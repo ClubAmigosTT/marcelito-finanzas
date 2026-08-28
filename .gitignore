@@ -1,0 +1,13 @@
+node_modules/
+dist/
+tmp/
+.DS_Store
+*.log
+
+# Local secrets and editor state
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+
