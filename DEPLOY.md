@@ -1,5 +1,11 @@
 # Publicar Marcelito en Render y preparar TestFlight
 
+Estado actual de la beta:
+
+- Web publicada: https://marcelito-finanzas.onrender.com
+- Repositorio privado: https://github.com/ClubAmigosTT/marcelito-finanzas
+- Servicio Render: `marcelito-finanzas` (sitio estatico, despliegue automatico desde `main`)
+
 La web se publica como sitio estático. No requiere servidor backend, base de datos ni disco persistente: los estados de cuenta se procesan localmente y se guardan en el navegador.
 
 ## Publicar la web en Render
