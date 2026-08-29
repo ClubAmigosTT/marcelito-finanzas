@@ -163,7 +163,111 @@ jobs:
           api-key-id: ${{ secrets.APPSTORE_API_KEY_ID }}
           api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
           uses-non-exempt-encryption: "false"
-          wait-for-processing: "true"
+          # La acción puede agotar el JWT mientras Apple procesa la compilación.
+          # La subida termina aquí y el paso siguiente renueva el token en cada intento.
+          wait-for-processing: "false"
+
+      - name: Confirmar procesamiento en App Store Connect
+        env:
+          ASC_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          ASC_BUNDLE_ID: mx.marcelito.personal
+          ASC_BUILD_NUMBER: ${{ github.run_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const crypto = require("node:crypto");
+
+          const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+          const base64Url = (value) => Buffer.from(value).toString("base64")
+            .replace(/=/g, "")
+            .replace(/\+/g, "-")
+            .replace(/\//g, "_");
+          const privateKey = (process.env.ASC_PRIVATE_KEY || "")
+            .replace(/\r\n/g, "\n")
+            .replace(/\\n/g, "\n");
+
+          function makeToken() {
+            const now = Math.floor(Date.now() / 1000);
+            const header = base64Url(JSON.stringify({
+              alg: "ES256",
+              kid: process.env.ASC_KEY_ID,
+              typ: "JWT",
+            }));
+            const payload = base64Url(JSON.stringify({
+              iss: process.env.ASC_ISSUER_ID,
+              iat: now - 30,
+              exp: now + 540,
+              aud: "appstoreconnect-v1",
+            }));
+            const signer = crypto.createSign("SHA256");
+            signer.update(`${header}.${payload}`);
+            signer.end();
+            const signature = signer.sign({
+              key: crypto.createPrivateKey(privateKey),
+              dsaEncoding: "ieee-p1363",
+            });
+            return `${header}.${payload}.${base64Url(signature)}`;
+          }
+
+          async function getJson(path) {
+            const response = await fetch(`https://api.appstoreconnect.apple.com${path}`, {
+              headers: { Authorization: `Bearer ${makeToken()}` },
+            });
+            const body = await response.text();
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}: ${body.slice(0, 300)}`);
+            }
+            return JSON.parse(body);
+          }
+
+          (async () => {
+            const targetBuild = String(process.env.ASC_BUILD_NUMBER);
+            const maxAttempts = 40;
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+              try {
+                const appResponse = await getJson(
+                  `/v1/apps?filter[bundleId]=${encodeURIComponent(process.env.ASC_BUNDLE_ID)}&limit=1`,
+                );
+                const app = appResponse.data?.[0];
+                if (!app) throw new Error("La app aún no aparece en App Store Connect");
+
+                const buildsResponse = await getJson(
+                  `/v1/builds?filter[app]=${encodeURIComponent(app.id)}&sort=-uploadedDate&limit=50`,
+                );
+                const build = (buildsResponse.data || []).find(
+                  (item) => String(item.attributes?.version) === targetBuild,
+                );
+
+                if (!build) {
+                  console.log(`Intento ${attempt}/${maxAttempts}: build ${targetBuild} aún no es visible.`);
+                } else {
+                  const state = build.attributes?.processingState || "DESCONOCIDO";
+                  console.log(`Intento ${attempt}/${maxAttempts}: build ${targetBuild} está ${state}.`);
+                  if (state === "VALID") {
+                    console.log("La compilación está VALID y disponible para TestFlight.");
+                    process.exit(0);
+                  }
+                  if (["FAILED", "INVALID"].includes(state)) {
+                    throw new Error(`Apple reportó el build como ${state}.`);
+                  }
+                }
+              } catch (error) {
+                console.log(`Intento ${attempt}/${maxAttempts}: Apple sigue procesando (${error.message}).`);
+              }
+
+              if (attempt < maxAttempts) await sleep(30_000);
+            }
+
+            throw new Error(`La compilación ${targetBuild} no llegó a VALID dentro del tiempo de espera.`);
+          })().catch((error) => {
+            console.error(error.message);
+            process.exit(1);
+          });
+          NODE
 
       - name: Escribir resumen
         if: success()
