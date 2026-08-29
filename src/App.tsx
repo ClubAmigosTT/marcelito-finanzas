@@ -34,12 +34,14 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { categories } from "./data";
 import { buildFinanceMetrics, defaultStatementKind, inferTransactionKind, isSpendTransaction } from "./finance";
 import { inspectPdf } from "./pdfImport";
+import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
 import type { ImportCommit, ImportResult, Section, Statement, StatementKind, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
 const moneyPrecise = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 2 });
 const transactionStorageKey = "marcelito-transactions.v2";
 const statementStorageKey = "marcelito-statements.v1";
+const categoryRulesStorageKey = "marcelito-category-rules.v1";
 type LocalAccount = { username: string; passwordHash: string };
 const seededAccount: LocalAccount = { username: "Marcelodiazs", passwordHash: "ed6357244f855d10e821359702d859df700ba81431a98b88ba1de5156a1e9f61" };
 
@@ -84,6 +86,7 @@ function deleteLocalAccount() {
   localStorage.removeItem("marcelito-transactions");
   localStorage.removeItem(transactionStorageKey);
   localStorage.removeItem(statementStorageKey);
+  localStorage.removeItem(categoryRulesStorageKey);
 }
 
 function readStored<T>(key: string, fallback: T): T {
@@ -217,6 +220,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   const [section, setSection] = useState<Section>("Inicio");
   const [transactions, setTransactions] = useState<Transaction[]>(() => readStored(transactionStorageKey, []));
   const [statements, setStatements] = useState<Statement[]>(() => readStored(statementStorageKey, []));
+  const [categoryRules, setCategoryRules] = useState<CategoryRules>(() => readStored(categoryRulesStorageKey, {}));
   const [importOpen, setImportOpen] = useState(false);
   const reduceMotion = useReducedMotion();
   const latestStatement = statements[0];
@@ -229,6 +233,10 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   useEffect(() => {
     localStorage.setItem(statementStorageKey, JSON.stringify(statements));
   }, [statements]);
+
+  useEffect(() => {
+    localStorage.setItem(categoryRulesStorageKey, JSON.stringify(categoryRules));
+  }, [categoryRules]);
 
   function saveImport(commit: ImportCommit) {
     // The same PDF may have been imported before with a wrong bank label.
@@ -256,6 +264,10 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       kind: commit.kind ?? previous?.kind ?? defaultStatementKind(commit.source),
       summary: commit.summary,
     };
+
+    if (commit.categoryRules && Object.keys(commit.categoryRules).length) {
+      setCategoryRules((current) => ({ ...current, ...commit.categoryRules }));
+    }
 
     setStatements((current) => previous ? current.map((item) => item.id === statementId ? statement : item) : [statement, ...current]);
     setTransactions((current) => {
@@ -300,7 +312,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
         <AnimatePresence mode="wait">
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
             {section === "Inicio" && <Home transactions={transactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} />}
-            {section === "Movimientos" && <Movements transactions={transactions} statements={statements} setTransactions={setTransactions} />}
+            {section === "Movimientos" && <Movements transactions={transactions} statements={statements} setTransactions={setTransactions} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
             {section === "Gastos" && <Expenses transactions={transactions} statements={statements} />}
             {section === "Cuentas" && <Accounts transactions={transactions} statements={statements} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} />}
             {section === "Patrimonio" && <NetWorth transactions={transactions} statements={statements} metrics={metrics} />}
@@ -310,7 +322,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       <nav className="mobile-nav" aria-label="Navegación principal móvil">
         {navItems.map(({ label, icon: Icon }) => <button key={label} className={section === label ? "active" : ""} onClick={() => setSection(label)}><Icon size={21} weight={section === label ? "fill" : "regular"} /><span>{label}</span></button>)}
       </nav>
-      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onSave={saveImport} />
+      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onSave={saveImport} categoryRules={categoryRules} />
     </div>
   );
 }
@@ -461,13 +473,13 @@ function Insight({ icon: Icon, title, body, action }: { icon: typeof Lightbulb; 
   return <article className="insight"><div className="insight-icon"><Icon size={21} /></div><div><strong>{title}</strong><p>{body}</p></div><button>{action}<ArrowRight size={16} /></button></article>;
 }
 
-function Movements({ transactions, statements, setTransactions }: { transactions: Transaction[]; statements: Statement[]; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>> }) {
+function Movements({ transactions, statements, setTransactions, onLearnCategory }: { transactions: Transaction[]; statements: Statement[]; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>>; onLearnCategory: (description: string, category: string) => void }) {
   const [query, setQuery] = useState("");
   const filtered = transactions.filter((item) => {
     const statement = statements.find((source) => source.id === item.statementId);
     return `${item.description} ${item.category} ${item.account} ${statementLabel(statement)} ${statement?.fileName ?? ""}`.toLowerCase().includes(query.toLowerCase());
   });
-  function updateCategory(id: string, category: string) { setTransactions((items) => items.map((item) => item.id === id ? { ...item, category } : item)); }
+  function updateCategory(id: string, category: string) { setTransactions((items) => items.map((item) => item.id === id ? { ...item, category } : item)); const movement = transactions.find((item) => item.id === id); if (movement) onLearnCategory(movement.description, category); }
   return <section><PageHeading title="Movimientos" body="Busca, corrige y conecta cada movimiento con su estado de cuenta." action="Agregar movimiento" /><div className="filter-row"><div className="search-box"><ListMagnifyingGlass size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar comercio, banco, periodo o categoría" /></div><span className="result-count">{filtered.length} de {transactions.length}</span></div>{filtered.length ? <div className="movement-list">{filtered.map((item) => { const statement = statements.find((source) => source.id === item.statementId); return <div className="movement-row" key={item.id}><span className={`movement-glyph glyph-${item.flow}`}>{item.flow === "transfer" ? <ArrowsLeftRight size={18} /> : item.flow === "income" ? <ArrowDown size={18} /> : <Receipt size={18} />}</span><div className="movement-name"><strong>{item.description}</strong><span>{item.date} · {item.account} · {statementLabel(statement)}</span></div><select aria-label={`Categoría de ${item.description}`} value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><strong className={item.amount > 0 ? "amount positive" : "amount"}>{moneyPrecise.format(item.amount)}</strong><button className="row-action" aria-label={`Editar ${item.description}`}><PencilSimple size={17} /></button></div>; })}</div> : <EmptyState title="No hay movimientos reales" body="Importa un estado de cuenta o agrega un movimiento manual para empezar." />}</section>;
 }
 
@@ -507,7 +519,7 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   return <div className="empty-state"><ListMagnifyingGlass size={32} /><h3>{title}</h3><p>{body}</p></div>;
 }
 
-function ImportDialog({ open, onClose, onSave }: { open: boolean; onClose: () => void; onSave: (commit: ImportCommit) => void }) {
+function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean; onClose: () => void; onSave: (commit: ImportCommit) => void; categoryRules: CategoryRules }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [stage, setStage] = useState<"pick" | "processing" | "review" | "error">("pick");
   const [progress, setProgress] = useState(0);
@@ -518,6 +530,7 @@ function ImportDialog({ open, onClose, onSave }: { open: boolean; onClose: () =>
   const [reviewSource, setReviewSource] = useState<StatementSource>("Desconocido");
   const [reviewKind, setReviewKind] = useState<StatementKind>("unknown");
   const [error, setError] = useState("");
+  const initialCategories = useRef<Record<string, string>>({});
 
   if (open && dialog.current && !dialog.current.open) dialog.current.showModal();
   if (!open && dialog.current?.open) dialog.current.close();
@@ -528,7 +541,12 @@ function ImportDialog({ open, onClose, onSave }: { open: boolean; onClose: () =>
     setStage("processing"); setError("");
     try {
       const inspected = await inspectPdf(file, (value, label) => { setProgress(value); setProgressLabel(label); });
-      setResult(inspected); setItems(inspected.transactions); setSummary(inspected.summary ?? {}); setReviewSource(inspected.source); setReviewKind(inspected.kind); setStage("review");
+      const withLearnedCategories = inspected.transactions.map((item) => {
+        const learned = categoryFromRules(item.description, categoryRules);
+        return learned ? { ...item, category: learned, confidence: 1 } : item;
+      });
+      initialCategories.current = Object.fromEntries(withLearnedCategories.map((item) => [item.id, item.category]));
+      setResult({ ...inspected, transactions: withLearnedCategories }); setItems(withLearnedCategories); setSummary(inspected.summary ?? {}); setReviewSource(inspected.source); setReviewKind(inspected.kind); setStage("review");
     } catch {
       setError("No pudimos leer este PDF. El archivo no se modificó; intenta con otra copia."); setStage("error");
     }
@@ -538,7 +556,7 @@ function ImportDialog({ open, onClose, onSave }: { open: boolean; onClose: () =>
   function updateAmount(id: string, value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, amount: Math.abs(Number(value) || 0) * (item.amount > 0 ? 1 : -1) } : item)); }
   function addManualItem() { setItems((current) => [...current, { id: `manual-${Date.now()}`, date: "Sin fecha", description: "Movimiento por revisar", account: result?.source ?? "Desconocido", category: "Sin categoría", amount: -1, flow: "expense", confidence: 1 }]); }
 
-  function resetAndClose() { setStage("pick"); setProgress(0); setResult(null); setItems([]); setSummary({}); setReviewSource("Desconocido"); setReviewKind("unknown"); setError(""); onClose(); }
+  function resetAndClose() { setStage("pick"); setProgress(0); setResult(null); setItems([]); setSummary({}); setReviewSource("Desconocido"); setReviewKind("unknown"); setError(""); initialCategories.current = {}; onClose(); }
 
   function updateSummary(key: keyof StatementSummary, value: string) {
     setSummary((current) => {
@@ -550,12 +568,17 @@ function ImportDialog({ open, onClose, onSave }: { open: boolean; onClose: () =>
   }
 
   const validItems = items.filter((item) => item.description.trim().length >= 3 && Number.isFinite(item.amount) && item.amount !== 0);
+  const learnedCategories = Object.fromEntries(validItems.flatMap((item) => {
+    const previous = initialCategories.current[item.id];
+    const key = merchantKey(item.description);
+    return key && previous && previous !== item.category && item.category !== "Sin categoría" ? [[key, item.category]] : [];
+  }));
   return <dialog ref={dialog} className="import-dialog" onCancel={(event) => { event.preventDefault(); resetAndClose(); }}><div className="dialog-head"><div><span className="dialog-icon"><FilePdf size={21} /></span><div><h2>Importar estado de cuenta</h2><p>El archivo se procesa localmente y conserva su origen.</p></div></div><button className="icon-button" aria-label="Cerrar" onClick={resetAndClose}><X size={20} /></button></div>
     {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se detectarán banco, periodo y movimientos. Los estados escaneados quedan pendientes de revisión.</span><span className="file-button">Elegir archivo</span></label>}
     {stage === "processing" && <div className="processing-state"><CircleNotch size={34} className="spinner" /><h3>{progressLabel}</h3><p>No cierres esta ventana mientras organizamos los movimientos.</p><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><small>{progress}%</small></div>}
     {stage === "error" && <div className="error-state"><Warning size={34} /><h3>No pudimos completar la importación</h3><p>{error}</p><button className="secondary-button" onClick={() => setStage("pick")}>Intentar de nuevo</button></div>}
-    {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Origen detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.mode === "text" ? "Lectura directa" : "Revisión visual"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div></div><div className="review-source-editor"><label><span>Nombre que se guardará</span><input value={reviewSource} onChange={(event) => setReviewSource(event.target.value as StatementSource)} placeholder="Ej. Santander, Nómina o Banco personal" /></label><label><span>Tipo de archivo</span><select value={reviewKind} onChange={(event) => setReviewKind(event.target.value as StatementKind)}><option value="card">Tarjeta de crédito</option><option value="bank">Cuenta bancaria</option><option value="unknown">No identificado</option></select></label><p>Corrige el origen aquí si el PDF usa una marca o formato que todavía no conocemos.</p></div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>El archivo no trae texto seleccionable. En iOS se intentará leerlo con OCR; en la web puedes capturar o corregir los movimientos antes de guardarlo.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.slice(0, 40).map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
-      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" onClick={() => onSave({ source: reviewSource.trim() || "Desconocido", kind: reviewKind, period: result.period, fileName: result.fileName, mode: result.mode, transactions: validItems.map((item) => ({ ...item, account: reviewSource.trim() || item.account })) , summary })}><Check size={18} />{validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado para revisar"}</button></div></div>}
+    {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Origen detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.mode === "text" ? "Lectura directa" : "Revisión visual"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div></div><div className="review-source-editor"><label><span>Nombre que se guardará</span><input value={reviewSource} onChange={(event) => setReviewSource(event.target.value as StatementSource)} placeholder="Ej. Santander, Nómina o Banco personal" /></label><label><span>Tipo de archivo</span><select value={reviewKind} onChange={(event) => setReviewKind(event.target.value as StatementKind)}><option value="card">Tarjeta de crédito</option><option value="bank">Cuenta bancaria</option><option value="unknown">No identificado</option></select></label><p>Corrige el origen aquí si el PDF usa una marca o formato que todavía no conocemos. Las categorías que ajustes se recordarán para el siguiente mes.</p></div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>El archivo no trae texto seleccionable. En iOS se intentará leerlo con OCR; en la web puedes capturar o corregir los movimientos antes de guardarlo.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
+      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" onClick={() => onSave({ source: reviewSource.trim() || "Desconocido", kind: reviewKind, period: result.period, fileName: result.fileName, mode: result.mode, transactions: validItems.map((item) => ({ ...item, account: reviewSource.trim() || item.account })) , summary, categoryRules: learnedCategories })}><Check size={18} />{validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado para revisar"}</button></div></div>}
     {stage === "review" && result && <StatementSummaryForm source={reviewSource} kind={reviewKind} summary={summary} onChange={updateSummary} />}
   </dialog>;
 }

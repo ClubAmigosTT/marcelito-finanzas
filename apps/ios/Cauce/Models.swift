@@ -219,6 +219,7 @@ final class FinanceStore {
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
     private let importKey = "marcelito.lastImport"
+    private let categoryRulesKey = "marcelito.categoryRules.v1"
 
     var movements: [Movement]
     var statements: [StatementRecord]
@@ -469,6 +470,16 @@ final class FinanceStore {
     func updateCategory(for movement: Movement, to category: String) {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return }
         movements[index].category = category
+        let key = Self.categoryRuleKey(movements[index].title)
+        if !key.isEmpty {
+            var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
+            if ["Por revisar", "Sin categoría"].contains(category) {
+                rules.removeValue(forKey: key)
+            } else {
+                rules[key] = category
+            }
+            UserDefaults.standard.set(rules, forKey: categoryRulesKey)
+        }
         persist()
     }
 
@@ -543,6 +554,7 @@ final class FinanceStore {
         defaults.removeObject(forKey: movementKey)
         defaults.removeObject(forKey: statementKey)
         defaults.removeObject(forKey: importKey)
+        defaults.removeObject(forKey: categoryRulesKey)
     }
 
     func importPDF(from url: URL) throws -> ImportSummary {
@@ -577,15 +589,15 @@ final class FinanceStore {
             ? Self.accountName(from: text)
             : fileSource
         let detectedKind = Self.statementKind(from: text, source: source)
-        let candidates: [Movement]
+        let parsedCandidates: [Movement]
         if usedOCR, source == "Santander" {
             let santanderCandidates = Self.parseSantanderOCR(ocrObservations, fileName: url.lastPathComponent)
-            candidates = santanderCandidates.isEmpty
+            parsedCandidates = santanderCandidates.isEmpty
                 ? Self.parse(text: text, fileName: url.lastPathComponent)
                 : santanderCandidates
         } else if usedOCR, source == "Amex" {
             let amexCandidates = Self.parseAmexOCR(Self.ocrLines(from: ocrObservations), fileName: url.lastPathComponent)
-            candidates = amexCandidates.isEmpty
+            parsedCandidates = amexCandidates.isEmpty
                 ? Self.parse(text: text, fileName: url.lastPathComponent)
                 : amexCandidates
         } else if usedOCR {
@@ -595,11 +607,19 @@ final class FinanceStore {
                 source: source,
                 kind: detectedKind
             )
-            candidates = genericCandidates.isEmpty
+            parsedCandidates = genericCandidates.isEmpty
                 ? Self.parse(text: text, fileName: url.lastPathComponent)
                 : genericCandidates
         } else {
-            candidates = Self.parse(text: text, fileName: url.lastPathComponent)
+            parsedCandidates = Self.parse(text: text, fileName: url.lastPathComponent)
+        }
+        let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
+        let candidates = parsedCandidates.map { candidate -> Movement in
+            var corrected = candidate
+            if let learned = learnedRules[Self.categoryRuleKey(candidate.title)] {
+                corrected.category = learned
+            }
+            return corrected
         }
         let period = Self.periodLabel(from: text, fileName: url.lastPathComponent)
         let summary = Self.summary(from: text, source: source)
@@ -1931,6 +1951,16 @@ final class FinanceStore {
             return detected
         }
         return "Importado"
+    }
+
+    private static func categoryRuleKey(_ value: String) -> String {
+        value
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .replacingOccurrences(of: #"(?i)\b(?:rfc|ref|referencia|aut)\s*[a-z0-9_-]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\b\d{2,}\b"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func category(for title: String, flow: FlowKind) -> String {

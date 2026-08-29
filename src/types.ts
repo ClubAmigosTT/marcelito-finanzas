@@ -90,4 +90,6 @@ export type ImportCommit = {
   mode: ImportResult["mode"];
   transactions: Transaction[];
   summary?: StatementSummary;
+  /** User corrections learned from this review, keyed by normalized merchant. */
+  categoryRules?: Record<string, string>;
 };
