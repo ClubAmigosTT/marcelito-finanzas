@@ -1,1 +1,15 @@
-export const categories = ["Alimentos", "Viajes", "Comidas", "Servicios", "Transporte", "Salud", "Compras", "Sin categoría"];
+export const categories = [
+  "Alimentos",
+  "Viajes",
+  "Comidas",
+  "Servicios",
+  "Transporte",
+  "Salud",
+  "Compras",
+  "Entretenimiento",
+  "Educación",
+  "Hogar",
+  "Mascotas",
+  "Finanzas",
+  "Sin categoría",
+];

@@ -96,7 +96,8 @@ private struct AddMovementView: View {
 
     private let categoryOptions = [
         "Por revisar", "Ingresos", "Transferencia", "Alimentos", "Viajes", "Comidas",
-        "Servicios", "Transporte", "Salud", "Compras"
+        "Servicios", "Transporte", "Salud", "Compras", "Entretenimiento", "Educación",
+        "Hogar", "Mascotas", "Finanzas", "Sin categoría"
     ]
 
     private var numericAmount: Decimal? {
@@ -167,7 +168,7 @@ private struct MovementDetailView: View {
     @State private var selectedCategory: String
     @State private var selectedKind: MovementKind
     @State private var isTravel: Bool
-    private let categories = ["Ingresos", "Transferencia", "Alimentos", "Viajes", "Comidas", "Servicios", "Transporte", "Salud", "Compras", "Sin categoría"]
+    private let categories = ["Ingresos", "Transferencia", "Alimentos", "Viajes", "Comidas", "Servicios", "Transporte", "Salud", "Compras", "Entretenimiento", "Educación", "Hogar", "Mascotas", "Finanzas", "Sin categoría"]
 
     init(movement: Movement) {
         self.movement = movement
@@ -407,10 +408,14 @@ private struct StatementSummaryEditor: View {
     @Environment(\.dismiss) private var dismiss
     let statement: StatementRecord
     @State private var summary: StatementSummaryRecord
+    @State private var source: String
+    @State private var statementKind: StatementKind
 
     init(statement: StatementRecord) {
         self.statement = statement
         _summary = State(initialValue: statement.summary ?? StatementSummaryRecord())
+        _source = State(initialValue: statement.source)
+        _statementKind = State(initialValue: statement.kind ?? (statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank))
     }
 
     private func decimalBinding(_ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>) -> Binding<String> {
@@ -437,6 +442,18 @@ private struct StatementSummaryEditor: View {
 
     var body: some View {
         Form {
+            Section("Origen") {
+                TextField("Banco o tarjeta", text: $source)
+                    .textInputAutocapitalization(.words)
+                Picker("Tipo de documento", selection: $statementKind) {
+                    Text("Tarjeta de crédito").tag(StatementKind.card)
+                    Text("Cuenta bancaria").tag(StatementKind.bank)
+                    Text("No identificado").tag(StatementKind.unknown)
+                }
+                Text("Si el banco no se identificó automáticamente, escribe aquí el nombre que quieres ver en tus cuentas.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Section("Resumen del corte") {
                 decimalField("Saldo anterior", \.previousBalance)
                 decimalField("Nuevas transacciones", \.newTransactions)
@@ -449,7 +466,7 @@ private struct StatementSummaryEditor: View {
                 decimalField("Pago mínimo", \.minimumPayment)
                 decimalField("Pago para no generar intereses", \.paymentForNoInterest)
             }
-            if statement.kind == .card || statement.source.localizedCaseInsensitiveContains("Amex") {
+            if statementKind == .card {
                 Section("Crédito y MSI") {
                     decimalField("Límite de crédito", \.creditLimit)
                     decimalField("Crédito disponible", \.creditAvailable)
@@ -466,6 +483,7 @@ private struct StatementSummaryEditor: View {
             }
             Section {
                 Button("Guardar cifras del corte") {
+                    store.updateStatementSource(for: statement, to: source, kind: statementKind)
                     store.updateStatementSummary(for: statement, summary: summary)
                     dismiss()
                 }

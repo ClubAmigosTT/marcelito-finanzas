@@ -108,13 +108,20 @@ function sumKnown(values: Array<number | undefined>) {
 }
 
 export function defaultStatementKind(source: StatementSource): StatementKind {
-  return source === "Amex" ? "card" : source === "Santander" || source === "BBVA" ? "bank" : "unknown";
+  if (source === "Amex") return "card";
+  const normalized = normalize(source);
+  const bankNames = [
+    "santander", "bbva", "bancomer", "banorte", "hsbc", "scotiabank",
+    "citibanamex", "banamex", "inbursa", "banco azteca", "banco del bajio",
+    "mifel", "invex", "hey banco", "nu", "klar", "rappi", "uala",
+  ];
+  return bankNames.some((name) => normalized.includes(name)) ? "bank" : "unknown";
 }
 
 export function inferTransactionKind(transaction: Transaction): TransactionKind {
   if (transaction.kind) return transaction.kind;
   const text = normalize(`${transaction.description} ${transaction.category}`);
-  if (/msi|meses sin intereses|diferid/.test(text)) return "msi";
+  if (/msi|meses sin intereses|meses en automatico|monto a diferir|diferir|diferid/.test(text)) return "msi";
   if (/interes|interes moratorio|interest/.test(text)) return "interest";
   if (/comision|comision anual|anualidad|fee/.test(text)) return "fee";
   if (/devolucion|reembolso|refund|bonificacion/.test(text)) return "refund";

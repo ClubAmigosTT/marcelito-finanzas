@@ -50,7 +50,7 @@ enum MovementKind: String, CaseIterable, Identifiable, Codable, Hashable {
     var id: String { rawValue }
 }
 
-enum StatementKind: String, Codable, Hashable {
+enum StatementKind: String, Codable, Hashable, CaseIterable {
     case card
     case bank
     case unknown
@@ -493,6 +493,23 @@ final class FinanceStore {
         persist()
     }
 
+    func updateStatementSource(for statement: StatementRecord, to source: String, kind: StatementKind? = nil) {
+        let cleaned = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !cleaned.isEmpty,
+              let index = statements.firstIndex(where: { $0.id == statement.id }) else { return }
+        let previousSource = statements[index].source
+        statements[index].source = cleaned
+        if let kind {
+            statements[index].kind = kind
+        }
+        for movementIndex in movements.indices where movements[movementIndex].statementId == statement.id {
+            if movements[movementIndex].account == previousSource || movements[movementIndex].account == "Importado" {
+                movements[movementIndex].account = cleaned
+            }
+        }
+        persist()
+    }
+
     func addMovement(
         title: String,
         account: String,
@@ -596,6 +613,11 @@ final class FinanceStore {
             imported.statementId = statementId
             return imported
         }
+        let needsReview = fresh.isEmpty
+            || usedOCR
+            || summary == nil
+            || detectedKind == .unknown
+            || fresh.contains { $0.category == "Por revisar" }
 
         movements.removeAll { $0.statementId == statementId }
         movements.insert(contentsOf: fresh.reversed(), at: 0)
@@ -606,7 +628,7 @@ final class FinanceStore {
             fileName: url.lastPathComponent,
             importedAt: .now,
             transactionCount: fresh.count,
-            requiresReview: fresh.isEmpty || usedOCR || summary == nil,
+            requiresReview: needsReview,
             kind: detectedKind,
             summary: summary
         )
@@ -625,7 +647,7 @@ final class FinanceStore {
             fileName: url.lastPathComponent,
             imported: fresh.count,
             skipped: candidates.count - fresh.count,
-            requiresReview: fresh.isEmpty || usedOCR || summary == nil,
+            requiresReview: needsReview,
             summary: summary,
             usedOCR: usedOCR
         )
@@ -763,7 +785,7 @@ final class FinanceStore {
             pattern: #"(?i)(?<!\d)(\d{1,2})\s+(?:de\s+)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         )
         let amountRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?\s*(?:\d{1,3}(?:[ ,]\d{3})+|\d+)(?:[.,]\d{1,2})?(?![A-Za-z0-9])"#
+            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?\s*(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)(?:[.,]\d{1,2})?(?![A-Za-z0-9])"#
         )
         let filenameAccount = accountName(from: fileName)
         let documentNormalized = text.folding(
@@ -827,8 +849,22 @@ final class FinanceStore {
                 working = working.replacingCharacters(in: Range(dateMatch.range, in: working)!, with: " ")
             }
 
-            guard let amountRegex,
-                  let amountMatch = allMatches(in: working, regex: amountRegex).last,
+            guard let amountRegex else { return nil }
+            let allAmountMatches = allMatches(in: working, regex: amountRegex)
+            let moneyMatches = allAmountMatches.filter {
+                $0.text.contains("$") || $0.text.range(of: #"[.,]\d{1,2}$"#, options: .regularExpression) != nil
+            }
+            let usableAmountMatches = moneyMatches.isEmpty ? allAmountMatches : moneyMatches
+            let foreignCurrency = ["dolar", "euro", "peso colombiano", "tipo de cambio", " tc:"].contains { normalized.contains($0) }
+            let bankLikeRow = documentKind == .bank
+                || ["deposito", "retiro", "saldo", "cuenta de cheques", "cuenta de ahorro", "abono"]
+                    .contains { normalized.contains($0) }
+            let amountMatch = foreignCurrency
+                ? usableAmountMatches.first
+                : bankLikeRow && usableAmountMatches.count > 1
+                    ? usableAmountMatches[usableAmountMatches.count - 2]
+                    : usableAmountMatches.last
+            guard let amountMatch,
                   let parsedAmount = parseAmount(amountMatch.text),
                   parsedAmount != 0,
                   abs(parsedAmount) < 10_000_000 else {
@@ -836,12 +872,13 @@ final class FinanceStore {
             }
             working = working.replacingCharacters(in: Range(amountMatch.range, in: working)!, with: " ")
 
-            let title = working
+            var title = working
                 .replacingOccurrences(of: #"\bRFC[A-Z0-9]+\b"#, with: "", options: .regularExpression)
                 .replacingOccurrences(of: #"/REF[A-Z0-9_]+\b"#, with: "", options: .regularExpression)
                 .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
                 .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
+            title = cleanMerchantTitle(title)
             guard title.count >= 3 else { return nil }
             guard title.rangeOfCharacter(from: .letters) != nil else { return nil }
 
@@ -1080,7 +1117,9 @@ final class FinanceStore {
             || ["deposito", "retiro", "saldo", "cuenta de cheques", "cuenta de ahorro", "abono"]
                 .contains { normalizedFullText.contains($0) }
         let selected: OCRAmountCandidate
-        if bankLikeRow, candidates.count > 1, !hasForeignCurrency {
+        if hasForeignCurrency {
+            selected = candidates[0]
+        } else if bankLikeRow, candidates.count > 1 {
             selected = candidates[max(0, candidates.count - 2)]
         } else {
             selected = candidates[candidates.count - 1]
@@ -1107,6 +1146,7 @@ final class FinanceStore {
             .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        title = cleanMerchantTitle(title)
         guard title.count >= 3, title.rangeOfCharacter(from: .letters) != nil else { return nil }
 
         let titleNormalized = title.folding(
@@ -1203,7 +1243,7 @@ final class FinanceStore {
         guard let dateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-.]\s*(\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*(\d{2,4})(?!\d)"#
         ), let amountRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
+            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
         ) else {
             return []
         }
@@ -1335,6 +1375,7 @@ final class FinanceStore {
             .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        title = cleanMerchantTitle(title)
         guard title.count >= 3, title.rangeOfCharacter(from: .letters) != nil else { return nil }
 
         let titleNormalized = title.folding(
@@ -1408,7 +1449,7 @@ final class FinanceStore {
         ), let textDateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(\d{1,2})\s+(?:de\s+)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         ), let amountRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
+            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
         ) else {
             return []
         }
@@ -1521,7 +1562,8 @@ final class FinanceStore {
                 )
             }
         }
-        guard let selected = amountCandidates.sorted(by: { $0.order < $1.order }).last else { return nil }
+        let orderedAmounts = amountCandidates.sorted(by: { $0.order < $1.order })
+        guard let selected = (hasForeignCurrency(in: normalizedFullText) ? orderedAmounts.first : orderedAmounts.last) else { return nil }
 
         var title = fullText
             .replacingOccurrences(
@@ -1544,6 +1586,7 @@ final class FinanceStore {
             .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        title = cleanMerchantTitle(title)
         guard title.count >= 3, title.rangeOfCharacter(from: .letters) != nil else { return nil }
 
         let titleNormalized = title.folding(
@@ -1651,6 +1694,23 @@ final class FinanceStore {
         return Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX"))
     }
 
+    private static func cleanMerchantTitle(_ value: String) -> String {
+        value
+            .replacingOccurrences(
+                of: #"(?i)\s+(?:d[oó]lar(?:es)?(?:\s+u\.s\.a\.)?|euro?s?|peso(?:s)?\s+colombiano?s?|tipo\s+de\s+cambio).*"#,
+                with: "",
+                options: .regularExpression
+            )
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func hasForeignCurrency(in normalizedText: String) -> Bool {
+        ["dolar", "euro", "peso colombiano", "tipo de cambio", " tc:"].contains {
+            normalizedText.contains($0)
+        }
+    }
+
     private static func parseDate(_ value: String) -> Date? {
         let normalized = value.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
@@ -1752,6 +1812,14 @@ final class FinanceStore {
            let match = regex.firstMatch(in: normalized, range: range),
            let valueRange = Range(match.range(at: 1), in: normalized) {
             return String(normalized[valueRange]).replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let normalizedFileName = fileName.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        if let fileMatch = try? NSRegularExpression(pattern: #"(?i)(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)[^\d]{0,8}20\d{2}"#) {
+            let range = NSRange(normalizedFileName.startIndex..<normalizedFileName.endIndex, in: normalizedFileName)
+            if let match = fileMatch.firstMatch(in: normalizedFileName, range: range),
+               let valueRange = Range(match.range, in: normalizedFileName) {
+                return String(normalizedFileName[valueRange]).replacingOccurrences(of: "[_-]+", with: " ", options: .regularExpression).replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+            }
         }
         return fileName
             .replacingOccurrences(of: ".pdf", with: "", options: .caseInsensitive)
@@ -1868,22 +1936,80 @@ final class FinanceStore {
     private static func category(for title: String, flow: FlowKind) -> String {
         if flow == .income { return "Ingresos" }
         if flow == .transfer { return "Transferencia" }
-        if title.contains("super")
-            || title.contains("costco")
-            || title.contains("walmart")
-            || title.contains("soriana") {
-            return "Alimentos"
-        }
-        if title.contains("hotel")
-            || title.contains("vuelo")
-            || title.contains("aeromexico")
-            || title.contains("aerobus")
-            || title.contains("airbnb")
-            || title.contains("volaris")
-            || title.contains("uber") {
-            return "Viajes"
-        }
         if flow == .debt { return "Pago de tarjeta" }
+
+        let rules: [(String, [String])] = [
+            // Travel is intentionally separate from day-to-day transport.
+            ("Viajes", [
+                "airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico",
+                "aerobus", "volaris", "vivaaerobus", "american airlines", "united airlines",
+                "delta air", "iberia", "vuelo", "flight", "travel", "renta de auto", "car rental",
+                "airport", "aeropuerto", "equipaje", "luggage"
+            ]),
+            ("Transporte", [
+                "uber", "didi", "cabify", "taxi", "metrobus", "metro ", "metrotap", "nyct paygo", "njtransit", "nyc ferry",
+                "subway", "mta ", "train ", "estacionamiento", "estac ", "parking", "parco ", "gasolina", "pemex", "shell",
+                "bp ", "gulf", "mobil", "caseta", "autopista", "toll", "ecobici", "mueve", "transporte"
+            ]),
+            ("Salud", [
+                "farmacia", "farmacias", "hospital", "clinica", "clínica", "doctor",
+                "consultorio", "dent", "dental", "laboratorio", "salud", "medic"
+            ]),
+            ("Comidas", [
+                "restaurant", "rest ", "rest.", "taquer", "taco", "sushi", "cafe",
+                "café", "coffee", "starbucks", "burger", "pizza", "pub", "bar ",
+                "comida", "food", "flauta", "ramen", "krispy", "pan ", "pastel",
+                "helado", "neveria", "churro", "frutos prohibidos", "grill", "deli",
+                "pantry", "wine", "beer", "chicken", "cocina", "parrilla", "guac time", "chipotle",
+                "dos toros", "dunkin", "italian", "crepes", "sanborns", "cerv", "mariscos", "exquisito",
+                "faunna", "terraza", "los gueros", "guero", "harp helu", "serena horneando", "tierra garat",
+                "malachy", "sophie", "lovejoy", "smokejazz", "smoke and gift", "metropolis", "mandarin mo", "social",
+                "goldbergs", "marta tap", "hana group", "tst*", "shreeji", "jimmys", "primavera", "saio la octava", "fogoncito",
+                "burger king", "aifa", "asador"
+            ]),
+            ("Alimentos", [
+                "walmart", "superama", "soriana", "costco", "chedraui", "la comer",
+                "city market", "sam's", "sams ", "oxxo", "7 eleven", "seven eleven",
+                "extra k", "extra ", "super ", "mercado ", "grocery", "market", "mkt ", "frutos", "abarrotes",
+                "cvs", "pharmacy", "wholefds", "whole foods", "queens mkt", "convenience", "meadowland", "mart corp", "7-eleven"
+            ]),
+            ("Entretenimiento", [
+                "cinemex", "cinepolis", "cinépolis", "cine ", "teatro", "spotify",
+                "netflix", "disney", "hbo", "prime video", "apple music", "xbox",
+                "playstation", "nintendo", "steam", "videojuego", "club deportivo", "entret ", "jazz",
+                "museum", "museo", "amnh", "guggenheim", "aquarium", "acuario", "zoo", "attraction", "atraccion", "ticket",
+                "boletos", "show", "concierto", "club ", "soccer", "summit one", "world of coca", "circo", "stadium",
+                "rounders", "empire hall", "hard rock", "salon de perreo", "asdeporte", "pickle"
+            ]),
+            ("Educación", [
+                "universidad", "escuela", "colegio", "curso", "udemy", "coursera",
+                "domestika", "libros", "libreria", "librería"
+            ]),
+            ("Mascotas", [
+                "veterin", "petco", "pet shop", "mascota", "mundo animal"
+            ]),
+            ("Hogar", [
+                "ikea", "home depot", "ferreter", "muebles", "hogar", "limpieza",
+                "decoracion", "decoración", "mantenimiento"
+            ]),
+            ("Servicios", [
+                "canva", "telcel", "at&t", "movistar", "izzi", "totalplay", "cfe",
+                "luz ", "agua ", "internet", "seguro", "asegur", "suscripcion",
+                "suscripción", "membresia", "membresía", "adobe", "microsoft",
+                "google storage", "apple.com/bill", "paypal", "stripe", "apple.com/mx", "holafly", "wi-fi onboard", "wifi onboard"
+            ]),
+            ("Compras", [
+                "amazon", "shein", "mercadolibre", "mercado libre", "mercadopago", "lumen", "steren",
+                "bout", "tienda", "shop", "store", "ropa", "zapateria", "departamental", "old navy", "fanatics", "thriftland", "miniso"
+            ]),
+            ("Finanzas", [
+                "comision", "comisión", "interes", "interés", "cajero", "retiro",
+                "anualidad", "financ", "keepcash", "meses sin intereses", "meses en automatico", "meses automatico", "monto a diferir", "diferid"
+            ])
+        ]
+        for (category, markers) in rules where markers.contains(where: { title.contains($0) }) {
+            return category
+        }
         return "Por revisar"
     }
 }

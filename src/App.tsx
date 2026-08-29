@@ -34,7 +34,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { categories } from "./data";
 import { buildFinanceMetrics, defaultStatementKind, inferTransactionKind, isSpendTransaction } from "./finance";
 import { inspectPdf } from "./pdfImport";
-import type { ImportCommit, ImportResult, Section, Statement, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types";
+import type { ImportCommit, ImportResult, Section, Statement, StatementKind, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
 const moneyPrecise = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 2 });
@@ -231,12 +231,19 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   }, [statements]);
 
   function saveImport(commit: ImportCommit) {
-    const previous = statements.find((item) => item.fileName === commit.fileName && item.source === commit.source && item.period === commit.period);
+    // The same PDF may have been imported before with a wrong bank label.
+    // Match by filename first so a corrected detection replaces that record
+    // instead of leaving a stale duplicate in the account ledger.
+    const previous = statements.find((item) => item.fileName === commit.fileName)
+      ?? statements.find((item) => item.source === commit.source && item.period === commit.period);
     const statementId = previous?.id ?? createId("statement");
     const importedAt = new Date().toISOString();
     const importedTransactions = commit.transactions
       .filter((item) => item.description.trim().length >= 3 && Number.isFinite(item.amount) && item.amount !== 0)
       .map((item, index) => ({ ...item, id: `${statementId}-${index}-${item.id}`, statementId }));
+    const needsReview = importedTransactions.some((item) => item.category === "Sin categoría" || (item.confidence ?? 1) < 0.75)
+      || commit.source === "Desconocido"
+      || commit.kind === "unknown";
     const statement: Statement = {
       id: statementId,
       source: commit.source,
@@ -245,7 +252,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       importedAt,
       mode: commit.mode,
       transactionCount: importedTransactions.length,
-      status: importedTransactions.length ? "ready" : "review",
+      status: importedTransactions.length && !needsReview ? "ready" : "review",
       kind: commit.kind ?? previous?.kind ?? defaultStatementKind(commit.source),
       summary: commit.summary,
     };
@@ -508,6 +515,8 @@ function ImportDialog({ open, onClose, onSave }: { open: boolean; onClose: () =>
   const [result, setResult] = useState<ImportResult | null>(null);
   const [items, setItems] = useState<Transaction[]>([]);
   const [summary, setSummary] = useState<StatementSummary>({});
+  const [reviewSource, setReviewSource] = useState<StatementSource>("Desconocido");
+  const [reviewKind, setReviewKind] = useState<StatementKind>("unknown");
   const [error, setError] = useState("");
 
   if (open && dialog.current && !dialog.current.open) dialog.current.showModal();
@@ -519,16 +528,17 @@ function ImportDialog({ open, onClose, onSave }: { open: boolean; onClose: () =>
     setStage("processing"); setError("");
     try {
       const inspected = await inspectPdf(file, (value, label) => { setProgress(value); setProgressLabel(label); });
-      setResult(inspected); setItems(inspected.transactions); setSummary(inspected.summary ?? {}); setStage("review");
+      setResult(inspected); setItems(inspected.transactions); setSummary(inspected.summary ?? {}); setReviewSource(inspected.source); setReviewKind(inspected.kind); setStage("review");
     } catch {
       setError("No pudimos leer este PDF. El archivo no se modificó; intenta con otra copia."); setStage("error");
     }
   }
 
-  function resetAndClose() { setStage("pick"); setProgress(0); setResult(null); setItems([]); setSummary({}); setError(""); onClose(); }
   function updateItem(id: string, key: "description" | "category", value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, [key]: value } : item)); }
   function updateAmount(id: string, value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, amount: Math.abs(Number(value) || 0) * (item.amount > 0 ? 1 : -1) } : item)); }
   function addManualItem() { setItems((current) => [...current, { id: `manual-${Date.now()}`, date: "Sin fecha", description: "Movimiento por revisar", account: result?.source ?? "Desconocido", category: "Sin categoría", amount: -1, flow: "expense", confidence: 1 }]); }
+
+  function resetAndClose() { setStage("pick"); setProgress(0); setResult(null); setItems([]); setSummary({}); setReviewSource("Desconocido"); setReviewKind("unknown"); setError(""); onClose(); }
 
   function updateSummary(key: keyof StatementSummary, value: string) {
     setSummary((current) => {
@@ -544,9 +554,9 @@ function ImportDialog({ open, onClose, onSave }: { open: boolean; onClose: () =>
     {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se detectarán banco, periodo y movimientos. Los estados escaneados quedan pendientes de revisión.</span><span className="file-button">Elegir archivo</span></label>}
     {stage === "processing" && <div className="processing-state"><CircleNotch size={34} className="spinner" /><h3>{progressLabel}</h3><p>No cierres esta ventana mientras organizamos los movimientos.</p><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><small>{progress}%</small></div>}
     {stage === "error" && <div className="error-state"><Warning size={34} /><h3>No pudimos completar la importación</h3><p>{error}</p><button className="secondary-button" onClick={() => setStage("pick")}>Intentar de nuevo</button></div>}
-    {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Banco detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.mode === "text" ? "Lectura directa" : "Revisión visual"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div></div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>Guardaremos el estado con su banco y periodo, pero tendrás que capturar o corregir movimientos manualmente.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.slice(0, 40).map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
-      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" onClick={() => onSave({ source: result.source, kind: result.kind, period: result.period, fileName: result.fileName, mode: result.mode, transactions: validItems, summary })}><Check size={18} />{validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado para revisar"}</button></div></div>}
-    {stage === "review" && result && <StatementSummaryForm source={result.source} kind={result.kind} summary={summary} onChange={updateSummary} />}
+    {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Origen detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.mode === "text" ? "Lectura directa" : "Revisión visual"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div></div><div className="review-source-editor"><label><span>Nombre que se guardará</span><input value={reviewSource} onChange={(event) => setReviewSource(event.target.value as StatementSource)} placeholder="Ej. Santander, Nómina o Banco personal" /></label><label><span>Tipo de archivo</span><select value={reviewKind} onChange={(event) => setReviewKind(event.target.value as StatementKind)}><option value="card">Tarjeta de crédito</option><option value="bank">Cuenta bancaria</option><option value="unknown">No identificado</option></select></label><p>Corrige el origen aquí si el PDF usa una marca o formato que todavía no conocemos.</p></div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>El archivo no trae texto seleccionable. En iOS se intentará leerlo con OCR; en la web puedes capturar o corregir los movimientos antes de guardarlo.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.slice(0, 40).map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
+      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" onClick={() => onSave({ source: reviewSource.trim() || "Desconocido", kind: reviewKind, period: result.period, fileName: result.fileName, mode: result.mode, transactions: validItems.map((item) => ({ ...item, account: reviewSource.trim() || item.account })) , summary })}><Check size={18} />{validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado para revisar"}</button></div></div>}
+    {stage === "review" && result && <StatementSummaryForm source={reviewSource} kind={reviewKind} summary={summary} onChange={updateSummary} />}
   </dialog>;
 }
 
