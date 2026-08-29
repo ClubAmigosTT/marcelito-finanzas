@@ -18,7 +18,9 @@ targets:
         MARKETING_VERSION: "1.0.0"
         CURRENT_PROJECT_VERSION: "1"
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
-        TARGETED_DEVICE_FAMILY: "1,2"
+        # La primera distribución de Marcelito es solo para iPhone.
+        # Evita declarar iPad hasta contar con launch screen y orientaciones específicas.
+        TARGETED_DEVICE_FAMILY: "1"
         INFOPLIST_KEY_NSFaceIDUsageDescription: "Marcelito usa Face ID para proteger el acceso a tus finanzas."
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         INFOPLIST_KEY_CFBundleDisplayName: Marcelito

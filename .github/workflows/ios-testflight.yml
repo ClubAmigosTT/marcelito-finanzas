@@ -22,7 +22,8 @@ concurrency:
 jobs:
   archive-and-upload:
     name: Compilar y subir Marcelito
-    runs-on: macos-15
+    # Apple exige el SDK de iOS 26 para nuevas subidas desde abril de 2026.
+    runs-on: macos-26
     timeout-minutes: 45
     env:
       APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -40,6 +41,13 @@ jobs:
           set -euo pipefail
           xcodebuild -version
           swift --version
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "SDK de iPhone: $sdk_version"
+          sdk_major="${sdk_version%%.*}"
+          if ((sdk_major < 26)); then
+            echo "::error title=SDK de iOS no compatible::Apple exige iOS 26 o posterior para subir a App Store Connect."
+            exit 1
+          fi
 
       - name: Validar secretos necesarios
         shell: bash
@@ -252,8 +260,23 @@ jobs:
                     process.exit(0);
                   }
                   if (["FAILED", "INVALID"].includes(state)) {
-                    throw new Error(`Apple reportó el build como ${state}.`);
+                    console.error(`Apple reportó el build como ${state}.`);
+                    process.exit(1);
                   }
+                }
+
+                const uploadsResponse = await getJson(
+                  `/v1/apps/${encodeURIComponent(app.id)}/buildUploads?limit=50`,
+                );
+                const uploads = (uploadsResponse.data || [])
+                  .filter((item) => String(item.attributes?.cfBundleVersion) === targetBuild)
+                  .sort((a, b) => Date.parse(b.attributes?.createdDate || 0) - Date.parse(a.attributes?.createdDate || 0));
+                const uploadStates = uploads.map((item) => item.attributes?.state?.state).filter(Boolean);
+                if (uploads.length && uploadStates.length && uploadStates.every((state) => state === "FAILED")) {
+                  const details = uploads[0].attributes?.state?.errors || [];
+                  const message = details.map((error) => `${error.code}: ${error.description}`).join(" | ");
+                  console.error(`Apple rechazó el upload (${message || "sin detalle"}).`);
+                  process.exit(1);
                 }
               } catch (error) {
                 console.log(`Intento ${attempt}/${maxAttempts}: Apple sigue procesando (${error.message}).`);
