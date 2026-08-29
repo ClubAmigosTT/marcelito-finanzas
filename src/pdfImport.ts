@@ -1,4 +1,4 @@
-import type { ImportResult, Transaction } from "./types";
+import type { ImportResult, StatementSource, Transaction } from "./types";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 
@@ -29,8 +29,36 @@ function normalizeAmount(value: string) {
   return Number.isFinite(parsed) ? parsed : 0;
 }
 
+function normalizeText(value: string) {
+  return value
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase();
+}
+
+function detectSource(text: string, fileName: string): StatementSource {
+  const haystack = normalizeText(`${text} ${fileName}`);
+  if (/american express|amex/.test(haystack)) return "Amex";
+  if (/santander/.test(haystack)) return "Santander";
+  if (/bbva|bancomer/.test(haystack)) return "BBVA";
+  return "Desconocido";
+}
+
+function detectPeriod(text: string, fileName: string) {
+  const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const periodMatch = normalized.match(/period(?:o|os)\s*(?:de\s+facturacion)?\s*[:-]?\s*([^\n]{8,80})/i);
+  if (periodMatch?.[1]) return periodMatch[1].replace(/\s+/g, " ").trim();
+
+  const fileLabel = fileName
+    .replace(/\.pdf$/i, "")
+    .replace(/[_-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return fileLabel || "Periodo no identificado";
+}
+
 function guessCategory(description: string) {
-  const value = description.toLowerCase();
+  const value = normalizeText(description);
   if (/uber|taxi|metro|gasolina/.test(value)) return "Transporte";
   if (/restaurant|cafe|taquer|comida/.test(value)) return "Comidas";
   if (/mercado|super|amazon/.test(value)) return "Compras";
@@ -39,24 +67,25 @@ function guessCategory(description: string) {
   return "Sin categoría";
 }
 
-function extractTransactions(text: string, source: ImportResult["source"]): Transaction[] {
+function extractTransactions(text: string, source: StatementSource, fileName: string): Transaction[] {
   const lines = text.split(/\n+/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
   const results: Transaction[] = [];
   const datePattern = /^(\d{1,2})\s+(?:de\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)/i;
   const amountPattern = /(-?\$?\s?[\d,]+\.\d{2})\s*(CR)?$/i;
+  const importKey = normalizeText(fileName).replace(/[^a-z0-9]+/g, "-").slice(0, 28) || "estado";
 
   lines.forEach((line, index) => {
     const date = line.match(datePattern);
     const amount = line.match(amountPattern);
     if (!date || !amount) return;
-    const month = monthNames[["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"].indexOf(date[2].toLowerCase())];
+    const month = monthNames[["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"].indexOf(normalizeText(date[2]))];
     const rawDescription = line.slice(date[0].length, amount.index).trim();
     if (!rawDescription || rawDescription.length < 3) return;
     const isCredit = Boolean(amount[2]) || /pago|abono|dep[oó]sito/i.test(rawDescription);
     const value = normalizeAmount(amount[1]) * (isCredit ? 1 : -1);
     const category = guessCategory(rawDescription);
     results.push({
-      id: `import-${index}-${value}`,
+      id: `import-${importKey}-${index}-${value}`,
       date: `${date[1]} ${month}`,
       description: rawDescription.slice(0, 54),
       account: source,
@@ -89,18 +118,17 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   }
 
   const text = pageTexts.join("\n");
-  let source: ImportResult["source"] = /american express|amex/i.test(text + file.name) ? "Amex" : /santander/i.test(text + file.name) ? "Santander" : "Desconocido";
+  const source = detectSource(text, file.name);
   const mode = text.replace(/\s/g, "").length > 500 ? "text" : "ocr";
-  if (source === "Desconocido" && mode === "ocr" && /estado[-_ ]de[-_ ]cuenta/i.test(file.name)) source = "Santander";
   onProgress(82, mode === "ocr" ? "El PDF requiere reconocimiento visual" : "Conciliando cargos y pagos");
 
-  const periodMatch = text.match(/(?:Per[ií]odo de Facturaci[oó]n|PERIODO)\s*([^\n]{8,56})/i);
-  const parsed = mode === "text" ? extractTransactions(text, source) : [];
+  const parsed = mode === "text" ? extractTransactions(text, source, file.name) : [];
   onProgress(100, "Listo para revisar");
 
   return {
     source,
-    period: periodMatch?.[1]?.trim() ?? file.name.replace(/\.pdf$/i, ""),
+    period: detectPeriod(text, file.name),
+    fileName: file.name,
     mode,
     transactions: parsed,
   };

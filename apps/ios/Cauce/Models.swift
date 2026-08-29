@@ -41,6 +41,7 @@ struct Movement: Identifiable, Codable {
     var category: String
     var amount: Decimal
     var flow: FlowKind
+    var statementId: UUID?
 
     init(
         id: UUID = UUID(),
@@ -49,7 +50,8 @@ struct Movement: Identifiable, Codable {
         account: String,
         category: String,
         amount: Decimal,
-        flow: FlowKind
+        flow: FlowKind,
+        statementId: UUID? = nil
     ) {
         self.id = id
         self.date = date
@@ -58,13 +60,27 @@ struct Movement: Identifiable, Codable {
         self.category = category
         self.amount = amount
         self.flow = flow
+        self.statementId = statementId
     }
+}
+
+struct StatementRecord: Identifiable, Codable {
+    var id: UUID
+    var source: String
+    var period: String
+    var fileName: String
+    var importedAt: Date
+    var transactionCount: Int
+    var requiresReview: Bool
 }
 
 struct ImportSummary {
     let source: String
+    let period: String
+    let fileName: String
     let imported: Int
     let skipped: Int
+    let requiresReview: Bool
 }
 
 enum FinanceImportError: LocalizedError {
@@ -83,19 +99,18 @@ enum FinanceImportError: LocalizedError {
 
 @Observable
 final class FinanceStore {
-    private let movementKey = "marcelito.movements.v1"
+    private let movementKey = "marcelito.movements.v2"
+    private let statementKey = "marcelito.statements.v1"
     private let importKey = "marcelito.lastImport"
 
     var movements: [Movement]
+    var statements: [StatementRecord]
 
     private(set) var lastImportedFile: String?
 
-    // These are intentionally visible constants while the account history is being built.
-    // They can be replaced with calculated balances once the user has imported a full cycle.
-    let cash: Decimal = 107_920
-    let debt: Decimal = 23_151
-
-    var liquidNetWorth: Decimal { cash - debt }
+    var totalIncome: Decimal { movements.filter { $0.flow == .income }.reduce(0) { $0 + abs($1.amount) } }
+    var totalTransfers: Decimal { movements.filter { $0.flow == .transfer }.reduce(0) { $0 + abs($1.amount) } }
+    var totalExpenses: Decimal { movements.filter { $0.flow == .expense }.reduce(0) { $0 + abs($1.amount) } }
 
     var monthlyExpense: Decimal {
         let monthStart = Calendar.current.date(
@@ -112,7 +127,13 @@ final class FinanceStore {
            let saved = try? JSONDecoder().decode([Movement].self, from: data) {
             movements = saved
         } else {
-            movements = Self.demoMovements
+            movements = []
+        }
+        if let data = defaults.data(forKey: statementKey),
+           let saved = try? JSONDecoder().decode([StatementRecord].self, from: data) {
+            statements = saved
+        } else {
+            statements = []
         }
         lastImportedFile = defaults.string(forKey: importKey)
     }
@@ -139,7 +160,8 @@ final class FinanceStore {
                 account: account,
                 category: category,
                 amount: signedAmount,
-                flow: flow
+                flow: flow,
+                statementId: nil
             ),
             at: 0
         )
@@ -148,10 +170,12 @@ final class FinanceStore {
 
     func clearLocalData() {
         movements = []
+        statements = []
         lastImportedFile = nil
         persist()
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: movementKey)
+        defaults.removeObject(forKey: statementKey)
         defaults.removeObject(forKey: importKey)
     }
 
@@ -171,47 +195,69 @@ final class FinanceStore {
             .compactMap { document.page(at: $0)?.string }
             .joined(separator: "\n")
         let candidates = Self.parse(text: text, fileName: url.lastPathComponent)
-
-        guard !candidates.isEmpty else {
-            throw FinanceImportError.emptyDocument
+        let source = Self.accountName(from: url.lastPathComponent) == "Importado"
+            ? Self.accountName(from: text)
+            : Self.accountName(from: url.lastPathComponent)
+        let period = Self.periodLabel(from: text, fileName: url.lastPathComponent)
+        let existingStatement = statements.first(where: { $0.fileName == url.lastPathComponent })
+        let statementId = existingStatement?.id ?? UUID()
+        let existingKeys = Set(movements.filter { $0.statementId != statementId }.map(Self.identityKey))
+        let fresh = candidates.compactMap { candidate -> Movement? in
+            let keyed = Self.identityKey(candidate)
+            guard !existingKeys.contains(keyed) else { return nil }
+            var imported = candidate
+            imported.statementId = statementId
+            return imported
         }
 
-        var existingKeys = Set(movements.map(Self.identityKey))
-        var fresh: [Movement] = []
-        for candidate in candidates {
-            let key = Self.identityKey(candidate)
-            if existingKeys.insert(key).inserted {
-                fresh.append(candidate)
-            }
-        }
-
+        movements.removeAll { $0.statementId == statementId }
         movements.insert(contentsOf: fresh.reversed(), at: 0)
+        let statement = StatementRecord(
+            id: statementId,
+            source: source,
+            period: period,
+            fileName: url.lastPathComponent,
+            importedAt: .now,
+            transactionCount: fresh.count,
+            requiresReview: fresh.isEmpty
+        )
+        if let index = statements.firstIndex(where: { $0.id == statementId }) {
+            statements[index] = statement
+        } else {
+            statements.insert(statement, at: 0)
+        }
         lastImportedFile = url.lastPathComponent
         persist()
         UserDefaults.standard.set(lastImportedFile, forKey: importKey)
 
         return ImportSummary(
-            source: url.lastPathComponent,
+            source: source,
+            period: period,
+            fileName: url.lastPathComponent,
             imported: fresh.count,
-            skipped: candidates.count - fresh.count
+            skipped: candidates.count - fresh.count,
+            requiresReview: fresh.isEmpty
         )
     }
 
     private func persist() {
         guard let data = try? JSONEncoder().encode(movements) else { return }
         UserDefaults.standard.set(data, forKey: movementKey)
+        if let data = try? JSONEncoder().encode(statements) {
+            UserDefaults.standard.set(data, forKey: statementKey)
+        }
     }
 
     private static func identityKey(_ movement: Movement) -> String {
         "\(Calendar.current.startOfDay(for: movement.date).timeIntervalSince1970)|\(movement.title.lowercased())|\(movement.account.lowercased())|\(movement.amount)"
     }
 
-    private static let demoMovements: [Movement] = [
+    private static let demoMovements: [Movement] = [/*
         Movement(date: .now, title: "Nómina mensual", account: "Santander", category: "Ingresos", amount: 48_200, flow: .income),
         Movement(date: .now.addingTimeInterval(-86_400), title: "Pago de tarjeta", account: "Santander a Amex", category: "Transferencia", amount: -19_405, flow: .transfer),
         Movement(date: .now.addingTimeInterval(-172_800), title: "Supermercado", account: "Amex", category: "Alimentos", amount: -1_842.70, flow: .expense),
         Movement(date: .now.addingTimeInterval(-259_200), title: "Reserva de viaje", account: "Amex", category: "Viajes", amount: -6_270, flow: .expense)
-    ]
+    */]
 
     private struct TextMatch {
         let range: NSRange
@@ -405,6 +451,22 @@ final class FinanceStore {
         case let month where month.hasPrefix("dic"): return 12
         default: return nil
         }
+    }
+
+    private static func periodLabel(from text: String, fileName: String) -> String {
+        let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        if let regex = try? NSRegularExpression(pattern: #"period(?:o|os)\s*(?:de\s+facturacion)?\s*[:-]?\s*([^\n]{8,80})"#),
+           let match = regex.firstMatch(in: normalized, range: range),
+           let valueRange = Range(match.range(at: 1), in: normalized) {
+            return String(normalized[valueRange]).replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return fileName
+            .replacingOccurrences(of: ".pdf", with: "", options: .caseInsensitive)
+            .replacingOccurrences(of: "_", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .replacingOccurrences(of: "  ", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func accountName(from fileName: String) -> String {

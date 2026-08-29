@@ -6,39 +6,52 @@ struct MovementsView: View {
     @State private var isAddPresented = false
 
     private var filtered: [Movement] {
-        query.isEmpty ? store.movements : store.movements.filter {
-            $0.title.localizedCaseInsensitiveContains(query) || $0.category.localizedCaseInsensitiveContains(query)
+        guard !query.isEmpty else { return store.movements }
+        return store.movements.filter {
+            let statement = $0.statementId.flatMap { id in store.statements.first(where: { $0.id == id }) }
+            return $0.title.localizedCaseInsensitiveContains(query)
+                || $0.category.localizedCaseInsensitiveContains(query)
+                || $0.account.localizedCaseInsensitiveContains(query)
+                || statement?.source.localizedCaseInsensitiveContains(query) == true
+                || statement?.period.localizedCaseInsensitiveContains(query) == true
         }
     }
 
     var body: some View {
         NavigationStack {
-            List(filtered) { movement in
-                NavigationLink {
-                    MovementDetailView(movement: movement)
-                } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: movement.flow.symbol)
-                            .foregroundStyle(movement.flow.color)
-                        VStack(alignment: .leading) {
-                            Text(movement.title)
-                            Text("\(movement.account) · \(movement.category)")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
+            List {
+                if filtered.isEmpty {
+                    ContentUnavailableView("Sin movimientos", systemImage: "doc.text.magnifyingglass", description: Text("Importa un estado de cuenta o agrega un movimiento manual."))
+                } else {
+                    ForEach(filtered) { movement in
+                        NavigationLink {
+                            MovementDetailView(movement: movement)
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: movement.flow.symbol)
+                                    .foregroundStyle(movement.flow.color)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(movement.title)
+                                    Text("\(movement.account) · \(statementLabel(for: movement))")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                    Text(movement.date, format: .dateTime.day().month(.abbreviated).year())
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                Text(movement.amount, format: .currency(code: "MXN"))
+                                    .monospacedDigit()
+                            }
                         }
-                        Spacer()
-                        Text(movement.amount, format: .currency(code: "MXN"))
-                            .monospacedDigit()
                     }
                 }
             }
-            .searchable(text: $query, prompt: "Comercio o categoría")
+            .searchable(text: $query, prompt: "Comercio, banco o periodo")
             .navigationTitle("Movimientos")
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        isAddPresented = true
-                    } label: {
+                    Button { isAddPresented = true } label: {
                         Image(systemName: "plus")
                     }
                     .accessibilityLabel("Agregar movimiento")
@@ -52,6 +65,14 @@ struct MovementsView: View {
                 AddMovementView()
             }
         }
+    }
+
+    private func statementLabel(for movement: Movement) -> String {
+        guard let statementId = movement.statementId,
+              let statement = store.statements.first(where: { $0.id == statementId }) else {
+            return "Manual"
+        }
+        return "\(statement.source) · \(statement.period)"
     }
 }
 
@@ -147,6 +168,12 @@ private struct MovementDetailView: View {
         Form {
             LabeledContent("Importe") { Text(movement.amount, format: .currency(code: "MXN")).monospacedDigit() }
             LabeledContent("Cuenta", value: movement.account)
+            if let statement = movement.statementId.flatMap({ id in store.statements.first(where: { $0.id == id }) }) {
+                LabeledContent("Estado", value: "\(statement.source) · \(statement.period)")
+                LabeledContent("Archivo", value: statement.fileName)
+            } else {
+                LabeledContent("Estado", value: "Movimiento manual")
+            }
             Picker("Categoría", selection: Binding(
                 get: { selectedCategory },
                 set: {
@@ -166,22 +193,36 @@ private struct MovementDetailView: View {
 }
 
 struct ExpensesView: View {
+    @Environment(FinanceStore.self) private var store
+
+    private var groups: [(category: String, amount: Decimal)] {
+        Dictionary(grouping: store.movements.filter { $0.flow == .expense }, by: { $0.category })
+            .map { (category: $0.key, amount: $0.value.reduce(0) { $0 + abs($1.amount) }) }
+            .sorted { $0.amount > $1.amount }
+    }
+
+    private var total: Decimal { groups.reduce(0) { $0 + $1.amount } }
+
     var body: some View {
         NavigationStack {
             List {
-                Section("Agosto") {
-                    ExpenseRow(name: "Viajes", amount: 6_270, share: "61%", color: .marcelitoNavy)
-                    ExpenseRow(name: "Alimentos", amount: 1_843, share: "18%", color: .marcelitoNavyMid)
-                    ExpenseRow(name: "Comidas", amount: 920, share: "9%", color: .marcelitoNavySoft)
-                    ExpenseRow(name: "Servicios", amount: 648, share: "6%", color: .marcelitoNavyMid.opacity(0.72))
-                }
-                Section("Historia financiera") {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Fin de semana en Mérida").font(.headline)
-                        Text("Hospedaje y transporte ya están pagados. Quedan $1,800 reservados para consumo.")
-                            .foregroundStyle(.secondary)
+                if groups.isEmpty {
+                    ContentUnavailableView("Sin gastos", systemImage: "chart.pie", description: Text("Importa un estado de cuenta para construir tus categorías reales."))
+                } else {
+                    Section("Gasto identificado") {
+                        ForEach(Array(groups.enumerated()), id: \.element.category) { index, item in
+                            ExpenseRow(name: item.category, amount: item.amount, share: total > 0 ? "\(Int((item.amount / total * 100).rounded()))%" : "0%", color: [.marcelitoNavy, .marcelitoNavyMid, .marcelitoNavySoft][min(index, 2)])
+                        }
                     }
-                    .padding(.vertical, 6)
+                    Section("Lectura") {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("\(groups.count) categorías explican")
+                            Text(total, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                                .font(.headline)
+                            Text("Puedes corregir el origen o la categoría desde Movimientos.")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
             .navigationTitle("Gastos")
@@ -198,6 +239,7 @@ private struct ExpenseRow: View {
     let amount: Decimal
     let share: String
     let color: Color
+
     var body: some View {
         HStack {
             Circle().fill(color).frame(width: 10, height: 10).accessibilityHidden(true)
@@ -210,12 +252,55 @@ private struct ExpenseRow: View {
 }
 
 struct AccountsView: View {
+    @Environment(FinanceStore.self) private var store
+    private let knownSources = ["Santander", "BBVA", "Amex"]
+
     var body: some View {
         NavigationStack {
             List {
-                AccountRow(name: "Santander", purpose: "Cuenta principal", balance: 27_654, symbol: "building.columns.fill", color: .marcelitoNavy)
-                AccountRow(name: "BBVA", purpose: "Ahorro y reservas", balance: 80_266, symbol: "building.columns.fill", color: .marcelitoNavyMid)
-                AccountRow(name: "American Express", purpose: "Crédito · corte 27 ago", balance: 23_151, symbol: "creditcard.fill", color: .marcelitoNavySoft)
+                Section("Estados de cuenta") {
+                    if store.statements.isEmpty {
+                        Text("Aún no hay estados importados. Usa el botón de carga en Inicio.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(store.statements) { statement in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Image(systemName: statement.requiresReview ? "exclamationmark.triangle" : "checkmark.circle.fill")
+                                        .foregroundStyle(statement.requiresReview ? .orange : .marcelitoNavyMid)
+                                    Text("\(statement.source) · \(statement.period)")
+                                    Spacer()
+                                    Text("\(statement.transactionCount) mov.")
+                                        .font(.caption)
+                                        .monospacedDigit()
+                                }
+                                Text(statement.fileName)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                Section("Bancos") {
+                    ForEach(knownSources, id: \.self) { source in
+                        let statements = store.statements.filter { $0.source == source }
+                        let movementCount = store.movements.filter { movement in
+                            guard let statementId = movement.statementId else { return false }
+                            return statements.contains(where: { $0.id == statementId })
+                        }.count
+                        HStack(spacing: 12) {
+                            Image(systemName: source == "Amex" ? "creditcard.fill" : "building.columns.fill")
+                                .foregroundStyle(.marcelitoNavyMid)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(source)
+                                Text(statements.isEmpty ? "Sin estados importados" : "\(statements.count) estado(s) · \(movementCount) movimientos")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                        }
+                    }
+                }
             }
             .navigationTitle("Cuentas")
             .listRowBackground(Color.marcelitoCreamSoft)
@@ -226,38 +311,32 @@ struct AccountsView: View {
     }
 }
 
-private struct AccountRow: View {
-    let name: String
-    let purpose: String
-    let balance: Decimal
-    let symbol: String
-    let color: Color
-    var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: symbol).foregroundStyle(color)
-            VStack(alignment: .leading) { Text(name); Text(purpose).font(.caption).foregroundStyle(.secondary) }
-            Spacer()
-            Text(balance, format: .currency(code: "MXN").precision(.fractionLength(0))).monospacedDigit()
-        }
-    }
-}
-
 struct NetWorthView: View {
+    @Environment(FinanceStore.self) private var store
+
     var body: some View {
         NavigationStack {
             List {
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("Patrimonio neto estimado").foregroundStyle(.secondary)
-                        Text(84_769, format: .currency(code: "MXN").precision(.fractionLength(0)))
-                            .font(.largeTitle.bold()).monospacedDigit()
-                        Text("+$18,430 en seis meses").foregroundStyle(.marcelitoNavyMid)
-                    }.padding(.vertical, 10)
+                        Text("Patrimonio líquido").foregroundStyle(.secondary)
+                        Text("—")
+                            .font(.largeTitle.bold())
+                            .monospacedDigit()
+                        Text("Pendiente de saldos al corte")
+                            .foregroundStyle(.marcelitoNavyMid)
+                    }
+                    .padding(.vertical, 10)
                 }
-                Section("Evolución") {
-                    LabeledContent("Agosto", value: "$84,769")
-                    LabeledContent("Julio", value: "$77,929")
-                    LabeledContent("Junio", value: "$75,310")
+                Section("Estados que alimentan la historia") {
+                    if store.statements.isEmpty {
+                        Text("Importa tus PDFs para construir la línea de tiempo por banco y periodo.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(store.statements) { statement in
+                            LabeledContent("\(statement.period) · \(statement.source)", value: "\(statement.transactionCount) mov.")
+                        }
+                    }
                 }
             }
             .navigationTitle("Patrimonio")

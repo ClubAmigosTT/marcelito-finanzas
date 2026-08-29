@@ -184,3 +184,44 @@ body { background: var(--bg); color: var(--ink); }
 .side-profile { grid-template-columns: auto 1fr auto auto; }.side-profile button:hover { color: var(--cream); background: oklch(0.29 0.065 255); }
 .mobile-profile-action { display: none !important; }
 @media (max-width: 820px) { .top-actions .mobile-profile-action { display: grid !important; } }
+
+/* Real-data states: the first screen is useful even before the first PDF arrives. */
+.real-data-empty { min-height: min(620px, calc(100dvh - 170px)); display: grid; place-items: center; align-content: center; gap: 14px; padding: 48px 24px; text-align: center; background: var(--surface); border-radius: var(--radius-card); }
+.real-data-empty h1 { font-size: 34px; }
+.real-data-empty p { max-width: 54ch; color: var(--muted); line-height: 1.55; }
+.real-data-empty small { color: var(--muted); font-size: 12px; }
+.real-data-icon { width: 64px; height: 64px; display: grid; place-items: center; border-radius: 18px; background: var(--surface-raised); color: var(--navy); }
+.data-period { display: inline-flex; align-items: center; }
+.result-count { color: var(--muted); align-self: center; font-size: 12px; }
+.metric-transfer .metric-icon, .metric-transfer small { color: var(--transfer); }
+.statement-ledger { margin-top: 8px; padding: 22px; background: var(--surface); border-radius: var(--radius-card); }
+.statement-filters { display: flex; flex-wrap: wrap; gap: 8px; }
+.statement-filters select { height: 38px; padding: 0 10px; color: var(--ink); background: var(--surface-raised); border: 1px solid var(--line); border-radius: 8px; }
+.statement-list { border-top: 1px solid var(--line); }
+.statement-row { min-height: 82px; display: grid; grid-template-columns: auto minmax(0, 1fr) auto auto; align-items: center; gap: 13px; border-bottom: 1px solid var(--line); }
+.statement-icon { width: 40px; height: 40px; display: grid; place-items: center; border-radius: 50%; background: var(--surface-raised); color: var(--navy); }
+.statement-main { min-width: 0; display: grid; gap: 3px; }
+.statement-main strong { font-size: 14px; }
+.statement-main span, .statement-main small { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.statement-main span { font-size: 12px; }
+.statement-main small { font-size: 11px; }
+.statement-status { padding: 5px 8px; border-radius: 999px; background: var(--surface-raised); color: var(--muted); font-size: 11px; font-weight: 650; white-space: nowrap; }
+.statement-status.ready { color: var(--navy-mid); }
+.statement-status.review { color: var(--expense); }
+.statement-action { white-space: nowrap; }
+.statement-amex { color: var(--navy); }
+.statement-santander { color: var(--navy-mid); }
+.statement-bbva { color: var(--navy-soft); }
+.statement-unknown { color: var(--muted); }
+.account-icon.statement-amex, .account-icon.statement-santander, .account-icon.statement-bbva { background: var(--surface-raised); }
+
+@media (max-width: 820px) {
+  .real-data-empty { min-height: 520px; padding: 36px 20px; }
+  .real-data-empty h1 { font-size: 28px; }
+  .statement-ledger { padding: 16px; }
+  .statement-filters { margin-top: 14px; }
+  .statement-filters select { flex: 1; min-width: 145px; }
+  .statement-row { grid-template-columns: auto minmax(0, 1fr) auto; padding: 12px 0; }
+  .statement-status { grid-column: 2; justify-self: start; }
+  .statement-action { grid-column: 3; grid-row: 2; }
+}

@@ -25,18 +25,24 @@ struct HomeView: View {
     @State private var isDeleteConfirmationPresented = false
     @State private var importMessage: String?
 
+    private var hasData: Bool { !store.movements.isEmpty || !store.statements.isEmpty }
+
     var body: some View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
-                    NetWorthSummary(value: store.liquidNetWorth)
-                    MetricsStrip(cash: store.cash, debt: store.debt, monthlyExpense: store.monthlyExpense)
-                    DecisionCallout()
-                    MoneyFlowView()
-                    if let lastImportedFile = store.lastImportedFile {
-                        Label("Último estado importado: \(lastImportedFile)", systemImage: "checkmark.circle.fill")
-                            .font(.footnote)
-                            .foregroundStyle(.marcelitoNavyMid)
+                    if hasData {
+                        NetWorthSummary(hasData: true)
+                        MetricsStrip(income: store.totalIncome, transfers: store.totalTransfers, monthlyExpense: store.monthlyExpense)
+                        DecisionCallout(statement: store.statements.first)
+                        MoneyFlowView(store: store)
+                        if let lastImportedFile = store.lastImportedFile {
+                            Label("Último estado importado: \(lastImportedFile)", systemImage: "checkmark.circle.fill")
+                                .font(.footnote)
+                                .foregroundStyle(.marcelitoNavyMid)
+                        }
+                    } else {
+                        EmptyDataCard { isImporterPresented = true }
                     }
                 }
                 .padding()
@@ -48,12 +54,16 @@ struct HomeView: View {
                     Button { isImporterPresented = true } label: {
                         Image(systemName: "square.and.arrow.down")
                     }
-                        .accessibilityLabel("Importar estado de cuenta")
+                    .accessibilityLabel("Importar estado de cuenta")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
-                        if let lastImportedFile = store.lastImportedFile {
-                            Label(lastImportedFile, systemImage: "doc.text.fill")
+                        if store.statements.isEmpty {
+                            Label("Sin estados importados", systemImage: "doc.text")
+                        } else {
+                            ForEach(store.statements.prefix(4)) { statement in
+                                Label("\(statement.source) · \(statement.period)", systemImage: statement.requiresReview ? "exclamationmark.triangle" : "checkmark.circle")
+                            }
                         }
                         Button("Eliminar cuenta", role: .destructive) {
                             isDeleteConfirmationPresented = true
@@ -73,10 +83,9 @@ struct HomeView: View {
                 case .success(let url):
                     do {
                         let summary = try store.importPDF(from: url)
-                        let duplicateNote = summary.skipped > 0
-                            ? " Se omitieron \(summary.skipped) repetidos."
-                            : ""
-                        importMessage = "Se agregaron \(summary.imported) movimientos de \(summary.source).\(duplicateNote)"
+                        let duplicateNote = summary.skipped > 0 ? " Se omitieron \(summary.skipped) repetidos." : ""
+                        let reviewNote = summary.requiresReview ? " Quedó pendiente de revisión manual." : ""
+                        importMessage = "\(summary.source) · \(summary.period): se agregaron \(summary.imported) movimientos.\(duplicateNote)\(reviewNote)"
                     } catch {
                         importMessage = error.localizedDescription
                     }
@@ -112,16 +121,40 @@ struct HomeView: View {
     }
 }
 
+private struct EmptyDataCard: View {
+    let importAction: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Image(systemName: "doc.text.magnifyingglass")
+                .font(.title2)
+                .foregroundStyle(.marcelitoNavy)
+            Text("Empieza con tus estados reales")
+                .font(.title2.bold())
+            Text("Marcelito no carga cifras de muestra. Importa un PDF mensual para guardar banco, periodo y movimientos en este dispositivo.")
+                .foregroundStyle(.secondary)
+            Button("Importar primer estado", action: importAction)
+                .buttonStyle(.borderedProminent)
+                .tint(.marcelitoNavy)
+                .padding(.top, 4)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding()
+        .foregroundStyle(.marcelitoNavy)
+        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
 private struct NetWorthSummary: View {
-    let value: Decimal
+    let hasData: Bool
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Patrimonio líquido").foregroundStyle(.secondary)
-            Text(value, format: .currency(code: "MXN").precision(.fractionLength(0)))
+            Text("—")
                 .font(.largeTitle.bold())
                 .monospacedDigit()
-                .minimumScaleFactor(0.75)
-            Text("Subió $6,840 desde julio")
+            Text(hasData ? "Pendiente de saldos al corte" : "Importa un estado para comenzar")
                 .font(.subheadline)
                 .foregroundStyle(.marcelitoNavyMid)
         }
@@ -133,15 +166,16 @@ private struct NetWorthSummary: View {
 }
 
 private struct MetricsStrip: View {
-    let cash: Decimal
-    let debt: Decimal
+    let income: Decimal
+    let transfers: Decimal
     let monthlyExpense: Decimal
+
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
-                MetricTile(title: "Efectivo", value: cash, symbol: "wallet.bifold.fill", color: .marcelitoNavyMid)
-                MetricTile(title: "Deuda", value: debt, symbol: "creditcard.fill", color: .marcelitoNavy)
-                MetricTile(title: "Gasto del mes", value: monthlyExpense, symbol: "receipt.fill", color: .marcelitoNavySoft)
+                MetricTile(title: "Ingresos", value: income, symbol: "arrow.down.circle.fill", color: .marcelitoNavyMid)
+                MetricTile(title: "Transferencias", value: transfers, symbol: "arrow.left.arrow.right.circle.fill", color: .marcelitoNavySoft)
+                MetricTile(title: "Gasto del mes", value: monthlyExpense, symbol: "receipt.fill", color: .marcelitoNavy)
             }
         }
     }
@@ -152,6 +186,7 @@ private struct MetricTile: View {
     let value: Decimal
     let symbol: String
     let color: Color
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Image(systemName: symbol).foregroundStyle(color)
@@ -168,11 +203,13 @@ private struct MetricTile: View {
 }
 
 private struct DecisionCallout: View {
+    let statement: StatementRecord?
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Decisión para septiembre", systemImage: "lightbulb.fill")
+            Label("Revisión de origen", systemImage: "doc.text.magnifyingglass")
                 .font(.headline)
-            Text("Reserva $6,500 antes del día 12 para cubrir Amex sin tocar tu fondo de viaje.")
+            Text(statement.map { "\($0.source) · \($0.period) está guardado como \($0.transactionCount) movimientos. Corrige categorías desde Movimientos antes de usarlo para decidir." } ?? "Importa un estado de cuenta para empezar a revisar.")
                 .foregroundStyle(.secondary)
         }
         .padding()
@@ -182,19 +219,30 @@ private struct DecisionCallout: View {
 }
 
 private struct MoneyFlowView: View {
+    let store: FinanceStore
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Así se movió tu dinero").font(.title2.bold())
-            ForEach(FlowKind.allCases) { flow in
-                HStack {
-                    Image(systemName: flow.symbol).foregroundStyle(flow.color)
-                    Text(flow.rawValue)
-                    Spacer()
-                    Text(flow == .income ? "$48,200" : flow == .debt ? "$23,151" : "$19,405")
-                        .monospacedDigit()
-                }
-                .padding(.vertical, 7)
-            }
+            FlowLine(flow: .income, value: store.totalIncome)
+            FlowLine(flow: .transfer, value: store.totalTransfers)
+            FlowLine(flow: .expense, value: store.totalExpenses)
         }
+    }
+}
+
+private struct FlowLine: View {
+    let flow: FlowKind
+    let value: Decimal
+
+    var body: some View {
+        HStack {
+            Image(systemName: flow.symbol).foregroundStyle(flow.color)
+            Text(flow.rawValue)
+            Spacer()
+            Text(value, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                .monospacedDigit()
+        }
+        .padding(.vertical, 7)
     }
 }
