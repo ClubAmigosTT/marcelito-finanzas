@@ -27,7 +27,7 @@ struct HomeView: View {
     @Environment(AuthenticationModel.self) private var auth
     @State private var isImporterPresented = false
     @State private var isDeleteConfirmationPresented = false
-    @State private var importMessage: String?
+    @State private var importReport: ImportReport?
 
     private var hasData: Bool { !store.movements.isEmpty || !store.statements.isEmpty }
 
@@ -101,40 +101,36 @@ struct HomeView: View {
                 switch result {
                 case .success(let urls):
                     guard !urls.isEmpty else {
-                        importMessage = "No se seleccionó un archivo."
+                        importReport = ImportReport(
+                            fileCount: 0,
+                            items: [],
+                            selectionError: "No elegiste ningún PDF. Selecciona un estado de cuenta para revisar sus movimientos."
+                        )
                         return
                     }
-                    var reports: [String] = []
+                    var items: [ImportReportItem] = []
                     for url in urls {
                         do {
                             let summary = try store.importPDF(from: url)
-                            let movementText = summary.imported == 0
-                                ? "no se detectaron movimientos"
-                                : "se agregaron \(summary.imported) movimientos"
-                            let duplicateNote = summary.skipped > 0 ? "; \(summary.skipped) repetidos omitidos" : ""
-                            let reviewNote = summary.requiresReview ? "; requiere revisión" : ""
-                            let ocrNote = summary.usedOCR ? "; OCR aplicado" : ""
-                            reports.append("\(summary.source) · \(summary.period): \(movementText)\(duplicateNote)\(reviewNote)\(ocrNote)")
+                            items.append(ImportReportItem(summary: summary))
                         } catch {
-                            reports.append("\(url.lastPathComponent): \(error.localizedDescription)")
+                            items.append(ImportReportItem(
+                                fileName: url.lastPathComponent,
+                                errorMessage: error.localizedDescription
+                            ))
                         }
                     }
-                    let prefix = urls.count > 1 ? "Se revisaron \(urls.count) archivos.\n\n" : ""
-                    importMessage = prefix + reports.joined(separator: "\n\n")
+                    importReport = ImportReport(fileCount: urls.count, items: items)
                 case .failure(let error):
-                    importMessage = error.localizedDescription
+                    importReport = ImportReport(
+                        fileCount: 0,
+                        items: [],
+                        selectionError: error.localizedDescription
+                    )
                 }
             }
-            .alert(
-                "Estado de cuenta",
-                isPresented: Binding(
-                    get: { importMessage != nil },
-                    set: { if !$0 { importMessage = nil } }
-                )
-            ) {
-                Button("Listo", role: .cancel) { importMessage = nil }
-            } message: {
-                Text(importMessage ?? "")
+            .sheet(item: $importReport) { report in
+                ImportReportSheet(report: report)
             }
             .confirmationDialog(
                 "Eliminar cuenta",
@@ -150,6 +146,259 @@ struct HomeView: View {
                 Text("Se borrarán tu usuario, movimientos y estados importados de este dispositivo. Esta acción no se puede deshacer.")
             }
         }
+    }
+}
+
+private struct ImportReport: Identifiable {
+    let id = UUID()
+    let fileCount: Int
+    let items: [ImportReportItem]
+    let selectionError: String?
+
+    init(fileCount: Int, items: [ImportReportItem], selectionError: String? = nil) {
+        self.fileCount = fileCount
+        self.items = items
+        self.selectionError = selectionError
+    }
+
+    var hasErrors: Bool {
+        selectionError != nil || items.contains { $0.errorMessage != nil || $0.imported == 0 }
+    }
+
+    var totalImported: Int {
+        items.reduce(0) { $0 + $1.imported }
+    }
+
+    var reviewCount: Int {
+        items.filter { $0.requiresReview }.count
+    }
+
+    var title: String {
+        if selectionError != nil { return "No se pudo importar" }
+        if items.isEmpty { return "No hay archivos para revisar" }
+        if items.allSatisfy({ $0.imported == 0 && $0.errorMessage == nil }) {
+            return "Necesita atención"
+        }
+        return hasErrors ? "Importación completada" : "Datos listos para revisar"
+    }
+
+    var subtitle: String {
+        if let selectionError { return selectionError }
+        if items.isEmpty { return "Selecciona un PDF mensual para comenzar." }
+        let files = fileCount == 1 ? "1 archivo revisado" : "\(fileCount) archivos revisados"
+        let movements = totalImported == 1 ? "1 movimiento nuevo" : "\(totalImported) movimientos nuevos"
+        return "\(files) · \(movements)"
+    }
+}
+
+private struct ImportReportItem: Identifiable {
+    enum State: Equatable {
+        case imported
+        case review
+        case empty
+        case error
+
+        var icon: String {
+            switch self {
+            case .imported: "checkmark.circle.fill"
+            case .review: "checkmark.seal.fill"
+            case .empty: "exclamationmark.triangle.fill"
+            case .error: "xmark.octagon.fill"
+            }
+        }
+
+        var color: Color {
+            switch self {
+            case .imported: .marcelitoSuccess
+            case .review: .marcelitoNavyMid
+            case .empty: .marcelitoAmber
+            case .error: .marcelitoDanger
+            }
+        }
+    }
+
+    let id = UUID()
+    let fileName: String
+    let source: String?
+    let period: String?
+    let imported: Int
+    let skipped: Int
+    let requiresReview: Bool
+    let usedOCR: Bool
+    let errorMessage: String?
+
+    init(summary: ImportSummary) {
+        fileName = summary.fileName
+        source = summary.source
+        period = summary.period
+        imported = summary.imported
+        skipped = summary.skipped
+        requiresReview = summary.requiresReview
+        usedOCR = summary.usedOCR
+        errorMessage = nil
+    }
+
+    init(fileName: String, errorMessage: String) {
+        self.fileName = fileName
+        source = nil
+        period = nil
+        imported = 0
+        skipped = 0
+        requiresReview = false
+        usedOCR = false
+        self.errorMessage = errorMessage
+    }
+
+    var state: State {
+        if errorMessage != nil { return .error }
+        if imported == 0 { return .empty }
+        return requiresReview ? .review : .imported
+    }
+
+    var heading: String {
+        if let source, let period { return "\(source) · \(period)" }
+        return fileName
+    }
+
+    var statusText: String {
+        if let errorMessage { return errorMessage }
+        if imported == 0 { return "No se encontraron movimientos" }
+        return imported == 1 ? "1 movimiento nuevo" : "\(imported) movimientos nuevos"
+    }
+}
+
+private struct ImportReportSheet: View {
+    let report: ImportReport
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    summaryHeader
+
+                    if !report.items.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Archivos")
+                                .font(.headline)
+                                .foregroundStyle(Color.marcelitoNavy)
+
+                            ForEach(report.items) { item in
+                                ImportReportRow(item: item)
+                            }
+                        }
+                    }
+
+                    if report.reviewCount > 0 {
+                        Label(
+                            "El OCR ayuda a leer escaneos, pero conviene confirmar los importes en Movimientos.",
+                            systemImage: "info.circle.fill"
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(Color.marcelitoNavyMid)
+                        .padding(.horizontal, 2)
+                    }
+                }
+                .padding(20)
+            }
+            .scrollIndicators(.hidden)
+            .background(Color.marcelitoCream.ignoresSafeArea())
+            .navigationTitle("Importación")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Cerrar") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(Color.marcelitoCream)
+    }
+
+    private var summaryHeader: some View {
+        HStack(alignment: .top, spacing: 14) {
+            Image(systemName: report.hasErrors ? "arrow.triangle.2.circlepath" : "checkmark.seal.fill")
+                .font(.title2.weight(.semibold))
+                .foregroundStyle(report.hasErrors ? Color.marcelitoAmber : Color.marcelitoSuccess)
+                .frame(width: 44, height: 44)
+                .background(
+                    (report.hasErrors ? Color.marcelitoAmber : Color.marcelitoSuccess).opacity(0.14),
+                    in: Circle()
+                )
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(report.title)
+                    .font(.title3.weight(.bold))
+                    .foregroundStyle(Color.marcelitoNavy)
+                Text(report.subtitle)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.marcelitoNavyMid)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(16)
+        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+}
+
+private struct ImportReportRow: View {
+    let item: ImportReportItem
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: item.state.icon)
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(item.state.color)
+                .frame(width: 34, height: 34)
+                .background(item.state.color.opacity(0.14), in: Circle())
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(item.heading)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(Color.marcelitoNavy)
+                        .lineLimit(2)
+                    Spacer(minLength: 0)
+                    if item.usedOCR {
+                        Text("OCR")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(Color.marcelitoNavyMid)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Color.marcelitoNavy.opacity(0.08), in: Capsule())
+                    }
+                }
+
+                Text(item.statusText)
+                    .font(.subheadline)
+                    .foregroundStyle(item.state == .empty || item.state == .error ? item.state.color : Color.marcelitoNavyMid)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Text(item.fileName)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+
+                if item.skipped > 0 || item.requiresReview {
+                    HStack(spacing: 6) {
+                        if item.skipped > 0 {
+                            Text("\(item.skipped) repetidos omitidos")
+                        }
+                        if item.requiresReview {
+                            Text("Revisa algunos datos")
+                        }
+                    }
+                    .font(.caption2)
+                    .foregroundStyle(Color.marcelitoNavySoft)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
     }
 }
 

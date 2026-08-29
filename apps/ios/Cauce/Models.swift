@@ -553,9 +553,10 @@ final class FinanceStore {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FinanceImportError.emptyDocument
         }
-        let source = Self.accountName(from: url.lastPathComponent) == "Importado"
+        let fileSource = Self.accountName(from: url.lastPathComponent)
+        let source = fileSource == "Importado"
             ? Self.accountName(from: text)
-            : Self.accountName(from: url.lastPathComponent)
+            : fileSource
         let candidates: [Movement]
         if usedOCR, source == "Santander" {
             let santanderCandidates = Self.parseSantanderOCR(ocrObservations, fileName: url.lastPathComponent)
@@ -1451,24 +1452,42 @@ final class FinanceStore {
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: .current
         )
-        if normalized.contains("amex")
-            || normalized.contains("american express")
-            || normalized.contains("gracias por su pago en linea")
-            || normalized.contains("importe en mn")
-            || normalized.contains("meses sin intereses")
-            || normalized.contains("paga desde los canales de amex") {
+
+        // Scanned Santander statements can contain generic card terminology
+        // in OCR noise. Give the bank's own visual/table markers priority so a
+        // Santander PDF is never routed through the Amex parser.
+        let santanderMarkers = [
+            "santander", "banco santander", "estado de cuenta nomina",
+            "detalle de movimientos cuenta", "super nomina", "cuenta de cheques",
+            "saldo final del periodo anterior", "fecha folio descripcion",
+            "deposito retiro saldo", "cuenta clabe"
+        ]
+        let santanderScore = santanderMarkers.reduce(into: 0) { score, marker in
+            if normalized.contains(marker) { score += 1 }
+        }
+        if normalized.contains("santander")
+            || normalized.contains("estado de cuenta nomina")
+            || normalized.contains("detalle de movimientos cuenta")
+            || normalized.contains("super nomina")
+            || santanderScore >= 2 {
+            return "Santander"
+        }
+
+        let amexMarkers = [
+            "amex", "american express", "gracias por su pago en linea",
+            "importe en mn", "fecha y detalle de las operaciones",
+            "paga desde los canales de amex", "the platinum credit card",
+            "total de las transacciones en moneda extranjera"
+        ]
+        let amexScore = amexMarkers.reduce(into: 0) { score, marker in
+            if normalized.contains(marker) { score += 1 }
+        }
+        if amexScore >= 1 {
             return "Amex"
         }
+
         if normalized.contains("bbva") {
             return "BBVA"
-        }
-        if normalized.contains("santander") {
-            return "Santander"
-        }
-        if normalized.contains("estado de cuenta nomina")
-            || normalized.contains("detalle de movimientos cuenta")
-            || normalized.contains("super nomina") {
-            return "Santander"
         }
         return "Importado"
     }
