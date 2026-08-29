@@ -554,7 +554,15 @@ final class FinanceStore {
             : Self.accountName(from: url.lastPathComponent)
         let candidates: [Movement]
         if usedOCR, source == "Santander" {
-            candidates = Self.parseSantanderOCR(ocrObservations, fileName: url.lastPathComponent)
+            let santanderCandidates = Self.parseSantanderOCR(ocrObservations, fileName: url.lastPathComponent)
+            candidates = santanderCandidates.isEmpty
+                ? Self.parse(text: text, fileName: url.lastPathComponent)
+                : santanderCandidates
+        } else if usedOCR, source == "Amex" {
+            let amexCandidates = Self.parseAmexOCR(Self.ocrLines(from: ocrObservations), fileName: url.lastPathComponent)
+            candidates = amexCandidates.isEmpty
+                ? Self.parse(text: text, fileName: url.lastPathComponent)
+                : amexCandidates
         } else {
             candidates = Self.parse(text: text, fileName: url.lastPathComponent)
         }
@@ -680,7 +688,45 @@ final class FinanceStore {
     }
 
     private static func ocrText(from observations: [OCRObservation]) -> String {
-        observations.map(\.text).joined(separator: "\n")
+        ocrLines(from: observations).map(\.text).joined(separator: "\n")
+    }
+
+    private static func ocrLines(from observations: [OCRObservation]) -> [OCRObservation] {
+        let observationsByPage = Dictionary(grouping: observations, by: \.page)
+        var lines: [OCRObservation] = []
+
+        for page in observationsByPage.keys.sorted() {
+            let pageObservations = (observationsByPage[page] ?? []).sorted {
+                if abs($0.centerY - $1.centerY) > 0.012 {
+                    return $0.centerY > $1.centerY
+                }
+                return $0.centerX < $1.centerX
+            }
+            var groups: [[OCRObservation]] = []
+            for observation in pageObservations {
+                if let last = groups.last,
+                   let reference = last.first,
+                   abs(reference.centerY - observation.centerY) <= 0.012 {
+                    groups[groups.count - 1].append(observation)
+                } else {
+                    groups.append([observation])
+                }
+            }
+
+            for group in groups {
+                guard let first = group.first else { continue }
+                let box = group.dropFirst().reduce(first.boundingBox) { $0.union($1.boundingBox) }
+                lines.append(
+                    OCRObservation(
+                        page: page,
+                        text: group.sorted { $0.centerX < $1.centerX }.map(\.text).joined(separator: " "),
+                        boundingBox: box
+                    )
+                )
+            }
+        }
+
+        return lines
     }
 
     private struct TextMatch {
@@ -693,7 +739,7 @@ final class FinanceStore {
             pattern: #"(?<!\d)(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?!\d)"#
         )
         let textDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(\d{1,2})\s+de\s+([A-Za-zÁÉÍÓÚáéíóú]+)(?:\s+de\s+(\d{4}))?"#
+            pattern: #"(?i)(?<!\d)(\d{1,2})\s+(?:de\s+)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         )
         let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?\s*(?:\d{1,3}(?:[ ,]\d{3})+|\d+)(?:[.,]\d{1,2})?(?![A-Za-z0-9])"#
@@ -1038,6 +1084,217 @@ final class FinanceStore {
         )
     }
 
+    /// Amex statements use a date/description block followed by the amount;
+    /// OCR may split the date into several observations, so group visual lines
+    /// before looking for a new transaction.
+    private static func parseAmexOCR(
+        _ lines: [OCRObservation],
+        fileName: String
+    ) -> [Movement] {
+        guard let dateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-.]\s*(\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*(\d{2,4})(?!\d)"#
+        ), let textDateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(\d{1,2})\s+(?:de\s+)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
+        ), let amountRegex = try? NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
+        ) else {
+            return []
+        }
+
+        let linesByPage = Dictionary(grouping: lines, by: \.page)
+        var rows: [[OCRObservation]] = []
+        let ignoredHeaderPhrases = [
+            "estado de cuenta", "tarjetahabiente", "marcelo andres",
+            "fecha y detalle", "este no es", "paga desde", "total nuevos cargos",
+            "nuevas transacciones", "fecha limite", "periodo de facturacion",
+            "saldo actual", "pago minimo", "american express", "resumen de meses",
+            "consolidado de compras", "fecha original", "monto original",
+            "tasa de interes anual", "saldo pendiente", "numero de mensualidad",
+            "monto total a pagar", "conoce tus meses", "informacion al tarjetahabiente",
+            "a partir del", "anualidad de la tarjeta"
+        ]
+
+        for page in linesByPage.keys.sorted() {
+            let pageLines = (linesByPage[page] ?? []).sorted {
+                if abs($0.centerY - $1.centerY) > 0.012 {
+                    return $0.centerY > $1.centerY
+                }
+                return $0.centerX < $1.centerX
+            }
+            var pendingRow: [OCRObservation] = []
+            var inMSISummary = false
+            for line in pageLines {
+                let normalized = line.text.folding(
+                    options: [.diacriticInsensitive, .caseInsensitive],
+                    locale: .current
+                )
+                if normalized.contains("resumen de meses sin intereses")
+                    || normalized.contains("consolidado de compras en meses sin intereses") {
+                    if !pendingRow.isEmpty {
+                        rows.append(pendingRow)
+                        pendingRow.removeAll(keepingCapacity: true)
+                    }
+                    inMSISummary = true
+                    continue
+                }
+                if inMSISummary { continue }
+
+                // The totals after each transaction section are not movements.
+                // Flush the last real row before dropping the total line so a
+                // deferred/foreign charge immediately before it is preserved.
+                if normalized.contains("total de las transacciones")
+                    || normalized.contains("total de transacciones en moneda extranjera")
+                    || normalized.contains("total de meses sin intereses")
+                    || normalized.contains("total de plan de meses sin intereses") {
+                    if !pendingRow.isEmpty {
+                        rows.append(pendingRow)
+                        pendingRow.removeAll(keepingCapacity: true)
+                    }
+                    continue
+                }
+                let hasDate = firstMatch(in: line.text, regex: dateRegex) != nil
+                    || firstMatch(in: line.text, regex: textDateRegex) != nil
+                let isTransactionDate = hasDate
+                    && line.boundingBox.minX < 0.30
+                    && !ignoredHeaderPhrases.contains(where: { normalized.contains($0) })
+
+                if isTransactionDate {
+                    if !pendingRow.isEmpty { rows.append(pendingRow) }
+                    pendingRow = [line]
+                } else if !pendingRow.isEmpty {
+                    pendingRow.append(line)
+                }
+            }
+            if !pendingRow.isEmpty { rows.append(pendingRow) }
+        }
+
+        return rows.compactMap { parseAmexRow($0, dateRegex: dateRegex, textDateRegex: textDateRegex, amountRegex: amountRegex) }
+    }
+
+    private static func parseAmexRow(
+        _ row: [OCRObservation],
+        dateRegex: NSRegularExpression,
+        textDateRegex: NSRegularExpression,
+        amountRegex: NSRegularExpression
+    ) -> Movement? {
+        let fullText = row.map(\.text).joined(separator: " ")
+        let dateMatch = firstMatch(in: fullText, regex: dateRegex)
+            ?? firstMatch(in: fullText, regex: textDateRegex)
+        guard let dateMatch, let date = parseDate(dateMatch.text) else { return nil }
+
+        let normalizedFullText = fullText.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: .current
+        )
+        let ignoredPhrases = [
+            "detalle de movimientos", "fecha y detalle", "estado de cuenta",
+            "este no es un documento", "paga desde", "periodo de facturacion",
+            "fecha limite de pago", "informacion al tarjetahabiente"
+        ]
+        guard !ignoredPhrases.contains(where: { normalizedFullText.contains($0) }) else { return nil }
+
+        var amountCandidates: [OCRAmountCandidate] = []
+        for (observationOrder, observation) in row.enumerated() {
+            for (matchOrder, match) in allMatches(in: observation.text, regex: amountRegex).enumerated() {
+                guard let value = parseAmount(match.text), abs(value) > 0, abs(value) < 10_000_000 else {
+                    continue
+                }
+                amountCandidates.append(
+                    OCRAmountCandidate(
+                        value: value,
+                        text: match.text,
+                        x: observation.boundingBox.minX,
+                        order: observationOrder * 100 + matchOrder
+                    )
+                )
+            }
+        }
+        guard let selected = amountCandidates.sorted(by: { $0.order < $1.order }).last else { return nil }
+
+        var title = fullText
+            .replacingOccurrences(
+                of: #"(?i)(?<!\d)\d{1,2}\s*[\/\-.]\s*(?:\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*\d{2,4}(?!\d)"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?i)(?<!\d)\d{1,2}\s+(?:de\s+)?[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(of: #"\bRFC[A-Z0-9]+\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"/REF[A-Z0-9_]+\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard title.count >= 3, title.rangeOfCharacter(from: .letters) != nil else { return nil }
+
+        let titleNormalized = title.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: .current
+        )
+        let hasCreditMarker = row.contains {
+            let normalized = $0.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            return normalized == "cr" || normalized.hasSuffix(" cr")
+        }
+        let isPayment = titleNormalized.contains("gracias por su pago")
+            || (hasCreditMarker && titleNormalized.contains("pago"))
+        let isRefund = titleNormalized.contains("devolucion")
+            || titleNormalized.contains("reembolso")
+            || titleNormalized.contains("bonificacion")
+        let isStatementCredit = hasCreditMarker && !isPayment && !isRefund
+
+        let flow: FlowKind
+        if isRefund || isStatementCredit {
+            flow = .income
+        } else if isPayment {
+            flow = .debt
+        } else {
+            flow = .expense
+        }
+        let signedAmount = flow == .income ? abs(selected.value) : -abs(selected.value)
+        let category = category(for: titleNormalized, flow: flow)
+        let kind: MovementKind
+        if titleNormalized.contains("msi")
+                    || titleNormalized.contains("meses sin intereses")
+                    || titleNormalized.contains("diferid") {
+            kind = .msi
+        } else if titleNormalized.contains("interes") {
+            kind = .interest
+        } else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") {
+            kind = .fee
+        } else if isRefund {
+            kind = .refund
+        } else if isStatementCredit {
+            kind = .credit
+        } else if isPayment {
+            kind = .cardPayment
+        } else {
+            kind = .purchase
+        }
+        let travelRelated = [
+            "viaje", "hotel", "hospedaje", "aerolinea", "vuelo", "avion",
+            "transporte", "uber", "taxi", "metro", "renta de auto", "destino", "equipaje",
+            "airbnb", "aeromexico", "vivaaerobus", "volaris"
+        ].contains { titleNormalized.contains($0) }
+
+        return Movement(
+            date: date,
+            title: title,
+            account: "Amex",
+            category: category,
+            amount: signedAmount,
+            flow: flow,
+            kind: kind,
+            travelRelated: travelRelated
+        )
+    }
+
     private static func firstMatch(in string: String, regex: NSRegularExpression) -> TextMatch? {
         let range = NSRange(string.startIndex..<string.endIndex, in: string)
         guard let result = regex.firstMatch(in: string, range: range),
@@ -1184,7 +1441,12 @@ final class FinanceStore {
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: .current
         )
-        if normalized.contains("amex") || normalized.contains("american express") {
+        if normalized.contains("amex")
+            || normalized.contains("american express")
+            || normalized.contains("gracias por su pago en linea")
+            || normalized.contains("importe en mn")
+            || normalized.contains("meses sin intereses")
+            || normalized.contains("paga desde los canales de amex") {
             return "Amex"
         }
         if normalized.contains("bbva") {
