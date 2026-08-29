@@ -32,8 +32,9 @@ import {
 } from "@phosphor-icons/react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { categories } from "./data";
+import { buildFinanceMetrics, defaultStatementKind, inferTransactionKind, isSpendTransaction } from "./finance";
 import { inspectPdf } from "./pdfImport";
-import type { ImportCommit, ImportResult, Section, Statement, StatementSource, Transaction } from "./types";
+import type { ImportCommit, ImportResult, Section, Statement, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
 const moneyPrecise = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 2 });
@@ -41,6 +42,19 @@ const transactionStorageKey = "marcelito-transactions.v2";
 const statementStorageKey = "marcelito-statements.v1";
 type LocalAccount = { username: string; passwordHash: string };
 const seededAccount: LocalAccount = { username: "Marcelodiazs", passwordHash: "ed6357244f855d10e821359702d859df700ba81431a98b88ba1de5156a1e9f61" };
+
+const kindLabels: Record<TransactionKind, string> = {
+  purchase: "Compra",
+  cardPayment: "Pago tarjeta",
+  bankTransfer: "Traspaso propio",
+  income: "Ingreso",
+  credit: "Crédito contable",
+  refund: "Devolución",
+  msi: "MSI",
+  interest: "Interés",
+  fee: "Comisión",
+  other: "Otro",
+};
 
 async function passwordDigest(username: string, password: string) {
   const bytes = new TextEncoder().encode(`${username}:${password}`);
@@ -88,6 +102,14 @@ function createId(prefix: string) {
 
 function amountFor(transactions: Transaction[], flow: Transaction["flow"]) {
   return transactions.filter((item) => item.flow === flow).reduce((sum, item) => sum + Math.abs(item.amount), 0);
+}
+
+function displayMoney(value: number | undefined | null) {
+  return value === undefined || value === null || !Number.isFinite(value) ? "Pendiente" : money.format(value);
+}
+
+function displayPercent(value: number | null | undefined) {
+  return value === undefined || value === null || !Number.isFinite(value) ? "Pendiente" : `${Math.round(value * 100)}%`;
 }
 
 function statementDate(statement: Statement) {
@@ -198,6 +220,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   const [importOpen, setImportOpen] = useState(false);
   const reduceMotion = useReducedMotion();
   const latestStatement = statements[0];
+  const metrics = useMemo(() => buildFinanceMetrics(transactions, statements), [transactions, statements]);
 
   useEffect(() => {
     localStorage.setItem(transactionStorageKey, JSON.stringify(transactions));
@@ -223,6 +246,8 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       mode: commit.mode,
       transactionCount: importedTransactions.length,
       status: importedTransactions.length ? "ready" : "review",
+      kind: previous?.kind ?? defaultStatementKind(commit.source),
+      summary: commit.summary,
     };
 
     setStatements((current) => previous ? current.map((item) => item.id === statementId ? statement : item) : [statement, ...current]);
@@ -267,11 +292,11 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
         </header>
         <AnimatePresence mode="wait">
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
-            {section === "Inicio" && <Home transactions={transactions} statements={statements} onImport={() => setImportOpen(true)} />}
+            {section === "Inicio" && <Home transactions={transactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} />}
             {section === "Movimientos" && <Movements transactions={transactions} statements={statements} setTransactions={setTransactions} />}
             {section === "Gastos" && <Expenses transactions={transactions} statements={statements} />}
             {section === "Cuentas" && <Accounts transactions={transactions} statements={statements} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} />}
-            {section === "Patrimonio" && <NetWorth transactions={transactions} statements={statements} />}
+            {section === "Patrimonio" && <NetWorth transactions={transactions} statements={statements} metrics={metrics} />}
           </motion.div>
         </AnimatePresence>
       </main>
@@ -283,9 +308,9 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   );
 }
 
-function Home({ transactions, statements, onImport }: { transactions: Transaction[]; statements: Statement[]; onImport: () => void }) {
-  const expenseTotal = amountFor(transactions, "expense");
-  const incomeTotal = amountFor(transactions, "income");
+function Home({ transactions, statements, metrics, setTransactions, onImport }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>>; onImport: () => void }) {
+  const expenseTotal = metrics.consolidatedRealSpend;
+  const incomeTotal = metrics.realIncome;
   const transferTotal = amountFor(transactions, "transfer");
   const latest = statements[0];
   const accountEntries = Array.from(transactions.reduce((map, item) => {
@@ -294,7 +319,7 @@ function Home({ transactions, statements, onImport }: { transactions: Transactio
     return map;
   }, new Map<string, { total: number; count: number }>()).entries()).sort((a, b) => b[1].total - a[1].total).slice(0, 2);
   const displayAccounts: Array<[string, { total: number; count: number }]> = accountEntries.length ? accountEntries : [["Sin banco", { total: 0, count: 0 }]];
-  const categoryEntries = Array.from(transactions.filter((item) => item.flow === "expense").reduce((map, item) => map.set(item.category, (map.get(item.category) ?? 0) + Math.abs(item.amount)), new Map<string, number>()).entries()).sort((a, b) => b[1] - a[1]).slice(0, 5);
+  const categoryEntries = Array.from(transactions.filter(isSpendTransaction).reduce((map, item) => map.set(item.category, (map.get(item.category) ?? 0) + Math.abs(item.amount)), new Map<string, number>()).entries()).sort((a, b) => b[1] - a[1]).slice(0, 5);
 
   if (!transactions.length && !statements.length) {
     return <RealDataEmpty onImport={onImport} />;
@@ -323,6 +348,10 @@ function Home({ transactions, statements, onImport }: { transactions: Transactio
         <Metric label="Transferencias" value={money.format(transferTotal)} delta="Flujo interno" tone="transfer" icon={ArrowsLeftRight} />
         <Metric label="Gasto identificado" value={money.format(expenseTotal)} delta={`${categoryEntries.length} categorías`} tone="expense" icon={Receipt} />
       </section>
+      <CalculationSummary metrics={metrics} />
+      <PeriodCalculationTable metrics={metrics} />
+      <ConsolidatedBreakdown metrics={metrics} />
+      <RefinementPanel transactions={transactions} setTransactions={setTransactions} />
       <section className="money-section">
         <div className="section-heading"><div><h2>Así se movió tu dinero</h2><p>Los importes salen únicamente de movimientos que cargaste o agregaste.</p></div><div className="legend"><span className="income-text">Ingreso</span><span className="transfer-text">Transferencia</span><span className="expense-text">Gasto</span></div></div>
         <div className="money-map">
@@ -350,6 +379,59 @@ function Home({ transactions, statements, onImport }: { transactions: Transactio
       </section>
     </>
   );
+}
+
+function CalculationSummary({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  return <section className="calculation-section" aria-label="Cálculos financieros"><div className="section-heading"><div><h2>Lo que explica tu dinero</h2><p>Calculado por periodo y conciliado con pagos, MSI, transferencias y devoluciones cuando están disponibles.</p></div><span className="calculation-periods">{metrics.periodCount} {metrics.periodCount === 1 ? "periodo" : "periodos"}</span></div><div className="calculation-grid"><div className="calculation-ledger"><div className="calculation-ledger-head"><span>Tarjeta</span><small>Acumulado de estados Amex</small></div><CalculationRow label="Gasto total" value={displayMoney(metrics.totalNewTransactions)} detail="Compras nuevas" /><CalculationRow label="Gasto promedio mensual" value={displayMoney(metrics.averageMonthlySpend)} detail="Nuevos cargos / periodos" /><CalculationRow label="Abonos reales" value={displayMoney(metrics.totalRealPayments)} detail="Pagos, sin créditos contables" /><CalculationRow label="Saldo acumulado" value={displayMoney(metrics.accumulatedBalance)} detail="Cargos − pagos − créditos" tone={metrics.accumulatedBalance > 0 ? "warning" : "positive"} /><CalculationRow label="Porcentaje pagado" value={displayPercent(metrics.paidPercent)} detail="Abonos / nuevos cargos" /><CalculationRow label="Pendiente" value={displayPercent(metrics.pendingPercent)} detail="Saldo / nuevos cargos" /></div><div className="calculation-ledger"><div className="calculation-ledger-head"><span>Consolidado</span><small>Tarjetas + bancos propios</small></div><CalculationRow label="Gasto real consolidado" value={displayMoney(metrics.consolidatedRealSpend)} detail="Excluye pagos y traspasos" /><CalculationRow label="Gasto de viaje" value={displayMoney(metrics.travelSpend)} detail={metrics.travelPercent === null ? "Pendiente de identificar" : `${displayPercent(metrics.travelPercent)} del gasto`} /><CalculationRow label="Gasto ordinario" value={displayMoney(metrics.ordinarySpend)} detail="Consolidado − viajes" /><CalculationRow label="Flujo neto mensual" value={displayMoney(metrics.netFlow)} detail="Ingresos reales − gastos reales" tone={metrics.netFlow >= 0 ? "positive" : "warning"} /><CalculationRow label="Tasa de ahorro" value={displayPercent(metrics.savingsRate)} detail="Flujo neto / ingresos" /><CalculationRow label="Promedio ordinario" value={displayMoney(metrics.ordinaryAverageMonthly)} detail="Ordinario / periodos" /></div><div className="calculation-ledger"><div className="calculation-ledger-head"><span>Crédito y MSI</span><small>Último corte con datos</small></div><CalculationRow label="Utilización de crédito" value={displayPercent(metrics.creditUtilizationRate)} detail={metrics.creditUsed !== undefined ? `${displayMoney(metrics.creditUsed)} utilizado` : "Límite y disponible pendientes"} /><CalculationRow label="Carga mensual MSI" value={displayMoney(metrics.latestMsiMonthlyLoad)} detail={metrics.latestMsiInstallmentsCount !== undefined ? `${metrics.latestMsiInstallmentsCount} mensualidades activas` : "Captura el total del corte"} /><CalculationRow label="MSI diferido original" value={displayMoney(metrics.latestMsiOriginalDeferred)} detail="Principal aún diferido" /><CalculationRow label="Nuevos cargos del corte" value={displayMoney(metrics.cardPeriods[0]?.newCharges)} detail="Compras + MSI + intereses + comisiones" /><CalculationRow label="Pago para no generar intereses" value={displayMoney(metrics.latestPaymentForNoInterest)} detail="Estimado con saldo anterior y pagos" /><CalculationRow label="Saldo de deuda" value={displayMoney(metrics.debtTotal)} detail="Requiere saldo al corte" /></div></div><p className="calculation-footnote">Pendiente significa que el documento aún no trae ese dato o debes capturarlo en <strong>Cuentas</strong>. Marcelito no sustituye una cifra faltante con una estimación silenciosa.</p></section>;
+}
+
+function CalculationRow({ label, value, detail, tone }: { label: string; value: string; detail: string; tone?: "positive" | "warning" }) {
+  return <div className={`calculation-row${tone ? ` ${tone}` : ""}`}><div><span>{label}</span><small>{detail}</small></div><strong>{value}</strong></div>;
+}
+
+function PeriodCalculationTable({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  if (!metrics.cardPeriods.length) return null;
+  return <section className="period-calculation"><div className="section-heading"><div><h2>Comparación por corte</h2><p>La diferencia mensual muestra cargos nuevos menos abonos reales en cada periodo.</p></div></div><div className="period-table"><div className="period-table-head"><span>Periodo</span><span>Gasto nuevo</span><span>Abonos</span><span>Diferencia</span><span>% pagado</span></div>{metrics.cardPeriods.map((period) => <div className="period-table-row" key={period.statementId}><div><strong>{period.label}</strong><small>{period.source}</small></div><strong>{displayMoney(period.newTransactions)}</strong><strong>{displayMoney(period.realPayments)}</strong><strong className={period.difference > 0 ? "period-negative" : "period-positive"}>{displayMoney(period.difference)}</strong><strong>{displayPercent(period.paidPercent)}</strong></div>)}</div></section>;
+}
+
+function RefinementPanel({ transactions, setTransactions }: { transactions: Transaction[]; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>> }) {
+  if (!transactions.length) return null;
+  const rows = transactions.slice(0, 8);
+  function updateKind(id: string, kind: TransactionKind) {
+    setTransactions((items) => items.map((item) => item.id === id ? { ...item, kind, flow: ["cardPayment", "bankTransfer"].includes(kind) ? "transfer" : ["credit", "refund", "income"].includes(kind) ? "income" : "expense" } : item));
+  }
+  function updateTravel(id: string, travelRelated: boolean) {
+    setTransactions((items) => items.map((item) => item.id === id ? { ...item, travelRelated } : item));
+  }
+  return <section className="refinement-section"><div className="section-heading"><div><h2>Pulir la lectura</h2><p>Marca pagos, MSI y viajes para que el consolidado no cuente dos veces el mismo peso.</p></div><span className="calculation-periods">{transactions.length} movimientos</span></div><div className="refinement-list">{rows.map((item) => { const kind = inferTransactionKind(item); return <div className="refinement-row" key={item.id}><div><strong>{item.description}</strong><small>{item.account} · {item.date}</small></div><select aria-label={`Tipo de ${item.description}`} value={kind} onChange={(event) => updateKind(item.id, event.target.value as TransactionKind)}>{Object.entries(kindLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><label className="travel-toggle"><input type="checkbox" checked={Boolean(item.travelRelated)} onChange={(event) => updateTravel(item.id, event.target.checked)} />Viaje</label></div>; })}</div>{transactions.length > rows.length && <p className="refinement-note">Mostrando 8 movimientos. El resto se puede pulir desde Movimientos.</p>}</section>;
+}
+
+function ConsolidatedBreakdown({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  return <section className="consolidated-breakdown"><div className="section-heading"><div><h2>Cómo se construye el gasto real</h2><p>La conciliación separa compras, pagos de tarjeta y traspasos entre tus cuentas.</p></div></div><div className="calculation-ledger"><CalculationRow label="Gasto con tarjeta" value={displayMoney(metrics.cardSpend)} detail="Nuevos cargos de tarjeta" /><CalculationRow label="Gasto directo de bancos" value={displayMoney(metrics.directBankSpend)} detail="Cargos de Santander / BBVA" /><CalculationRow label="Pagos de tarjeta excluidos" value={displayMoney(metrics.excludedCardPayments)} detail="No son gasto nuevo" /><CalculationRow label="Traspasos propios excluidos" value={displayMoney(metrics.excludedInternalTransfers)} detail="No son consumo" /><CalculationRow label="Devoluciones aplicadas" value={displayMoney(metrics.totalRefunds)} detail="Ajustan el gasto" /><CalculationRow label="Gasto real consolidado" value={displayMoney(metrics.consolidatedRealSpend)} detail="Resultado para decisiones" tone="positive" /><CalculationRow label="Patrimonio líquido" value={displayMoney(metrics.liquidPatrimony)} detail="Efectivo disponible − deuda" tone="positive" /></div></section>;
+}
+
+function StatementSummaryForm({ source, summary, onChange }: { source: StatementSource; summary: StatementSummary; onChange: (key: keyof StatementSummary, value: string) => void }) {
+  const fields: Array<{ key: keyof StatementSummary; label: string; hint: string }> = [
+    { key: "previousBalance", label: "Saldo anterior", hint: "Corte previo" },
+    { key: "newTransactions", label: "Nuevas transacciones", hint: "Compras nuevas" },
+    { key: "payments", label: "Pagos realizados", hint: "Abonos reales" },
+    { key: "credits", label: "Créditos / abonos contables", hint: "No son pagos" },
+    { key: "newCharges", label: "Nuevos cargos del corte", hint: "Total del resumen" },
+    { key: "interest", label: "Intereses", hint: "Interés del periodo" },
+    { key: "fees", label: "Comisiones", hint: "Cargos y anualidad" },
+    { key: "statementBalance", label: source === "Amex" ? "Saldo nuevo" : "Saldo al corte", hint: "Saldo del estado" },
+    { key: "minimumPayment", label: "Pago mínimo", hint: "Pago requerido" },
+    { key: "paymentForNoInterest", label: "Pago para no generar intereses", hint: "Importe del estado" },
+    ...(source === "Amex" ? [
+      { key: "creditLimit" as keyof StatementSummary, label: "Límite de crédito", hint: "Línea autorizada" },
+      { key: "creditAvailable" as keyof StatementSummary, label: "Crédito disponible", hint: "Disponible al corte" },
+      { key: "debtBalance" as keyof StatementSummary, label: "Deuda al corte", hint: "Saldo usado" },
+      { key: "msiOriginalDeferred" as keyof StatementSummary, label: "MSI original diferido", hint: "Principal pendiente" },
+      { key: "msiInstallments" as keyof StatementSummary, label: "Mensualidades MSI activas", hint: "Cantidad" },
+      { key: "msiMonthlyLoad" as keyof StatementSummary, label: "Carga mensual MSI", hint: "Total del corte" },
+    ] : [{ key: "cashBalance" as keyof StatementSummary, label: "Efectivo disponible", hint: "Saldo bancario" }]),
+  ];
+  return <details className="statement-summary-form"><summary>Completar datos del corte <span>Opcional, pero necesario para crédito y patrimonio</span></summary><p>Los importes detectados del PDF aparecen aquí para que puedas corregirlos. Si un campo no está en el estado, déjalo vacío.</p><div className="summary-field-grid">{fields.map((field) => <label key={String(field.key)}><span>{field.label}</span><small>{field.hint}</small><input type="number" step="0.01" value={typeof summary[field.key] === "number" ? summary[field.key] : ""} onChange={(event) => onChange(field.key, event.target.value)} placeholder="—" /></label>)}</div></details>;
 }
 
 function RealDataEmpty({ onImport }: { onImport: () => void }) {
@@ -383,7 +465,7 @@ function Movements({ transactions, statements, setTransactions }: { transactions
 }
 
 function Expenses({ transactions, statements }: { transactions: Transaction[]; statements: Statement[] }) {
-  const groups = Array.from(transactions.filter((item) => item.flow === "expense").reduce((map, item) => map.set(item.category, (map.get(item.category) ?? 0) + Math.abs(item.amount)), new Map<string, number>()).entries()).sort((a, b) => b[1] - a[1]);
+  const groups = Array.from(transactions.filter(isSpendTransaction).reduce((map, item) => map.set(item.category, (map.get(item.category) ?? 0) + Math.abs(item.amount)), new Map<string, number>()).entries()).sort((a, b) => b[1] - a[1]);
   const total = groups.reduce((sum, [, amount]) => sum + amount, 0);
   const latest = statements[0];
   if (!transactions.length) return <section><PageHeading title="Gastos" body="El gasto real se calcula a partir de tus movimientos importados." action="Importar estado" /><EmptyState title="Todavía no hay gastos" body="Carga un PDF mensual para ver categorías construidas con tus datos." /></section>;
@@ -400,10 +482,14 @@ function Accounts({ transactions, statements, onImport, onMarkReviewed }: { tran
   return <section><PageHeading title="Cuentas" body="Aquí puedes ver qué banco y qué periodo alimentan tus datos." action="Importar estado" onAction={onImport} /><div className="statement-ledger"><div className="section-heading"><div><h2>Estados de cuenta</h2><p>{statements.length ? `${statements.length} archivos guardados localmente.` : "Aún no has guardado ningún estado."}</p></div><div className="statement-filters"><select aria-label="Filtrar por banco" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as StatementSource | "Todos")}><option value="Todos">Todos los bancos</option>{knownSources.map((source) => <option key={source} value={source}>{source}</option>)}</select><select aria-label="Filtrar por periodo" value={periodFilter} onChange={(event) => setPeriodFilter(event.target.value)}><option value="Todos">Todos los periodos</option>{periods.map((period) => <option key={period} value={period}>{period}</option>)}</select></div></div>{filteredStatements.length ? <div className="statement-list">{filteredStatements.map((statement) => <article className="statement-row" key={statement.id}><span className={`statement-icon ${sourceColor(statement.source)}`}><FilePdf size={20} /></span><div className="statement-main"><strong>{statement.source}</strong><span>{statement.period} · {statement.fileName}</span><small>Importado {statementDate(statement)} · {statement.transactionCount} movimientos · {statement.mode === "text" ? "lectura directa" : "requiere revisión visual"}</small></div><span className={`statement-status ${statement.status}`}>{statement.status === "ready" ? "Revisado" : "Pendiente"}</span>{statement.status === "review" && <button className="text-button statement-action" onClick={() => onMarkReviewed(statement.id)}>Marcar revisado</button>}</article>)}</div> : <EmptyState title="No coincide ningún estado" body="Prueba otro banco o periodo, o importa un nuevo PDF." />}</div><div className="accounts-layout"><div className="account-list">{knownSources.map((source) => { const sourceStatements = statements.filter((item) => item.source === source); const sourceTransactions = transactions.filter((item) => item.statementId && sourceStatements.some((statement) => statement.id === item.statementId)); const latest = sourceStatements[0]; return <article className="account-row" key={source}><span className={`account-icon ${sourceColor(source)}`}><Bank size={22} /></span><div><h3>{source}</h3><p>{latest ? `${sourceStatements.length} estado(s) · último: ${latest.period}` : "Sin estados importados"}</p></div><strong>{sourceTransactions.length} mov.</strong><button aria-label={`Filtrar ${source}`} onClick={() => setSourceFilter(source)}><ArrowRight size={18} /></button></article>; })}</div><aside className="account-rule"><Fingerprint size={26} /><h3>Origen visible</h3><p>Cada movimiento conserva el banco, el periodo y el nombre del archivo que lo originó. Los saldos de corte se incorporarán cuando estén disponibles en el documento.</p></aside></div></section>;
 }
 
-function NetWorth({ transactions, statements }: { transactions: Transaction[]; statements: Statement[] }) {
+function NetWorthBase({ transactions, statements }: { transactions: Transaction[]; statements: Statement[] }) {
   const expenses = amountFor(transactions, "expense");
   const income = amountFor(transactions, "income");
   return <section><PageHeading title="Patrimonio" body="No mostramos un patrimonio inventado: primero necesitamos saldos al corte conciliados." action="Ver estados" /><div className="networth-hero"><div><span>Patrimonio líquido</span><strong>—</strong><p>Saldo pendiente de capturar desde tus estados.</p></div><div className="balance-story"><Sparkle size={24} weight="fill" /><div><strong>La historia ya está separada</strong><p>{statements.length ? `${statements.length} estados alimentan ${transactions.length} movimientos: ${money.format(income)} de ingresos y ${money.format(expenses)} de gasto.` : "Importa un estado para comenzar a conciliar ingresos, deuda y saldos."}</p></div></div></div><div className="timeline">{statements.length ? statements.map((statement) => <div className="timeline-row" key={statement.id}><span>{statement.period}</span><strong>{statement.transactionCount} mov.</strong><p>{statement.source} · {statement.fileName} · {statement.status === "ready" ? "revisado" : "pendiente de revisión"}</p></div>) : <EmptyState title="Sin historial financiero" body="Cuando importes tus PDFs, aquí quedará la línea de tiempo por banco y periodo." />}</div></section>;
+}
+
+function NetWorth({ transactions, statements, metrics }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  return <><NetWorthBase transactions={transactions} statements={statements} /><CalculationSummary metrics={metrics} /></>;
 }
 
 function PageHeading({ title, body, action, onAction }: { title: string; body: string; action: string; onAction?: () => void }) {
@@ -421,6 +507,7 @@ function ImportDialog({ open, onClose, onSave }: { open: boolean; onClose: () =>
   const [progressLabel, setProgressLabel] = useState("");
   const [result, setResult] = useState<ImportResult | null>(null);
   const [items, setItems] = useState<Transaction[]>([]);
+  const [summary, setSummary] = useState<StatementSummary>({});
   const [error, setError] = useState("");
 
   if (open && dialog.current && !dialog.current.open) dialog.current.showModal();
@@ -432,16 +519,25 @@ function ImportDialog({ open, onClose, onSave }: { open: boolean; onClose: () =>
     setStage("processing"); setError("");
     try {
       const inspected = await inspectPdf(file, (value, label) => { setProgress(value); setProgressLabel(label); });
-      setResult(inspected); setItems(inspected.transactions); setStage("review");
+      setResult(inspected); setItems(inspected.transactions); setSummary(inspected.summary ?? {}); setStage("review");
     } catch {
       setError("No pudimos leer este PDF. El archivo no se modificó; intenta con otra copia."); setStage("error");
     }
   }
 
-  function resetAndClose() { setStage("pick"); setProgress(0); setResult(null); setItems([]); setError(""); onClose(); }
+  function resetAndClose() { setStage("pick"); setProgress(0); setResult(null); setItems([]); setSummary({}); setError(""); onClose(); }
   function updateItem(id: string, key: "description" | "category", value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, [key]: value } : item)); }
   function updateAmount(id: string, value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, amount: Math.abs(Number(value) || 0) * (item.amount > 0 ? 1 : -1) } : item)); }
   function addManualItem() { setItems((current) => [...current, { id: `manual-${Date.now()}`, date: "Sin fecha", description: "Movimiento por revisar", account: result?.source ?? "Desconocido", category: "Sin categoría", amount: -1, flow: "expense", confidence: 1 }]); }
+
+  function updateSummary(key: keyof StatementSummary, value: string) {
+    setSummary((current) => {
+      const next = { ...current };
+      if (!value.trim()) delete next[key];
+      else next[key] = Number(value.replace(/,/g, "")) as never;
+      return next;
+    });
+  }
 
   const validItems = items.filter((item) => item.description.trim().length >= 3 && Number.isFinite(item.amount) && item.amount !== 0);
   return <dialog ref={dialog} className="import-dialog" onCancel={(event) => { event.preventDefault(); resetAndClose(); }}><div className="dialog-head"><div><span className="dialog-icon"><FilePdf size={21} /></span><div><h2>Importar estado de cuenta</h2><p>El archivo se procesa localmente y conserva su origen.</p></div></div><button className="icon-button" aria-label="Cerrar" onClick={resetAndClose}><X size={20} /></button></div>
@@ -449,7 +545,8 @@ function ImportDialog({ open, onClose, onSave }: { open: boolean; onClose: () =>
     {stage === "processing" && <div className="processing-state"><CircleNotch size={34} className="spinner" /><h3>{progressLabel}</h3><p>No cierres esta ventana mientras organizamos los movimientos.</p><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><small>{progress}%</small></div>}
     {stage === "error" && <div className="error-state"><Warning size={34} /><h3>No pudimos completar la importación</h3><p>{error}</p><button className="secondary-button" onClick={() => setStage("pick")}>Intentar de nuevo</button></div>}
     {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Banco detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.mode === "text" ? "Lectura directa" : "Revisión visual"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div></div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>Guardaremos el estado con su banco y periodo, pero tendrás que capturar o corregir movimientos manualmente.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.slice(0, 40).map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
-      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" onClick={() => onSave({ source: result.source, period: result.period, fileName: result.fileName, mode: result.mode, transactions: validItems })}><Check size={18} />{validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado para revisar"}</button></div></div>}
+      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" onClick={() => onSave({ source: result.source, period: result.period, fileName: result.fileName, mode: result.mode, transactions: validItems, summary })}><Check size={18} />{validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado para revisar"}</button></div></div>}
+    {stage === "review" && result && <StatementSummaryForm source={result.source} summary={summary} onChange={updateSummary} />}
   </dialog>;
 }
 

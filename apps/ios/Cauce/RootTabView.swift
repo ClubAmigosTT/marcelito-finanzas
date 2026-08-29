@@ -1,5 +1,6 @@
 import SwiftUI
 import UniformTypeIdentifiers
+import Foundation
 
 struct RootTabView: View {
     var body: some View {
@@ -32,8 +33,9 @@ struct HomeView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 24) {
                     if hasData {
-                        NetWorthSummary(hasData: true)
+                        NetWorthSummary(store: store)
                         MetricsStrip(income: store.totalIncome, transfers: store.totalTransfers, monthlyExpense: store.monthlyExpense)
+                        DecisionMetricsView()
                         DecisionCallout(statement: store.statements.first)
                         MoneyFlowView(store: store)
                         if let lastImportedFile = store.lastImportedFile {
@@ -146,15 +148,20 @@ private struct EmptyDataCard: View {
 }
 
 private struct NetWorthSummary: View {
-    let hasData: Bool
+    let store: FinanceStore
+
+    private var displayValue: String {
+        guard let value = store.liquidPatrimony else { return "—" }
+        return value.formatted(.currency(code: "MXN").precision(.fractionLength(0)))
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Patrimonio líquido").foregroundStyle(.secondary)
-            Text("—")
+            Text(displayValue)
                 .font(.largeTitle.bold())
                 .monospacedDigit()
-            Text(hasData ? "Pendiente de saldos al corte" : "Importa un estado para comenzar")
+            Text(store.liquidPatrimony == nil ? "Pendiente de saldos al corte" : "Efectivo disponible menos deuda")
                 .font(.subheadline)
                 .foregroundStyle(.marcelitoNavyMid)
         }
@@ -162,6 +169,65 @@ private struct NetWorthSummary: View {
         .padding()
         .foregroundStyle(.marcelitoNavy)
         .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+private struct DecisionMetricsView: View {
+    @Environment(FinanceStore.self) private var store
+
+    private func money(_ value: Decimal?) -> String {
+        value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
+    }
+
+    private func percent(_ value: Decimal?) -> String {
+        guard let value else { return "Pendiente" }
+        return "\(Int((NSDecimalNumber(decimal: value).doubleValue * 100).rounded()))%"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Cálculos para decidir")
+                .font(.title2.bold())
+                .padding(.bottom, 8)
+            CalculationLine(label: "Gasto total de tarjeta", value: money(store.totalNewTransactions), detail: "Compras nuevas")
+            CalculationLine(label: "Promedio mensual", value: money(store.averageMonthlySpend), detail: "Compras / periodos")
+            CalculationLine(label: "Abonos reales", value: money(store.totalRealPayments), detail: "Pagos, sin créditos contables")
+            CalculationLine(label: "Saldo acumulado", value: money(store.accumulatedBalance), detail: "Gasto − abonos")
+            CalculationLine(label: "Porcentaje pagado", value: percent(store.paidPercent), detail: "Abonos / gasto total")
+            CalculationLine(label: "Porcentaje pendiente", value: percent(store.pendingPercent), detail: "Saldo / gasto total")
+            Divider().padding(.vertical, 4)
+            CalculationLine(label: "Gasto real consolidado", value: money(store.consolidatedRealSpend), detail: "Tarjeta + bancos, sin pagos propios")
+            CalculationLine(label: "Gasto de viaje", value: money(store.travelSpend), detail: store.travelPercent.map { "\(percent($0)) del consolidado" } ?? "Pendiente de identificar")
+            CalculationLine(label: "Gasto ordinario", value: money(store.ordinarySpend), detail: "Consolidado − viajes")
+            CalculationLine(label: "Flujo neto", value: money(store.netFlow), detail: "Ingresos reales − gastos reales")
+            CalculationLine(label: "Tasa de ahorro", value: percent(store.savingsRate), detail: "Flujo neto / ingresos")
+            Divider().padding(.vertical, 4)
+            CalculationLine(label: "Utilización de crédito", value: percent(store.creditUtilizationRate), detail: store.creditUsed.map { "\(money($0)) utilizado" } ?? "Captura límite y disponible")
+            CalculationLine(label: "Carga mensual MSI", value: money(store.latestMsiMonthlyLoad), detail: "Mensualidades activas")
+            CalculationLine(label: "Nuevos cargos del corte", value: money(store.cardPeriodMetrics.first?.newCharges), detail: "Compras + MSI + intereses + comisiones")
+            CalculationLine(label: "Pago para no generar intereses", value: money(store.latestPaymentForNoInterest), detail: "Del estado o calculado")
+        }
+        .padding()
+        .foregroundStyle(.marcelitoNavy)
+        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16))
+    }
+}
+
+private struct CalculationLine: View {
+    let label: String
+    let value: String
+    let detail: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label).font(.subheadline.weight(.semibold))
+                Text(detail).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 10)
+            Text(value).font(.subheadline.monospacedDigit()).multilineTextAlignment(.trailing)
+        }
+        .padding(.vertical, 7)
     }
 }
 

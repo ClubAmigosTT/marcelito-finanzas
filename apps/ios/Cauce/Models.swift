@@ -33,6 +33,47 @@ enum FlowKind: String, CaseIterable, Identifiable, Codable, Hashable {
     }
 }
 
+enum MovementKind: String, CaseIterable, Identifiable, Codable, Hashable {
+    case purchase = "Compra"
+    case cardPayment = "Pago de tarjeta"
+    case bankTransfer = "Traspaso propio"
+    case income = "Ingreso"
+    case credit = "Crédito contable"
+    case refund = "Devolución"
+    case msi = "MSI"
+    case interest = "Interés"
+    case fee = "Comisión"
+    case other = "Otro"
+
+    var id: String { rawValue }
+}
+
+enum StatementKind: String, Codable {
+    case card
+    case bank
+    case unknown
+}
+
+struct StatementSummaryRecord: Codable {
+    var previousBalance: Decimal? = nil
+    var statementBalance: Decimal? = nil
+    var debtBalance: Decimal? = nil
+    var newTransactions: Decimal? = nil
+    var payments: Decimal? = nil
+    var credits: Decimal? = nil
+    var newCharges: Decimal? = nil
+    var interest: Decimal? = nil
+    var fees: Decimal? = nil
+    var creditLimit: Decimal? = nil
+    var creditAvailable: Decimal? = nil
+    var minimumPayment: Decimal? = nil
+    var paymentForNoInterest: Decimal? = nil
+    var cashBalance: Decimal? = nil
+    var msiOriginalDeferred: Decimal? = nil
+    var msiInstallments: Int? = nil
+    var msiMonthlyLoad: Decimal? = nil
+}
+
 struct Movement: Identifiable, Codable {
     var id: UUID
     var date: Date
@@ -42,6 +83,8 @@ struct Movement: Identifiable, Codable {
     var amount: Decimal
     var flow: FlowKind
     var statementId: UUID?
+    var kind: MovementKind?
+    var travelRelated: Bool
 
     init(
         id: UUID = UUID(),
@@ -51,7 +94,9 @@ struct Movement: Identifiable, Codable {
         category: String,
         amount: Decimal,
         flow: FlowKind,
-        statementId: UUID? = nil
+        statementId: UUID? = nil,
+        kind: MovementKind? = nil,
+        travelRelated: Bool = false
     ) {
         self.id = id
         self.date = date
@@ -61,6 +106,40 @@ struct Movement: Identifiable, Codable {
         self.amount = amount
         self.flow = flow
         self.statementId = statementId
+        self.kind = kind
+        self.travelRelated = travelRelated
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, date, title, account, category, amount, flow, statementId, kind, travelRelated
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        date = try container.decode(Date.self, forKey: .date)
+        title = try container.decode(String.self, forKey: .title)
+        account = try container.decode(String.self, forKey: .account)
+        category = try container.decode(String.self, forKey: .category)
+        amount = try container.decode(Decimal.self, forKey: .amount)
+        flow = try container.decode(FlowKind.self, forKey: .flow)
+        statementId = try container.decodeIfPresent(UUID.self, forKey: .statementId)
+        kind = try container.decodeIfPresent(MovementKind.self, forKey: .kind)
+        travelRelated = try container.decodeIfPresent(Bool.self, forKey: .travelRelated) ?? false
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encode(date, forKey: .date)
+        try container.encode(title, forKey: .title)
+        try container.encode(account, forKey: .account)
+        try container.encode(category, forKey: .category)
+        try container.encode(amount, forKey: .amount)
+        try container.encode(flow, forKey: .flow)
+        try container.encodeIfPresent(statementId, forKey: .statementId)
+        try container.encodeIfPresent(kind, forKey: .kind)
+        try container.encode(travelRelated, forKey: .travelRelated)
     }
 }
 
@@ -72,6 +151,8 @@ struct StatementRecord: Identifiable, Codable {
     var importedAt: Date
     var transactionCount: Int
     var requiresReview: Bool
+    var kind: StatementKind? = nil
+    var summary: StatementSummaryRecord? = nil
 }
 
 struct ImportSummary {
@@ -81,6 +162,39 @@ struct ImportSummary {
     let imported: Int
     let skipped: Int
     let requiresReview: Bool
+    let summary: StatementSummaryRecord?
+}
+
+struct StatementMetric: Identifiable {
+    let id: UUID
+    let source: String
+    let period: String
+    let kind: StatementKind
+    let newTransactions: Decimal
+    let msiInstallments: Decimal
+    let interest: Decimal
+    let fees: Decimal
+    let newCharges: Decimal
+    let realPayments: Decimal
+    let credits: Decimal
+    let refunds: Decimal
+    let difference: Decimal
+    let accumulatedBalance: Decimal
+    let travelSpend: Decimal
+    let ordinarySpend: Decimal
+    let creditLimit: Decimal?
+    let creditAvailable: Decimal?
+    let creditUsed: Decimal?
+    let creditUtilizationRate: Decimal?
+    let paymentForNoInterest: Decimal?
+    let msiOriginalDeferred: Decimal?
+    let msiInstallmentsCount: Int?
+    let msiMonthlyLoad: Decimal?
+    let cashBalance: Decimal?
+    let debtBalance: Decimal?
+
+    var paidPercent: Decimal? { newTransactions == 0 ? nil : realPayments / newTransactions }
+    var pendingPercent: Decimal? { newTransactions == 0 ? nil : max(Decimal(0), accumulatedBalance) / newTransactions }
 }
 
 enum FinanceImportError: LocalizedError {
@@ -108,17 +222,222 @@ final class FinanceStore {
 
     private(set) var lastImportedFile: String?
 
-    var totalIncome: Decimal { movements.filter { $0.flow == .income }.reduce(0) { $0 + abs($1.amount) } }
-    var totalTransfers: Decimal { movements.filter { $0.flow == .transfer }.reduce(0) { $0 + abs($1.amount) } }
-    var totalExpenses: Decimal { movements.filter { $0.flow == .expense }.reduce(0) { $0 + abs($1.amount) } }
+    var periodMetrics: [StatementMetric] { statements.map { calculateMetric(for: $0) }.sorted { periodKey($0.period) > periodKey($1.period) } }
+    var cardPeriodMetrics: [StatementMetric] { periodMetrics.filter { $0.kind == .card } }
+    var cardPeriodCount: Int { Set(cardPeriodMetrics.map { periodKey($0.period) }).count }
+    var totalNewTransactions: Decimal { cardPeriodMetrics.reduce(0) { $0 + $1.newTransactions } }
+    var averageMonthlySpend: Decimal { cardPeriodCount == 0 ? 0 : totalNewTransactions / Decimal(cardPeriodCount) }
+    var totalNewCharges: Decimal { cardPeriodMetrics.reduce(0) { $0 + $1.newCharges } }
+    var totalRealPayments: Decimal { cardPeriodMetrics.reduce(0) { $0 + $1.realPayments } }
+    var totalCredits: Decimal { cardPeriodMetrics.reduce(0) { $0 + $1.credits } }
+    var totalRefunds: Decimal { cardPeriodMetrics.reduce(0) { $0 + $1.refunds } }
+    var accumulatedBalance: Decimal { totalNewTransactions - totalRealPayments }
+    var latestDifference: Decimal { cardPeriodMetrics.first?.difference ?? 0 }
+    var paidPercent: Decimal? { totalNewTransactions == 0 ? nil : totalRealPayments / totalNewTransactions }
+    var pendingPercent: Decimal? { totalNewTransactions == 0 ? nil : max(Decimal(0), accumulatedBalance) / totalNewTransactions }
+    var travelSpend: Decimal { periodMetrics.reduce(0) { $0 + $1.travelSpend } }
+    var travelPercent: Decimal? { consolidatedRealSpend == 0 ? nil : travelSpend / consolidatedRealSpend }
+    var ordinarySpend: Decimal { max(Decimal(0), consolidatedRealSpend - travelSpend) }
+    var ordinaryAverageMonthly: Decimal { cardPeriodCount == 0 ? 0 : ordinarySpend / Decimal(cardPeriodCount) }
+    var latestMsiMonthlyLoad: Decimal? { cardPeriodMetrics.first?.msiMonthlyLoad }
+    var latestMsiOriginalDeferred: Decimal? { cardPeriodMetrics.first?.msiOriginalDeferred }
+    var latestMsiInstallmentsCount: Int? { cardPeriodMetrics.first?.msiInstallmentsCount }
+    var latestPaymentForNoInterest: Decimal? { cardPeriodMetrics.first?.paymentForNoInterest }
+    var cardSpend: Decimal { cardPeriodMetrics.reduce(0) { $0 + $1.newCharges } }
+    var directBankSpend: Decimal {
+        movements.filter { movement in
+            guard isSpend(movement), let statementId = movement.statementId,
+                  let statement = statements.first(where: { $0.id == statementId }) else { return false }
+            return statementKind(statement) == .bank
+        }.reduce(0) { $0 + absolute($1.amount) }
+    }
+    var rawExpense: Decimal { movements.filter { $0.flow == .expense }.reduce(0) { $0 + absolute($1.amount) } }
+    var excludedCardPayments: Decimal { movements.filter { movementKind($0) == .cardPayment }.reduce(0) { $0 + absolute($1.amount) } }
+    var excludedInternalTransfers: Decimal { movements.filter { movementKind($0) == .bankTransfer }.reduce(0) { $0 + absolute($1.amount) } }
+    var consolidatedRealSpend: Decimal {
+        let manualSpend = movements.filter { $0.statementId == nil && isSpend($0) }.reduce(0) { $0 + absolute($1.amount) }
+        return max(Decimal(0), cardSpend + directBankSpend + manualSpend - totalRefunds)
+    }
+    var totalIncome: Decimal { realIncome }
+    var totalTransfers: Decimal { movements.filter { $0.flow == .transfer }.reduce(0) { $0 + absolute($1.amount) } }
+    var totalExpenses: Decimal { consolidatedRealSpend }
+    var realExpenseMovements: [Movement] { movements.filter(isSpend) }
+    var realIncome: Decimal {
+        movements.filter { movement in
+            guard movement.flow == .income else { return false }
+            let kind = movementKind(movement)
+            if kind == .credit || kind == .refund { return false }
+            if let statementId = movement.statementId,
+               let statement = statements.first(where: { $0.id == statementId }), statementKind(statement) == .card {
+                return false
+            }
+            return true
+        }.reduce(0) { $0 + absolute($1.amount) }
+    }
+    var netFlow: Decimal { realIncome - consolidatedRealSpend }
+    var savingsRate: Decimal? { realIncome == 0 ? nil : netFlow / realIncome }
+    var cashAvailable: Decimal? {
+        let values = latestMetricsBySource(periodMetrics.filter { $0.kind == .bank }).compactMap { $0.cashBalance }
+        return values.isEmpty ? nil : values.reduce(0, +)
+    }
+    var debtTotal: Decimal? {
+        let values = latestMetricsBySource(cardPeriodMetrics).compactMap { $0.debtBalance }
+        return values.isEmpty ? nil : values.reduce(0, +)
+    }
+    var liquidPatrimony: Decimal? {
+        guard let cashAvailable, let debtTotal else { return nil }
+        return cashAvailable - debtTotal
+    }
+    var creditLimit: Decimal? {
+        let values = latestMetricsBySource(cardPeriodMetrics).compactMap { $0.creditLimit }
+        return values.isEmpty ? nil : values.reduce(0, +)
+    }
+    var creditAvailable: Decimal? {
+        let values = latestMetricsBySource(cardPeriodMetrics).compactMap { $0.creditAvailable }
+        return values.isEmpty ? nil : values.reduce(0, +)
+    }
+    var creditUsed: Decimal? {
+        guard let creditLimit, let creditAvailable else { return nil }
+        return max(Decimal(0), creditLimit - creditAvailable)
+    }
+    var creditUtilizationRate: Decimal? {
+        guard let creditLimit, creditLimit != 0, let creditUsed else { return nil }
+        return creditUsed / creditLimit
+    }
 
     var monthlyExpense: Decimal {
         let monthStart = Calendar.current.date(
             from: Calendar.current.dateComponents([.year, .month], from: .now)
         ) ?? .now
         return movements
-            .filter { $0.flow == .expense && $0.date >= monthStart }
-            .reduce(0) { $0 + abs($1.amount) }
+            .filter { isSpend($0) && $0.date >= monthStart }
+            .reduce(0) { $0 + absolute($1.amount) }
+    }
+
+    private func absolute(_ value: Decimal) -> Decimal { value < 0 ? -value : value }
+
+    private func statementKind(_ statement: StatementRecord) -> StatementKind {
+        if let kind = statement.kind { return kind }
+        return statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank
+    }
+
+    private func movementKind(_ movement: Movement) -> MovementKind {
+        if let kind = movement.kind { return kind }
+        let value = movement.title.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        if value.contains("msi") || value.contains("meses sin intereses") || value.contains("diferid") { return .msi }
+        if value.contains("interes") { return .interest }
+        if value.contains("comision") || value.contains("anualidad") { return .fee }
+        if (value.contains("devolucion") || value.contains("reembolso") || value.contains("bonificacion")) && movement.amount > 0 { return .refund }
+        if value.contains("pago") && (value.contains("tarjeta") || value.contains("amex") || value.contains("credito")) { return .cardPayment }
+        if movement.flow == .transfer { return value.contains("transfer") || value.contains("traspaso") ? .bankTransfer : .cardPayment }
+        if movement.flow == .income { return value.contains("credito") || value.contains("abono") ? .credit : .income }
+        return movement.flow == .expense ? .purchase : .other
+    }
+
+    private func isSpend(_ movement: Movement) -> Bool {
+        guard movement.flow == .expense else { return false }
+        return ![.cardPayment, .bankTransfer, .refund].contains(movementKind(movement))
+    }
+
+    private func isTravel(_ movement: Movement) -> Bool {
+        if movement.travelRelated { return true }
+        let value = "\(movement.title) \(movement.category)".folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        return ["viaje", "hotel", "hospedaje", "aerolinea", "vuelo", "avion", "transporte", "uber", "taxi", "metro", "renta de auto", "destino", "equipaje"].contains { value.contains($0) }
+    }
+
+    private func periodKey(_ value: String) -> String {
+        value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+    }
+
+    private func summaryValue(_ summary: StatementSummaryRecord?, _ keyPath: KeyPath<StatementSummaryRecord, Decimal?>, fallback: Decimal) -> Decimal {
+        guard let value = summary?[keyPath: keyPath] else { return fallback }
+        return absolute(value)
+    }
+
+    private func latestMetricsBySource(_ metrics: [StatementMetric]) -> [StatementMetric] {
+        var latest: [String: StatementMetric] = [:]
+        for metric in metrics where latest[metric.source] == nil {
+            latest[metric.source] = metric
+        }
+        return Array(latest.values)
+    }
+
+    private func calculateMetric(for statement: StatementRecord) -> StatementMetric {
+        let kind = statementKind(statement)
+        let linked = movements.filter { $0.statementId == statement.id }
+        let spend = linked.filter(isSpend)
+        let regular = spend.filter { movementKind($0) == .purchase }
+        let msi = spend.filter { movementKind($0) == .msi }
+        let interests = spend.filter { movementKind($0) == .interest }
+        let fees = spend.filter { movementKind($0) == .fee }
+        let payments = linked.filter { movementKind($0) == .cardPayment }
+        let credits = linked.filter { movementKind($0) == .credit }
+        let refunds = linked.filter { movementKind($0) == .refund }
+        let newTransactions = summaryValue(statement.summary, \.newTransactions, fallback: regular.reduce(0) { $0 + absolute($1.amount) })
+        let msiFallback: Decimal
+        if let original = statement.summary?.msiOriginalDeferred, let count = statement.summary?.msiInstallments, count > 0 {
+            msiFallback = absolute(original) / Decimal(count)
+        } else {
+            msiFallback = msi.reduce(0) { $0 + absolute($1.amount) }
+        }
+        let msiInstallments = summaryValue(statement.summary, \.msiMonthlyLoad, fallback: msiFallback)
+        let interest = summaryValue(statement.summary, \.interest, fallback: interests.reduce(0) { $0 + absolute($1.amount) })
+        let feeTotal = summaryValue(statement.summary, \.fees, fallback: fees.reduce(0) { $0 + absolute($1.amount) })
+        let newCharges = summaryValue(statement.summary, \.newCharges, fallback: newTransactions + msiInstallments + interest + feeTotal)
+        let realPayments = summaryValue(statement.summary, \.payments, fallback: payments.reduce(0) { $0 + absolute($1.amount) })
+        let creditTotal = summaryValue(statement.summary, \.credits, fallback: credits.reduce(0) { $0 + absolute($1.amount) })
+        let refundTotal = refunds.reduce(0) { $0 + absolute($1.amount) }
+        let travel = spend.filter(isTravel).reduce(0) { $0 + absolute($1.amount) }
+        let previousBalance = statement.summary?.previousBalance.map(absolute)
+        let paymentNoInterest = statement.summary?.paymentForNoInterest.map(absolute)
+            ?? previousBalance.map { max(Decimal(0), $0 - realPayments - creditTotal + newCharges) }
+            ?? statement.summary?.statementBalance.map(absolute)
+        let creditLimit = statement.summary?.creditLimit.map(absolute)
+        let creditAvailable = statement.summary?.creditAvailable.map(absolute)
+        let creditUsed: Decimal?
+        if let creditLimit, let creditAvailable {
+            creditUsed = max(Decimal(0), creditLimit - creditAvailable)
+        } else {
+            creditUsed = nil
+        }
+        let utilization: Decimal?
+        if let creditLimit, creditLimit != 0, let creditUsed {
+            utilization = creditUsed / creditLimit
+        } else {
+            utilization = nil
+        }
+        let debt = statement.summary?.debtBalance.map(absolute)
+            ?? (kind == .card ? statement.summary?.statementBalance.map(absolute) : nil)
+        let cash = statement.summary?.cashBalance.map(absolute)
+
+        return StatementMetric(
+            id: statement.id,
+            source: statement.source,
+            period: statement.period,
+            kind: kind,
+            newTransactions: newTransactions,
+            msiInstallments: msiInstallments,
+            interest: interest,
+            fees: feeTotal,
+            newCharges: newCharges,
+            realPayments: realPayments,
+            credits: creditTotal,
+            refunds: refundTotal,
+            difference: newTransactions - realPayments,
+            accumulatedBalance: newTransactions - realPayments,
+            travelSpend: travel,
+            ordinarySpend: max(Decimal(0), newCharges - travel),
+            creditLimit: creditLimit,
+            creditAvailable: creditAvailable,
+            creditUsed: creditUsed,
+            creditUtilizationRate: utilization,
+            paymentForNoInterest: paymentNoInterest,
+            msiOriginalDeferred: statement.summary?.msiOriginalDeferred.map(absolute),
+            msiInstallmentsCount: statement.summary?.msiInstallments,
+            msiMonthlyLoad: statement.summary?.msiMonthlyLoad.map(absolute) ?? (msiInstallments == 0 ? nil : msiInstallments),
+            cashBalance: cash,
+            debtBalance: debt
+        )
     }
 
     init() {
@@ -141,6 +460,27 @@ final class FinanceStore {
     func updateCategory(for movement: Movement, to category: String) {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return }
         movements[index].category = category
+        persist()
+    }
+
+    func updateClassification(for movement: Movement, kind: MovementKind, travelRelated: Bool) {
+        guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return }
+        movements[index].kind = kind
+        movements[index].travelRelated = travelRelated
+        switch kind {
+        case .cardPayment, .bankTransfer:
+            movements[index].flow = .transfer
+        case .income, .credit, .refund:
+            movements[index].flow = .income
+        default:
+            movements[index].flow = .expense
+        }
+        persist()
+    }
+
+    func updateStatementSummary(for statement: StatementRecord, summary: StatementSummaryRecord) {
+        guard let index = statements.firstIndex(where: { $0.id == statement.id }) else { return }
+        statements[index].summary = summary
         persist()
     }
 
@@ -199,6 +539,7 @@ final class FinanceStore {
             ? Self.accountName(from: text)
             : Self.accountName(from: url.lastPathComponent)
         let period = Self.periodLabel(from: text, fileName: url.lastPathComponent)
+        let summary = Self.summary(from: text, source: source)
         let existingStatement = statements.first(where: { $0.fileName == url.lastPathComponent })
         let statementId = existingStatement?.id ?? UUID()
         let existingKeys = Set(movements.filter { $0.statementId != statementId }.map(Self.identityKey))
@@ -219,7 +560,9 @@ final class FinanceStore {
             fileName: url.lastPathComponent,
             importedAt: .now,
             transactionCount: fresh.count,
-            requiresReview: fresh.isEmpty
+            requiresReview: fresh.isEmpty,
+            kind: source == "Amex" ? .card : .bank,
+            summary: summary
         )
         if let index = statements.firstIndex(where: { $0.id == statementId }) {
             statements[index] = statement
@@ -236,7 +579,8 @@ final class FinanceStore {
             fileName: url.lastPathComponent,
             imported: fresh.count,
             skipped: candidates.count - fresh.count,
-            requiresReview: fresh.isEmpty
+            requiresReview: fresh.isEmpty,
+            summary: summary
         )
     }
 
@@ -373,6 +717,25 @@ final class FinanceStore {
                 ? "Santander a Amex"
                 : account
             let category = category(for: titleNormalized, flow: flow)
+            let kind: MovementKind
+            if titleNormalized.contains("msi") || titleNormalized.contains("meses sin intereses") || titleNormalized.contains("diferid") {
+                kind = .msi
+            } else if titleNormalized.contains("interes") {
+                kind = .interest
+            } else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") {
+                kind = .fee
+            } else if (titleNormalized.contains("devolucion") || titleNormalized.contains("reembolso") || titleNormalized.contains("bonificacion")) && signedAmount > 0 {
+                kind = .refund
+            } else if titleNormalized.contains("pago") && (titleNormalized.contains("tarjeta") || titleNormalized.contains("amex") || titleNormalized.contains("credito")) {
+                kind = .cardPayment
+            } else if titleNormalized.contains("transfer") || titleNormalized.contains("traspaso") {
+                kind = .bankTransfer
+            } else if flow == .income {
+                kind = titleNormalized.contains("credito") || titleNormalized.contains("abono") ? .credit : .income
+            } else {
+                kind = .purchase
+            }
+            let travelRelated = ["viaje", "hotel", "hospedaje", "aerolinea", "vuelo", "avion", "transporte", "uber", "taxi", "metro", "renta de auto", "destino", "equipaje"].contains { titleNormalized.contains($0) }
 
             return Movement(
                 date: date,
@@ -380,7 +743,9 @@ final class FinanceStore {
                 account: displayAccount,
                 category: category,
                 amount: signedAmount,
-                flow: flow
+                flow: flow,
+                kind: kind,
+                travelRelated: travelRelated
             )
         }
     }
@@ -451,6 +816,46 @@ final class FinanceStore {
         case let month where month.hasPrefix("dic"): return 12
         default: return nil
         }
+    }
+
+    private static func summary(from text: String, source: String) -> StatementSummaryRecord? {
+        let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        func amount(after labels: [String]) -> Decimal? {
+            let joined = labels.joined(separator: "|")
+            let pattern = "(?:\(joined))[^0-9$-]{0,90}([-+]?\\s*\\$?\\s*(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{1,2})?)"
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: normalized, range: range),
+                  let valueRange = Range(match.range(at: 1), in: normalized) else { return nil }
+            return parseAmount(String(normalized[valueRange]))
+        }
+
+        var summary = StatementSummaryRecord()
+        var hasValue = false
+        func assign(_ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>, _ value: Decimal?) {
+            guard let value else { return }
+            summary[keyPath: keyPath] = abs(value)
+            hasValue = true
+        }
+        assign(\.previousBalance, amount(after: ["saldo anterior", "saldo previo"]))
+        assign(\.statementBalance, amount(after: ["saldo nuevo", "saldo al corte", "saldo actual", "saldo deudor"]))
+        assign(\.newTransactions, amount(after: ["nuevas transacciones", "compras nuevas"]))
+        assign(\.payments, amount(after: ["pagos realizados", "pagos efectuados"]))
+        assign(\.credits, amount(after: ["pagos y creditos", "creditos", "abonos"]))
+        assign(\.newCharges, amount(after: ["nuevos cargos", "total de cargos"]))
+        assign(\.interest, amount(after: ["intereses", "interes del periodo"]))
+        assign(\.fees, amount(after: ["comisiones", "comision"]))
+        assign(\.creditLimit, amount(after: ["limite de credito", "linea de credito"]))
+        assign(\.creditAvailable, amount(after: ["credito disponible", "disponible para compras"]))
+        assign(\.minimumPayment, amount(after: ["pago minimo"]))
+        assign(\.paymentForNoInterest, amount(after: ["pago para no generar intereses", "pago para no generar interes"]))
+        if source.localizedCaseInsensitiveContains("Amex") {
+            summary.debtBalance = summary.statementBalance
+        } else {
+            summary.cashBalance = amount(after: ["saldo disponible", "saldo final", "saldo actual"]).map(abs)
+            hasValue = hasValue || summary.cashBalance != nil
+        }
+        return hasValue ? summary : nil
     }
 
     private static func periodLabel(from text: String, fileName: String) -> String {

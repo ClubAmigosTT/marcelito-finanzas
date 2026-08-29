@@ -157,11 +157,15 @@ private struct MovementDetailView: View {
     @Environment(FinanceStore.self) private var store
     let movement: Movement
     @State private var selectedCategory: String
+    @State private var selectedKind: MovementKind
+    @State private var isTravel: Bool
     private let categories = ["Ingresos", "Transferencia", "Alimentos", "Viajes", "Comidas", "Servicios", "Transporte", "Salud", "Compras", "Sin categoría"]
 
     init(movement: Movement) {
         self.movement = movement
         _selectedCategory = State(initialValue: movement.category)
+        _selectedKind = State(initialValue: movement.kind ?? .purchase)
+        _isTravel = State(initialValue: movement.travelRelated)
     }
 
     var body: some View {
@@ -183,6 +187,22 @@ private struct MovementDetailView: View {
             )) {
                 ForEach(categories, id: \.self) { Text($0) }
             }
+            Picker("Tipo de movimiento", selection: Binding(
+                get: { selectedKind },
+                set: {
+                    selectedKind = $0
+                    store.updateClassification(for: movement, kind: $0, travelRelated: isTravel)
+                }
+            )) {
+                ForEach(MovementKind.allCases) { Text($0.rawValue).tag($0) }
+            }
+            Toggle("Relacionado con viaje", isOn: Binding(
+                get: { isTravel },
+                set: {
+                    isTravel = $0
+                    store.updateClassification(for: movement, kind: selectedKind, travelRelated: $0)
+                }
+            ))
         }
         .navigationTitle(movement.title)
         .navigationBarTitleDisplayMode(.inline)
@@ -196,7 +216,7 @@ struct ExpensesView: View {
     @Environment(FinanceStore.self) private var store
 
     private var groups: [(category: String, amount: Decimal)] {
-        Dictionary(grouping: store.movements.filter { $0.flow == .expense }, by: { $0.category })
+        Dictionary(grouping: store.realExpenseMovements, by: { $0.category })
             .map { (category: $0.key, amount: $0.value.reduce(0) { $0 + abs($1.amount) }) }
             .sorted { $0.amount > $1.amount }
     }
@@ -222,6 +242,12 @@ struct ExpensesView: View {
                             Text("Puedes corregir el origen o la categoría desde Movimientos.")
                                 .foregroundStyle(.secondary)
                         }
+                    }
+                    Section("Conciliación") {
+                        LabeledContent("Gasto de viaje", value: store.travelSpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                        LabeledContent("Gasto ordinario", value: store.ordinarySpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                        LabeledContent("Gasto consolidado", value: store.consolidatedRealSpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                        LabeledContent("Tasa de ahorro", value: store.savingsRate.map { "\(Int((NSDecimalNumber(decimal: $0).doubleValue * 100).rounded()))%" } ?? "Pendiente")
                     }
                 }
             }
@@ -281,6 +307,25 @@ struct AccountsView: View {
                         }
                     }
                 }
+                Section("Editar cifras del corte") {
+                    if store.statements.isEmpty {
+                        Text("Importa un estado para capturar saldos, pagos, crédito y MSI.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(store.statements) { statement in
+                            NavigationLink {
+                                StatementSummaryEditor(statement: statement)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text("\(statement.source) · \(statement.period)")
+                                    Text("Saldos, pagos, crédito y MSI")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                }
                 Section("Bancos") {
                     ForEach(knownSources, id: \.self) { source in
                         let statements = store.statements.filter { $0.source == source }
@@ -311,8 +356,90 @@ struct AccountsView: View {
     }
 }
 
+private struct StatementSummaryEditor: View {
+    @Environment(FinanceStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    let statement: StatementRecord
+    @State private var summary: StatementSummaryRecord
+
+    init(statement: StatementRecord) {
+        self.statement = statement
+        _summary = State(initialValue: statement.summary ?? StatementSummaryRecord())
+    }
+
+    private func decimalBinding(_ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>) -> Binding<String> {
+        Binding(
+            get: { summary[keyPath: keyPath].map { String(describing: $0) } ?? "" },
+            set: { value in
+                let cleaned = value.replacingOccurrences(of: "$", with: "").replacingOccurrences(of: ",", with: "")
+                summary[keyPath: keyPath] = Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX"))
+            }
+        )
+    }
+
+    private var installmentBinding: Binding<String> {
+        Binding(
+            get: { summary.msiInstallments.map { String($0) } ?? "" },
+            set: { summary.msiInstallments = Int($0) }
+        )
+    }
+
+    private func decimalField(_ title: String, _ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>) -> some View {
+        TextField(title, text: decimalBinding(keyPath))
+            .keyboardType(.decimalPad)
+    }
+
+    var body: some View {
+        Form {
+            Section("Resumen del corte") {
+                decimalField("Saldo anterior", \.previousBalance)
+                decimalField("Nuevas transacciones", \.newTransactions)
+                decimalField("Pagos realizados", \.payments)
+                decimalField("Créditos / abonos contables", \.credits)
+                decimalField("Nuevos cargos", \.newCharges)
+                decimalField("Intereses", \.interest)
+                decimalField("Comisiones", \.fees)
+                decimalField("Saldo al corte", \.statementBalance)
+                decimalField("Pago mínimo", \.minimumPayment)
+                decimalField("Pago para no generar intereses", \.paymentForNoInterest)
+            }
+            if statement.source.localizedCaseInsensitiveContains("Amex") {
+                Section("Crédito y MSI") {
+                    decimalField("Límite de crédito", \.creditLimit)
+                    decimalField("Crédito disponible", \.creditAvailable)
+                    decimalField("Deuda al corte", \.debtBalance)
+                    decimalField("MSI original diferido", \.msiOriginalDeferred)
+                    TextField("Mensualidades MSI activas", text: installmentBinding)
+                        .keyboardType(.numberPad)
+                    decimalField("Carga mensual MSI", \.msiMonthlyLoad)
+                }
+            } else {
+                Section("Banco") {
+                    decimalField("Efectivo disponible", \.cashBalance)
+                }
+            }
+            Section {
+                Button("Guardar cifras del corte") {
+                    store.updateStatementSummary(for: statement, summary: summary)
+                    dismiss()
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .navigationTitle("Cifras del corte")
+        .navigationBarTitleDisplayMode(.inline)
+        .scrollContentBackground(.hidden)
+        .background(Color.marcelitoCream)
+        .foregroundStyle(.marcelitoNavy)
+    }
+}
+
 struct NetWorthView: View {
     @Environment(FinanceStore.self) private var store
+
+    private var patrimonyText: String {
+        store.liquidPatrimony?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "—"
+    }
 
     var body: some View {
         NavigationStack {
@@ -320,13 +447,18 @@ struct NetWorthView: View {
                 Section {
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Patrimonio líquido").foregroundStyle(.secondary)
-                        Text("—")
+                        Text(patrimonyText)
                             .font(.largeTitle.bold())
                             .monospacedDigit()
-                        Text("Pendiente de saldos al corte")
+                        Text(store.liquidPatrimony == nil ? "Pendiente de saldos al corte" : "Efectivo disponible menos deuda")
                             .foregroundStyle(.marcelitoNavyMid)
                     }
                     .padding(.vertical, 10)
+                }
+                Section("Saldos calculados") {
+                    LabeledContent("Efectivo disponible", value: store.cashAvailable?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
+                    LabeledContent("Deuda total", value: store.debtTotal?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
+                    LabeledContent("Utilización de crédito", value: store.creditUtilizationRate.map { "\(Int((NSDecimalNumber(decimal: $0).doubleValue * 100).rounded()))%" } ?? "Pendiente")
                 }
                 Section("Estados que alimentan la historia") {
                     if store.statements.isEmpty {

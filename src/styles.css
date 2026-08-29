@@ -124,6 +124,87 @@ input::placeholder { color: oklch(0.64 0.012 80); }
   .expense-layout, .accounts-layout, .networth-hero { grid-template-columns: 1fr; }.shape-grid.large { height: 400px; }.story-card { min-height: 340px; }.account-rule { margin-top: 12px; }.networth-hero { gap: 26px; }.networth-hero strong { font-size: 39px; }.timeline-row { grid-template-columns: 75px 1fr; gap: 9px; padding: 15px 0; }.timeline-row p { grid-column: 2; font-size: 12px; }.page-heading .secondary-button { font-size: 0; width: 42px; padding: 0; }.page-heading .secondary-button svg { font-size: initial; }
 }
 
+/* Decision metrics: a compact ledger keeps the formulas visible without turning
+   the dashboard into a spreadsheet. */
+.calculation-section { margin-top: 44px; }
+.calculation-periods { color: var(--navy-mid); font-size: 12px; font-weight: 650; padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; white-space: nowrap; }
+.calculation-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.calculation-ledger { background: var(--surface); border-radius: var(--radius-card); padding: 8px 20px; }
+.calculation-ledger-head { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; padding: 14px 0 12px; border-bottom: 1px solid var(--line); }
+.calculation-ledger-head span { font-size: 15px; font-weight: 700; }
+.calculation-ledger-head small { color: var(--muted); font-size: 10px; text-align: right; }
+.calculation-row { min-height: 62px; display: flex; justify-content: space-between; align-items: center; gap: 12px; border-bottom: 1px solid var(--line); }
+.calculation-row:last-child { border-bottom: 0; }
+.calculation-row > div { min-width: 0; display: grid; gap: 3px; }
+.calculation-row span { font-size: 12px; font-weight: 600; }
+.calculation-row small { color: var(--muted); font-size: 10px; line-height: 1.35; }
+.calculation-row strong { color: var(--navy); font-family: ui-monospace, monospace; font-size: 14px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.calculation-row.positive strong { color: var(--navy-mid); }
+.calculation-row.warning strong { color: var(--expense); }
+.calculation-footnote { margin-top: 13px; color: var(--muted); font-size: 11px; line-height: 1.5; }
+.calculation-footnote strong { color: var(--navy); }
+.period-calculation { margin-top: 28px; }
+.period-table { background: var(--surface); border-radius: var(--radius-card); overflow: hidden; }
+.period-table-head, .period-table-row { display: grid; grid-template-columns: minmax(150px, 1.5fr) repeat(4, minmax(90px, 1fr)); gap: 14px; align-items: center; padding: 0 20px; }
+.period-table-head { min-height: 40px; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; }
+.period-table-row { min-height: 68px; border-bottom: 1px solid var(--line); font-family: ui-monospace, monospace; font-size: 13px; font-variant-numeric: tabular-nums; }
+.period-table-row:last-child { border-bottom: 0; }
+.period-table-row > div { min-width: 0; display: grid; gap: 3px; font-family: inherit; }
+.period-table-row > div strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.period-table-row small { color: var(--muted); font-family: "Segoe UI Variable", system-ui, sans-serif; font-size: 10px; }
+.period-table-row > strong { text-align: right; }
+.period-negative { color: var(--expense); }.period-positive { color: var(--navy-mid); }
+.refinement-section { margin-top: 28px; }
+.consolidated-breakdown { margin-top: 28px; }
+.consolidated-breakdown .calculation-ledger { max-width: 720px; }
+.refinement-list { background: var(--surface); border-radius: var(--radius-card); }
+.refinement-row { min-height: 64px; display: grid; grid-template-columns: minmax(0, 1fr) 180px 90px; align-items: center; gap: 14px; padding: 0 20px; border-bottom: 1px solid var(--line); }
+.refinement-row:last-child { border-bottom: 0; }
+.refinement-row > div { min-width: 0; display: grid; gap: 3px; }
+.refinement-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.refinement-row small { color: var(--muted); font-size: 10px; }
+.refinement-row select { height: 34px; min-width: 0; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 0 8px; font-size: 11px; }
+.travel-toggle { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 10px; white-space: nowrap; }
+.travel-toggle input { accent-color: var(--navy); }
+.refinement-note { margin-top: 9px; color: var(--muted); font-size: 11px; }
+.statement-summary-form { margin-top: 18px; padding: 15px 17px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); }
+.statement-summary-form summary { cursor: pointer; color: var(--navy); font-size: 13px; font-weight: 700; display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.statement-summary-form summary span { color: var(--muted); font-size: 11px; font-weight: 500; text-align: right; }
+.statement-summary-form > p { color: var(--muted); margin: 9px 0 14px; font-size: 11px; line-height: 1.45; }
+.summary-field-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.summary-field-grid label { display: grid; gap: 4px; }
+.summary-field-grid label > span { color: var(--navy); font-size: 11px; font-weight: 650; }
+.summary-field-grid label > small { color: var(--muted); font-size: 10px; }
+.summary-field-grid input { width: 100%; height: 36px; padding: 0 9px; color: var(--ink); background: var(--surface); border: 1px solid var(--line); border-radius: 8px; font-family: ui-monospace, monospace; font-size: 12px; }
+.expense-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
+.expense-facts > div { padding: 15px 18px; background: var(--surface); border-radius: var(--radius-card); display: grid; gap: 4px; }
+.expense-facts span, .expense-facts small { color: var(--muted); font-size: 11px; }
+.expense-facts strong { color: var(--navy); font-family: ui-monospace, monospace; font-size: 20px; }
+.expense-facts small { line-height: 1.35; }
+
+@media (max-width: 1100px) {
+  .calculation-grid { grid-template-columns: 1fr 1fr; }
+  .calculation-ledger:last-child { grid-column: 1 / -1; }
+}
+
+@media (max-width: 820px) {
+  .calculation-grid, .expense-facts { grid-template-columns: 1fr; }
+  .calculation-ledger:last-child { grid-column: auto; }
+  .calculation-periods { margin-top: 14px; display: inline-flex; }
+  .summary-field-grid { grid-template-columns: 1fr 1fr; }
+  .statement-summary-form summary { align-items: flex-start; flex-direction: column; }
+  .statement-summary-form summary span { text-align: left; }
+  .period-table { overflow-x: auto; }
+  .period-table-head, .period-table-row { min-width: 650px; }
+  .refinement-row { grid-template-columns: minmax(0, 1fr) auto; padding: 10px 14px; }
+  .refinement-row select { grid-column: 1; width: 100%; }
+  .refinement-row .travel-toggle { grid-column: 2; grid-row: 1 / span 2; }
+}
+
+@media (max-width: 560px) {
+  .summary-field-grid { grid-template-columns: 1fr; }
+}
+
 @media (max-width: 560px) {
   .top-actions .primary-button { font-size: 12px; }.home-heading { display: grid; }.month-button { justify-self: start; }.balance-story { grid-template-columns: auto 1fr; }.balance-story button { grid-column: 2; justify-self: end; }.shape-grid { grid-template-columns: 1.35fr 1fr; }.shape-grid .food { grid-column: 2; }.shape-grid .other { display: none; }.review-summary { grid-template-columns: 1fr; }.review-row { grid-template-columns: 1fr 100px; padding: 10px 0; }.review-row select { grid-column: 1; }.review-row > strong { grid-column: 2; grid-row: 1; }.table-head { display: none; }.dialog-actions { align-items: stretch; flex-direction: column-reverse; }.dialog-actions button { width: 100%; }.import-dialog { width: 100%; max-height: 100dvh; border-radius: 0; border: 0; }.dialog-head { padding: 16px; }.review-state { padding: 16px; }
 }
