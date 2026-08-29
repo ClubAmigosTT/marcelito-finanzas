@@ -30,7 +30,7 @@ struct HomeView: View {
 
     @ViewBuilder
     private var homeContent: some View {
-        LazyVStack(alignment: .leading, spacing: 24) {
+        LazyVStack(alignment: .leading, spacing: 18) {
             if hasData {
                 NetWorthSummary(store: store)
                 MetricsStrip(income: store.totalIncome, transfers: store.totalTransfers, monthlyExpense: store.monthlyExpense)
@@ -70,10 +70,13 @@ struct HomeView: View {
         NavigationStack {
             ScrollView {
                 homeContent
-                    .padding()
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 14)
             }
+            .scrollIndicators(.hidden)
             .background(Color.marcelitoCream.ignoresSafeArea())
             .navigationTitle("Inicio")
+            .navigationBarTitleDisplayMode(.large)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { isImporterPresented = true } label: {
@@ -100,7 +103,8 @@ struct HomeView: View {
                         let summary = try store.importPDF(from: url)
                         let duplicateNote = summary.skipped > 0 ? " Se omitieron \(summary.skipped) repetidos." : ""
                         let reviewNote = summary.requiresReview ? " Quedó pendiente de revisión manual." : ""
-                        importMessage = "\(summary.source) · \(summary.period): se agregaron \(summary.imported) movimientos.\(duplicateNote)\(reviewNote)"
+                        let ocrNote = summary.usedOCR ? " El PDF era un escaneo; revisa los movimientos detectados." : ""
+                        importMessage = "\(summary.source) · \(summary.period): se agregaron \(summary.imported) movimientos.\(duplicateNote)\(reviewNote)\(ocrNote)"
                     } catch {
                         importMessage = error.localizedDescription
                     }
@@ -154,9 +158,8 @@ private struct EmptyDataCard: View {
                 .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
         .foregroundStyle(Color.marcelitoNavy)
-        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16))
+        .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 18)
     }
 }
 
@@ -169,19 +172,27 @@ private struct NetWorthSummary: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Patrimonio líquido").foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Patrimonio líquido")
+                    .font(.subheadline.weight(.medium))
+                Spacer()
+                Image(systemName: "arrow.up.right")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .foregroundStyle(Color.marcelitoCream.opacity(0.78))
             Text(displayValue)
-                .font(.largeTitle.bold())
+                .font(.system(.largeTitle, design: .rounded).weight(.bold))
                 .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.65)
             Text(store.liquidPatrimony == nil ? "Pendiente de saldos al corte" : "Efectivo disponible menos deuda")
                 .font(.subheadline)
-                .foregroundStyle(Color.marcelitoNavyMid)
+                .foregroundStyle(Color.marcelitoCream.opacity(0.78))
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding()
-        .foregroundStyle(Color.marcelitoNavy)
-        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16))
+        .foregroundStyle(Color.marcelitoCream)
+        .marcelitoCard(fill: Color.marcelitoNavy, radius: 18, padding: 20)
     }
 }
 
@@ -200,8 +211,8 @@ private struct DecisionMetricsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             Text("Cálculos para decidir")
-                .font(.title2.bold())
-                .padding(.bottom, 8)
+                .font(.title3.weight(.bold))
+                .padding(.bottom, 6)
             CalculationLine(label: "Gasto total de tarjeta", value: money(store.totalNewTransactions), detail: "Compras nuevas")
             CalculationLine(label: "Promedio mensual", value: money(store.averageMonthlySpend), detail: "Compras / periodos")
             CalculationLine(label: "Abonos reales", value: money(store.totalRealPayments), detail: "Pagos, sin créditos contables")
@@ -220,9 +231,8 @@ private struct DecisionMetricsView: View {
             CalculationLine(label: "Nuevos cargos del corte", value: money(store.cardPeriodMetrics.first?.newCharges), detail: "Compras + MSI + intereses + comisiones")
             CalculationLine(label: "Pago para no generar intereses", value: money(store.latestPaymentForNoInterest), detail: "Del estado o calculado")
         }
-        .padding()
         .foregroundStyle(Color.marcelitoNavy)
-        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16))
+        .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 18)
     }
 }
 
@@ -234,11 +244,21 @@ private struct CalculationLine: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
-                Text(label).font(.subheadline.weight(.semibold))
-                Text(detail).font(.caption2).foregroundStyle(.secondary)
+                Text(label)
+                    .font(.subheadline.weight(.semibold))
+                    .lineLimit(2)
+                Text(detail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
             }
-            Spacer(minLength: 10)
-            Text(value).font(.subheadline.monospacedDigit()).multilineTextAlignment(.trailing)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.subheadline.monospacedDigit())
+                .multilineTextAlignment(.trailing)
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
+                .frame(minWidth: 78, alignment: .trailing)
         }
         .padding(.vertical, 7)
     }
@@ -250,12 +270,10 @@ private struct MetricsStrip: View {
     let monthlyExpense: Decimal
 
     var body: some View {
-        ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 12) {
-                MetricTile(title: "Ingresos", value: income, symbol: "arrow.down.circle.fill", color: Color.marcelitoNavyMid)
-                MetricTile(title: "Transferencias", value: transfers, symbol: "arrow.left.arrow.right.circle.fill", color: Color.marcelitoNavySoft)
-                MetricTile(title: "Gasto del mes", value: monthlyExpense, symbol: "receipt.fill", color: Color.marcelitoNavy)
-            }
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 10)], spacing: 10) {
+            MetricTile(title: "Ingresos", value: income, symbol: "arrow.down.circle.fill", color: Color.marcelitoSuccess)
+            MetricTile(title: "Transferencias", value: transfers, symbol: "arrow.left.arrow.right.circle.fill", color: Color.marcelitoNavyMid)
+            MetricTile(title: "Gasto del mes", value: monthlyExpense, symbol: "receipt.fill", color: Color.marcelitoAmber)
         }
     }
 }
@@ -274,10 +292,9 @@ private struct MetricTile: View {
                 .font(.headline)
                 .monospacedDigit()
         }
-        .frame(width: 156, alignment: .leading)
-        .padding()
+        .frame(maxWidth: .infinity, minHeight: 106, alignment: .leading)
         .foregroundStyle(Color.marcelitoNavy)
-        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16))
+        .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 14, padding: 14)
     }
 }
 
@@ -291,9 +308,8 @@ private struct DecisionCallout: View {
             Text(statement.map { "\($0.source) · \($0.period) está guardado como \($0.transactionCount) movimientos. Corrige categorías desde Movimientos antes de usarlo para decidir." } ?? "Importa un estado de cuenta para empezar a revisar.")
                 .foregroundStyle(.secondary)
         }
-        .padding()
         .foregroundStyle(Color.marcelitoNavy)
-        .background(Color.marcelitoNavy.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
+        .marcelitoCard(fill: Color.marcelitoNavy.opacity(0.12), radius: 14, padding: 16)
     }
 }
 
@@ -302,11 +318,14 @@ private struct MoneyFlowView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Así se movió tu dinero").font(.title2.bold())
+            Text("Así se movió tu dinero")
+                .font(.title3.weight(.bold))
             FlowLine(flow: .income, value: store.totalIncome)
             FlowLine(flow: .transfer, value: store.totalTransfers)
             FlowLine(flow: .expense, value: store.totalExpenses)
         }
+        .foregroundStyle(Color.marcelitoNavy)
+        .marcelitoCard(fill: Color.marcelitoCreamTint, radius: 16, padding: 18)
     }
 }
 

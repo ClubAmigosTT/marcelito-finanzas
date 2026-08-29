@@ -30,18 +30,25 @@ struct MovementsView: View {
                             HStack(spacing: 12) {
                                 Image(systemName: movement.flow.symbol)
                                     .foregroundStyle(movement.flow.color)
+                                    .font(.title3)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(movement.title)
+                                        .lineLimit(1)
                                     Text("\(movement.account) · \(statementLabel(for: movement))")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                        .lineLimit(1)
                                     Text(movement.date, format: .dateTime.day().month(.abbreviated).year())
                                         .font(.caption2)
                                         .foregroundStyle(.secondary)
+                                        .lineLimit(1)
                                 }
                                 Spacer()
                                 Text(movement.amount, format: .currency(code: "MXN"))
+                                    .font(.subheadline.weight(.semibold))
                                     .monospacedDigit()
+                                    .lineLimit(1)
+                                    .minimumScaleFactor(0.75)
                             }
                         }
                     }
@@ -49,6 +56,7 @@ struct MovementsView: View {
             }
             .searchable(text: $query, prompt: "Comercio, banco o periodo")
             .navigationTitle("Movimientos")
+            .listStyle(.insetGrouped)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { isAddPresented = true } label: {
@@ -283,6 +291,7 @@ struct ExpensesView: View {
         NavigationStack {
             expenseRows
                 .navigationTitle("Gastos")
+                .listStyle(.insetGrouped)
                 .listRowBackground(Color.marcelitoCreamSoft)
                 .foregroundStyle(Color.marcelitoNavy)
                 .scrollContentBackground(.hidden)
@@ -379,6 +388,7 @@ struct AccountsView: View {
                 }
             }
             .navigationTitle("Cuentas")
+            .listStyle(.insetGrouped)
             .listRowBackground(Color.marcelitoCreamSoft)
             .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)
@@ -503,6 +513,7 @@ struct NetWorthView: View {
                 }
             }
             .navigationTitle("Patrimonio")
+            .listStyle(.insetGrouped)
             .listRowBackground(Color.marcelitoCreamSoft)
             .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)

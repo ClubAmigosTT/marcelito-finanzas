@@ -5,6 +5,8 @@ import Observation
 import PDFKit
 import Security
 import SwiftUI
+import UIKit
+import Vision
 
 enum FlowKind: String, CaseIterable, Identifiable, Codable, Hashable {
     case income = "Ingreso"
@@ -16,10 +18,10 @@ enum FlowKind: String, CaseIterable, Identifiable, Codable, Hashable {
 
     var color: Color {
         switch self {
-        case .income: Color.marcelitoNavyMid
+        case .income: Color.marcelitoSuccess
         case .transfer: Color.marcelitoNavySoft
-        case .expense: Color.marcelitoNavy
-        case .debt: Color.marcelitoNavy
+        case .expense: Color.marcelitoAmber
+        case .debt: Color.marcelitoViolet
         }
     }
 
@@ -163,6 +165,7 @@ struct ImportSummary {
     let skipped: Int
     let requiresReview: Bool
     let summary: StatementSummaryRecord?
+    let usedOCR: Bool
 }
 
 struct StatementMetric: Identifiable {
@@ -206,7 +209,7 @@ enum FinanceImportError: LocalizedError {
         case .unreadableDocument:
             "No pudimos leer este PDF. Verifica que sea un estado de cuenta válido."
         case .emptyDocument:
-            "El PDF no contiene movimientos reconocibles. Ve a Movimientos y usa + para agregarlos manualmente."
+            "Este PDF no contiene texto ni movimientos reconocibles. Si es un escaneo, usa el PDF original descargado del banco o captura sus cifras manualmente en Cuentas."
         }
     }
 }
@@ -527,13 +530,24 @@ final class FinanceStore {
             }
         }
 
-        guard let document = PDFDocument(url: url) else {
+        let documentData: Data
+        do {
+            documentData = try Data(contentsOf: url, options: .mappedIfSafe)
+        } catch {
+            throw FinanceImportError.unreadableDocument
+        }
+        guard let document = PDFDocument(data: documentData) else {
             throw FinanceImportError.unreadableDocument
         }
 
-        let text = (0..<document.pageCount)
+        let extractedText = (0..<document.pageCount)
             .compactMap { document.page(at: $0)?.string }
             .joined(separator: "\n")
+        let usedOCR = extractedText.trimmingCharacters(in: .whitespacesAndNewlines).count < 120
+        let text = usedOCR ? Self.ocrText(from: document) : extractedText
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw FinanceImportError.emptyDocument
+        }
         let candidates = Self.parse(text: text, fileName: url.lastPathComponent)
         let source = Self.accountName(from: url.lastPathComponent) == "Importado"
             ? Self.accountName(from: text)
@@ -560,7 +574,7 @@ final class FinanceStore {
             fileName: url.lastPathComponent,
             importedAt: .now,
             transactionCount: fresh.count,
-            requiresReview: fresh.isEmpty,
+            requiresReview: fresh.isEmpty || usedOCR || summary == nil,
             kind: source == "Amex" ? .card : .bank,
             summary: summary
         )
@@ -579,8 +593,9 @@ final class FinanceStore {
             fileName: url.lastPathComponent,
             imported: fresh.count,
             skipped: candidates.count - fresh.count,
-            requiresReview: fresh.isEmpty,
-            summary: summary
+            requiresReview: fresh.isEmpty || usedOCR || summary == nil,
+            summary: summary,
+            usedOCR: usedOCR
         )
     }
 
@@ -603,6 +618,34 @@ final class FinanceStore {
         Movement(date: .now.addingTimeInterval(-259_200), title: "Reserva de viaje", account: "Amex", category: "Viajes", amount: -6_270, flow: .expense)
     */]
 
+    private static func ocrText(from document: PDFDocument) -> String {
+        var lines: [String] = []
+        let pageSize = CGSize(width: 1800, height: 2400)
+
+        for index in 0..<document.pageCount {
+            guard let page = document.page(at: index) else { continue }
+            let image = page.thumbnail(of: pageSize, for: .mediaBox)
+            guard let cgImage = image.cgImage else { continue }
+
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.recognitionLanguages = ["es-MX", "en-US"]
+            request.usesLanguageCorrection = true
+
+            do {
+                try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+            } catch {
+                continue
+            }
+
+            lines.append(contentsOf: (request.results ?? []).compactMap {
+                $0.topCandidates(1).first?.string
+            })
+        }
+
+        return lines.joined(separator: "\n")
+    }
+
     private struct TextMatch {
         let range: NSRange
         let text: String
@@ -616,7 +659,7 @@ final class FinanceStore {
             pattern: #"(?i)(?<!\d)(\d{1,2})\s+de\s+([A-Za-zÁÉÍÓÚáéíóú]+)(?:\s+de\s+(\d{4}))?"#
         )
         let amountRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?\s*(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d{1,2})?(?![A-Za-z0-9])"#
+            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?\s*(?:\d{1,3}(?:[ ,]\d{3})+|\d+)(?:[.,]\d{1,2})?(?![A-Za-z0-9])"#
         )
         let filenameAccount = accountName(from: fileName)
         let documentNormalized = text.folding(
@@ -632,7 +675,12 @@ final class FinanceStore {
             "fecha de corte", "fecha limite", "total a pagar",
             "periodo de facturacion", "este no es un documento",
             "total de las transacciones", "el estado de cuenta incluye",
-            "estimado cliente", "en caso de que la fecha"
+            "estimado cliente", "en caso de que la fecha",
+            "resumen informativo", "cuenta de cheques", "saldo inicial",
+            "saldo final", "saldo promedio", "saldo disponible", "mes anterior",
+            "mes actual", "intereses brutos", "comisiones cobradas", "otros cargos",
+            "dias del periodo", "codigo de cliente", "rfc",
+            "depositos", "retiros", "abonos"
         ]
 
         // Amex puts the merchant, RFC and amount on separate PDF text lines.
@@ -768,10 +816,27 @@ final class FinanceStore {
     }
 
     private static func parseAmount(_ value: String) -> Decimal? {
-        let cleaned = value
+        var cleaned = value
             .replacingOccurrences(of: "$", with: "")
             .replacingOccurrences(of: " ", with: "")
-            .replacingOccurrences(of: ",", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let commaIndex = cleaned.lastIndex(of: ",")
+        let dotIndex = cleaned.lastIndex(of: ".")
+        if let commaIndex, dotIndex == nil {
+            let decimalDigits = cleaned.distance(from: commaIndex, to: cleaned.endIndex) - 1
+            if decimalDigits == 1 || decimalDigits == 2 {
+                cleaned = cleaned.replacingOccurrences(of: ",", with: ".")
+            } else {
+                cleaned = cleaned.replacingOccurrences(of: ",", with: "")
+            }
+        } else if let commaIndex, let dotIndex, commaIndex > dotIndex {
+            cleaned = cleaned.replacingOccurrences(of: ".", with: "")
+                .replacingOccurrences(of: ",", with: ".")
+        } else {
+            cleaned = cleaned.replacingOccurrences(of: ",", with: "")
+        }
+
         return Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX"))
     }
 
