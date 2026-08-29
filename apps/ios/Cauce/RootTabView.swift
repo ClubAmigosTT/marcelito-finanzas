@@ -28,26 +28,49 @@ struct HomeView: View {
 
     private var hasData: Bool { !store.movements.isEmpty || !store.statements.isEmpty }
 
+    @ViewBuilder
+    private var homeContent: some View {
+        LazyVStack(alignment: .leading, spacing: 24) {
+            if hasData {
+                NetWorthSummary(store: store)
+                MetricsStrip(income: store.totalIncome, transfers: store.totalTransfers, monthlyExpense: store.monthlyExpense)
+                DecisionMetricsView()
+                DecisionCallout(statement: store.statements.first)
+                MoneyFlowView(store: store)
+                if let lastImportedFile = store.lastImportedFile {
+                    Label("Último estado importado: \(lastImportedFile)", systemImage: "checkmark.circle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(Color.marcelitoNavyMid)
+                }
+            } else {
+                EmptyDataCard { isImporterPresented = true }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var accountMenu: some View {
+        Menu {
+            if store.statements.isEmpty {
+                Label("Sin estados importados", systemImage: "doc.text")
+            } else {
+                ForEach(store.statements.prefix(4)) { statement in
+                    Label("\(statement.source) · \(statement.period)", systemImage: statement.requiresReview ? "exclamationmark.triangle" : "checkmark.circle")
+                }
+            }
+            Button("Eliminar cuenta", role: .destructive) {
+                isDeleteConfirmationPresented = true
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .accessibilityLabel("Opciones de cuenta")
+    }
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 24) {
-                    if hasData {
-                        NetWorthSummary(store: store)
-                        MetricsStrip(income: store.totalIncome, transfers: store.totalTransfers, monthlyExpense: store.monthlyExpense)
-                        DecisionMetricsView()
-                        DecisionCallout(statement: store.statements.first)
-                        MoneyFlowView(store: store)
-                        if let lastImportedFile = store.lastImportedFile {
-                            Label("Último estado importado: \(lastImportedFile)", systemImage: "checkmark.circle.fill")
-                                .font(.footnote)
-                                .foregroundStyle(Color.marcelitoNavyMid)
-                        }
-                    } else {
-                        EmptyDataCard { isImporterPresented = true }
-                    }
-                }
-                .padding()
+                homeContent
+                    .padding()
             }
             .background(Color.marcelitoCream.ignoresSafeArea())
             .navigationTitle("Inicio")
@@ -59,21 +82,7 @@ struct HomeView: View {
                     .accessibilityLabel("Importar estado de cuenta")
                 }
                 ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        if store.statements.isEmpty {
-                            Label("Sin estados importados", systemImage: "doc.text")
-                        } else {
-                            ForEach(store.statements.prefix(4)) { statement in
-                                Label("\(statement.source) · \(statement.period)", systemImage: statement.requiresReview ? "exclamationmark.triangle" : "checkmark.circle")
-                            }
-                        }
-                        Button("Eliminar cuenta", role: .destructive) {
-                            isDeleteConfirmationPresented = true
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                    .accessibilityLabel("Opciones de cuenta")
+                    accountMenu
                 }
             }
             .fileImporter(

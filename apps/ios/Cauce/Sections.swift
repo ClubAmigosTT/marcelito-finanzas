@@ -223,39 +223,43 @@ struct ExpensesView: View {
 
     private var total: Decimal { groups.reduce(0) { $0 + $1.amount } }
 
-    var body: some View {
-        NavigationStack {
-            List {
-                if groups.isEmpty {
-                    ContentUnavailableView("Sin gastos", systemImage: "chart.pie", description: Text("Importa un estado de cuenta para construir tus categorías reales."))
-                } else {
-                    Section("Gasto identificado") {
-                        ForEach(Array(groups.enumerated()), id: \.element.category) { index, item in
-                            ExpenseRow(name: item.category, amount: item.amount, share: total > 0 ? "\(Int((item.amount / total * 100).rounded()))%" : "0%", color: [.marcelitoNavy, .marcelitoNavyMid, .marcelitoNavySoft][min(index, 2)])
-                        }
-                    }
-                    Section("Lectura") {
-                        VStack(alignment: .leading, spacing: 6) {
-                            Text("\(groups.count) categorías explican")
-                            Text(total, format: .currency(code: "MXN").precision(.fractionLength(0)))
-                                .font(.headline)
-                            Text("Puedes corregir el origen o la categoría desde Movimientos.")
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    Section("Conciliación") {
-                        LabeledContent("Gasto de viaje", value: store.travelSpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
-                        LabeledContent("Gasto ordinario", value: store.ordinarySpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
-                        LabeledContent("Gasto consolidado", value: store.consolidatedRealSpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
-                        LabeledContent("Tasa de ahorro", value: store.savingsRate.map { "\(Int((NSDecimalNumber(decimal: $0).doubleValue * 100).rounded()))%" } ?? "Pendiente")
+    @ViewBuilder
+    private var expenseRows: some View {
+        List {
+            if groups.isEmpty {
+                ContentUnavailableView("Sin gastos", systemImage: "chart.pie", description: Text("Importa un estado de cuenta para construir tus categorías reales."))
+            } else {
+                Section("Gasto identificado") {
+                    ForEach(Array(groups.enumerated()), id: \.element.category) { index, item in
+                        ExpenseRow(name: item.category, amount: item.amount, share: total > 0 ? "\(Int((item.amount / total * 100).rounded()))%" : "0%", color: [.marcelitoNavy, .marcelitoNavyMid, .marcelitoNavySoft][min(index, 2)])
                     }
                 }
+                Section("Lectura") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("\(groups.count) categorías explican")
+                        Text(total, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                            .font(.headline)
+                        Text("Puedes corregir el origen o la categoría desde Movimientos.")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Section("Conciliación") {
+                    LabeledContent("Gasto de viaje", value: store.travelSpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                    LabeledContent("Gasto ordinario", value: store.ordinarySpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                    LabeledContent("Gasto consolidado", value: store.consolidatedRealSpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                    LabeledContent("Tasa de ahorro", value: store.savingsRate.map { "\(Int((NSDecimalNumber(decimal: $0).doubleValue * 100).rounded()))%" } ?? "Pendiente")
+                }
             }
-            .navigationTitle("Gastos")
-            .listRowBackground(Color.marcelitoCreamSoft)
-            .foregroundStyle(Color.marcelitoNavy)
-            .scrollContentBackground(.hidden)
-            .background(Color.marcelitoCream)
+        }
+    }
+    var body: some View {
+        NavigationStack {
+            expenseRows
+                .navigationTitle("Gastos")
+                .listRowBackground(Color.marcelitoCreamSoft)
+                .foregroundStyle(Color.marcelitoNavy)
+                .scrollContentBackground(.hidden)
+                .background(Color.marcelitoCream)
         }
     }
 }
