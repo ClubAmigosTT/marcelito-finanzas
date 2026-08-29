@@ -13,7 +13,39 @@
 - Revisión manual: Movimientos > + permite agregar una fila y cada movimiento permite corregir su categoría.
 - Credenciales de revisión: usuario Marcelodiazs y la contraseña que definiste.
 
-## Pasos que requieren una Mac
+## Publicar desde GitHub Actions (sin Mac)
+
+El workflow `.github/workflows/ios-testflight.yml` compila Marcelito en un runner macOS, genera el proyecto a partir de `project.yml`, firma con la cuenta de Apple y sube el IPA a TestFlight. Solo se ejecuta manualmente o con una etiqueta `ios-v*`, así que hacer push de código no inicia una compilación costosa.
+
+### Configuración única
+
+1. En [App Store Connect](https://appstoreconnect.apple.com/) crea la app **Marcelito** para iOS con el Bundle ID `mx.marcelito.personal`. La app debe existir antes de subir el primer build.
+2. En **Users and Access > Integrations > App Store Connect API**, crea una clave con rol **App Manager**. Descarga el archivo `.p8` una sola vez y anota el **Key ID** y el **Issuer ID**. No subas el `.p8` al repositorio.
+3. En GitHub abre **Settings > Secrets and variables > Actions > New repository secret** y crea exactamente estos cuatro secretos:
+   - `APPLE_TEAM_ID`: el Team ID de Apple Developer (10 caracteres), no tu correo.
+   - `APPSTORE_ISSUER_ID`: Issuer ID de App Store Connect.
+   - `APPSTORE_API_KEY_ID`: Key ID de la clave anterior.
+   - `APPSTORE_API_PRIVATE_KEY`: contenido completo del archivo `.p8`, incluyendo `BEGIN PRIVATE KEY` y `END PRIVATE KEY`.
+4. En GitHub abre **Actions > iOS TestFlight > Run workflow**, escribe la versión (por ejemplo `1.0.1`) y ejecuta. Alternativamente, desde una terminal:
+
+   ```bash
+   git tag ios-v1.0.1
+   git push origin ios-v1.0.1
+   ```
+
+5. Cuando finalice el workflow, espera a que App Store Connect procese el build y agrégalo a un grupo de testers en TestFlight.
+
+La firma automática usa la autenticación de clave de App Store Connect y `-allowProvisioningUpdates`; no hace falta una Mac local ni guardar certificados en GitHub. Si Apple muestra un error de firma, revisa que el Bundle ID exista, que la clave tenga permisos de App Manager y que `APPLE_TEAM_ID` corresponda al equipo que creó la app.
+
+### Seguridad y consumo
+
+- Nunca pegues tu contraseña de Apple, códigos de doble factor ni el contenido de la clave `.p8` en una conversación o commit.
+- La clave se escribe solo en el almacenamiento temporal del runner y se elimina al terminar el job.
+- El workflow está limitado a ejecuciones manuales y tags para evitar builds accidentales. Revisa la cuota de [GitHub Actions](https://docs.github.com/en/billing/concepts/product-billing/github-actions) antes de activar ejecuciones frecuentes.
+
+## Publicación manual (alternativa)
+
+Si en algún momento tienes acceso a una Mac, también puedes usar Xcode directamente:
 
 1. En apps/ios instala XcodeGen y ejecuta xcodegen generate.
 2. Abre Marcelito.xcodeproj en Xcode 26 o posterior, elige tu Team y confirma la firma automática.

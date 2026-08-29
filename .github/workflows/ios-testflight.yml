@@ -1,0 +1,186 @@
+name: iOS TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      marketing_version:
+        description: "Versión de marketing (por ejemplo, 1.0.1)"
+        required: false
+        default: "1.0.0"
+        type: string
+  push:
+    tags:
+      - "ios-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  archive-and-upload:
+    name: Compilar y subir Marcelito
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+      APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+      APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+      REQUESTED_MARKETING_VERSION: "${{ inputs.marketing_version }}"
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Mostrar toolchain de Apple
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+
+      - name: Validar secretos necesarios
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_TEAM_ID APPSTORE_ISSUER_ID APPSTORE_API_KEY_ID APPSTORE_API_PRIVATE_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if ((${#missing[@]} > 0)); then
+            printf "::error title=Faltan secretos::Configura en GitHub Actions: %s\n" "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Resolver versión
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${REQUESTED_MARKETING_VERSION:-}"
+          if [[ -z "$version" && "$GITHUB_REF" == refs/tags/ios-v* ]]; then
+            version="${GITHUB_REF_NAME#ios-v}"
+          fi
+          version="${version:-1.0.0}"
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "::error title=Versión inválida::Usa un formato como 1.0.1"
+            exit 1
+          fi
+          echo "MARKETING_VERSION=$version" >> "$GITHUB_ENV"
+          echo "Se compilará Marcelito $version"
+
+      - name: Instalar XcodeGen
+        shell: bash
+        run: brew install xcodegen
+
+      - name: Generar proyecto Xcode
+        working-directory: apps/ios
+        shell: bash
+        run: xcodegen generate --spec project.yml
+
+      - name: Preparar clave de App Store Connect
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/AuthKey_${APPSTORE_API_KEY_ID}.p8"
+          printf "%s" "$APPSTORE_API_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          echo "APPSTORE_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Archivar aplicación
+        working-directory: apps/ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project Marcelito.xcodeproj \
+            -scheme Marcelito \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/Marcelito.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/MarcelitoDerivedData" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$APPSTORE_KEY_PATH" \
+            -authenticationKeyID "$APPSTORE_API_KEY_ID" \
+            -authenticationKeyIssuerID "$APPSTORE_ISSUER_ID" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            MARKETING_VERSION="$MARKETING_VERSION" \
+            clean archive
+
+      - name: Exportar IPA para App Store
+        working-directory: apps/ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          export_options="$RUNNER_TEMP/ExportOptions.plist"
+          cat > "$export_options" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store</string>
+            <key>signingStyle</key>
+            <string>automatic</string>
+            <key>teamID</key>
+            <string>$APPLE_TEAM_ID</string>
+            <key>uploadSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+          rm -rf "$RUNNER_TEMP/MarcelitoExport"
+          mkdir -p "$RUNNER_TEMP/MarcelitoExport"
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Marcelito.xcarchive" \
+            -exportPath "$RUNNER_TEMP/MarcelitoExport" \
+            -exportOptionsPlist "$export_options" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$APPSTORE_KEY_PATH" \
+            -authenticationKeyID "$APPSTORE_API_KEY_ID" \
+            -authenticationKeyIssuerID "$APPSTORE_ISSUER_ID"
+          ipa_path="$RUNNER_TEMP/MarcelitoExport/Marcelito.ipa"
+          if [[ ! -f "$ipa_path" ]]; then
+            ipa_path="$(find "$RUNNER_TEMP/MarcelitoExport" -maxdepth 1 -name "*.ipa" -print -quit)"
+          fi
+          if [[ -z "$ipa_path" || ! -f "$ipa_path" ]]; then
+            echo "::error title=No se encontró el IPA::La exportación no generó un archivo .ipa"
+            exit 1
+          fi
+          echo "IPA_PATH=$ipa_path" >> "$GITHUB_ENV"
+
+      - name: Subir build a TestFlight
+        uses: apple-actions/upload-testflight-build@v4
+        with:
+          app-path: ${{ env.IPA_PATH }}
+          issuer-id: ${{ secrets.APPSTORE_ISSUER_ID }}
+          api-key-id: ${{ secrets.APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          uses-non-exempt-encryption: "false"
+          wait-for-processing: "true"
+
+      - name: Escribir resumen
+        if: success()
+        shell: bash
+        run: |
+          {
+            echo "## Marcelito en TestFlight"
+            echo ""
+            echo "Versión: $MARKETING_VERSION"
+            echo "Build: $GITHUB_RUN_NUMBER"
+            echo "El build fue enviado a App Store Connect; Apple puede tardar unos minutos en procesarlo."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Eliminar clave temporal
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${APPSTORE_KEY_PATH:-}" && -f "$APPSTORE_KEY_PATH" ]]; then
+            rm -f -- "$APPSTORE_KEY_PATH"
+          fi

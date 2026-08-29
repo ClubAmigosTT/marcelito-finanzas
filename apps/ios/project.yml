@@ -23,5 +23,6 @@ targets:
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         INFOPLIST_KEY_CFBundleDisplayName: Marcelito
         GENERATE_INFOPLIST_FILE: YES
+        CODE_SIGN_STYLE: Automatic
     scheme:
       testTargets: []
