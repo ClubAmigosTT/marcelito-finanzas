@@ -327,7 +327,11 @@ final class FinanceStore {
     private func movementKind(_ movement: Movement) -> MovementKind {
         if let kind = movement.kind { return kind }
         let value = movement.title.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-        if value.contains("msi") || value.contains("meses sin intereses") || value.contains("diferid") { return .msi }
+        if value.contains("msi")
+            || value.contains("meses sin intereses")
+            || value.contains("meses en automatico")
+            || value.contains("diferir")
+            || value.contains("diferid") { return .msi }
         if value.contains("interes") { return .interest }
         if value.contains("comision") || value.contains("anualidad") { return .fee }
         if (value.contains("devolucion") || value.contains("reembolso") || value.contains("bonificacion")) && movement.amount > 0 { return .refund }
@@ -849,7 +853,11 @@ final class FinanceStore {
                 : account
             let category = category(for: titleNormalized, flow: flow)
             let kind: MovementKind
-            if titleNormalized.contains("msi") || titleNormalized.contains("meses sin intereses") || titleNormalized.contains("diferid") {
+            if titleNormalized.contains("msi")
+                || titleNormalized.contains("meses sin intereses")
+                || titleNormalized.contains("meses en automatico")
+                || titleNormalized.contains("diferir")
+                || titleNormalized.contains("diferid") {
                 kind = .msi
             } else if titleNormalized.contains("interes") {
                 kind = .interest
@@ -1262,6 +1270,8 @@ final class FinanceStore {
         let kind: MovementKind
         if titleNormalized.contains("msi")
                     || titleNormalized.contains("meses sin intereses")
+                    || titleNormalized.contains("meses en automatico")
+                    || titleNormalized.contains("diferir")
                     || titleNormalized.contains("diferid") {
             kind = .msi
         } else if titleNormalized.contains("interes") {
