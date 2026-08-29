@@ -91,7 +91,11 @@ struct HomeView: View {
                 allowsMultipleSelection: false
             ) { result in
                 switch result {
-                case .success(let url):
+                case .success(let urls):
+                    guard let url = urls.first else {
+                        importMessage = "No se seleccionó un archivo."
+                        return
+                    }
                     do {
                         let summary = try store.importPDF(from: url)
                         let duplicateNote = summary.skipped > 0 ? " Se omitieron \(summary.skipped) repetidos." : ""

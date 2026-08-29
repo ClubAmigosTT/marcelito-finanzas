@@ -223,32 +223,59 @@ struct ExpensesView: View {
 
     private var total: Decimal { groups.reduce(0) { $0 + $1.amount } }
 
+    private func expenseShare(for amount: Decimal) -> String {
+        guard total > 0 else { return "0%" }
+        let percentage = NSDecimalNumber(decimal: (amount / total) * 100).doubleValue
+        return "\(Int(percentage.rounded()))%"
+    }
+
+    private func expenseColor(for index: Int) -> Color {
+        switch min(index, 2) {
+        case 0: Color.marcelitoNavy
+        case 1: Color.marcelitoNavyMid
+        default: Color.marcelitoNavySoft
+        }
+    }
+
+    @ViewBuilder
+    private var identifiedExpensesSection: some View {
+        Section("Gasto identificado") {
+            ForEach(Array(groups.enumerated()), id: \.element.category) { index, item in
+                ExpenseRow(name: item.category, amount: item.amount, share: expenseShare(for: item.amount), color: expenseColor(for: index))
+            }
+        }
+    }
+
+    private var readingSection: some View {
+        Section("Lectura") {
+            VStack(alignment: .leading, spacing: 6) {
+                Text("\(groups.count) categorías explican")
+                Text(total, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                    .font(.headline)
+                Text("Puedes corregir el origen o la categoría desde Movimientos.")
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var reconciliationSection: some View {
+        Section("Conciliación") {
+            LabeledContent("Gasto de viaje", value: store.travelSpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+            LabeledContent("Gasto ordinario", value: store.ordinarySpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+            LabeledContent("Gasto consolidado", value: store.consolidatedRealSpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+            LabeledContent("Tasa de ahorro", value: store.savingsRate.map { "\(Int((NSDecimalNumber(decimal: $0).doubleValue * 100).rounded()))%" } ?? "Pendiente")
+        }
+    }
+
     @ViewBuilder
     private var expenseRows: some View {
         List {
             if groups.isEmpty {
                 ContentUnavailableView("Sin gastos", systemImage: "chart.pie", description: Text("Importa un estado de cuenta para construir tus categorías reales."))
             } else {
-                Section("Gasto identificado") {
-                    ForEach(Array(groups.enumerated()), id: \.element.category) { index, item in
-                        ExpenseRow(name: item.category, amount: item.amount, share: total > 0 ? "\(Int((item.amount / total * 100).rounded()))%" : "0%", color: [.marcelitoNavy, .marcelitoNavyMid, .marcelitoNavySoft][min(index, 2)])
-                    }
-                }
-                Section("Lectura") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("\(groups.count) categorías explican")
-                        Text(total, format: .currency(code: "MXN").precision(.fractionLength(0)))
-                            .font(.headline)
-                        Text("Puedes corregir el origen o la categoría desde Movimientos.")
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Section("Conciliación") {
-                    LabeledContent("Gasto de viaje", value: store.travelSpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
-                    LabeledContent("Gasto ordinario", value: store.ordinarySpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
-                    LabeledContent("Gasto consolidado", value: store.consolidatedRealSpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
-                    LabeledContent("Tasa de ahorro", value: store.savingsRate.map { "\(Int((NSDecimalNumber(decimal: $0).doubleValue * 100).rounded()))%" } ?? "Pendiente")
-                }
+                identifiedExpensesSection
+                readingSection
+                reconciliationSection
             }
         }
     }
