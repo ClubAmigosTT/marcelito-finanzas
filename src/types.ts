@@ -14,7 +14,9 @@ export type TransactionKind =
   | "fee"
   | "other";
 
-export type StatementSource = "Amex" | "Santander" | "BBVA" | "Desconocido";
+// Known brands keep stable labels, while the open string branch lets a file
+// from any other bank retain the name detected from its document or filename.
+export type StatementSource = "Amex" | "Santander" | "BBVA" | "Desconocido" | (string & {});
 
 export type StatementStatus = "ready" | "review";
 
@@ -59,6 +61,7 @@ export type StatementSummary = {
 
 export type ImportResult = {
   source: StatementSource;
+  kind: StatementKind;
   period: string;
   fileName: string;
   mode: "text" | "ocr";
@@ -81,6 +84,7 @@ export type Statement = {
 
 export type ImportCommit = {
   source: StatementSource;
+  kind: StatementKind;
   period: string;
   fileName: string;
   mode: ImportResult["mode"];

@@ -412,7 +412,7 @@ private struct EmptyDataCard: View {
                 .foregroundStyle(Color.marcelitoNavy)
             Text("Empieza con tus estados reales")
                 .font(.title2.bold())
-            Text("Marcelito no carga cifras de muestra. Importa un PDF mensual para guardar banco, periodo y movimientos en este dispositivo.")
+            Text("Marcelito no carga cifras de muestra. Importa un PDF mensual de cualquier banco o tarjeta para guardar cuenta, periodo y movimientos en este dispositivo.")
                 .foregroundStyle(.secondary)
             Button("Importar primer estado", action: importAction)
                 .buttonStyle(.borderedProminent)

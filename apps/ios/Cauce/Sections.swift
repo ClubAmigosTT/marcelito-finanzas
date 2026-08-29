@@ -319,7 +319,12 @@ private struct ExpenseRow: View {
 
 struct AccountsView: View {
     @Environment(FinanceStore.self) private var store
-    private let knownSources = ["Santander", "BBVA", "Amex"]
+
+    private var displayedSources: [String] {
+        let preferred = ["Santander", "BBVA", "Amex"]
+        let imported = store.statements.map(\.source).filter { !preferred.contains($0) }
+        return preferred + Array(Set(imported)).sorted()
+    }
 
     var body: some View {
         NavigationStack {
@@ -367,14 +372,14 @@ struct AccountsView: View {
                     }
                 }
                 Section("Bancos") {
-                    ForEach(knownSources, id: \.self) { source in
+                    ForEach(displayedSources, id: \.self) { source in
                         let statements = store.statements.filter { $0.source == source }
                         let movementCount = store.movements.filter { movement in
                             guard let statementId = movement.statementId else { return false }
                             return statements.contains(where: { $0.id == statementId })
                         }.count
                         HStack(spacing: 12) {
-                            Image(systemName: source == "Amex" ? "creditcard.fill" : "building.columns.fill")
+                            Image(systemName: (source == "Amex" || statements.contains(where: { $0.kind == .card })) ? "creditcard.fill" : "building.columns.fill")
                                 .foregroundStyle(Color.marcelitoNavyMid)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(source)
@@ -444,7 +449,7 @@ private struct StatementSummaryEditor: View {
                 decimalField("Pago mínimo", \.minimumPayment)
                 decimalField("Pago para no generar intereses", \.paymentForNoInterest)
             }
-            if statement.source.localizedCaseInsensitiveContains("Amex") {
+            if statement.kind == .card || statement.source.localizedCaseInsensitiveContains("Amex") {
                 Section("Crédito y MSI") {
                     decimalField("Límite de crédito", \.creditLimit)
                     decimalField("Crédito disponible", \.creditAvailable)
@@ -503,7 +508,7 @@ struct NetWorthView: View {
                 }
                 Section("Estados que alimentan la historia") {
                     if store.statements.isEmpty {
-                        Text("Importa tus PDFs para construir la línea de tiempo por banco y periodo.")
+                        Text("Importa tus PDFs para construir la línea de tiempo por cuenta y periodo.")
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(store.statements) { statement in

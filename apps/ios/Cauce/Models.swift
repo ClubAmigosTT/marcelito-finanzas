@@ -50,7 +50,7 @@ enum MovementKind: String, CaseIterable, Identifiable, Codable, Hashable {
     var id: String { rawValue }
 }
 
-enum StatementKind: String, Codable {
+enum StatementKind: String, Codable, Hashable {
     case card
     case bank
     case unknown
@@ -209,7 +209,7 @@ enum FinanceImportError: LocalizedError {
         case .unreadableDocument:
             "No pudimos leer este PDF. Verifica que sea un estado de cuenta válido."
         case .emptyDocument:
-            "Este PDF no contiene texto ni movimientos reconocibles. Si es un escaneo, usa el PDF original descargado del banco o captura sus cifras manualmente en Cuentas."
+            "Este PDF no contiene texto ni movimientos reconocibles. Revisa que sea un estado de cuenta y, si es un escaneo, confirma los importes en Movimientos después de importarlo."
         }
     }
 }
@@ -251,7 +251,7 @@ final class FinanceStore {
         movements.filter { movement in
             guard isSpend(movement), let statementId = movement.statementId,
                   let statement = statements.first(where: { $0.id == statementId }) else { return false }
-            return statementKind(statement) == .bank
+            return statementKind(statement) != .card
         }.reduce(0) { $0 + absolute($1.amount) }
     }
     var rawExpense: Decimal { movements.filter { $0.flow == .expense }.reduce(0) { $0 + absolute($1.amount) } }
@@ -321,7 +321,9 @@ final class FinanceStore {
 
     private func statementKind(_ statement: StatementRecord) -> StatementKind {
         if let kind = statement.kind { return kind }
-        return statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank
+        if statement.source.localizedCaseInsensitiveContains("Amex") { return .card }
+        if statement.source.localizedCaseInsensitiveContains("Importado") { return .unknown }
+        return .bank
     }
 
     private func movementKind(_ movement: Movement) -> MovementKind {
@@ -557,6 +559,7 @@ final class FinanceStore {
         let source = fileSource == "Importado"
             ? Self.accountName(from: text)
             : fileSource
+        let detectedKind = Self.statementKind(from: text, source: source)
         let candidates: [Movement]
         if usedOCR, source == "Santander" {
             let santanderCandidates = Self.parseSantanderOCR(ocrObservations, fileName: url.lastPathComponent)
@@ -568,6 +571,16 @@ final class FinanceStore {
             candidates = amexCandidates.isEmpty
                 ? Self.parse(text: text, fileName: url.lastPathComponent)
                 : amexCandidates
+        } else if usedOCR {
+            let genericCandidates = Self.parseGenericOCR(
+                ocrObservations,
+                fileName: url.lastPathComponent,
+                source: source,
+                kind: detectedKind
+            )
+            candidates = genericCandidates.isEmpty
+                ? Self.parse(text: text, fileName: url.lastPathComponent)
+                : genericCandidates
         } else {
             candidates = Self.parse(text: text, fileName: url.lastPathComponent)
         }
@@ -594,7 +607,7 @@ final class FinanceStore {
             importedAt: .now,
             transactionCount: fresh.count,
             requiresReview: fresh.isEmpty || usedOCR || summary == nil,
-            kind: source == "Amex" ? .card : .bank,
+            kind: detectedKind,
             summary: summary
         )
         if let index = statements.firstIndex(where: { $0.id == statementId }) {
@@ -743,6 +756,9 @@ final class FinanceStore {
         let dateRegex = try? NSRegularExpression(
             pattern: #"(?<!\d)(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?!\d)"#
         )
+        let isoDateRegex = try? NSRegularExpression(
+            pattern: #"(?<!\d)(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})(?!\d)"#
+        )
         let textDateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(\d{1,2})\s+(?:de\s+)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         )
@@ -757,6 +773,7 @@ final class FinanceStore {
         let account = filenameAccount == "Importado"
             ? accountName(from: documentNormalized)
             : filenameAccount
+        let documentKind = statementKind(from: documentNormalized, source: account)
         let ignoredPhrases = [
             "saldo anterior", "saldo al corte", "pago minimo",
             "limite de credito", "tasa anual", "numero de cuenta",
@@ -779,6 +796,7 @@ final class FinanceStore {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             guard line.count > 1 else { continue }
             let hasDate = (dateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
+                || (isoDateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
                 || (textDateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
             if hasDate {
                 if !pendingRow.isEmpty { rows.append(pendingRow) }
@@ -802,6 +820,7 @@ final class FinanceStore {
             var working = original
             var date = Date()
             let dateMatch = dateRegex.flatMap { firstMatch(in: working, regex: $0) }
+                ?? isoDateRegex.flatMap { firstMatch(in: working, regex: $0) }
                 ?? textDateRegex.flatMap { firstMatch(in: working, regex: $0) }
             if let dateMatch {
                 date = parseDate(dateMatch.text) ?? date
@@ -830,19 +849,35 @@ final class FinanceStore {
                 options: [.diacriticInsensitive, .caseInsensitive],
                 locale: .current
             )
-            let flow: FlowKind
-            if titleNormalized.contains("nomina")
+            let hasCreditMarker = normalized.range(of: #"\b(cr|abono|credito)\b"#, options: .regularExpression) != nil
+            let isRefund = titleNormalized.contains("devolucion")
+                || titleNormalized.contains("reembolso")
+                || titleNormalized.contains("bonificacion")
+            let isCardPayment = titleNormalized.contains("gracias por su pago")
+                || titleNormalized.contains("pago de tarjeta")
+                || (titleNormalized.contains("pago")
+                    && (titleNormalized.contains("tarjeta") || titleNormalized.contains("credito") || documentKind == .card))
+            let isIncome = titleNormalized.contains("nomina")
                 || titleNormalized.contains("sueldo")
+                || titleNormalized.contains("salario")
                 || titleNormalized.contains("deposito")
                 || titleNormalized.contains("abono")
-                || titleNormalized.contains("transferencia recibida") {
+                || titleNormalized.contains("ingreso")
+                || titleNormalized.contains("transferencia recibida")
+            let isTransfer = titleNormalized.contains("transfer")
+                || titleNormalized.contains("traspaso")
+                || titleNormalized.contains("spei")
+                || titleNormalized.contains("entre cuentas")
+                || titleNormalized.contains("clabe")
+            let isStatementCredit = hasCreditMarker && !isCardPayment && !isRefund && !isIncome
+            let flow: FlowKind
+            if isRefund || isStatementCredit {
                 flow = .income
-            } else if titleNormalized.contains("pago")
-                        && account.localizedCaseInsensitiveContains("Amex") {
+            } else if isCardPayment {
                 flow = .debt
-            } else if titleNormalized.contains("transfer")
-                        || titleNormalized.contains("traspaso")
-                        || titleNormalized.contains("pago de tarjeta") {
+            } else if isIncome {
+                flow = .income
+            } else if isTransfer {
                 flow = .transfer
             } else {
                 flow = .expense
@@ -854,7 +889,9 @@ final class FinanceStore {
                 : account
             let category = category(for: titleNormalized, flow: flow)
             let kind: MovementKind
-            if titleNormalized.contains("msi")
+            if isStatementCredit {
+                kind = .credit
+            } else if titleNormalized.contains("msi")
                 || titleNormalized.contains("meses sin intereses")
                 || titleNormalized.contains("meses en automatico")
                 || titleNormalized.contains("diferir")
@@ -864,14 +901,16 @@ final class FinanceStore {
                 kind = .interest
             } else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") {
                 kind = .fee
-            } else if (titleNormalized.contains("devolucion") || titleNormalized.contains("reembolso") || titleNormalized.contains("bonificacion")) && signedAmount > 0 {
+            } else if isRefund && signedAmount > 0 {
                 kind = .refund
-            } else if titleNormalized.contains("pago") && (titleNormalized.contains("tarjeta") || titleNormalized.contains("amex") || titleNormalized.contains("credito")) {
+            } else if isCardPayment {
                 kind = .cardPayment
-            } else if titleNormalized.contains("transfer") || titleNormalized.contains("traspaso") {
+            } else if isTransfer {
                 kind = .bankTransfer
+            } else if isIncome {
+                kind = .income
             } else if flow == .income {
-                kind = titleNormalized.contains("credito") || titleNormalized.contains("abono") ? .credit : .income
+                kind = .credit
             } else {
                 kind = .purchase
             }
@@ -888,6 +927,270 @@ final class FinanceStore {
                 travelRelated: travelRelated
             )
         }
+    }
+
+    /// Universal OCR fallback for scanned statements that are not one of the
+    /// known Santander or Amex layouts. It uses the date as the row anchor and
+    /// the last right-aligned amount (or the penultimate amount for bank rows,
+    /// where the final value is commonly the running balance).
+    private static func parseGenericOCR(
+        _ observations: [OCRObservation],
+        fileName: String,
+        source: String,
+        kind: StatementKind
+    ) -> [Movement] {
+        guard let dayFirstDateRegex = try? NSRegularExpression(
+            pattern: #"(?<!\d)(\d{1,2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{2,4})(?!\d)"#
+        ), let isoDateRegex = try? NSRegularExpression(
+            pattern: #"(?<!\d)(\d{4})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{1,2})(?!\d)"#
+        ), let textDateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(\d{1,2})\s+(?:de\s+)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
+        ), let amountRegex = try? NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
+        ) else {
+            return []
+        }
+
+        let linesByPage = Dictionary(grouping: ocrLines(from: observations), by: \.page)
+        var rows: [[OCRObservation]] = []
+        let ignoredHeaderPhrases = [
+            "estado de cuenta", "resumen de cuenta", "resumen de movimientos",
+            "resumen de meses", "periodo de facturacion", "periodo de corte",
+            "fecha de corte", "fecha limite", "pago minimo", "saldo anterior",
+            "saldo al corte", "saldo final", "saldo actual", "saldo disponible",
+            "limite de credito", "credito disponible", "fecha descripcion",
+            "fecha folio", "total de movimientos", "total de transacciones",
+            "total de las transacciones", "informacion al cliente", "titular de la cuenta",
+            "saldo inicial", "saldo promedio", "pagina"
+        ]
+        for page in linesByPage.keys.sorted() {
+            let pageLines = (linesByPage[page] ?? []).sorted {
+                if abs($0.centerY - $1.centerY) > 0.012 {
+                    return $0.centerY > $1.centerY
+                }
+                return $0.centerX < $1.centerX
+            }
+            var pendingRow: [OCRObservation] = []
+
+            for line in pageLines {
+                let normalized = line.text.folding(
+                    options: [.diacriticInsensitive, .caseInsensitive],
+                    locale: .current
+                )
+                // End the current row before dropping totals or a new section
+                // header. This keeps the final charge in each page/section.
+                if normalized.contains("total de movimientos")
+                    || normalized.contains("total de transacciones")
+                    || normalized.contains("total de las transacciones")
+                    || normalized.contains("total de meses sin intereses") {
+                    if !pendingRow.isEmpty {
+                        rows.append(pendingRow)
+                        pendingRow.removeAll(keepingCapacity: true)
+                    }
+                    continue
+                }
+
+                let dateMatch = firstMatch(in: line.text, regex: dayFirstDateRegex)
+                    ?? firstMatch(in: line.text, regex: isoDateRegex)
+                    ?? firstMatch(in: line.text, regex: textDateRegex)
+                let isTransactionDate = dateMatch != nil
+                    // The date column is usually left aligned, but some banks
+                    // place it farther inboard on a narrow/mobile statement.
+                    // Keep the threshold broad; headers are filtered by text.
+                    && line.boundingBox.minX < 0.72
+                    && !ignoredHeaderPhrases.contains(where: { normalized.contains($0) })
+
+                if isTransactionDate {
+                    if !pendingRow.isEmpty { rows.append(pendingRow) }
+                    pendingRow = [line]
+                } else if !pendingRow.isEmpty {
+                    if ignoredHeaderPhrases.contains(where: { normalized.contains($0) }) {
+                        rows.append(pendingRow)
+                        pendingRow.removeAll(keepingCapacity: true)
+                    } else {
+                        pendingRow.append(line)
+                    }
+                }
+            }
+            if !pendingRow.isEmpty { rows.append(pendingRow) }
+        }
+
+        return rows.compactMap {
+            parseGenericOCRRow(
+                $0,
+                dayFirstDateRegex: dayFirstDateRegex,
+                isoDateRegex: isoDateRegex,
+                textDateRegex: textDateRegex,
+                amountRegex: amountRegex,
+                source: source,
+                kind: kind
+            )
+        }
+    }
+
+    private static func parseGenericOCRRow(
+        _ row: [OCRObservation],
+        dayFirstDateRegex: NSRegularExpression,
+        isoDateRegex: NSRegularExpression,
+        textDateRegex: NSRegularExpression,
+        amountRegex: NSRegularExpression,
+        source: String,
+        kind: StatementKind
+    ) -> Movement? {
+        let fullText = row.map(\.text).joined(separator: " ")
+        let dateMatch = firstMatch(in: fullText, regex: dayFirstDateRegex)
+            ?? firstMatch(in: fullText, regex: isoDateRegex)
+            ?? firstMatch(in: fullText, regex: textDateRegex)
+        guard let dateMatch, let date = parseDate(dateMatch.text) else { return nil }
+
+        let normalizedFullText = fullText.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: .current
+        )
+        let ignoredPhrases = [
+            "estado de cuenta", "resumen de cuenta", "resumen de movimientos",
+            "resumen de meses", "periodo de facturacion", "fecha de corte",
+            "fecha limite", "pago minimo", "saldo anterior", "saldo al corte",
+            "saldo final", "saldo actual", "saldo disponible", "limite de credito",
+            "credito disponible", "total de movimientos", "total de transacciones",
+            "total de las transacciones", "informacion al cliente", "titular de la cuenta",
+            "saldo inicial", "saldo promedio"
+        ]
+        guard !ignoredPhrases.contains(where: { normalizedFullText.contains($0) }) else { return nil }
+
+        let candidates = row.enumerated().flatMap { observationOrder, observation in
+            allMatches(in: observation.text, regex: amountRegex).enumerated().compactMap { matchOrder, match -> OCRAmountCandidate? in
+                guard let value = parseAmount(match.text), abs(value) > 0, abs(value) < 100_000_000 else {
+                    return nil
+                }
+                return OCRAmountCandidate(
+                    value: value,
+                    text: match.text,
+                    x: observation.boundingBox.minX,
+                    order: observationOrder * 100 + matchOrder
+                )
+            }
+        }.sorted { $0.order < $1.order }
+        guard !candidates.isEmpty else { return nil }
+
+        let hasForeignCurrency = ["dolar", "euro", "peso colombiano", "tipo de cambio", " tc:"].contains {
+            normalizedFullText.contains($0)
+        }
+        let bankLikeRow = kind == .bank
+            || ["deposito", "retiro", "saldo", "cuenta de cheques", "cuenta de ahorro", "abono"]
+                .contains { normalizedFullText.contains($0) }
+        let selected: OCRAmountCandidate
+        if bankLikeRow, candidates.count > 1, !hasForeignCurrency {
+            selected = candidates[max(0, candidates.count - 2)]
+        } else {
+            selected = candidates[candidates.count - 1]
+        }
+
+        var title = fullText
+            .replacingOccurrences(
+                of: #"(?i)(?<!\d)\d{1,4}\s*[\/\-.]\s*\d{1,4}\s*[\/\-.]\s*\d{2,4}(?!\d)"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?i)(?<!\d)\d{1,2}\s+(?:de\s+)?[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(of: #"\bRFC[A-Z0-9]+\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"/REF[A-Z0-9_]+\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard title.count >= 3, title.rangeOfCharacter(from: .letters) != nil else { return nil }
+
+        let titleNormalized = title.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: .current
+        )
+        let hasCreditMarker = normalizedFullText.range(of: #"\b(cr|abono|credito)\b"#, options: .regularExpression) != nil
+        let isRefund = titleNormalized.contains("devolucion")
+            || titleNormalized.contains("reembolso")
+            || titleNormalized.contains("bonificacion")
+        let isCardPayment = titleNormalized.contains("gracias por su pago")
+            || titleNormalized.contains("pago de tarjeta")
+            || (titleNormalized.contains("pago")
+                && (titleNormalized.contains("tarjeta") || titleNormalized.contains("credito") || kind == .card))
+        let isIncome = titleNormalized.contains("nomina")
+            || titleNormalized.contains("sueldo")
+            || titleNormalized.contains("salario")
+            || titleNormalized.contains("deposito")
+            || titleNormalized.contains("abono")
+            || titleNormalized.contains("ingreso")
+            || titleNormalized.contains("transferencia recibida")
+        let isTransfer = titleNormalized.contains("transfer")
+            || titleNormalized.contains("traspaso")
+            || titleNormalized.contains("spei")
+            || titleNormalized.contains("entre cuentas")
+            || titleNormalized.contains("clabe")
+        let isStatementCredit = hasCreditMarker && !isCardPayment && !isRefund && !isIncome
+
+        let flow: FlowKind
+        if isRefund || isStatementCredit {
+            flow = .income
+        } else if isCardPayment {
+            flow = .debt
+        } else if isIncome {
+            flow = .income
+        } else if isTransfer {
+            flow = .transfer
+        } else {
+            flow = .expense
+        }
+        let signedAmount = flow == .income ? abs(selected.value) : -abs(selected.value)
+        let displayAccount = flow == .transfer && titleNormalized.contains("amex")
+            ? "Santander a Amex"
+            : source
+        let movementKind: MovementKind
+        if isStatementCredit {
+            movementKind = .credit
+        } else if titleNormalized.contains("msi")
+            || titleNormalized.contains("meses sin intereses")
+            || titleNormalized.contains("meses en automatico")
+            || titleNormalized.contains("diferir")
+            || titleNormalized.contains("diferid") {
+            movementKind = .msi
+        } else if titleNormalized.contains("interes") {
+            movementKind = .interest
+        } else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") {
+            movementKind = .fee
+        } else if isRefund {
+            movementKind = .refund
+        } else if isCardPayment {
+            movementKind = .cardPayment
+        } else if isTransfer {
+            movementKind = .bankTransfer
+        } else if isIncome {
+            movementKind = .income
+        } else {
+            movementKind = .purchase
+        }
+        let travelRelated = [
+            "viaje", "hotel", "hospedaje", "aerolinea", "vuelo", "avion",
+            "transporte", "uber", "taxi", "metro", "renta de auto", "destino", "equipaje",
+            "airbnb", "aeromexico", "vivaaerobus", "volaris"
+        ].contains { titleNormalized.contains($0) }
+
+        return Movement(
+            date: date,
+            title: title,
+            account: displayAccount,
+            category: category(for: titleNormalized, flow: flow),
+            amount: signedAmount,
+            flow: flow,
+            kind: movementKind,
+            travelRelated: travelRelated
+        )
     }
 
     /// Santander's statement is a scanned table. A plain text OCR stream loses
@@ -1269,7 +1572,9 @@ final class FinanceStore {
         let signedAmount = flow == .income ? abs(selected.value) : -abs(selected.value)
         let category = category(for: titleNormalized, flow: flow)
         let kind: MovementKind
-        if titleNormalized.contains("msi")
+        if isStatementCredit {
+            kind = .credit
+        } else if titleNormalized.contains("msi")
                     || titleNormalized.contains("meses sin intereses")
                     || titleNormalized.contains("meses en automatico")
                     || titleNormalized.contains("diferir")
@@ -1281,8 +1586,6 @@ final class FinanceStore {
             kind = .fee
         } else if isRefund {
             kind = .refund
-        } else if isStatementCredit {
-            kind = .credit
         } else if isPayment {
             kind = .cardPayment
         } else {
@@ -1356,16 +1659,27 @@ final class FinanceStore {
         let parts = normalized.split(whereSeparator: { character in
             character == "/" || character == "-" || character == "." || character == " "
         })
-        guard let day = parts.first.flatMap({ Int($0) }) else { return nil }
-        let monthToken = parts.dropFirst().first(where: {
-            Int($0) != nil || monthNumber(String($0)) != nil
-        })
-        guard let monthToken else { return nil }
-        let month = Int(monthToken) ?? monthNumber(String(monthToken))!
-        let year = parts.dropFirst()
-            .compactMap { Int($0) }
-            .last(where: { $0 >= 100 })
-            ?? Calendar.current.component(.year, from: .now)
+        guard let first = parts.first.flatMap({ Int($0) }) else { return nil }
+        let day: Int
+        let month: Int
+        let year: Int
+        if first >= 1_000, parts.count >= 3,
+           let parsedMonth = Int(parts[1]), let parsedDay = Int(parts[2]) {
+            // ISO dates are common in CSV-like PDFs: yyyy-mm-dd.
+            year = first
+            month = parsedMonth
+            day = parsedDay
+        } else {
+            guard let monthToken = parts.dropFirst().first(where: {
+                Int($0) != nil || monthNumber(String($0)) != nil
+            }) else { return nil }
+            day = first
+            month = Int(monthToken) ?? monthNumber(String(monthToken))!
+            year = parts.dropFirst()
+                .compactMap { Int($0) }
+                .last(where: { $0 >= 100 })
+                ?? Calendar.current.component(.year, from: .now)
+        }
         var dateComponents = DateComponents()
         dateComponents.day = day
         dateComponents.month = month
@@ -1447,6 +1761,46 @@ final class FinanceStore {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private static func statementKind(from text: String, source: String) -> StatementKind {
+        if source.localizedCaseInsensitiveContains("Amex") { return .card }
+        if source.localizedCaseInsensitiveContains("Santander")
+            || source.localizedCaseInsensitiveContains("BBVA")
+            || [
+                "Banorte", "HSBC", "Scotiabank", "Citibanamex", "Banamex",
+                "Inbursa", "Banco Azteca", "Banco del Bajío", "Mifel", "INVEX",
+                "Hey Banco", "Nu", "Klar", "Rappi", "Ualá"
+            ].contains(where: { source.localizedCaseInsensitiveContains($0) }) {
+            return .bank
+        }
+
+        let normalized = text.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: .current
+        )
+        let cardMarkers = [
+            "tarjeta de credito", "tarjetahabiente", "credito disponible",
+            "limite de credito", "linea de credito", "pago minimo",
+            "saldo deudor", "credit card", "mastercard", "visa credit"
+        ]
+        let bankMarkers = [
+            "cuenta de cheques", "cuenta de ahorro", "cuenta clabe",
+            "estado de cuenta nomina", "super nomina", "depositos",
+            "retiros", "saldo final", "saldo disponible", "cuenta corriente",
+            "banorte", "hsbc", "scotiabank", "citibanamex", "banamex",
+            "inbursa", "banco azteca", "banco del bajio", "mifel", "invex",
+            "hey banco", "nu mexico", "nu banco", "klar", "rappi", "uala"
+        ]
+        let cardScore = cardMarkers.reduce(into: 0) { score, marker in
+            if normalized.contains(marker) { score += 1 }
+        }
+        let bankScore = bankMarkers.reduce(into: 0) { score, marker in
+            if normalized.contains(marker) { score += 1 }
+        }
+        if cardScore >= 2 && cardScore >= bankScore { return .card }
+        if bankScore >= 2 { return .bank }
+        return .unknown
+    }
+
     private static func accountName(from fileName: String) -> String {
         let normalized = fileName.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
@@ -1488,6 +1842,25 @@ final class FinanceStore {
 
         if normalized.contains("bbva") {
             return "BBVA"
+        }
+        let otherBankNames: [(String, [String])] = [
+            ("Banorte", ["banorte"]),
+            ("HSBC", ["hsbc"]),
+            ("Scotiabank", ["scotiabank"]),
+            ("Citibanamex", ["citibanamex", "banamex"]),
+            ("Inbursa", ["inbursa"]),
+            ("Banco Azteca", ["banco azteca"]),
+            ("Banco del Bajío", ["banco del bajio"]),
+            ("Mifel", ["mifel"]),
+            ("INVEX", ["invex"]),
+            ("Hey Banco", ["hey banco"]),
+            ("Nu", ["nu mexico", "nu banco"]),
+            ("Klar", ["klar"]),
+            ("Rappi", ["rappi"]),
+            ("Ualá", ["uala"])
+        ]
+        if let detected = otherBankNames.first(where: { _, markers in markers.contains(where: { normalized.contains($0) }) })?.0 {
+            return detected
         }
         return "Importado"
     }
