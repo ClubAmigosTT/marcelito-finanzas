@@ -16,10 +16,10 @@ enum FlowKind: String, CaseIterable, Identifiable, Codable, Hashable {
 
     var color: Color {
         switch self {
-        case .income: .marcelitoNavyMid
-        case .transfer: .marcelitoNavySoft
-        case .expense: .marcelitoNavy
-        case .debt: .marcelitoNavy
+        case .income: Color.marcelitoNavyMid
+        case .transfer: Color.marcelitoNavySoft
+        case .expense: Color.marcelitoNavy
+        case .debt: Color.marcelitoNavy
         }
     }
 

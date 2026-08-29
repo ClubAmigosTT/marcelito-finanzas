@@ -19,7 +19,7 @@ struct SignInView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Image(systemName: "point.3.connected.trianglepath.dotted")
                             .font(.largeTitle)
-                            .foregroundStyle(.marcelitoNavy)
+                            .foregroundStyle(Color.marcelitoNavy)
                         Text("Marcelito")
                             .font(.largeTitle.bold())
                         Text("Entiende el camino completo de tu dinero.")
@@ -40,7 +40,7 @@ struct SignInView: View {
                 if let message = auth.message {
                     Section {
                         Label(message, systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(.marcelitoNavy)
+                            .foregroundStyle(Color.marcelitoNavy)
                     }
                 }
 

@@ -58,7 +58,7 @@ struct MovementsView: View {
                 }
             }
             .listRowBackground(Color.marcelitoCreamSoft)
-            .foregroundStyle(.marcelitoNavy)
+            .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)
             .background(Color.marcelitoCream)
             .sheet(isPresented: $isAddPresented) {
@@ -148,7 +148,7 @@ private struct AddMovementView: View {
             }
             .scrollContentBackground(.hidden)
             .background(Color.marcelitoCream)
-            .foregroundStyle(.marcelitoNavy)
+            .foregroundStyle(Color.marcelitoNavy)
         }
     }
 }
@@ -206,7 +206,7 @@ private struct MovementDetailView: View {
         }
         .navigationTitle(movement.title)
         .navigationBarTitleDisplayMode(.inline)
-        .foregroundStyle(.marcelitoNavy)
+        .foregroundStyle(Color.marcelitoNavy)
         .scrollContentBackground(.hidden)
         .background(Color.marcelitoCream)
     }
@@ -253,7 +253,7 @@ struct ExpensesView: View {
             }
             .navigationTitle("Gastos")
             .listRowBackground(Color.marcelitoCreamSoft)
-            .foregroundStyle(.marcelitoNavy)
+            .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)
             .background(Color.marcelitoCream)
         }
@@ -335,7 +335,7 @@ struct AccountsView: View {
                         }.count
                         HStack(spacing: 12) {
                             Image(systemName: source == "Amex" ? "creditcard.fill" : "building.columns.fill")
-                                .foregroundStyle(.marcelitoNavyMid)
+                                .foregroundStyle(Color.marcelitoNavyMid)
                             VStack(alignment: .leading, spacing: 3) {
                                 Text(source)
                                 Text(statements.isEmpty ? "Sin estados importados" : "\(statements.count) estado(s) · \(movementCount) movimientos")
@@ -349,7 +349,7 @@ struct AccountsView: View {
             }
             .navigationTitle("Cuentas")
             .listRowBackground(Color.marcelitoCreamSoft)
-            .foregroundStyle(.marcelitoNavy)
+            .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)
             .background(Color.marcelitoCream)
         }
@@ -430,7 +430,7 @@ private struct StatementSummaryEditor: View {
         .navigationBarTitleDisplayMode(.inline)
         .scrollContentBackground(.hidden)
         .background(Color.marcelitoCream)
-        .foregroundStyle(.marcelitoNavy)
+        .foregroundStyle(Color.marcelitoNavy)
     }
 }
 
@@ -451,7 +451,7 @@ struct NetWorthView: View {
                             .font(.largeTitle.bold())
                             .monospacedDigit()
                         Text(store.liquidPatrimony == nil ? "Pendiente de saldos al corte" : "Efectivo disponible menos deuda")
-                            .foregroundStyle(.marcelitoNavyMid)
+                            .foregroundStyle(Color.marcelitoNavyMid)
                     }
                     .padding(.vertical, 10)
                 }
@@ -473,7 +473,7 @@ struct NetWorthView: View {
             }
             .navigationTitle("Patrimonio")
             .listRowBackground(Color.marcelitoCreamSoft)
-            .foregroundStyle(.marcelitoNavy)
+            .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)
             .background(Color.marcelitoCream)
         }

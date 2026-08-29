@@ -7,3 +7,11 @@ extension Color {
     static let marcelitoCream = Color(red: 0.96, green: 0.94, blue: 0.88)
     static let marcelitoCreamSoft = Color(red: 0.99, green: 0.98, blue: 0.94)
 }
+
+extension ShapeStyle where Self == Color {
+    static var marcelitoNavy: Color { Color.marcelitoNavy }
+    static var marcelitoNavyMid: Color { Color.marcelitoNavyMid }
+    static var marcelitoNavySoft: Color { Color.marcelitoNavySoft }
+    static var marcelitoCream: Color { Color.marcelitoCream }
+    static var marcelitoCreamSoft: Color { Color.marcelitoCreamSoft }
+}

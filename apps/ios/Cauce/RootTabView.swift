@@ -41,7 +41,7 @@ struct HomeView: View {
                         if let lastImportedFile = store.lastImportedFile {
                             Label("Último estado importado: \(lastImportedFile)", systemImage: "checkmark.circle.fill")
                                 .font(.footnote)
-                                .foregroundStyle(.marcelitoNavyMid)
+                                .foregroundStyle(Color.marcelitoNavyMid)
                         }
                     } else {
                         EmptyDataCard { isImporterPresented = true }
@@ -130,19 +130,19 @@ private struct EmptyDataCard: View {
         VStack(alignment: .leading, spacing: 12) {
             Image(systemName: "doc.text.magnifyingglass")
                 .font(.title2)
-                .foregroundStyle(.marcelitoNavy)
+                .foregroundStyle(Color.marcelitoNavy)
             Text("Empieza con tus estados reales")
                 .font(.title2.bold())
             Text("Marcelito no carga cifras de muestra. Importa un PDF mensual para guardar banco, periodo y movimientos en este dispositivo.")
                 .foregroundStyle(.secondary)
             Button("Importar primer estado", action: importAction)
                 .buttonStyle(.borderedProminent)
-                .tint(.marcelitoNavy)
+                .tint(Color.marcelitoNavy)
                 .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .foregroundStyle(.marcelitoNavy)
+        .foregroundStyle(Color.marcelitoNavy)
         .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16))
     }
 }
@@ -163,11 +163,11 @@ private struct NetWorthSummary: View {
                 .monospacedDigit()
             Text(store.liquidPatrimony == nil ? "Pendiente de saldos al corte" : "Efectivo disponible menos deuda")
                 .font(.subheadline)
-                .foregroundStyle(.marcelitoNavyMid)
+                .foregroundStyle(Color.marcelitoNavyMid)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding()
-        .foregroundStyle(.marcelitoNavy)
+        .foregroundStyle(Color.marcelitoNavy)
         .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16))
     }
 }
@@ -208,7 +208,7 @@ private struct DecisionMetricsView: View {
             CalculationLine(label: "Pago para no generar intereses", value: money(store.latestPaymentForNoInterest), detail: "Del estado o calculado")
         }
         .padding()
-        .foregroundStyle(.marcelitoNavy)
+        .foregroundStyle(Color.marcelitoNavy)
         .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16))
     }
 }
@@ -239,9 +239,9 @@ private struct MetricsStrip: View {
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 12) {
-                MetricTile(title: "Ingresos", value: income, symbol: "arrow.down.circle.fill", color: .marcelitoNavyMid)
-                MetricTile(title: "Transferencias", value: transfers, symbol: "arrow.left.arrow.right.circle.fill", color: .marcelitoNavySoft)
-                MetricTile(title: "Gasto del mes", value: monthlyExpense, symbol: "receipt.fill", color: .marcelitoNavy)
+                MetricTile(title: "Ingresos", value: income, symbol: "arrow.down.circle.fill", color: Color.marcelitoNavyMid)
+                MetricTile(title: "Transferencias", value: transfers, symbol: "arrow.left.arrow.right.circle.fill", color: Color.marcelitoNavySoft)
+                MetricTile(title: "Gasto del mes", value: monthlyExpense, symbol: "receipt.fill", color: Color.marcelitoNavy)
             }
         }
     }
@@ -263,7 +263,7 @@ private struct MetricTile: View {
         }
         .frame(width: 156, alignment: .leading)
         .padding()
-        .foregroundStyle(.marcelitoNavy)
+        .foregroundStyle(Color.marcelitoNavy)
         .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16))
     }
 }
@@ -279,7 +279,7 @@ private struct DecisionCallout: View {
                 .foregroundStyle(.secondary)
         }
         .padding()
-        .foregroundStyle(.marcelitoNavy)
+        .foregroundStyle(Color.marcelitoNavy)
         .background(Color.marcelitoNavy.opacity(0.12), in: RoundedRectangle(cornerRadius: 16))
     }
 }

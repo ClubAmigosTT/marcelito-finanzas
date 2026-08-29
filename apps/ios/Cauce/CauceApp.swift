@@ -17,7 +17,7 @@ struct MarcelitoApp: App {
                         .environment(authModel)
                 }
             }
-            .tint(.marcelitoNavy)
+            .tint(Color.marcelitoNavy)
             .preferredColorScheme(.light)
         }
     }
