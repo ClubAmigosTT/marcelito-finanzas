@@ -21,11 +21,14 @@ El workflow `.github/workflows/ios-testflight.yml` compila Marcelito en un runne
 
 1. En [App Store Connect](https://appstoreconnect.apple.com/) crea la app **Marcelito** para iOS con el Bundle ID `mx.marcelito.personal`. La app debe existir antes de subir el primer build.
 2. En **Users and Access > Integrations > App Store Connect API**, crea una clave con rol **App Manager**. Descarga el archivo `.p8` una sola vez y anota el **Key ID** y el **Issuer ID**. No subas el `.p8` al repositorio.
-3. En GitHub abre **Settings > Secrets and variables > Actions > New repository secret** y crea exactamente estos cuatro secretos:
+3. En GitHub abre **Settings > Secrets and variables > Actions > New repository secret** y confirma estos secretos. Los tres últimos ya están configurados en este repositorio y no debes regenerarlos salvo que revoques la firma:
    - `APPLE_TEAM_ID`: el Team ID de Apple Developer (10 caracteres), no tu correo.
    - `APPSTORE_ISSUER_ID`: Issuer ID de App Store Connect.
    - `APPSTORE_API_KEY_ID`: Key ID de la clave anterior.
    - `APPSTORE_API_PRIVATE_KEY`: contenido completo del archivo `.p8`, incluyendo `BEGIN PRIVATE KEY` y `END PRIVATE KEY`.
+   - `APPLE_DISTRIBUTION_P12`: certificado de distribución en Base64.
+   - `APPLE_DISTRIBUTION_P12_PASSWORD`: contraseña del certificado P12.
+   - `APPLE_PROVISIONING_PROFILE`: perfil App Store en Base64 para `mx.marcelito.personal`.
 4. En GitHub abre **Actions > iOS TestFlight > Run workflow**, escribe la versión (por ejemplo `1.0.1`) y ejecuta. Alternativamente, desde una terminal:
 
    ```bash
@@ -35,7 +38,7 @@ El workflow `.github/workflows/ios-testflight.yml` compila Marcelito en un runne
 
 5. Cuando finalice el workflow, espera a que App Store Connect procese el build y agrégalo a un grupo de testers en TestFlight.
 
-La firma automática usa la autenticación de clave de App Store Connect y `-allowProvisioningUpdates`; no hace falta una Mac local ni guardar certificados en GitHub. Si Apple muestra un error de firma, revisa que el Bundle ID exista, que la clave tenga permisos de App Manager y que `APPLE_TEAM_ID` corresponda al equipo que creó la app.
+La firma de distribución se importa en un llavero temporal del runner y se elimina al terminar; no hace falta una Mac local. Si Apple muestra un error de firma, revisa que el Bundle ID exista, que la clave tenga permisos de App Manager y que `APPLE_TEAM_ID` corresponda al equipo que creó la app.
 
 ### Seguridad y consumo
 

@@ -30,10 +30,10 @@ Después selecciona tu equipo en Xcode, ejecuta en el iPhone y usa `Archive > Di
 El workflow [`ios-testflight.yml`](.github/workflows/ios-testflight.yml) compila en macOS y sube el build automáticamente. Para activarlo una vez:
 
 1. Crea en App Store Connect la app **Marcelito** con Bundle ID `mx.marcelito.personal`.
-2. Crea una clave API con rol **App Manager** y agrega a los secretos de GitHub `APPLE_TEAM_ID`, `APPSTORE_ISSUER_ID`, `APPSTORE_API_KEY_ID` y `APPSTORE_API_PRIVATE_KEY` (el contenido del `.p8`).
+2. Crea una clave API con rol **App Manager** y agrega a los secretos de GitHub `APPLE_TEAM_ID`, `APPSTORE_ISSUER_ID`, `APPSTORE_API_KEY_ID` y `APPSTORE_API_PRIVATE_KEY` (el contenido del `.p8`). El repositorio también conserva, como secretos protegidos, la firma de distribución (`APPLE_DISTRIBUTION_P12`, `APPLE_DISTRIBUTION_P12_PASSWORD` y `APPLE_PROVISIONING_PROFILE`); nunca los guardes en el código.
 3. Ejecuta **Actions > iOS TestFlight > Run workflow** con la versión deseada, o publica una etiqueta `ios-v1.0.1`.
 
-La acción no corre en cada push. Consulta [Apple sobre claves de App Store Connect](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/) y [GitHub sobre facturación de Actions](https://docs.github.com/en/billing/concepts/product-billing/github-actions) antes de automatizar ejecuciones frecuentes. Nunca guardes contraseñas, códigos 2FA o claves `.p8` en el código.
+La acción no corre en cada push. Consulta [Apple sobre claves de App Store Connect](https://developer.apple.com/help/app-store-connect/manage-builds/upload-builds/) y [GitHub sobre facturación de Actions](https://docs.github.com/en/billing/concepts/product-billing/github-actions) antes de automatizar ejecuciones frecuentes. Nunca guardes contraseñas, códigos 2FA, certificados P12, perfiles de aprovisionamiento o claves `.p8` en el código.
 
 ## Privacidad
 
