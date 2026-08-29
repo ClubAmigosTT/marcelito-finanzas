@@ -16,6 +16,9 @@ struct RootTabView: View {
             NetWorthView()
                 .tabItem { Label("Patrimonio", systemImage: "chart.line.uptrend.xyaxis") }
         }
+        .tint(Color.marcelitoNavy)
+        .toolbarBackground(Color.marcelitoCreamSoft, for: .tabBar)
+        .toolbarBackground(.visible, for: .tabBar)
     }
 }
 
@@ -77,6 +80,8 @@ struct HomeView: View {
             .background(Color.marcelitoCream.ignoresSafeArea())
             .navigationTitle("Inicio")
             .navigationBarTitleDisplayMode(.large)
+            .toolbarBackground(Color.marcelitoCream, for: .navigationBar)
+            .toolbarBackground(.visible, for: .navigationBar)
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { isImporterPresented = true } label: {
@@ -91,23 +96,31 @@ struct HomeView: View {
             .fileImporter(
                 isPresented: $isImporterPresented,
                 allowedContentTypes: [.pdf],
-                allowsMultipleSelection: false
+                allowsMultipleSelection: true
             ) { result in
                 switch result {
                 case .success(let urls):
-                    guard let url = urls.first else {
+                    guard !urls.isEmpty else {
                         importMessage = "No se seleccionó un archivo."
                         return
                     }
-                    do {
-                        let summary = try store.importPDF(from: url)
-                        let duplicateNote = summary.skipped > 0 ? " Se omitieron \(summary.skipped) repetidos." : ""
-                        let reviewNote = summary.requiresReview ? " Quedó pendiente de revisión manual." : ""
-                        let ocrNote = summary.usedOCR ? " El PDF era un escaneo; revisa los movimientos detectados." : ""
-                        importMessage = "\(summary.source) · \(summary.period): se agregaron \(summary.imported) movimientos.\(duplicateNote)\(reviewNote)\(ocrNote)"
-                    } catch {
-                        importMessage = error.localizedDescription
+                    var reports: [String] = []
+                    for url in urls {
+                        do {
+                            let summary = try store.importPDF(from: url)
+                            let movementText = summary.imported == 0
+                                ? "no se detectaron movimientos"
+                                : "se agregaron \(summary.imported) movimientos"
+                            let duplicateNote = summary.skipped > 0 ? "; \(summary.skipped) repetidos omitidos" : ""
+                            let reviewNote = summary.requiresReview ? "; requiere revisión" : ""
+                            let ocrNote = summary.usedOCR ? "; OCR aplicado" : ""
+                            reports.append("\(summary.source) · \(summary.period): \(movementText)\(duplicateNote)\(reviewNote)\(ocrNote)")
+                        } catch {
+                            reports.append("\(url.lastPathComponent): \(error.localizedDescription)")
+                        }
                     }
+                    let prefix = urls.count > 1 ? "Se revisaron \(urls.count) archivos.\n\n" : ""
+                    importMessage = prefix + reports.joined(separator: "\n\n")
                 case .failure(let error):
                     importMessage = error.localizedDescription
                 }

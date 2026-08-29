@@ -24,6 +24,9 @@ targets:
         INFOPLIST_KEY_NSFaceIDUsageDescription: "Marcelito usa Face ID para proteger el acceso a tus finanzas."
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         INFOPLIST_KEY_CFBundleDisplayName: Marcelito
+        # Declara una pantalla de lanzamiento moderna para evitar que iOS use
+        # el lienzo de compatibilidad 320x480 en los iPhone actuales.
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
     scheme:

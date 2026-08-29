@@ -544,14 +544,20 @@ final class FinanceStore {
             .compactMap { document.page(at: $0)?.string }
             .joined(separator: "\n")
         let usedOCR = extractedText.trimmingCharacters(in: .whitespacesAndNewlines).count < 120
-        let text = usedOCR ? Self.ocrText(from: document) : extractedText
+        let ocrObservations = usedOCR ? Self.ocrObservations(from: document) : []
+        let text = usedOCR ? Self.ocrText(from: ocrObservations) : extractedText
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FinanceImportError.emptyDocument
         }
-        let candidates = Self.parse(text: text, fileName: url.lastPathComponent)
         let source = Self.accountName(from: url.lastPathComponent) == "Importado"
             ? Self.accountName(from: text)
             : Self.accountName(from: url.lastPathComponent)
+        let candidates: [Movement]
+        if usedOCR, source == "Santander" {
+            candidates = Self.parseSantanderOCR(ocrObservations, fileName: url.lastPathComponent)
+        } else {
+            candidates = Self.parse(text: text, fileName: url.lastPathComponent)
+        }
         let period = Self.periodLabel(from: text, fileName: url.lastPathComponent)
         let summary = Self.summary(from: text, source: source)
         let existingStatement = statements.first(where: { $0.fileName == url.lastPathComponent })
@@ -618,12 +624,28 @@ final class FinanceStore {
         Movement(date: .now.addingTimeInterval(-259_200), title: "Reserva de viaje", account: "Amex", category: "Viajes", amount: -6_270, flow: .expense)
     */]
 
-    private static func ocrText(from document: PDFDocument) -> String {
-        var lines: [String] = []
+    private struct OCRObservation {
+        let page: Int
+        let text: String
+        let boundingBox: CGRect
+
+        var centerX: CGFloat { boundingBox.midX }
+        var centerY: CGFloat { boundingBox.midY }
+    }
+
+    private struct OCRAmountCandidate {
+        let value: Decimal
+        let text: String
+        let x: CGFloat
+        let order: Int
+    }
+
+    private static func ocrObservations(from document: PDFDocument) -> [OCRObservation] {
+        var observations: [OCRObservation] = []
         let pageSize = CGSize(width: 1800, height: 2400)
 
-        for index in 0..<document.pageCount {
-            guard let page = document.page(at: index) else { continue }
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
             let image = page.thumbnail(of: pageSize, for: .mediaBox)
             guard let cgImage = image.cgImage else { continue }
 
@@ -638,12 +660,27 @@ final class FinanceStore {
                 continue
             }
 
-            lines.append(contentsOf: (request.results ?? []).compactMap {
-                $0.topCandidates(1).first?.string
-            })
+            let pageObservations = (request.results ?? []).compactMap { result -> OCRObservation? in
+                guard let text = result.topCandidates(1).first?.string,
+                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    return nil
+                }
+                return OCRObservation(page: pageIndex, text: text, boundingBox: result.boundingBox)
+            }
+            .sorted {
+                if abs($0.centerY - $1.centerY) > 0.008 {
+                    return $0.centerY > $1.centerY
+                }
+                return $0.centerX < $1.centerX
+            }
+            observations.append(contentsOf: pageObservations)
         }
 
-        return lines.joined(separator: "\n")
+        return observations
+    }
+
+    private static func ocrText(from observations: [OCRObservation]) -> String {
+        observations.map(\.text).joined(separator: "\n")
     }
 
     private struct TextMatch {
@@ -796,6 +833,201 @@ final class FinanceStore {
                 travelRelated: travelRelated
             )
         }
+    }
+
+    /// Santander's statement is a scanned table. A plain text OCR stream loses
+    /// the distinction between the transaction amount and the running balance,
+    /// so use Vision bounding boxes to read the deposit/withdrawal columns.
+    private static func parseSantanderOCR(
+        _ observations: [OCRObservation],
+        fileName: String
+    ) -> [Movement] {
+        guard let dateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-.]\s*(\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*(\d{2,4})(?!\d)"#
+        ), let amountRegex = try? NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
+        ) else {
+            return []
+        }
+
+        let observationsByPage = Dictionary(grouping: observations, by: \.page)
+        var parsed: [Movement] = []
+
+        for page in observationsByPage.keys.sorted() {
+            let pageObservations = (observationsByPage[page] ?? []).sorted {
+                if abs($0.centerY - $1.centerY) > 0.008 {
+                    return $0.centerY > $1.centerY
+                }
+                return $0.centerX < $1.centerX
+            }
+
+            var rows: [[OCRObservation]] = []
+            var pendingRow: [OCRObservation] = []
+            for observation in pageObservations {
+                let normalized = observation.text.folding(
+                    options: [.diacriticInsensitive, .caseInsensitive],
+                    locale: .current
+                )
+                let hasDate = firstMatch(in: observation.text, regex: dateRegex) != nil
+                let isDateCell = hasDate
+                    && observation.boundingBox.minX < 0.24
+                    && !normalized.contains("periodo")
+                    && !normalized.contains("corte")
+                    && !normalized.contains("pagina")
+
+                if isDateCell {
+                    if !pendingRow.isEmpty { rows.append(pendingRow) }
+                    pendingRow = [observation]
+                } else if !pendingRow.isEmpty {
+                    pendingRow.append(observation)
+                }
+            }
+            if !pendingRow.isEmpty { rows.append(pendingRow) }
+
+            for row in rows {
+                if let movement = parseSantanderRow(row, dateRegex: dateRegex, amountRegex: amountRegex) {
+                    parsed.append(movement)
+                }
+            }
+        }
+
+        return parsed
+    }
+
+    private static func parseSantanderRow(
+        _ row: [OCRObservation],
+        dateRegex: NSRegularExpression,
+        amountRegex: NSRegularExpression
+    ) -> Movement? {
+        guard let dateObservation = row.first(where: {
+            $0.boundingBox.minX < 0.24 && firstMatch(in: $0.text, regex: dateRegex) != nil
+        }), let dateMatch = firstMatch(in: dateObservation.text, regex: dateRegex),
+        let date = parseDate(dateMatch.text) else {
+            return nil
+        }
+
+        let fullText = row.map(\.text).joined(separator: " ")
+        let normalizedFullText = fullText.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: .current
+        )
+        let ignoredPhrases = [
+            "detalle de movimientos", "saldo final del periodo anterior",
+            "fecha folio descripcion", "cuenta de cheques", "super nomina",
+            "estado de cuenta nomina"
+        ]
+        guard !ignoredPhrases.contains(where: { normalizedFullText.contains($0) }) else {
+            return nil
+        }
+
+        var amountCandidates: [OCRAmountCandidate] = []
+        for (order, observation) in row.enumerated() {
+            for match in allMatches(in: observation.text, regex: amountRegex) {
+                guard let value = parseAmount(match.text), abs(value) > 0, abs(value) < 10_000_000 else {
+                    continue
+                }
+                amountCandidates.append(
+                    OCRAmountCandidate(
+                        value: value,
+                        text: match.text,
+                        x: observation.boundingBox.minX,
+                        order: order
+                    )
+                )
+            }
+        }
+        guard !amountCandidates.isEmpty else { return nil }
+
+        // On Santander's table the deposit and withdrawal columns sit before
+        // the running balance. Prefer those columns so the balance is never
+        // mistaken for a purchase.
+        let columnCandidates = amountCandidates.filter { $0.x >= 0.53 && $0.x < 0.86 }
+        let selected = columnCandidates.sorted { $0.order < $1.order }.first
+            ?? amountCandidates
+                .filter { $0.x < 0.90 && ($0.text.contains(".") || $0.text.contains(",")) }
+                .sorted { $0.order < $1.order }
+                .first
+        guard let selected else { return nil }
+
+        let titleParts = row
+            .filter { $0.centerX >= 0.18 && $0.centerX < 0.62 }
+            .map(\.text)
+        var title = titleParts.isEmpty ? fullText : titleParts.joined(separator: " ")
+        title = title
+            .replacingOccurrences(
+                of: #"(?i)(?<!\d)\d{1,2}\s*[\/\-.]\s*(?:\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*\d{2,4}(?!\d)"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(of: #"\bRFC[A-Z0-9]+\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"/REF[A-Z0-9_]+\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard title.count >= 3, title.rangeOfCharacter(from: .letters) != nil else { return nil }
+
+        let titleNormalized = title.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: .current
+        )
+        let depositColumn = selected.x >= 0.53 && selected.x < 0.73
+        let semanticDeposit = titleNormalized.contains("nomina")
+            || titleNormalized.contains("sueldo")
+            || titleNormalized.contains("deposito")
+            || titleNormalized.contains("abono")
+            || titleNormalized.contains("transferencia recibida")
+        let flow: FlowKind
+        if depositColumn || semanticDeposit {
+            flow = .income
+        } else if titleNormalized.contains("transfer")
+                    || titleNormalized.contains("traspaso")
+                    || titleNormalized.contains("pago de tarjeta") {
+            flow = .transfer
+        } else {
+            flow = .expense
+        }
+
+        let signedAmount = flow == .income ? abs(selected.value) : -abs(selected.value)
+        let displayAccount = flow == .transfer && titleNormalized.contains("amex")
+            ? "Santander a Amex"
+            : "Santander"
+        let category = category(for: titleNormalized, flow: flow)
+        let kind: MovementKind
+        if titleNormalized.contains("msi") || titleNormalized.contains("meses sin intereses") || titleNormalized.contains("diferid") {
+            kind = .msi
+        } else if titleNormalized.contains("interes") {
+            kind = .interest
+        } else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") {
+            kind = .fee
+        } else if titleNormalized.contains("pago") && (titleNormalized.contains("tarjeta") || titleNormalized.contains("amex") || titleNormalized.contains("credito")) {
+            kind = .cardPayment
+        } else if titleNormalized.contains("transfer") || titleNormalized.contains("traspaso") {
+            kind = .bankTransfer
+        } else if flow == .income {
+            kind = titleNormalized.contains("credito") || titleNormalized.contains("abono") ? .credit : .income
+        } else {
+            kind = .purchase
+        }
+        let travelRelated = [
+            "viaje", "hotel", "hospedaje", "aerolinea", "vuelo", "avion",
+            "transporte", "uber", "taxi", "metro", "renta de auto", "destino", "equipaje"
+        ].contains { titleNormalized.contains($0) }
+
+        return Movement(
+            date: date,
+            title: title,
+            account: displayAccount,
+            category: category,
+            amount: signedAmount,
+            flow: flow,
+            kind: kind,
+            travelRelated: travelRelated
+        )
     }
 
     private static func firstMatch(in string: String, regex: NSRegularExpression) -> TextMatch? {
@@ -951,6 +1183,11 @@ final class FinanceStore {
             return "BBVA"
         }
         if normalized.contains("santander") {
+            return "Santander"
+        }
+        if normalized.contains("estado de cuenta nomina")
+            || normalized.contains("detalle de movimientos cuenta")
+            || normalized.contains("super nomina") {
             return "Santander"
         }
         return "Importado"
