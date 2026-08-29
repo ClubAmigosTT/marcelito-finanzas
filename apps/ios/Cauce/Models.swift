@@ -921,8 +921,8 @@ final class FinanceStore {
         }
 
         var amountCandidates: [OCRAmountCandidate] = []
-        for (order, observation) in row.enumerated() {
-            for match in allMatches(in: observation.text, regex: amountRegex) {
+        for (observationOrder, observation) in row.enumerated() {
+            for (matchOrder, match) in allMatches(in: observation.text, regex: amountRegex).enumerated() {
                 guard let value = parseAmount(match.text), abs(value) > 0, abs(value) < 10_000_000 else {
                     continue
                 }
@@ -931,7 +931,7 @@ final class FinanceStore {
                         value: value,
                         text: match.text,
                         x: observation.boundingBox.minX,
-                        order: order
+                        order: observationOrder * 100 + matchOrder
                     )
                 )
             }
@@ -941,12 +941,20 @@ final class FinanceStore {
         // On Santander's table the deposit and withdrawal columns sit before
         // the running balance. Prefer those columns so the balance is never
         // mistaken for a purchase.
-        let columnCandidates = amountCandidates.filter { $0.x >= 0.53 && $0.x < 0.86 }
+        let columnCandidates = amountCandidates.filter { $0.x >= 0.59 && $0.x < 0.86 }
         let selected = columnCandidates.sorted { $0.order < $1.order }.first
-            ?? amountCandidates
-                .filter { $0.x < 0.90 && ($0.text.contains(".") || $0.text.contains(",")) }
-                .sorted { $0.order < $1.order }
-                .first
+            ?? { () -> OCRAmountCandidate? in
+                let fallbackCandidates = amountCandidates
+                    .filter { $0.x < 0.90 && ($0.text.contains(".") || $0.text.contains(",")) }
+                    .sorted { $0.order < $1.order }
+                // If Vision returns the whole row as one observation, the
+                // final amount is usually the running balance. Use the
+                // penultimate amount (the transaction) in that case.
+                if fallbackCandidates.count > 1 {
+                    return fallbackCandidates[fallbackCandidates.count - 2]
+                }
+                return fallbackCandidates.first
+            }()
         guard let selected else { return nil }
 
         let titleParts = row
@@ -975,7 +983,7 @@ final class FinanceStore {
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: .current
         )
-        let depositColumn = selected.x >= 0.53 && selected.x < 0.73
+        let depositColumn = selected.x >= 0.59 && selected.x < 0.73
         let semanticDeposit = titleNormalized.contains("nomina")
             || titleNormalized.contains("sueldo")
             || titleNormalized.contains("deposito")
