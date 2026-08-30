@@ -864,85 +864,98 @@ private struct CashFlowLineChart: View {
     @Binding var selectedPoint: CashFlowPoint?
 
     var body: some View {
-        Chart {
-            ForEach(points) { point in
-                LineMark(
-                    x: .value("Fecha", point.date),
-                    y: .value("Monto", point.income),
-                    series: .value("Serie", "Ingresos")
-                )
-                .foregroundStyle(by: .value("Serie", "Ingresos"))
-                .lineStyle(StrokeStyle(lineWidth: 2.5))
-            }
-            ForEach(points) { point in
-                LineMark(
-                    x: .value("Fecha", point.date),
-                    y: .value("Monto", point.expense),
-                    series: .value("Serie", "Gastos")
-                )
-                .foregroundStyle(by: .value("Serie", "Gastos"))
-                .lineStyle(StrokeStyle(lineWidth: 2.5))
-            }
-            ForEach(points) { point in
-                LineMark(
-                    x: .value("Fecha", point.date),
-                    y: .value("Monto", point.balance),
-                    series: .value("Serie", "Balance acumulado")
-                )
-                .foregroundStyle(by: .value("Serie", "Balance acumulado"))
-                .lineStyle(StrokeStyle(lineWidth: 2, dash: [6, 4]))
-            }
-            if let selectedPoint {
-                RuleMark(x: .value("Fecha seleccionada", selectedPoint.date))
-                    .foregroundStyle(Color.marcelitoNavy.opacity(0.35))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
-            }
-        }
-        .chartForegroundStyleScale([
-            "Ingresos": Color.marcelitoSuccess,
-            "Gastos": Color.marcelitoAmber,
-            "Balance acumulado": Color.marcelitoNavy
-        ])
-        .chartYScale(domain: yDomain)
-        .chartXAxis {
-            AxisMarks(values: .automatic(desiredCount: 5)) { _ in
-                AxisGridLine()
-                AxisTick()
-                AxisValueLabel()
-            }
-        }
-        .chartYAxis {
-            AxisMarks(position: .leading) { _ in
-                AxisGridLine()
-                AxisTick()
-                AxisValueLabel()
-            }
-        }
-        .chartLegend(position: .bottom, alignment: .leading, spacing: 12)
-        .chartOverlay { proxy in
-            GeometryReader { geometry in
-                Rectangle()
-                    .fill(.clear)
-                    .contentShape(Rectangle())
-                    .gesture(
-                        SpatialTapGesture()
-                            .onEnded { event in
-                                let plotFrame = geometry[proxy.plotFrame]
-                                let x = event.location.x - plotFrame.origin.x
-                                guard x >= 0, x <= plotFrame.size.width,
-                                      let date = proxy.value(atX: x, as: Date.self),
-                                      let closest = points.min(by: {
-                                          abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
-                                      }) else { return }
-                                selectedPoint = closest
-                            }
+        VStack(alignment: .leading, spacing: 8) {
+            Chart {
+                ForEach(points) { point in
+                    LineMark(
+                        x: .value("Fecha", point.date),
+                        y: .value("Monto", point.income),
+                        series: .value("Serie", "Ingresos")
                     )
+                    .foregroundStyle(Color.marcelitoSuccess)
+                    .lineStyle(StrokeStyle(lineWidth: 2.5))
+                }
+                ForEach(points) { point in
+                    LineMark(
+                        x: .value("Fecha", point.date),
+                        y: .value("Monto", point.expense),
+                        series: .value("Serie", "Gastos")
+                    )
+                    .foregroundStyle(Color.marcelitoAmber)
+                    .lineStyle(StrokeStyle(lineWidth: 2.5))
+                }
+                ForEach(points) { point in
+                    LineMark(
+                        x: .value("Fecha", point.date),
+                        y: .value("Monto", point.balance),
+                        series: .value("Serie", "Balance")
+                    )
+                    .foregroundStyle(Color.marcelitoNavy)
+                    .lineStyle(StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                }
             }
+            .chartYScale(domain: yDomain)
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 5)) { _ in
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel()
+                }
+            }
+            .chartYAxis {
+                AxisMarks(position: .leading) { _ in
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel()
+                }
+            }
+            .chartOverlay { proxy in
+                GeometryReader { geometry in
+                    Rectangle()
+                        .fill(.clear)
+                        .contentShape(Rectangle())
+                        .gesture(
+                            SpatialTapGesture()
+                                .onEnded { event in
+                                    let plotFrame = geometry[proxy.plotFrame]
+                                    let x = event.location.x - plotFrame.origin.x
+                                    guard x >= 0, x <= plotFrame.size.width,
+                                          let date = proxy.value(atX: x, as: Date.self),
+                                          let closest = points.min(by: {
+                                              abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
+                                          }) else { return }
+                                    selectedPoint = closest
+                                }
+                        )
+                }
+            }
+            .frame(height: 250)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Gráfica de líneas de ingresos, gastos y balance acumulado por fecha")
+            .accessibilityHint("Toca una fecha para ver sus importes y comportamiento reciente")
+
+            HStack(spacing: 12) {
+                CashFlowLegendItem(label: "Ingresos", color: Color.marcelitoSuccess)
+                CashFlowLegendItem(label: "Gastos", color: Color.marcelitoAmber)
+                CashFlowLegendItem(label: "Balance", color: Color.marcelitoNavy)
+            }
+            .font(.caption2)
         }
-        .frame(height: 250)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Gráfica de líneas de ingresos, gastos y balance acumulado por fecha")
-        .accessibilityHint("Toca una fecha para ver sus importes y comportamiento reciente")
+    }
+}
+
+private struct CashFlowLegendItem: View {
+    let label: String
+    let color: Color
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+            Text(label)
+        }
+        .foregroundStyle(Color.marcelitoNavy)
     }
 }
 
