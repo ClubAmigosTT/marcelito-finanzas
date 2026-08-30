@@ -739,7 +739,6 @@ private struct AccountDetailView: View {
                 Text("Próxima decisión")
                     .font(.subheadline.weight(.semibold))
                 LabeledContent("Pago para no generar intereses", value: latest.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
-                LabeledContent("Pago mínimo", value: latest.minimumPayment?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
             }
             .foregroundStyle(Color.marcelitoNavy)
             .padding(16)
