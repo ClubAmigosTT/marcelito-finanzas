@@ -616,7 +616,7 @@ struct AccountsView: View {
                                         .font(.subheadline.weight(.semibold))
                                         .monospacedDigit()
                                 }
-                                Text(kind == .card ? "Pago próximo: \(metric?.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")" : "Cuenta de efectivo")
+                                Text(kind == .card ? "Pago próximo: \(metric?.minimumPayment?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente") · No intereses: \(metric?.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")" : "Cuenta de efectivo")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -987,6 +987,8 @@ private struct StatementSummaryEditor: View {
                     decimalField("Límite de crédito", \.creditLimit)
                     decimalField("Crédito disponible", \.creditAvailable)
                     decimalField("Deuda al corte", \.debtBalance)
+                    decimalField("Saldo revolvente", \.revolvingBalance)
+                    decimalField("MSI pendientes", \.msiPending)
                     decimalField("MSI original diferido", \.msiOriginalDeferred)
                     TextField("Mensualidades MSI activas", text: installmentBinding)
                         .keyboardType(.numberPad)

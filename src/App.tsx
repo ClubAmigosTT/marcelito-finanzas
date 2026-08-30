@@ -32,6 +32,7 @@ import { categories } from "./data";
 import { buildFinanceMetrics, defaultStatementKind, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
 import { inspectPdf } from "./pdfImport";
 import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
+import { runTransactionPipeline } from "./reconciliation";
 import type { FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementSource, StatementSummary, Transaction } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
@@ -236,7 +237,9 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   const [importOpen, setImportOpen] = useState(false);
   const reduceMotion = useReducedMotion();
   const latestStatement = statements[0];
-  const metrics = useMemo(() => buildFinanceMetrics(transactions, statements), [transactions, statements]);
+  const pipeline = useMemo(() => runTransactionPipeline(transactions, statements), [transactions, statements]);
+  const ledgerTransactions = pipeline.transactions;
+  const metrics = useMemo(() => buildFinanceMetrics(transactions, statements, pipeline), [transactions, statements, pipeline]);
 
   useEffect(() => {
     localStorage.setItem(transactionStorageKey, JSON.stringify(transactions));
@@ -264,9 +267,6 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
     const importedTransactions = commit.transactions
       .filter((item) => item.description.trim().length >= 3 && Number.isFinite(item.amount) && item.amount !== 0)
       .map((item, index) => ({ ...item, id: `${statementId}-${index}-${item.id}`, statementId }));
-    const needsReview = importedTransactions.some((item) => item.category === "Sin categoría" || (item.confidence ?? 1) < 0.75)
-      || commit.source === "Desconocido"
-      || commit.kind === "unknown";
     const statement: Statement = {
       id: statementId,
       source: commit.source,
@@ -275,24 +275,32 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       importedAt,
       mode: commit.mode,
       transactionCount: importedTransactions.length,
-      status: importedTransactions.length && !needsReview ? "ready" : "review",
+      status: "review",
       kind: commit.kind ?? previous?.kind ?? defaultStatementKind(commit.source),
       summary: commit.summary,
     };
+    const nextStatements = previous
+      ? statements.map((item) => item.id === statementId ? statement : item)
+      : [statement, ...statements];
+    const withoutPrevious = previous ? transactions.filter((item) => item.statementId !== statementId) : transactions;
+    const importedPipeline = runTransactionPipeline([...importedTransactions, ...withoutPrevious], nextStatements);
+    const needsReview = importedTransactions.some((item) => item.category === "Sin categoría" || (item.confidence ?? 1) < 0.75)
+      || commit.source === "Desconocido"
+      || commit.kind === "unknown"
+      || importedPipeline.audit.criticalIssues.length > 0;
+    statement.status = importedTransactions.length && !needsReview ? "ready" : "review";
+    statement.transactionCount = importedPipeline.transactions.filter((item) => item.statementId === statementId).length;
 
     if (commit.categoryRules && Object.keys(commit.categoryRules).length) {
       setCategoryRules((current) => ({ ...current, ...commit.categoryRules }));
     }
 
-    setStatements((current) => previous ? current.map((item) => item.id === statementId ? statement : item) : [statement, ...current]);
-    setTransactions((current) => {
-      const withoutPrevious = previous ? current.filter((item) => item.statementId !== statementId) : current;
-      // A date/description/amount/account match is not a stable identity:
-      // two genuine purchases can share all four values. Re-importing the
-      // same file is already safe because its statement rows were removed
-      // above, so every row from a different statement must be retained.
-      return [...importedTransactions, ...withoutPrevious];
-    });
+    setStatements(nextStatements);
+    // Keep the raw extracted rows so the next pipeline run can explain
+    // rejected/admin rows and cross-statement duplicates in the audit view.
+    // All KPI and screen consumers use `ledgerTransactions` (the canonical
+    // pipeline output), never this raw collection directly.
+    setTransactions([...importedTransactions, ...withoutPrevious]);
     setImportOpen(false);
   }
 
@@ -329,9 +337,9 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
         </header>
         <AnimatePresence mode="wait">
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
-            {section === "Resumen" && <Home transactions={transactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} onImport={() => setImportOpen(true)} />}
-            {section === "Gastos" && <Expenses transactions={transactions} statements={statements} metrics={metrics} onImport={() => setImportOpen(true)} />}
-            {section === "Cuentas" && <Accounts transactions={transactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
+            {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} onImport={() => setImportOpen(true)} />}
+            {section === "Gastos" && <Expenses transactions={ledgerTransactions} statements={statements} metrics={metrics} onImport={() => setImportOpen(true)} />}
+            {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
             {section === "Patrimonio" && <NetWorth metrics={metrics} />}
           </motion.div>
         </AnimatePresence>
@@ -359,6 +367,7 @@ function Home({ transactions, statements, metrics, goals, setGoals, onImport }: 
   return (
     <>
       <CFOBrief metrics={metrics} />
+      {metrics.isProvisional && <div className="provisional-banner" role="status"><Warning size={18} /><span>Estos KPI son provisionales hasta corregir los movimientos señalados en Calidad de datos / conciliación.</span></div>}
       <section className="summary-heading">
         <div><p className="summary-eyebrow">Tu situación financiera</p><h1>Una lectura clara de tu dinero.</h1><p>Actualizado con tus estados y movimientos reales.</p></div>
         <span className="month-button data-period">{latestPeriodLabel}</span>
@@ -377,11 +386,13 @@ function Home({ transactions, statements, metrics, goals, setGoals, onImport }: 
       <SpendTrendChart periods={metrics.analyticsPeriods} />
       <CashFlowTrendChart points={metrics.cashFlowHistory} />
       <SpendingSplit period={metrics.analyticsPeriods[0]} />
+      <DebtBreakdown metrics={metrics} />
       <ProjectionPanel projection={metrics.projection} />
       <ScenarioSimulator metrics={metrics} />
       <ExecutiveAlerts alerts={metrics.executiveAlerts} />
       <GoalsPanel metrics={metrics} goals={goals} setGoals={setGoals} />
       <DataQualityIndicator metrics={metrics} />
+      <AuditDiagnostics metrics={metrics} />
     </>
   );
 }
@@ -645,11 +656,24 @@ function SpendingSplit({ period }: { period?: AnalyticsPeriod }) {
 
 function DataQualityIndicator({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
   const quality = metrics.dataQuality;
-  const alert = quality.relevantReviewCount > 0;
+  const alert = quality.relevantReviewCount > 0 || quality.critical;
   return <section className={`data-quality${alert ? " has-alert" : ""}`} aria-label="Calidad de datos y conciliación">
-    <div><span>Calidad de datos / conciliación</span><strong>{Math.round(quality.classifiedPercent)}%</strong><small>{quality.classifiedCount} de {quality.totalCount} movimientos clasificados</small></div>
-    {alert ? <p className="quality-alert">Revisa {quality.relevantReviewCount} movimiento{quality.relevantReviewCount === 1 ? " relevante" : "s relevantes"} antes de tomar decisiones.</p> : <p className="quality-ok">Sin alertas relevantes de clasificación.</p>}
+    <div><span>Calidad de datos / conciliación</span><strong>{Math.round(quality.classifiedPercent)}%</strong><small>{Math.round(quality.reconciledPercent)}% conciliado · {quality.classifiedCount} de {quality.totalCount} movimientos clasificados</small></div>
+    {alert ? <p className="quality-alert">{metrics.isProvisional ? "KPI provisionales: " : ""}{quality.relevantReviewCount ? `revisa ${quality.relevantReviewCount} movimiento${quality.relevantReviewCount === 1 ? " relevante" : "s relevantes"}` : "hay filas rechazadas por el parser"}.</p> : <p className="quality-ok">Sin alertas relevantes de clasificación.</p>}
   </section>;
+}
+
+function DebtBreakdown({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  return <section className="debt-breakdown" aria-label="Desglose de deuda"><div><span>Saldo total de deuda</span><strong>{displayMoney(metrics.debtTotal)}</strong><small>Tarjetas y créditos al último corte</small></div><div><span>Pago próximo</span><strong>{displayMoney(metrics.latestPaymentDue)}</strong><small>Pago mínimo requerido</small></div><div><span>Pago para no generar intereses</span><strong>{displayMoney(metrics.latestPaymentForNoInterest)}</strong><small>Importe del estado</small></div><div><span>MSI pendientes</span><strong>{displayMoney(metrics.latestMsiPending)}</strong><small>{metrics.latestMsiInstallmentsCount ? `${metrics.latestMsiInstallmentsCount} mensualidades` : "Principal diferido"}</small></div></section>;
+}
+
+function AuditDiagnostics({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  const audit = metrics.audit;
+  return <details className="audit-diagnostics">
+    <summary><div><strong>Auditoría de importación y conciliación</strong><span>Diagnóstico temporal reproducible · {audit.stages.join(" → ")}</span></div><b>{audit.periods.length} periodos</b></summary>
+    {audit.criticalIssues.length > 0 && <div className="audit-critical">{audit.criticalIssues.join(" · ")}</div>}
+    <div className="audit-table" role="table" aria-label="Auditoría por periodo"><div className="audit-row audit-head" role="row"><span>Periodo</span><span>Importados / válidos</span><span>Duplicados</span><span>Traspasos</span><span>Pagos tarjeta</span><span>Ingresos</span><span>Gasto real</span><span>Reembolsos / revisar</span></div>{audit.periods.map((period) => <div className="audit-row" role="row" key={period.key}><strong>{period.label}</strong><span>{period.importedCount} / {period.validCount}<small>{displayMoney(period.importedAmount)} / {displayMoney(period.validAmount)}</small></span><span>{period.duplicateCount}<small>{displayMoney(period.duplicateAmount)}</small></span><span>{period.internalTransferCount}<small>{displayMoney(period.internalTransferAmount)}</small></span><span>{period.cardPaymentCount}<small>{displayMoney(period.cardPaymentAmount)}</small></span><span>{period.incomeCount}<small>{displayMoney(period.incomeAmount)}</small></span><span>{period.expenseCount}<small>{displayMoney(period.expenseAmount)}</small></span><span>{period.refundCount} / {period.reviewCount}<small>{displayMoney(period.refundAmount)} / {displayMoney(period.reviewAmount)}</small></span></div>)}</div><div className="audit-totals"><span>Totales</span><b>{audit.importedCount} · {displayMoney(audit.importedAmount)} importados</b><b>{audit.validCount} · {displayMoney(audit.validAmount)} válidos</b><b>{audit.invalidCount} · {displayMoney(audit.invalidAmount)} rechazados</b><b>{audit.duplicateCount} · {displayMoney(audit.duplicateAmount)} duplicados</b><b>{audit.internalTransferCount} traspasos</b><b>{audit.cardPaymentCount} pagos tarjeta</b><b>{displayMoney(audit.incomeAmount)} ingresos</b><b>{displayMoney(audit.expenseAmount)} gasto</b></div><div className="consistency-list"><strong>Consistencias contables</strong>{metrics.consistencyChecks.map((check) => <span className={check.passed ? "check-pass" : "check-fail"} key={check.id}>{check.passed ? "✓" : "!"} {check.label}{check.difference === undefined ? " · pendiente" : ` · diferencia ${displayMoney(check.difference)}`}</span>)}</div>
+  </details>;
 }
 
 function CalculationSummary({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
@@ -676,6 +700,8 @@ function StatementSummaryForm({ source, kind, summary, onChange }: { source: Sta
       { key: "creditLimit" as keyof StatementSummary, label: "Límite de crédito", hint: "Línea autorizada" },
       { key: "creditAvailable" as keyof StatementSummary, label: "Crédito disponible", hint: "Disponible al corte" },
       { key: "debtBalance" as keyof StatementSummary, label: "Deuda al corte", hint: "Saldo usado" },
+      { key: "revolvingBalance" as keyof StatementSummary, label: "Saldo revolvente", hint: "Deuda fuera de MSI" },
+      { key: "msiPending" as keyof StatementSummary, label: "MSI pendientes", hint: "Principal diferido" },
       { key: "msiOriginalDeferred" as keyof StatementSummary, label: "MSI original diferido", hint: "Principal pendiente" },
       { key: "msiInstallments" as keyof StatementSummary, label: "Mensualidades MSI activas", hint: "Cantidad" },
       { key: "msiMonthlyLoad" as keyof StatementSummary, label: "Carga mensual MSI", hint: "Total del corte" },
@@ -845,7 +871,7 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
           <div className="account-card-head"><span className={`account-icon ${sourceColor(source)}`}>{kind === "card" ? <CreditCard size={22} /> : <Bank size={22} />}</span><small>{kind === "card" ? "Tarjeta de crédito" : kind === "bank" ? "Cuenta de efectivo" : "Tipo pendiente"}</small></div>
           <h3>{source}</h3>
           <strong className={kind === "card" ? "account-card-balance debt" : "account-card-balance"}>{balanceLabel}</strong>
-          <p>{kind === "card" ? `Pago próximo: ${displayMoney(period?.paymentForNoInterest)}` : kind === "bank" ? "Cuenta de efectivo" : "Confirma el tipo en el documento importado"}</p>
+          <p>{kind === "card" ? `Pago próximo: ${displayMoney(period?.minimumPayment)} · No intereses: ${displayMoney(period?.paymentForNoInterest)}` : kind === "bank" ? "Cuenta de efectivo" : "Confirma el tipo en el documento importado"}</p>
           <small>{sourceTransactions.length} movimientos · {sourceStatements.length} estado(s)</small>
           <button className="account-card-link" onClick={() => { setSourceFilter(source); setView("movements"); }}>Ver movimientos <ArrowRight size={16} /></button>
         </article>;

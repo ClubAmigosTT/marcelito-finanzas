@@ -22,6 +22,9 @@ export type TransactionKind =
   | "fee"
   | "other";
 
+export type TransactionValidationStatus = "valid" | "review" | "invalid";
+export type ReconciliationType = "internalTransfer" | "cardPayment";
+
 // Known brands keep stable labels, while the open string branch lets a file
 // from any other bank retain the name detected from its document or filename.
 export type StatementSource = "Amex" | "Santander" | "BBVA" | "Desconocido" | (string & {});
@@ -40,6 +43,14 @@ export type Transaction = {
   travelRelated?: boolean;
   confidence?: number;
   statementId?: string;
+  /** Canonical merchant/concept used for reconciliation and grouping. */
+  normalizedDescription?: string;
+  /** Stable identity across overlapping statements and repeated imports. */
+  deduplicationKey?: string;
+  validationStatus?: TransactionValidationStatus;
+  /** Links both sides of a transfer or a bank-to-card payment. */
+  reconciliationId?: string;
+  reconciledAs?: ReconciliationType;
 };
 
 export type StatementKind = "card" | "bank" | "unknown";
@@ -63,6 +74,8 @@ export type StatementSummary = {
   paymentDueDate?: string;
   cashBalance?: number;
   msiOriginalDeferred?: number;
+  msiPending?: number;
+  revolvingBalance?: number;
   msiInstallments?: number;
   msiMonthlyLoad?: number;
 };

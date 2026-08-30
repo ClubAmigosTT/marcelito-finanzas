@@ -5,7 +5,8 @@ import type {
   StatementSummary,
   Transaction,
   TransactionKind,
-} from "./types";
+} from "./types.ts";
+import { normalizeConcept, runTransactionPipeline, transactionPeriodKey, type PipelineAudit, type PipelineResult } from "./reconciliation.ts";
 
 export type PeriodMetrics = {
   key: string;
@@ -34,6 +35,8 @@ export type PeriodMetrics = {
   paymentForNoInterest?: number;
   minimumPayment?: number;
   msiOriginalDeferred?: number;
+  msiPending?: number;
+  revolvingBalance?: number;
   msiInstallmentsCount?: number;
   msiMonthlyLoad?: number;
   cashBalance?: number;
@@ -139,6 +142,20 @@ export type DataQualityMetrics = {
   totalCount: number;
   reviewCount: number;
   relevantReviewCount: number;
+  reconciledPercent: number;
+  invalidCount: number;
+  duplicateCount: number;
+  critical: boolean;
+};
+
+export type FinancialConsistencyCheck = {
+  id: string;
+  label: string;
+  expected: number | undefined;
+  actual: number | undefined;
+  difference: number | undefined;
+  tolerance: number;
+  passed: boolean;
 };
 
 export type PrimaryCause = {
@@ -168,9 +185,12 @@ export type FinanceMetrics = {
   ordinaryAverageMonthly: number;
   latestMsiMonthlyLoad?: number;
   latestMsiOriginalDeferred?: number;
+  latestMsiPending?: number;
+  latestRevolvingDebt?: number;
   latestMsiInstallmentsCount?: number;
   latestPaymentForNoInterest?: number;
   latestMinimumPayment?: number;
+  latestPaymentDue?: number;
   latestInterest?: number;
   cardSpend: number;
   directBankSpend: number;
@@ -194,6 +214,9 @@ export type FinanceMetrics = {
   topMovements: MovementSpend[];
   travelTrips: TravelTrip[];
   dataQuality: DataQualityMetrics;
+  audit: PipelineAudit;
+  consistencyChecks: FinancialConsistencyCheck[];
+  isProvisional: boolean;
   primaryCause?: PrimaryCause;
   projection: ProjectionSummary;
   executiveAlerts: ExecutiveAlert[];
@@ -458,6 +481,16 @@ function periodKey(period: string) {
   return normalized.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "sin-periodo";
 }
 
+function statementPeriodKeys(period: string) {
+  const normalized = normalize(period);
+  const matches = Array.from(normalized.matchAll(/(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)[^0-9]{0,8}(20\d{2})/g));
+  const keys = matches.map((match) => {
+    const month = match[1].startsWith("set") ? 8 : monthNames.findIndex((name) => match[1].startsWith(name));
+    return `${match[2]}-${String(month + 1).padStart(2, "0")}`;
+  }).filter((key) => !key.endsWith("-00"));
+  return keys.length ? keys : [periodKey(period)];
+}
+
 function linkedTransactions(statement: Statement, transactions: Transaction[]) {
   return transactions.filter((transaction) => transaction.statementId === statement.id);
 }
@@ -479,24 +512,40 @@ export function calculatePeriod(statement: Statement, transactions: Transaction[
   const paymentTransactions = linked.filter((transaction) => inferTransactionKind(transaction) === "cardPayment");
   const creditTransactions = linked.filter((transaction) => inferTransactionKind(transaction) === "credit");
   const refundTransactions = linked.filter((transaction) => inferTransactionKind(transaction) === "refund");
-  const newTransactions = summaryValue(summary, "newTransactions", sum(regularTransactions.map((transaction) => absolute(transaction.amount))));
+  const parsedCharges = sum(spend.map((transaction) => absolute(transaction.amount)));
+  const hasParsedCharges = spend.length > 0;
+  const newTransactions = hasParsedCharges
+    ? sum(regularTransactions.map((transaction) => absolute(transaction.amount)))
+    : summaryValue(summary, "newTransactions", 0);
   const msiFallback = hasNumber(summary?.msiOriginalDeferred) && hasNumber(summary?.msiInstallments) && summary.msiInstallments > 0
     ? absolute(summary.msiOriginalDeferred) / summary.msiInstallments
     : sum(msiTransactions.map((transaction) => absolute(transaction.amount)));
-  const msiInstallments = summaryValue(summary, "msiMonthlyLoad", msiFallback);
-  const interest = summaryValue(summary, "interest", sum(interestTransactions.map((transaction) => absolute(transaction.amount))));
-  const fees = summaryValue(summary, "fees", sum(feeTransactions.map((transaction) => absolute(transaction.amount))));
-  const newCharges = summaryValue(summary, "newCharges", newTransactions + msiInstallments + interest + fees);
-  const realPayments = summaryValue(summary, "payments", sum(paymentTransactions.map((transaction) => absolute(transaction.amount))));
-  const credits = summaryValue(summary, "credits", sum(creditTransactions.map((transaction) => absolute(transaction.amount))));
+  const msiInstallments = hasParsedCharges
+    ? sum(msiTransactions.map((transaction) => absolute(transaction.amount)))
+    : summaryValue(summary, "msiMonthlyLoad", msiFallback);
+  const interest = hasParsedCharges
+    ? sum(interestTransactions.map((transaction) => absolute(transaction.amount)))
+    : summaryValue(summary, "interest", 0);
+  const fees = hasParsedCharges
+    ? sum(feeTransactions.map((transaction) => absolute(transaction.amount)))
+    : summaryValue(summary, "fees", 0);
+  const newCharges = hasParsedCharges
+    ? parsedCharges
+    : summaryValue(summary, "newCharges", newTransactions + msiInstallments + interest + fees);
+  const realPayments = paymentTransactions.length
+    ? sum(paymentTransactions.map((transaction) => absolute(transaction.amount)))
+    : summaryValue(summary, "payments", 0);
+  const credits = creditTransactions.length
+    ? sum(creditTransactions.map((transaction) => absolute(transaction.amount)))
+    : summaryValue(summary, "credits", 0);
   const refunds = sum(refundTransactions.map((transaction) => absolute(transaction.amount)));
   const travelSpend = sum(spend.filter(isTravelTransaction).map((transaction) => absolute(transaction.amount)));
-  const ordinarySpend = Math.max(0, newCharges - travelSpend);
+  const ordinarySpend = Math.max(0, newCharges - travelSpend - refunds);
   const previousBalance = hasNumber(summary?.previousBalance) ? absolute(summary.previousBalance) : undefined;
   const paymentForNoInterest = hasNumber(summary?.paymentForNoInterest)
     ? absolute(summary.paymentForNoInterest)
     : hasNumber(previousBalance)
-      ? Math.max(0, previousBalance - realPayments - credits + newCharges)
+      ? Math.max(0, previousBalance - realPayments - credits - refunds + newCharges)
       : hasNumber(summary?.statementBalance) ? absolute(summary.statementBalance) : undefined;
   const creditLimit = hasNumber(summary?.creditLimit) ? absolute(summary.creditLimit) : undefined;
   const creditAvailable = hasNumber(summary?.creditAvailable) ? absolute(summary.creditAvailable) : undefined;
@@ -505,6 +554,16 @@ export function calculatePeriod(statement: Statement, transactions: Transaction[
   const debtBalance = hasNumber(summary?.debtBalance)
     ? absolute(summary.debtBalance)
     : kind === "card" && hasNumber(summary?.statementBalance) ? absolute(summary.statementBalance) : undefined;
+  const msiPending = hasNumber(summary?.msiPending)
+    ? absolute(summary.msiPending)
+    : hasNumber(summary?.msiOriginalDeferred)
+      ? absolute(summary.msiOriginalDeferred)
+      : hasNumber(summary?.msiMonthlyLoad) && hasNumber(summary?.msiInstallments)
+        ? absolute(summary.msiMonthlyLoad) * Math.max(0, Math.round(summary.msiInstallments))
+        : undefined;
+  const revolvingBalance = hasNumber(summary?.revolvingBalance)
+    ? absolute(summary.revolvingBalance)
+    : debtBalance !== undefined && msiPending !== undefined ? Math.max(0, debtBalance - msiPending) : debtBalance;
 
   return {
     key: periodKey(statement.period),
@@ -520,10 +579,10 @@ export function calculatePeriod(statement: Statement, transactions: Transaction[
     realPayments,
     credits,
     refunds,
-    difference: newCharges - realPayments,
-    accumulatedBalance: newCharges - realPayments - credits,
+    difference: newCharges - realPayments - credits - refunds,
+    accumulatedBalance: newCharges - realPayments - credits - refunds,
     paidPercent: newCharges ? realPayments / newCharges : null,
-    pendingPercent: newCharges ? Math.max(0, newCharges - realPayments - credits) / newCharges : null,
+    pendingPercent: newCharges ? Math.max(0, newCharges - realPayments - credits - refunds) / newCharges : null,
     travelSpend,
     ordinarySpend,
     creditLimit,
@@ -533,6 +592,8 @@ export function calculatePeriod(statement: Statement, transactions: Transaction[
     paymentForNoInterest,
     minimumPayment: hasNumber(summary?.minimumPayment) ? absolute(summary.minimumPayment) : undefined,
     msiOriginalDeferred: hasNumber(summary?.msiOriginalDeferred) ? absolute(summary.msiOriginalDeferred) : undefined,
+    msiPending,
+    revolvingBalance,
     msiInstallmentsCount: hasNumber(summary?.msiInstallments) ? Math.max(0, Math.round(summary.msiInstallments)) : undefined,
     msiMonthlyLoad: hasNumber(summary?.msiMonthlyLoad) ? absolute(summary.msiMonthlyLoad) : msiInstallments || undefined,
     cashBalance: hasNumber(summary?.cashBalance) ? summary.cashBalance : undefined,
@@ -559,30 +620,88 @@ function latestBySource(periods: PeriodMetrics[]) {
 function periodPatrimony(periods: PeriodMetrics[]) {
   const latest = latestBySource(periods);
   const cash = sumKnown(latest.filter((period) => period.kind === "bank").map((period) => period.cashBalance));
-  const debt = sumKnown(latest.filter((period) => period.kind === "card").map((period) => period.debtBalance));
+  const debt = sumKnown(latest.filter((period) => period.kind === "card").map((period) => period.debtBalance ?? period.creditUsed));
   return cash !== undefined && debt !== undefined ? cash - debt : undefined;
 }
 
-export function buildFinanceMetrics(transactions: Transaction[], statements: Statement[]): FinanceMetrics {
- const periods = statements.map((statement) => calculatePeriod(statement, transactions));
-  periods.sort((left, right) => right.key.localeCompare(left.key) || right.statementId.localeCompare(left.statementId));
- const cardPeriods = periods.filter((period) => period.kind === "card");
+function buildConsistencyCheck(id: string, label: string, expected: number | undefined, actual: number | undefined): FinancialConsistencyCheck {
+  const difference = expected !== undefined && actual !== undefined ? actual - expected : undefined;
+  const tolerance = expected === undefined || actual === undefined ? 0 : Math.max(1, Math.abs(expected) * 0.01);
+  return { id, label, expected, actual, difference, tolerance, passed: difference === undefined || Math.abs(difference) <= tolerance };
+}
+
+export function buildFinanceMetrics(inputTransactions: Transaction[], statements: Statement[], providedPipeline?: PipelineResult): FinanceMetrics {
+  // Never aggregate raw imports directly. This is the single point where
+  // invalid rows, overlapping statements, own transfers and card payments
+  // are removed or linked before any KPI is calculated.
+  const pipeline = providedPipeline ?? runTransactionPipeline(inputTransactions, statements);
+  const transactions = pipeline.transactions;
+  const statementsWithoutRows = statements.filter((statement) => {
+    const hasRows = transactions.some((transaction) => transaction.statementId === statement.id);
+    const summaryHasFinancialValue = statement.summary && [statement.summary.newCharges, statement.summary.newTransactions, statement.summary.cashBalance, statement.summary.debtBalance, statement.summary.statementBalance].some((value) => value !== undefined);
+    return !hasRows && (statement.transactionCount > 0 || Boolean(summaryHasFinancialValue));
+  });
+  if (statementsWithoutRows.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("sin filas válidas"))) {
+    pipeline.audit.criticalIssues.push(`${statementsWithoutRows.length} estado(s) tienen resumen pero no filas válidas; los KPI son provisionales`);
+  }
+  const periods = statements.map((statement) => calculatePeriod(statement, transactions));
+  periods.sort((left, right) => {
+    const byPeriod = right.key.localeCompare(left.key);
+    if (byPeriod) return byPeriod;
+    const rightImported = statements.find((statement) => statement.id === right.statementId)?.importedAt ?? "";
+    const leftImported = statements.find((statement) => statement.id === left.statementId)?.importedAt ?? "";
+    return rightImported.localeCompare(leftImported) || right.statementId.localeCompare(left.statementId);
+  });
+  const cardPeriods = periods.filter((period) => period.kind === "card");
   const periodCount = distinctPeriodCount(cardPeriods);
-  const totalNewTransactions = sum(cardPeriods.map((period) => period.newTransactions));
-  const totalNewCharges = sum(cardPeriods.map((period) => period.newCharges));
-  const totalRealPayments = sum(cardPeriods.map((period) => period.realPayments));
-  const totalCredits = sum(cardPeriods.map((period) => period.credits));
-  const totalRefunds = sum(cardPeriods.map((period) => period.refunds));
-  const accumulatedBalance = totalNewCharges - totalRealPayments - totalCredits;
+  // Totals come from unique canonical movements, never from every PDF
+  // summary. This prevents overlapping card statements from multiplying a
+  // month of spending.
+  const cardSpendTransactions = transactions.filter((transaction) => {
+    const statement = transaction.statementId ? statements.find((item) => item.id === transaction.statementId) : undefined;
+    return statement && (statement.kind ?? defaultStatementKind(statement.source)) === "card" && isSpendTransaction(transaction);
+  });
+  const cardPurchaseTransactions = cardSpendTransactions.filter((transaction) => inferTransactionKind(transaction) === "purchase");
+  const cardPaymentTransactions = transactions.filter((transaction) => {
+    const statement = transaction.statementId ? statements.find((item) => item.id === transaction.statementId) : undefined;
+    return statement && (statement.kind ?? defaultStatementKind(statement.source)) === "card" && inferTransactionKind(transaction) === "cardPayment";
+  });
+  const cardCreditTransactions = transactions.filter((transaction) => {
+    const statement = transaction.statementId ? statements.find((item) => item.id === transaction.statementId) : undefined;
+    return statement && (statement.kind ?? defaultStatementKind(statement.source)) === "card" && inferTransactionKind(transaction) === "credit";
+  });
+  const cardRefundTransactions = transactions.filter((transaction) => {
+    const statement = transaction.statementId ? statements.find((item) => item.id === transaction.statementId) : undefined;
+    return statement && (statement.kind ?? defaultStatementKind(statement.source)) === "card" && inferTransactionKind(transaction) === "refund";
+  });
+  const latestCardPeriodsForFallback = latestBySource(cardPeriods);
+  const parsedCardStatementIds = new Set(cardSpendTransactions.map((transaction) => transaction.statementId));
+  const fallbackCardPeriods = latestCardPeriodsForFallback.filter((period) => !parsedCardStatementIds.has(period.statementId));
+  const parsedPaymentStatementIds = new Set(cardPaymentTransactions.map((transaction) => transaction.statementId));
+  const parsedCreditStatementIds = new Set(cardCreditTransactions.map((transaction) => transaction.statementId));
+  const totalNewTransactions = sum(cardPurchaseTransactions.map((transaction) => absolute(transaction.amount))) + sum(fallbackCardPeriods.map((period) => period.newTransactions));
+  const totalNewCharges = sum(cardSpendTransactions.map((transaction) => absolute(transaction.amount))) + sum(fallbackCardPeriods.map((period) => period.newCharges));
+  const totalRealPayments = sum(cardPaymentTransactions.map((transaction) => absolute(transaction.amount))) + sum(latestCardPeriodsForFallback.filter((period) => !parsedPaymentStatementIds.has(period.statementId)).map((period) => period.realPayments));
+  const totalCredits = sum(cardCreditTransactions.map((transaction) => absolute(transaction.amount))) + sum(latestCardPeriodsForFallback.filter((period) => !parsedCreditStatementIds.has(period.statementId)).map((period) => period.credits));
+  const totalRefunds = sum(cardRefundTransactions.map((transaction) => absolute(transaction.amount)));
+  const accumulatedBalance = totalNewCharges - totalRealPayments - totalCredits - totalRefunds;
   const latest = cardPeriods[0];
-  const travelSpend = sum(periods.map((period) => period.travelSpend)) + sum(transactions.filter((transaction) => transaction.statementId === undefined && isSpendTransaction(transaction) && isTravelTransaction(transaction)).map((transaction) => absolute(transaction.amount)));
+  const travelSpend = sum(cardSpendTransactions.filter(isTravelTransaction).map((transaction) => absolute(transaction.amount))) + sum(transactions.filter((transaction) => transaction.statementId === undefined && isSpendTransaction(transaction) && isTravelTransaction(transaction)).map((transaction) => absolute(transaction.amount))) + sum(transactions.filter((transaction) => {
+    if (!isSpendTransaction(transaction) || transaction.statementId === undefined) return false;
+    const statement = statements.find((item) => item.id === transaction.statementId);
+    return statement && (statement.kind ?? defaultStatementKind(statement.source)) === "bank" && isTravelTransaction(transaction);
+  }).map((transaction) => absolute(transaction.amount)));
 
   const rawExpense = sum(transactions.filter((transaction) => transaction.flow === "expense").map((transaction) => absolute(transaction.amount)));
-  const excludedCardPayments = sum(transactions.filter((transaction) => inferTransactionKind(transaction) === "cardPayment").map((transaction) => absolute(transaction.amount)));
-  const excludedInternalTransfers = sum(transactions.filter((transaction) => inferTransactionKind(transaction) === "bankTransfer").map((transaction) => absolute(transaction.amount)));
+  const excludedCardPayments = sum(transactions.filter((transaction) => {
+    if (inferTransactionKind(transaction) !== "cardPayment") return false;
+    const statement = transaction.statementId ? statements.find((item) => item.id === transaction.statementId) : undefined;
+    return !statement || (statement.kind ?? defaultStatementKind(statement.source)) === "bank";
+  }).map((transaction) => absolute(transaction.amount)));
+  const excludedInternalTransfers = sum(transactions.filter((transaction) => inferTransactionKind(transaction) === "bankTransfer" && transaction.amount < 0).map((transaction) => absolute(transaction.amount)));
   const refunds = sum(transactions.filter((transaction) => inferTransactionKind(transaction) === "refund").map((transaction) => absolute(transaction.amount)));
   const manualSpend = sum(transactions.filter((transaction) => transaction.statementId === undefined && isSpendTransaction(transaction)).map((transaction) => absolute(transaction.amount)));
-  const cardSpend = sum(cardPeriods.map((period) => period.newCharges));
+  const cardSpend = totalNewCharges;
   const directBankSpend = sum(transactions.filter((transaction) => {
     if (!isSpendTransaction(transaction)) return false;
     const statement = statements.find((item) => item.id === transaction.statementId);
@@ -598,23 +717,38 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
   const latestCardMinimumPayment = sumKnown(latestCardPeriods.map((period) => period.minimumPayment));
   const latestCardInterest = sumKnown(latestCardPeriods.map((period) => period.interest));
   const cashAvailable = sumKnown(latestBankPeriods.map((period) => period.cashBalance));
-  const debtTotal = sumKnown(latestCardPeriods.map((period) => period.debtBalance));
+  // Coalesce per card before summing so one issuer with a statement balance
+  // and another with only limit/available values are both represented.
+  const debtTotal = sumKnown(latestCardPeriods.map((period) => period.debtBalance ?? period.creditUsed));
+  const latestMsiPending = sumKnown(latestCardPeriods.map((period) => period.msiPending ?? period.msiOriginalDeferred));
+  const latestRevolvingDebt = debtTotal !== undefined && latestMsiPending !== undefined ? Math.max(0, debtTotal - latestMsiPending) : debtTotal;
   const liquidPatrimony = cashAvailable !== undefined && debtTotal !== undefined ? cashAvailable - debtTotal : undefined;
   const creditLimit = sumKnown(latestCardPeriods.map((period) => period.creditLimit));
   const creditAvailable = sumKnown(latestCardPeriods.map((period) => period.creditAvailable));
-  const creditUsed = creditLimit !== undefined && creditAvailable !== undefined ? Math.max(0, creditLimit - creditAvailable) : undefined;
+  const creditUsed = sumKnown(latestCardPeriods.map((period) => (
+    period.creditLimit !== undefined && period.creditAvailable !== undefined
+      ? Math.max(0, period.creditLimit - period.creditAvailable)
+      : undefined
+  )));
   const creditUtilizationRate = creditUsed !== undefined && creditLimit ? creditUsed / creditLimit : undefined;
   const ordinarySpend = Math.max(0, consolidatedRealSpend - travelSpend);
-  const currentPeriodKey = periods[0]?.key;
-  const currentPeriods = currentPeriodKey ? periods.filter((period) => period.key === currentPeriodKey) : [];
-  const currentStatementIds = new Set(currentPeriods.map((period) => period.statementId));
-  const manualRefunds = sum(transactions.filter((transaction) => transaction.statementId === undefined && inferTransactionKind(transaction) === "refund").map((transaction) => absolute(transaction.amount)));
-  const currentMonthSpend = currentPeriods.length
-    ? Math.max(0, sum(currentPeriods.map((period) => period.newCharges)) + manualSpend - sum(currentPeriods.map((period) => period.refunds)) - manualRefunds)
-    : manualSpend;
-  const currentMonthTransactions = currentPeriods.length
-    ? transactions.filter((transaction) => transaction.statementId === undefined || currentStatementIds.has(transaction.statementId))
+  const transactionPeriodKeys = transactions
+    .map((transaction) => transactionPeriodKey(transaction, statements))
+    .filter((key): key is string => Boolean(key));
+  const currentPeriodKey = periods[0]?.key
+    ?? transactionPeriodKeys.sort((left, right) => right.localeCompare(left))[0];
+  const currentStatementIds = new Set(periods.filter((period) => period.key === currentPeriodKey).map((period) => period.statementId));
+  // A dated movement belongs to the month of its own date.  Statement-level
+  // fallback is allowed only when a legacy row has no parseable date; this
+  // prevents a statement containing an adjacent period from inflating the
+  // selected month's KPI.
+  const currentMonthTransactions = currentPeriodKey
+    ? transactions.filter((transaction) => {
+      const key = transactionPeriodKey(transaction, statements);
+      return key === currentPeriodKey || (key === undefined && transaction.statementId !== undefined && currentStatementIds.has(transaction.statementId));
+    })
     : transactions;
+  const currentMonthSpendFromMovements = Math.max(0, sum(currentMonthTransactions.filter(isSpendTransaction).map((transaction) => absolute(transaction.amount))) - sum(currentMonthTransactions.filter((transaction) => inferTransactionKind(transaction) === "refund").map((transaction) => absolute(transaction.amount))));
   const currentMonthIncome = sum(currentMonthTransactions.filter((transaction) => isRealIncomeTransaction(transaction, statements)).map((transaction) => absolute(transaction.amount)));
   const periodGroups = new Map<string, PeriodMetrics[]>();
   periods.forEach((period) => periodGroups.set(period.key, [...(periodGroups.get(period.key) ?? []), period]));
@@ -623,25 +757,41 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
   const periodByStatement = new Map(periods.map((period) => [period.statementId, period.key]));
 
   function transactionsForPeriod(key: string) {
-    return transactions.filter((transaction) => transaction.statementId
-      ? periodByStatement.get(transaction.statementId) === key
-      : key === currentPeriodKey);
+    return transactions.filter((transaction) => {
+      const transactionKey = transactionPeriodKey(transaction, statements);
+      if (transactionKey === key) return true;
+      if (transaction.statementId) {
+        const statement = statements.find((item) => item.id === transaction.statementId);
+        return transactionKey === undefined && (periodByStatement.get(transaction.statementId) === key || (statement ? statementPeriodKeys(statement.period).includes(key) : false));
+      }
+      return transactionKey === undefined && key === currentPeriodKey;
+    });
   }
 
   const analyticsBase = periodKeys.map((key) => {
     const group = periodGroups.get(key) ?? [];
     const periodTransactions = transactionsForPeriod(key);
     const linkedSpend = periodTransactions.filter(isSpendTransaction);
-    const manualForPeriod = key === currentPeriodKey ? manualSpend : 0;
-    const refundsForPeriod = sum(group.map((period) => period.refunds)) + (key === currentPeriodKey ? manualRefunds : 0);
-    const spend = Math.max(0, sum(group.map((period) => period.newCharges)) + manualForPeriod - refundsForPeriod);
+    const refundsForPeriod = sum(periodTransactions.filter((transaction) => inferTransactionKind(transaction) === "refund").map((transaction) => absolute(transaction.amount)));
+    // Summary-only documents can overlap the same source/period. Use the
+    // latest statement per source for fallback analytics, just as for debt
+    // and cash, so a repeated PDF cannot multiply the period's spend.
+    const statementSpendFallback = sum(latestBySource(group).map((period) => period.newCharges));
+    const parsedGrossSpend = sum(linkedSpend.map((transaction) => absolute(transaction.amount)));
+    // A refund can be the only parsed row while the statement summary still
+    // carries the gross charges. Prefer parsed rows when they exist, but keep
+    // the summary as a transparent fallback instead of turning the period to
+    // zero merely because a refund was recognized.
+    const spend = linkedSpend.length
+      ? Math.max(0, parsedGrossSpend - refundsForPeriod)
+      : Math.max(0, statementSpendFallback - refundsForPeriod);
     const income = sum(periodTransactions.filter((transaction) => isRealIncomeTransaction(transaction, statements)).map((transaction) => absolute(transaction.amount)));
     const extraordinarySpend = Math.min(spend, sum(linkedSpend.filter(isExtraordinaryTransaction).map((transaction) => absolute(transaction.amount))));
     const travelSpendForPeriod = Math.min(spend, sum(linkedSpend.filter(isTravelTransaction).map((transaction) => absolute(transaction.amount))));
     const bankPeriods = latestBySource(group.filter((period) => period.kind === "bank"));
     const cardPeriodsForKey = latestBySource(group.filter((period) => period.kind === "card"));
     const cash = sumKnown(bankPeriods.map((period) => period.cashBalance));
-    const debt = sumKnown(cardPeriodsForKey.map((period) => period.debtBalance));
+    const debt = sumKnown(cardPeriodsForKey.map((period) => period.debtBalance ?? period.creditUsed));
     return {
       key,
       label: group[0]?.label ?? key,
@@ -649,7 +799,7 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
       ordinarySpend: Math.max(0, spend - extraordinarySpend),
       extraordinarySpend,
       travelSpend: travelSpendForPeriod,
-      paymentTotal: sum(group.map((period) => period.realPayments)),
+      paymentTotal: sum(periodTransactions.filter((transaction) => inferTransactionKind(transaction) === "cardPayment" && transaction.statementId && cardPeriods.some((period) => period.statementId === transaction.statementId)).map((transaction) => absolute(transaction.amount))),
       income,
       netFlow: income - spend,
       cashAvailable: cash,
@@ -676,7 +826,7 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
   const categoryMap = new Map<string, { name: string; total: number }>();
   currentSpendTransactions.forEach((transaction) => {
     const name = transaction.category.trim() || "Sin categoría";
-    const key = normalize(name);
+    const key = normalizeConcept(name) || normalize(name);
     const previous = categoryMap.get(key);
     categoryMap.set(key, { name: previous?.name ?? name, total: (previous?.total ?? 0) + absolute(transaction.amount) });
   });
@@ -687,7 +837,7 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
   const merchantMap = new Map<string, { name: string; total: number; count: number }>();
   currentSpendTransactions.forEach((transaction) => {
     const name = merchantLabel(transaction.description);
-    const key = normalize(name);
+    const key = normalizeConcept(name) || normalize(name);
     const previous = merchantMap.get(key);
     merchantMap.set(key, { name: previous?.name ?? name, total: (previous?.total ?? 0) + absolute(transaction.amount), count: (previous?.count ?? 0) + 1 });
   });
@@ -752,7 +902,7 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
   const previousSpendTransactions = periodKeys[1] ? transactionsForPeriod(periodKeys[1]).filter(isSpendTransaction) : [];
   const previousCategoryMap = new Map<string, number>();
   previousSpendTransactions.forEach((transaction) => {
-    const key = normalize(transaction.category.trim() || "Sin categoría");
+    const key = normalizeConcept(transaction.category.trim() || "Sin categoría") || normalize(transaction.category.trim() || "Sin categoría");
     previousCategoryMap.set(key, (previousCategoryMap.get(key) ?? 0) + absolute(transaction.amount));
   });
   const causeCandidates = Array.from(categoryMap.entries()).map(([key, item]) => ({
@@ -768,20 +918,51 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
     ? { label: "Gasto extraordinario", current: currentExtraordinary, previous: previousExtraordinary, delta: currentExtraordinary - previousExtraordinary }
     : undefined;
   const primaryCause = bestCategoryCause && extraordinaryCause && extraordinaryCause.delta > bestCategoryCause.delta ? extraordinaryCause : bestCategoryCause ?? extraordinaryCause;
-  const reviewItems = transactions.filter((transaction) => transaction.category === "Sin categoría" || (transaction.confidence ?? 1) < 0.75);
-  const reviewThreshold = Math.max(1000, (analyticsPeriods[0]?.spend ?? currentMonthSpend) * 0.05);
+  const reviewItems = transactions.filter((transaction) => transaction.category === "Sin categoría" || (transaction.confidence ?? 1) < 0.75 || transaction.validationStatus === "review");
   const dataQuality: DataQualityMetrics = {
-    classifiedPercent: transactions.length ? ((transactions.length - reviewItems.length) / transactions.length) * 100 : 100,
-    classifiedCount: transactions.length - reviewItems.length,
-    totalCount: transactions.length,
+    classifiedPercent: pipeline.audit.classifiedPercent,
+    classifiedCount: Math.max(0, pipeline.audit.validCount - reviewItems.length),
+    totalCount: pipeline.audit.importedCount,
     reviewCount: reviewItems.length,
-    relevantReviewCount: reviewItems.filter((transaction) => absolute(transaction.amount) >= reviewThreshold).length,
+    relevantReviewCount: pipeline.audit.relevantReviewCount,
+    reconciledPercent: pipeline.audit.reconciledPercent,
+    invalidCount: pipeline.audit.invalidCount,
+    duplicateCount: pipeline.audit.duplicateCount,
+    critical: pipeline.audit.criticalIssues.length > 0,
   };
   const currentPatrimony = currentPeriodKey ? periodPatrimony(periodGroups.get(currentPeriodKey) ?? []) : undefined;
   const previousPatrimony = periodKeys[1] ? periodPatrimony(periodGroups.get(periodKeys[1]) ?? []) : undefined;
   const liquidPatrimonyChangePercent = currentPatrimony !== undefined && previousPatrimony !== undefined && previousPatrimony !== 0
     ? (currentPatrimony - previousPatrimony) / Math.abs(previousPatrimony)
     : null;
+  const consistencyChecks: FinancialConsistencyCheck[] = [];
+  consistencyChecks.push(buildConsistencyCheck("flow", "Ingresos − gasto real = flujo neto", realIncome - consolidatedRealSpend, netFlow));
+  consistencyChecks.push(buildConsistencyCheck("patrimony", "Efectivo − deuda = patrimonio líquido", cashAvailable !== undefined && debtTotal !== undefined ? cashAvailable - debtTotal : undefined, liquidPatrimony));
+  consistencyChecks.push(buildConsistencyCheck("credit", "Límite − crédito disponible = deuda utilizada", creditLimit !== undefined && creditAvailable !== undefined ? creditLimit - creditAvailable : undefined, creditUsed));
+  latestBankPeriods.forEach((period) => {
+    const statement = statements.find((item) => item.id === period.statementId);
+    const opening = statement?.summary?.previousBalance;
+    const closing = period.cashBalance;
+    const linked = transactions.filter((transaction) => transaction.statementId === period.statementId);
+    const cashDelta = linked.reduce((total, transaction) => total + transaction.amount, 0);
+    consistencyChecks.push(buildConsistencyCheck(`cash-${period.statementId}`, `Saldo inicial + movimientos = saldo final (${period.source})`, hasNumber(opening) && closing !== undefined ? opening + cashDelta : undefined, closing));
+  });
+
+  const currentMonthSpend = currentPeriodKey
+    ? (currentMonthTransactions.some(isSpendTransaction)
+      || currentMonthTransactions.some((transaction) => inferTransactionKind(transaction) === "refund")
+      ? currentMonthSpendFromMovements
+      : analyticsPeriods.find((period) => period.key === currentPeriodKey)?.spend ?? currentMonthSpendFromMovements)
+    : currentMonthSpendFromMovements;
+  const failedConsistencyChecks = consistencyChecks.filter((check) => !check.passed);
+  if (failedConsistencyChecks.length) {
+    dataQuality.critical = true;
+    failedConsistencyChecks.forEach((check) => {
+      const issue = `Inconsistencia: ${check.label}`;
+      if (!pipeline.audit.criticalIssues.includes(issue)) pipeline.audit.criticalIssues.push(issue);
+    });
+  }
+  const isProvisional = dataQuality.critical || failedConsistencyChecks.length > 0;
   const projection = buildProjection(
     analyticsPeriods,
     cardPeriods,
@@ -855,9 +1036,12 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
     ordinaryAverageMonthly: periodCount ? ordinarySpend / periodCount : 0,
     latestMsiMonthlyLoad: lastDefined(cardPeriods, (period) => period.msiMonthlyLoad),
     latestMsiOriginalDeferred: lastDefined(cardPeriods, (period) => period.msiOriginalDeferred),
+    latestMsiPending,
+    latestRevolvingDebt,
     latestMsiInstallmentsCount: lastDefined(cardPeriods, (period) => period.msiInstallmentsCount),
     latestPaymentForNoInterest: latestCardPaymentForNoInterest,
     latestMinimumPayment: latestCardMinimumPayment,
+    latestPaymentDue: latestCardMinimumPayment,
     latestInterest: latestCardInterest,
     cardSpend,
     directBankSpend,
@@ -881,6 +1065,9 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
     topMovements,
     travelTrips,
     dataQuality,
+    audit: pipeline.audit,
+    consistencyChecks,
+    isProvisional,
     primaryCause,
     projection,
     executiveAlerts,

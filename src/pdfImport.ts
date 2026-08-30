@@ -1,5 +1,6 @@
-import type { ImportResult, StatementKind, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types";
+import type { ImportResult, StatementKind, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types.ts";
 import type { PDFDocumentProxy } from "pdfjs-dist";
+import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 
@@ -140,6 +141,8 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
     ["creditAvailable", findSummaryAmount(text, ["credito disponible", "disponible para compras"])],
     ["minimumPayment", findSummaryAmount(text, ["pago minimo"])],
     ["paymentForNoInterest", findSummaryAmount(text, ["pago para no generar intereses", "pago para no generar interes"])],
+    ["msiPending", findSummaryAmount(text, ["msi pendientes", "saldo msi", "principal diferido"])],
+    ["revolvingBalance", findSummaryAmount(text, ["saldo revolvente", "saldo revolvente al corte"])],
   ];
   values.forEach(([key, value]) => {
     if (value !== undefined) (summary as unknown as Record<string, number | undefined>)[key] = value;
@@ -226,18 +229,19 @@ function inferImportedKind(description: string, amount: number, isCredit: boolea
   if (/interes|interes moratorio/.test(value)) return "interest";
   if (/comision|anualidad/.test(value)) return "fee";
   if (/devolucion|reembolso|bonificacion/.test(value) && amount > 0) return "refund";
-  if (/gracias por su pago|pago en linea|pago.*(tarjeta|amex|credito)|tarjeta.*pago|american express/.test(value)) return "cardPayment";
+  if (/gracias por su pago|pago en linea|pago.*(tarjeta|amex|credito|recibido)|tarjeta.*pago|abono.*(tarjeta|credito|recibido)|american express/.test(value)) return "cardPayment";
   if (/transfer|traspaso/.test(value)) return "bankTransfer";
   if (isCredit || amount > 0) return "credit";
   return "purchase";
 }
 
-function extractTransactions(text: string, source: StatementSource, fileName: string, kind: StatementKind): Transaction[] {
+export function extractTransactions(text: string, source: StatementSource, fileName: string, kind: StatementKind): Transaction[] {
   const lines = text.split(/\n+/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
   const results: Transaction[] = [];
   const datePattern = /^(?:(\d{1,2})\s+(?:de\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)(?:\s+(?:de\s+)?(\d{2,4}))?|(?:(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4}))|(?:(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})))/i;
   const amountPattern = /(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?:\s*CR)?(?![A-Za-z0-9])/gi;
   const importKey = normalizeText(fileName).replace(/[^a-z0-9]+/g, "-").slice(0, 28) || "estado";
+  const inferredYear = fileName.match(/20\d{2}/)?.[0] ?? text.match(/20\d{2}/)?.[0] ?? String(new Date().getFullYear());
   const monthIndex = (token: string) => {
     const value = normalizeText(token);
     const full = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
@@ -246,7 +250,7 @@ function extractTransactions(text: string, source: StatementSource, fileName: st
     return index >= 0 ? index : 0;
   };
   const formatDate = (match: RegExpMatchArray) => {
-    if (match[1] && match[2]) return `${match[1]} ${monthNames[monthIndex(match[2])]}${match[3] ? ` ${match[3]}` : ""}`;
+    if (match[1] && match[2]) return `${match[1]} ${monthNames[monthIndex(match[2])]} ${match[3] ?? inferredYear}`;
     if (match[4] && match[5] && match[6]) return `${match[4]} ${monthNames[Math.max(0, Number(match[5]) - 1)]} ${match[6]}`;
     if (match[7] && match[8] && match[9]) return `${match[9]} ${monthNames[Math.max(0, Number(match[8]) - 1)]} ${match[7]}`;
     return "Sin fecha";
@@ -260,11 +264,15 @@ function extractTransactions(text: string, source: StatementSource, fileName: st
     "estado de cuenta", "fecha y detalle", "resumen de cuenta", "paga desde",
     "este no es un documento", "total de las transacciones", "total de transacciones",
     "total de movimientos", "periodo de facturacion", "fecha de corte", "pagina ",
+    "ciudad de mexico", "serie del certificado", "total importe", "numero de cuenta",
+    "no de cuenta", "numero de cliente", "no de cliente", "cuenta clabe", "rfc",
+    "saldo inicial", "saldo anterior", "saldo final", "saldo disponible", "del al",
   ];
   lines.forEach((line) => {
     const startsWithDate = datePattern.test(line);
     const normalized = normalizeText(line);
-    const breaks = breakPhrases.some((phrase) => normalized.includes(phrase));
+    const breaks = breakPhrases.some((phrase) => normalized.includes(phrase))
+      || /^(?:del\s+al|total\b|saldo\b|periodo\b|fecha\s+de\s+corte|rfc\b|clabe\b)/.test(normalized);
     if (startsWithDate) {
       if (pending) rows.push(pending);
       pending = line;
@@ -308,13 +316,27 @@ function extractTransactions(text: string, source: StatementSource, fileName: st
       .replace(/\s+(?:d[oó]lar(?:es)?(?:\s+u\.s\.a\.)?|euro?s?|peso(?:s)?\s+colombiano?s?|tipo\s+de\s+cambio).*$/i, "")
       .replace(/\s+/g, " ")
       .trim();
-    if (!description || description.length < 3) return;
-    const normalizedDescription = normalizeText(description);
+    if (!description || description.length < 3 || isAdministrativeDescription(description)) return;
+    const normalizedDescription = normalizeConcept(description);
     const isRefund = /devolucion|reembolso|bonificacion/.test(normalizedDescription);
-    const isCardPayment = /gracias por su pago|pago de tarjeta|pago.*(?:tarjeta|credito)|tarjeta.*pago/.test(normalizedDescription);
+    const isCardPayment = /gracias por su pago|pago de tarjeta|pago.*(?:tarjeta|credito|recibido)|tarjeta.*pago|abono.*(?:tarjeta|credito|recibido)/.test(normalizedDescription);
     const isIncome = /nomina|sueldo|salario|deposito|abono|ingreso|transferencia recibida/.test(normalizedDescription);
     const isTransfer = /transfer|traspaso|spei|entre cuentas|clabe/.test(normalizedDescription);
     const isCredit = /\bcr\b/i.test(amount.raw) || isRefund || isIncome;
+    const directionSignal = kind === "card"
+      || (bankLike && usableCandidates.length > 1)
+      || isRefund
+      || isCardPayment
+      || isIncome
+      || isTransfer
+      || /\b(?:cargo|retiro|compra|pago|deposito|abono|nomina|sueldo|salario|credito|devolucion|reembolso)\b/.test(normalizedDescription)
+      || amount.raw.includes("-")
+      || amount.raw.includes("+")
+      || /\bcr\b/i.test(amount.raw);
+    // Text extraction has no column coordinates. When a bank row carries no
+    // signed amount or semantic direction, retaining it would turn a PDF
+    // heading into a financial event, so send it to review by rejecting it.
+    if (!directionSignal) return;
     const flow: Transaction["flow"] = isRefund || isIncome ? "income" : isCardPayment ? "debt" : isTransfer ? "transfer" : "expense";
     const value = amount.value * (flow === "income" ? 1 : -1);
     const importedKind = inferImportedKind(description, value, isCredit);
