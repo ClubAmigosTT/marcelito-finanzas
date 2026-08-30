@@ -704,7 +704,7 @@ private struct DecisionMetricsView: View {
 
     private func money(_ value: Decimal?) -> String {
         if store.dashboardIsBlocked { return "Bloqueado" }
-        value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
+        return value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
     }
 
     private func percent(_ value: Decimal?) -> String {
@@ -774,7 +774,7 @@ private struct MetricsStrip: View {
 
     private func money(_ value: Decimal?) -> String {
         if store.dashboardIsBlocked { return "Bloqueado" }
-        value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
+        return value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
     }
 
     var body: some View {

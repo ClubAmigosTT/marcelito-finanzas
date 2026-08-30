@@ -1184,7 +1184,7 @@ struct NetWorthView: View {
 
     private var patrimonyText: String {
         if store.dashboardIsBlocked { return "Bloqueado" }
-        store.liquidPatrimony?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "—"
+        return store.liquidPatrimony?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "—"
     }
 
     var body: some View {
