@@ -239,6 +239,7 @@ final class FinanceStore {
     private let statementKey = "marcelito.statements.v1"
     private let importKey = "marcelito.lastImport"
     private let categoryRulesKey = "marcelito.categoryRules.v1"
+    private let numericRepairKey = "marcelito.numericRepair.v1"
     private let statementFilesDirectoryName = "ImportedStatements"
 
     var movements: [Movement]
@@ -246,7 +247,21 @@ final class FinanceStore {
 
     private(set) var lastImportedFile: String?
 
-    var periodMetrics: [StatementMetric] { statements.map { calculateMetric(for: $0) }.sorted { periodKey($0.period) > periodKey($1.period) } }
+    /// Calculated statements are always ordered by their real cutoff date.
+    /// Import order is not a financial ordering: importing May after August
+    /// must never make May look like the current balance.
+    var periodMetrics: [StatementMetric] {
+        statements
+            .map { calculateMetric(for: $0) }
+            .sorted { left, right in
+                let leftDate = statementEndDate(for: left.id)
+                let rightDate = statementEndDate(for: right.id)
+                if leftDate != rightDate { return leftDate > rightDate }
+                let leftImported = statements.first(where: { $0.id == left.id })?.importedAt ?? .distantPast
+                let rightImported = statements.first(where: { $0.id == right.id })?.importedAt ?? .distantPast
+                return leftImported > rightImported
+            }
+    }
     var cardPeriodMetrics: [StatementMetric] { periodMetrics.filter { $0.kind == .card } }
     var cardPeriodCount: Int { Set(cardPeriodMetrics.map { periodKey($0.period) }).count }
 
@@ -258,6 +273,19 @@ final class FinanceStore {
             return candidate
         }
         return nil
+    }
+
+    /// Returns the newest statement for an account, independent of the order
+    /// in which PDFs were imported.
+    func latestStatement(for source: String) -> StatementRecord? {
+        statements
+            .filter { $0.source == source }
+            .max { left, right in
+                let leftDate = statementEndDate(for: left.id)
+                let rightDate = statementEndDate(for: right.id)
+                if leftDate != rightDate { return leftDate < rightDate }
+                return left.importedAt < right.importedAt
+            }
     }
 
     var totalNewTransactions: Decimal {
@@ -312,6 +340,16 @@ final class FinanceStore {
     var totalTransfers: Decimal { movements.filter { $0.flow == .transfer }.reduce(0) { $0 + absolute($1.amount) } }
     var totalExpenses: Decimal { consolidatedRealSpend }
     var realExpenseMovements: [Movement] { movements.filter(isSpend) }
+
+    /// Expenses shown in the dashboard are scoped to the newest available
+    /// statement period. Keeping the complete ledger above is useful for
+    /// audits, but it must not inflate the current-month view.
+    var currentPeriodExpenseMovements: [Movement] {
+        movements.filter { movement in
+            guard let currentPeriodKey else { return true }
+            return movementPeriodKey(movement) == currentPeriodKey
+        }.filter(isSpend)
+    }
     var realIncome: Decimal {
         movements.filter(isRealIncome).reduce(0) { $0 + absolute($1.amount) }
     }
@@ -364,21 +402,14 @@ final class FinanceStore {
     }
 
     var monthlyExpense: Decimal {
-        let monthStart = Calendar.current.date(
-            from: Calendar.current.dateComponents([.year, .month], from: .now)
-        ) ?? .now
-        return movements
-            .filter { isSpend($0) && $0.date >= monthStart }
-            .reduce(0) { $0 + absolute($1.amount) }
+        currentPeriodExpenseMovements.reduce(0) { $0 + absolute($1.amount) }
     }
 
     var monthlyIncome: Decimal {
-        let monthStart = Calendar.current.date(
-            from: Calendar.current.dateComponents([.year, .month], from: .now)
-        ) ?? .now
-        return movements
+        movements
             .filter { movement in
-                movement.date >= monthStart && isRealIncome(movement)
+                guard let currentPeriodKey else { return isRealIncome(movement) }
+                return movementPeriodKey(movement) == currentPeriodKey && isRealIncome(movement)
             }
             .reduce(0) { $0 + absolute($1.amount) }
     }
@@ -456,13 +487,10 @@ final class FinanceStore {
     private func isRealIncome(_ movement: Movement) -> Bool {
         guard movement.flow == .income else { return false }
         let kind = movementKind(movement)
-        guard kind != .credit && kind != .refund else { return false }
-        if kind == .bankTransfer, movement.amount > 0 {
-            let value = normalizedConcept(movement.title)
-            if !value.contains("entre cuentas") && !value.contains("cuenta propia") && !value.contains("traspaso interno") {
-                return true
-            }
-        }
+        // Card payments, own transfers, credits and refunds are balance
+        // movements, not new income. They are deliberately excluded from
+        // the income KPI even when the bank PDF labels them as deposits.
+        guard kind != .credit && kind != .refund && kind != .bankTransfer && kind != .cardPayment else { return false }
         if let statementId = movement.statementId,
            let statement = statements.first(where: { $0.id == statementId }) {
             return statementKind(statement) != .card
@@ -481,8 +509,111 @@ final class FinanceStore {
         return ["viaje", "hotel", "hospedaje", "aerolinea", "vuelo", "avion", "transporte", "uber", "taxi", "metro", "renta de auto", "destino", "equipaje"].contains { value.contains($0) }
     }
 
+    private var currentPeriodKey: String? {
+        periodMetrics.first.map { periodKey($0.period) }
+    }
+
+    private func movementPeriodKey(_ movement: Movement) -> String? {
+        // Prefer the statement's normalized cutoff period. Card statements
+        // often run from the 28th to the 27th, so using only the calendar
+        // month of each row would silently drop the first days of the latest
+        // cycle. Legacy/manual rows without a statement still use their date.
+        if let statementID = movement.statementId,
+           let statement = statements.first(where: { $0.id == statementID }) {
+            return periodKey(statement.period)
+        }
+        let components = Calendar(identifier: .gregorian).dateComponents([.year, .month], from: movement.date)
+        guard let year = components.year, let month = components.month else { return nil }
+        return String(format: "%04d-%02d", year, month)
+    }
+
     private func periodKey(_ value: String) -> String {
-        value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+        guard let date = periodDate(from: value) else {
+            return value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+        }
+        let components = Calendar(identifier: .gregorian).dateComponents([.year, .month], from: date)
+        guard let year = components.year, let month = components.month else {
+            return value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+        }
+        return String(format: "%04d-%02d", year, month)
+    }
+
+    /// Resolves the end/cutoff date encoded in a period label. It accepts
+    /// numeric and Spanish month-name dates, plus month/year-only labels.
+    private func periodDate(from value: String) -> Date? {
+        let normalized = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        let patterns = [
+            #"(?i)\b\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\b"#,
+            #"(?i)\b\d{1,2}[\/.\-](?:\d{1,2}|ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)[\/.\-]\d{2,4}\b"#,
+            #"(?i)\b\d{1,2}\s+(?:de\s+)?(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)(?:\s+de)?\s+\d{2,4}\b"#
+        ]
+        var lastDate: Date? = nil
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: normalized, range: range) {
+                guard let swiftRange = Range(match.range, in: normalized),
+                      let parsed = Self.parseDate(String(normalized[swiftRange])) else { continue }
+                lastDate = parsed
+            }
+            if lastDate != nil { return lastDate }
+        }
+
+        let monthPattern = #"(?i)\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\b"#
+        let yearPattern = #"\b20\d{2}\b"#
+        guard let monthRegex = try? NSRegularExpression(pattern: monthPattern),
+              let yearRegex = try? NSRegularExpression(pattern: yearPattern),
+              let yearMatch = yearRegex.matches(in: normalized, range: range).last,
+              let yearRange = Range(yearMatch.range, in: normalized),
+              let year = Int(normalized[yearRange]) else { return nil }
+        let months = monthRegex.matches(in: normalized, range: range).compactMap { match -> Int? in
+            guard let monthRange = Range(match.range(at: 1), in: normalized) else { return nil }
+            return Self.monthNumber(String(normalized[monthRange]))
+        }
+        guard let month = months.last else { return nil }
+        return Calendar(identifier: .gregorian).date(from: DateComponents(year: year, month: month, day: 1))
+    }
+
+    private func statementEndDate(for statementID: UUID) -> Date {
+        guard let statement = statements.first(where: { $0.id == statementID }) else { return .distantPast }
+        return periodDate(from: statement.period) ?? statement.importedAt
+    }
+
+    private func statementsOverlap(_ left: StatementRecord, _ right: StatementRecord) -> Bool {
+        if periodKey(left.period) == periodKey(right.period) { return true }
+        guard let leftRange = statementRange(from: left.period),
+              let rightRange = statementRange(from: right.period) else { return false }
+        return leftRange.lowerBound <= rightRange.upperBound
+            && rightRange.lowerBound <= leftRange.upperBound
+    }
+
+    private func statementRange(from value: String) -> ClosedRange<Date>? {
+        let normalized = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        let patterns = [
+            #"(?i)\b\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\b"#,
+            #"(?i)\b\d{1,2}[\/.\-](?:\d{1,2}|ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)[\/.\-]\d{2,4}\b"#,
+            #"(?i)\b\d{1,2}\s+(?:de\s+)?(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)(?:\s+de)?\s+\d{2,4}\b"#
+        ]
+        var dates: [Date] = []
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            dates.append(contentsOf: regex.matches(in: normalized, range: range).compactMap { match in
+                guard let swiftRange = Range(match.range, in: normalized) else { return nil }
+                return Self.parseDate(String(normalized[swiftRange]))
+            })
+        }
+        if let first = dates.min(), let last = dates.max() {
+            return first...last
+        }
+
+        guard let monthStart = periodDate(from: value) else { return nil }
+        let calendar = Calendar(identifier: .gregorian)
+        let components = calendar.dateComponents([.year, .month], from: monthStart)
+        guard let year = components.year, let month = components.month,
+              let start = calendar.date(from: DateComponents(year: year, month: month, day: 1)),
+              let next = calendar.date(byAdding: .month, value: 1, to: start) else { return nil }
+        return start...next.addingTimeInterval(-1)
     }
 
     private func summaryValue(_ summary: StatementSummaryRecord?, _ keyPath: KeyPath<StatementSummaryRecord, Decimal?>, fallback: Decimal) -> Decimal {
@@ -492,8 +623,21 @@ final class FinanceStore {
 
     private func latestMetricsBySource(_ metrics: [StatementMetric]) -> [StatementMetric] {
         var latest: [String: StatementMetric] = [:]
-        for metric in metrics where latest[metric.source] == nil {
-            latest[metric.source] = metric
+        for metric in metrics {
+            // Source alone is not an account identity: a bank account and a
+            // credit card can share an issuer name.
+            let key = "\(metric.source)|\(metric.kind.rawValue)"
+            if let current = latest[key] {
+                let metricDate = statementEndDate(for: metric.id)
+                let currentDate = statementEndDate(for: current.id)
+                if metricDate < currentDate { continue }
+                if metricDate == currentDate {
+                    let metricImported = statements.first(where: { $0.id == metric.id })?.importedAt ?? .distantPast
+                    let currentImported = statements.first(where: { $0.id == current.id })?.importedAt ?? .distantPast
+                    if metricImported <= currentImported { continue }
+                }
+            }
+            latest[key] = metric
         }
         return Array(latest.values)
     }
@@ -522,8 +666,15 @@ final class FinanceStore {
     }
 
     private func deduplicationKey(_ movement: Movement) -> String {
-        let amount = NSDecimalNumber(decimal: absolute(movement.amount)).stringValue
+        // Normalize to cents so 1,000, 1000.0 and 1000.00 share the same
+        // identity across PDF parsers and repeated uploads.
+        let amount = NSDecimalNumber(decimal: absolute(movement.amount) * Decimal(100)).intValue.description
         return [normalizedConcept(movement.account), normalizedDate(movement.date), amount, normalizedConcept(movement.title), movementKind(movement).rawValue].joined(separator: "|")
+    }
+
+    private func amountsMatch(_ left: Decimal, _ right: Decimal) -> Bool {
+        let tolerance = Decimal(string: "0.01", locale: Locale(identifier: "en_US_POSIX")) ?? 0
+        return absolute(left - right) <= tolerance
     }
 
     private func hasTransferHint(_ movement: Movement) -> Bool {
@@ -548,19 +699,40 @@ final class FinanceStore {
     /// statement remain separate (two genuine purchases can be identical),
     /// while an occurrence from another statement is treated as overlap.
     private func normalizeStoredLedger() {
+        // Drop malformed legacy rows before any aggregate can see them. This
+        // is especially important for builds that previously stored PDF
+        // headings or running balances as if they were transactions.
+        movements = movements.filter(isValidStoredMovement)
         var seen: [String: (statementId: UUID?, movementId: UUID)] = [:]
         var canonical: [Movement] = []
         for movement in movements {
             let key = deduplicationKey(movement)
             if let previous = seen[key], let statementId = movement.statementId,
                let previousStatementId = previous.statementId, statementId != previousStatementId {
-                continue
+                let currentStatement = statements.first(where: { $0.id == statementId })
+                let previousStatement = statements.first(where: { $0.id == previousStatementId })
+                // Only collapse rows when their statement periods overlap.
+                // Two genuinely identical purchases in different months must
+                // remain two occurrences in the ledger.
+                if let currentStatement, let previousStatement,
+                   statementsOverlap(currentStatement, previousStatement) {
+                    continue
+                }
             }
             seen[key] = (movement.statementId, movement.id)
             canonical.append(movement)
         }
         movements = canonical
         reconcileStoredMovements()
+    }
+
+    private func isValidStoredMovement(_ movement: Movement) -> Bool {
+        guard movement.amount != 0,
+              movement.title.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3,
+              movement.title.rangeOfCharacter(from: .letters) != nil,
+              !Self.isAdministrativeTitle(movement.title) else { return false }
+        let year = Calendar(identifier: .gregorian).component(.year, from: movement.date)
+        return (1900...2_200).contains(year)
     }
 
     private func reconcileStoredMovements() {
@@ -573,7 +745,7 @@ final class FinanceStore {
 
             if let cardIndex = movements.indices.first(where: { candidateIndex in
                 let card = movements[candidateIndex]
-                guard !consumed.contains(card.id), candidateIndex != index, isCardMovement(card), abs(bank.amount) == abs(card.amount), abs(bank.date.timeIntervalSince(card.date)) <= twoDays else { return false }
+                guard !consumed.contains(card.id), candidateIndex != index, isCardMovement(card), amountsMatch(bank.amount, card.amount), abs(bank.date.timeIntervalSince(card.date)) <= twoDays else { return false }
                 let cardText = normalizedConcept(card.title)
                 return movementKind(card) == .cardPayment
                     || hasCardPaymentHint(card)
@@ -592,7 +764,7 @@ final class FinanceStore {
 
             if let ownIndex = movements.indices.first(where: { candidateIndex in
                 let incoming = movements[candidateIndex]
-                guard !consumed.contains(incoming.id), candidateIndex != index, isBankMovement(incoming), isInflow(incoming), incoming.account != bank.account, abs(bank.amount) == abs(incoming.amount), abs(bank.date.timeIntervalSince(incoming.date)) <= twoDays else { return false }
+                guard !consumed.contains(incoming.id), candidateIndex != index, isBankMovement(incoming), isInflow(incoming), incoming.account != bank.account, amountsMatch(bank.amount, incoming.amount), abs(bank.date.timeIntervalSince(incoming.date)) <= twoDays else { return false }
                 return true
             }) {
                 movements[index].flow = .transfer
@@ -671,8 +843,16 @@ final class FinanceStore {
         } else {
             utilization = nil
         }
-        let debt = statement.summary?.debtBalance.map(absolute)
-            ?? (kind == .card ? statement.summary?.statementBalance.map(absolute) : nil)
+        // For cards the issuer's limit/disponible pair is the authoritative
+        // committed debt (including future MSI). It must win over a stale or
+        // statement-only balance captured from an earlier PDF.
+        let debt: Decimal?
+        if kind == .card, let creditLimit, let creditAvailable {
+            debt = max(Decimal(0), creditLimit - creditAvailable)
+        } else {
+            debt = statement.summary?.debtBalance.map(absolute)
+                ?? (kind == .card ? statement.summary?.statementBalance.map(absolute) : nil)
+        }
         let msiPending = statement.summary?.msiPending.map(absolute)
             ?? statement.summary?.msiOriginalDeferred.map(absolute)
             ?? statement.summary?.msiMonthlyLoad.map(absolute).flatMap { load in
@@ -836,6 +1016,7 @@ final class FinanceStore {
         defaults.removeObject(forKey: statementKey)
         defaults.removeObject(forKey: importKey)
         defaults.removeObject(forKey: categoryRulesKey)
+        defaults.removeObject(forKey: numericRepairKey)
         try? FileManager.default.removeItem(at: statementFilesDirectoryURL)
     }
 
@@ -847,6 +1028,33 @@ final class FinanceStore {
         let safeFileName = URL(fileURLWithPath: localFileName).lastPathComponent
         let url = statementFilesDirectoryURL.appendingPathComponent(safeFileName, isDirectory: false)
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    /// Older TestFlight builds persisted rows produced by the former parser.
+    /// Re-read those local PDFs once with the current extraction/reconciliation
+    /// pipeline so an app update does not require the user to upload every
+    /// statement again.
+    var hasStoredImportsNeedingRepair: Bool {
+        guard !UserDefaults.standard.bool(forKey: numericRepairKey) else { return false }
+        return statements.contains { statementFileURL(for: $0) != nil }
+    }
+
+    @discardableResult
+    func repairStoredImportsIfNeeded() -> Int {
+        guard !UserDefaults.standard.bool(forKey: numericRepairKey) else { return 0 }
+        let files = statements.compactMap { statementFileURL(for: $0) }
+        var repaired = 0
+        for file in files {
+            do {
+                _ = try importPDF(from: file)
+                repaired += 1
+            } catch {
+                // Keep the previous rows if a legacy file is unreadable. It
+                // will remain visible for a manual re-import/review.
+            }
+        }
+        UserDefaults.standard.set(true, forKey: numericRepairKey)
+        return repaired
     }
 
     func importPDF(from url: URL) throws -> ImportSummary {
@@ -2058,12 +2266,20 @@ final class FinanceStore {
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let phrases = [
-            "ciudad de mexico", "serie del certificado", "total importe cargos", "total de cargos",
-            "del al", "fecha de corte", "numero de cuenta", "no de cuenta", "numero de cliente",
-            "cuenta clabe", "rfc", "estado de cuenta", "periodo", "saldo", "total", "pagina",
-            "fecha y detalle", "pago minimo"
+            "ciudad de mexico", "serie del certificado", "no de serie del certificado",
+            "certificado sat", "total importe cargos", "total importe abonos", "total de cargos",
+            "total de abonos", "del al", "fecha de corte", "fecha limite", "numero de cuenta",
+            "no de cuenta", "numero de cliente", "cuenta clabe", "rfc", "estado de cuenta",
+            "estado de cue", "periodo", "periodo de facturacion", "saldo", "saldo disponible",
+            "saldo insoluto", "total", "pagina", "fecha y detalle", "pago minimo", "referencia",
+            "movimientos del periodo"
         ]
-        return phrases.contains { normalized == $0 || normalized.contains(" \($0) ") || normalized.hasPrefix("\($0) ") || normalized.hasSuffix(" \($0)") }
+        if phrases.contains(where: { normalized == $0 || normalized.contains(" \($0) ") || normalized.hasPrefix("\($0) ") || normalized.hasSuffix(" \($0)") }) {
+            return true
+        }
+        let tokens = normalized.split(separator: " ")
+        let nonLetterTokens = tokens.filter { String($0).rangeOfCharacter(from: .letters) == nil }.count
+        return !tokens.isEmpty && nonLetterTokens >= max(2, tokens.count - 1)
     }
 
     private static func hasForeignCurrency(in normalizedText: String) -> Bool {
@@ -2101,11 +2317,17 @@ final class FinanceStore {
                 .last(where: { $0 >= 100 })
                 ?? Calendar.current.component(.year, from: .now)
         }
+        let resolvedYear = year < 100 ? year + 2_000 : year
+        guard (1...12).contains(month), (1...31).contains(day), (1900...2_200).contains(resolvedYear) else { return nil }
         var dateComponents = DateComponents()
         dateComponents.day = day
         dateComponents.month = month
-        dateComponents.year = year < 100 ? year + 2_000 : year
-        return Calendar(identifier: .gregorian).date(from: dateComponents)
+        dateComponents.year = resolvedYear
+        let calendar = Calendar(identifier: .gregorian)
+        guard let date = calendar.date(from: dateComponents) else { return nil }
+        let roundTrip = calendar.dateComponents([.year, .month, .day], from: date)
+        guard roundTrip.year == resolvedYear, roundTrip.month == month, roundTrip.day == day else { return nil }
+        return date
     }
 
     private static func monthNumber(_ value: String) -> Int? {

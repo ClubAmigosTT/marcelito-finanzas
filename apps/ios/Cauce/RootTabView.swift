@@ -27,6 +27,9 @@ struct HomeView: View {
     @State private var isImporterPresented = false
     @State private var isDeleteConfirmationPresented = false
     @State private var importReport: ImportReport?
+    @State private var isImporting = false
+    @State private var importProgress = 0
+    @State private var importStatus = "Preparando…"
 
     private var hasData: Bool { !store.movements.isEmpty || !store.statements.isEmpty }
 
@@ -74,6 +77,13 @@ struct HomeView: View {
             .navigationBarTitleDisplayMode(.large)
             .toolbarBackground(Color.marcelitoCream, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
+            .disabled(isImporting)
+            .overlay {
+                if isImporting {
+                    ImportProgressOverlay(progress: importProgress, status: importStatus)
+                        .transition(.opacity)
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { isImporterPresented = true } label: {
@@ -100,20 +110,35 @@ struct HomeView: View {
                         )
                         return
                     }
-                    var items: [ImportReportItem] = []
-                    for url in urls {
-                        do {
-                            let summary = try store.importPDF(from: url)
-                            items.append(ImportReportItem(summary: summary))
-                        } catch {
-                            items.append(ImportReportItem(
-                                fileName: url.lastPathComponent,
-                                errorMessage: error.localizedDescription
-                            ))
+                    isImporting = true
+                    importProgress = 0
+                    importStatus = urls.count == 1 ? "Preparando el estado…" : "Preparando \(urls.count) estados…"
+                    Task { @MainActor in
+                        var items: [ImportReportItem] = []
+                        for (index, url) in urls.enumerated() {
+                            importStatus = "Leyendo \(url.lastPathComponent)…"
+                            importProgress = Int((Double(index) / Double(urls.count)) * 100)
+                            // Give SwiftUI one frame to present the loading
+                            // overlay before PDFKit/Vision starts its work.
+                            await Task.yield()
+                            do {
+                                let summary = try store.importPDF(from: url)
+                                items.append(ImportReportItem(summary: summary))
+                            } catch {
+                                items.append(ImportReportItem(
+                                    fileName: url.lastPathComponent,
+                                    errorMessage: error.localizedDescription
+                                ))
+                            }
+                            importProgress = Int((Double(index + 1) / Double(urls.count)) * 100)
+                            await Task.yield()
                         }
+                        importStatus = "Listo"
+                        isImporting = false
+                        importReport = ImportReport(fileCount: urls.count, items: items)
                     }
-                    importReport = ImportReport(fileCount: urls.count, items: items)
                 case .failure(let error):
+                    isImporting = false
                     importReport = ImportReport(
                         fileCount: 0,
                         items: [],
@@ -136,6 +161,20 @@ struct HomeView: View {
                 Button("Cancelar", role: .cancel) { }
             } message: {
                 Text("Se borrarán tu usuario, movimientos y estados importados de este dispositivo. Esta acción no se puede deshacer.")
+            }
+            .task {
+                guard store.hasStoredImportsNeedingRepair else { return }
+                isImporting = true
+                importProgress = 0
+                importStatus = "Actualizando cifras y conciliación…"
+                await Task.yield()
+                let repaired = store.repairStoredImportsIfNeeded()
+                importProgress = 100
+                importStatus = repaired == 1
+                    ? "1 estado recalculado"
+                    : "\(repaired) estados recalculados"
+                await Task.yield()
+                isImporting = false
             }
         }
     }
@@ -414,6 +453,48 @@ private struct EmptyDataCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .foregroundStyle(Color.marcelitoNavy)
         .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 18)
+    }
+}
+
+private struct ImportProgressOverlay: View {
+    let progress: Int
+    let status: String
+
+    var body: some View {
+        ZStack {
+            Color.marcelitoNavy.opacity(0.16)
+                .ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    ProgressView()
+                        .controlSize(.large)
+                        .tint(Color.marcelitoNavy)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Cargando estados…")
+                            .font(.headline)
+                            .foregroundStyle(Color.marcelitoNavy)
+                        Text(status)
+                            .font(.caption)
+                            .foregroundStyle(Color.marcelitoNavyMid)
+                            .lineLimit(2)
+                    }
+                }
+                ProgressView(value: Double(progress), total: 100)
+                    .tint(Color.marcelitoAmber)
+                Text("\(progress)%")
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            }
+            .padding(20)
+            .frame(maxWidth: 320)
+            .background(Color.marcelitoCream, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .shadow(color: Color.marcelitoNavy.opacity(0.18), radius: 18, y: 8)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Cargando estados de cuenta")
+            .accessibilityValue(status)
+        }
     }
 }
 

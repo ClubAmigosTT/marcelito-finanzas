@@ -360,7 +360,7 @@ struct ExpensesView: View {
     @State private var selectedCategory: ExpenseCategorySelection?
 
     private var groups: [(category: String, amount: Decimal)] {
-        Dictionary(grouping: store.realExpenseMovements, by: { $0.category })
+        Dictionary(grouping: store.currentPeriodExpenseMovements, by: { $0.category })
             .map { (category: $0.key, amount: $0.value.reduce(0) { $0 + abs($1.amount) }) }
             .sorted { $0.amount > $1.amount }
     }
@@ -477,13 +477,20 @@ private struct ExpenseTrendPoint: Identifiable {
     let value: Double
 }
 
+private struct ExpenseMerchantSummary: Identifiable {
+    let id: String
+    let name: String
+    let count: Int
+    let total: Decimal
+}
+
 private struct ExpenseCategoryDetailView: View {
     let category: String
     let store: FinanceStore
     @Environment(\.dismiss) private var dismiss
 
     private var movements: [Movement] {
-        store.realExpenseMovements.filter { $0.category == category }
+        store.currentPeriodExpenseMovements.filter { $0.category == category }
     }
 
     private var total: Decimal {
@@ -506,6 +513,59 @@ private struct ExpenseCategoryDetailView: View {
         }
     }
 
+    private var recurringMerchants: [ExpenseMerchantSummary] {
+        var grouped: [String: ExpenseMerchantSummary] = [:]
+        for movement in movements {
+            let key = merchantKey(movement.title)
+            let display = merchantDisplayName(movement.title)
+            if let existing = grouped[key] {
+                grouped[key] = ExpenseMerchantSummary(
+                    id: key,
+                    name: existing.name,
+                    count: existing.count + 1,
+                    total: existing.total + abs(movement.amount)
+                )
+            } else {
+                grouped[key] = ExpenseMerchantSummary(
+                    id: key,
+                    name: display,
+                    count: 1,
+                    total: abs(movement.amount)
+                )
+            }
+        }
+        return grouped.values
+            .sorted { left, right in
+                if left.count != right.count { return left.count > right.count }
+                return left.total > right.total
+            }
+            .prefix(5)
+            .map { $0 }
+    }
+
+    private var highestMovements: [Movement] {
+        Array(movements.sorted { abs($0.amount) > abs($1.amount) }.prefix(5))
+    }
+
+    private func merchantKey(_ value: String) -> String {
+        value
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: #"\b(?:aut\.?|ref\.?|folio|no\.?|num\.?)\s*[:#-]?\s*[a-z0-9-]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\b\d{2,}\b"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func merchantDisplayName(_ value: String) -> String {
+        let cleaned = value
+            .replacingOccurrences(of: #"\b(?:aut\.?|ref\.?|folio|no\.?|num\.?)\s*[:#-]?\s*[a-z0-9-]+"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.isEmpty ? "Sin descripción" : String(cleaned.prefix(44))
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -520,6 +580,62 @@ private struct ExpenseCategoryDetailView: View {
                         Text("\(movements.count) movimientos identificados en esta categoría.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
+                    }
+
+                    if !recurringMerchants.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Gastos más recurrentes")
+                                .font(.subheadline.weight(.semibold))
+                            ForEach(recurringMerchants) { item in
+                                HStack(spacing: 10) {
+                                    Image(systemName: "repeat")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(Color.marcelitoAmber)
+                                        .frame(width: 20)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(item.name)
+                                            .font(.subheadline.weight(.medium))
+                                            .lineLimit(1)
+                                        Text(item.count == 1 ? "1 movimiento" : "\(item.count) movimientos")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 8)
+                                    Text(item.total, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                                        .font(.subheadline.monospacedDigit())
+                                }
+                            }
+                        }
+                        .padding(14)
+                        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+
+                    if !highestMovements.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Gastos más altos")
+                                .font(.subheadline.weight(.semibold))
+                            ForEach(highestMovements) { movement in
+                                HStack(alignment: .top, spacing: 10) {
+                                    Image(systemName: "arrow.up.right")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(Color.marcelitoNavyMid)
+                                        .frame(width: 20)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(movement.title)
+                                            .font(.subheadline.weight(.medium))
+                                            .lineLimit(2)
+                                        Text(movement.date.formatted(.dateTime.day().month(.abbreviated)))
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    Spacer(minLength: 8)
+                                    Text(abs(movement.amount), format: .currency(code: "MXN").precision(.fractionLength(0)))
+                                        .font(.subheadline.monospacedDigit())
+                                }
+                            }
+                        }
+                        .padding(14)
+                        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
 
                     if points.isEmpty {
@@ -589,7 +705,7 @@ private struct AccountSummaryRow: View {
     let source: String
 
     private var statement: StatementRecord? {
-        store.statements.first { $0.source == source }
+        store.latestStatement(for: source)
     }
 
     private var metric: StatementMetric? {
