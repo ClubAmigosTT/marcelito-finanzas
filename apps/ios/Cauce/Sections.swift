@@ -611,7 +611,7 @@ private struct AccountSummaryRow: View {
 
     private var detailText: String {
         guard kind == .card else { return "Cuenta de efectivo" }
-        let minimum = metric?.minimumPayment?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
+        let minimum = statement?.summary?.minimumPayment?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
         let noInterest = metric?.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
         return "Pago próximo: \(minimum) · No intereses: \(noInterest)"
     }
