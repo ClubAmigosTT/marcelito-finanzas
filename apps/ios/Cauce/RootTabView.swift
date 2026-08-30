@@ -863,76 +863,137 @@ private struct CashFlowLineChart: View {
     let yDomain: ClosedRange<Double>
     @Binding var selectedPoint: CashFlowPoint?
 
+    private var selectedIndex: Int? {
+        guard let selectedPoint else { return nil }
+        return points.firstIndex { $0.id == selectedPoint.id }
+    }
+
+    private func xPosition(index: Int, width: CGFloat) -> CGFloat {
+        guard points.count > 1 else { return width / 2 }
+        return CGFloat(index) / CGFloat(points.count - 1) * width
+    }
+
+    private func yPosition(value: Double, height: CGFloat) -> CGFloat {
+        let range = max(yDomain.upperBound - yDomain.lowerBound, 1)
+        let normalized = (value - yDomain.lowerBound) / range
+        return height - CGFloat(normalized) * height
+    }
+
+    private func linePath(
+        keyPath: KeyPath<CashFlowPoint, Double>,
+        width: CGFloat,
+        height: CGFloat
+    ) -> Path {
+        var path = Path()
+        for (index, point) in points.enumerated() {
+            let coordinate = CGPoint(
+                x: xPosition(index: index, width: width),
+                y: yPosition(value: point[keyPath: keyPath], height: height)
+            )
+            if index == 0 {
+                path.move(to: coordinate)
+            } else {
+                path.addLine(to: coordinate)
+            }
+        }
+        return path
+    }
+
+    private func axisLabel(_ value: Double) -> String {
+        value.formatted(.number.notation(.compactName).precision(.fractionLength(0)))
+    }
+
+    private func dateLabel(_ date: Date) -> String {
+        date.formatted(.dateTime.day().month(.abbreviated))
+    }
+
+    private func selectPoint(at locationX: CGFloat, width: CGFloat) {
+        guard !points.isEmpty else { return }
+        let leftInset: CGFloat = 44
+        let plotWidth = max(width - leftInset, 1)
+        let relativeX = min(max(locationX - leftInset, 0), plotWidth)
+        let ratio = relativeX / plotWidth
+        let rawIndex = Int((ratio * CGFloat(max(points.count - 1, 0))).rounded())
+        let index = min(max(rawIndex, 0), points.count - 1)
+        selectedPoint = points[index]
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Chart {
-                ForEach(points) { point in
-                    LineMark(
-                        x: .value("Fecha", point.date),
-                        y: .value("Monto", point.income),
-                        series: .value("Serie", "Ingresos")
-                    )
-                    .foregroundStyle(Color.marcelitoSuccess)
-                    .lineStyle(StrokeStyle(lineWidth: 2.5))
+            GeometryReader { geometry in
+                let plotHeight = max(geometry.size.height - 8, 1)
+                let plotWidth = max(geometry.size.width - 44, 1)
+                ZStack(alignment: .topLeading) {
+                    VStack(alignment: .trailing, spacing: 0) {
+                        Text(axisLabel(yDomain.upperBound))
+                        Spacer()
+                        Text(axisLabel(0))
+                        Spacer()
+                        Text(axisLabel(yDomain.lowerBound))
+                    }
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .frame(width: 40, height: plotHeight, alignment: .trailing)
+
+                    ZStack(alignment: .topLeading) {
+                        Path { path in
+                            let y = yPosition(value: 0, height: plotHeight)
+                            path.move(to: CGPoint(x: 0, y: y))
+                            path.addLine(to: CGPoint(x: plotWidth, y: y))
+                        }
+                        .stroke(Color.marcelitoNavy.opacity(0.15), style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
+
+                        Path { path in
+                            path.addPath(linePath(keyPath: \CashFlowPoint.income, width: plotWidth, height: plotHeight))
+                        }
+                        .stroke(Color.marcelitoSuccess, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+
+                        Path { path in
+                            path.addPath(linePath(keyPath: \CashFlowPoint.expense, width: plotWidth, height: plotHeight))
+                        }
+                        .stroke(Color.marcelitoAmber, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
+
+                        Path { path in
+                            path.addPath(linePath(keyPath: \CashFlowPoint.balance, width: plotWidth, height: plotHeight))
+                        }
+                        .stroke(Color.marcelitoNavy, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [6, 4]))
+
+                        if let selectedIndex {
+                            let x = xPosition(index: selectedIndex, width: plotWidth)
+                            Path { path in
+                                path.move(to: CGPoint(x: x, y: 0))
+                                path.addLine(to: CGPoint(x: x, y: plotHeight))
+                            }
+                            .stroke(Color.marcelitoNavy.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                        }
+                    }
+                    .frame(width: plotWidth, height: plotHeight, alignment: .topLeading)
+                    .offset(x: 44)
                 }
-                ForEach(points) { point in
-                    LineMark(
-                        x: .value("Fecha", point.date),
-                        y: .value("Monto", point.expense),
-                        series: .value("Serie", "Gastos")
-                    )
-                    .foregroundStyle(Color.marcelitoAmber)
-                    .lineStyle(StrokeStyle(lineWidth: 2.5))
-                }
-                ForEach(points) { point in
-                    LineMark(
-                        x: .value("Fecha", point.date),
-                        y: .value("Monto", point.balance),
-                        series: .value("Serie", "Balance")
-                    )
-                    .foregroundStyle(Color.marcelitoNavy)
-                    .lineStyle(StrokeStyle(lineWidth: 2, dash: [6, 4]))
-                }
+                .contentShape(Rectangle())
+                .gesture(
+                    SpatialTapGesture()
+                        .onEnded { event in
+                            selectPoint(at: event.location.x, width: geometry.size.width)
+                        }
+                )
             }
-            .chartYScale(domain: yDomain)
-            .chartXAxis {
-                AxisMarks(values: .automatic(desiredCount: 5)) { _ in
-                    AxisGridLine()
-                    AxisTick()
-                    AxisValueLabel()
+            .frame(height: 170)
+
+            if let first = points.first, let last = points.last {
+                HStack {
+                    Spacer().frame(width: 44)
+                    Text(dateLabel(first.date))
+                    Spacer()
+                    if points.count > 2 {
+                        Text(dateLabel(points[points.count / 2].date))
+                        Spacer()
+                    }
+                    Text(dateLabel(last.date))
                 }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
             }
-            .chartYAxis {
-                AxisMarks(position: .leading) { _ in
-                    AxisGridLine()
-                    AxisTick()
-                    AxisValueLabel()
-                }
-            }
-            .chartOverlay { proxy in
-                GeometryReader { geometry in
-                    Rectangle()
-                        .fill(.clear)
-                        .contentShape(Rectangle())
-                        .gesture(
-                            SpatialTapGesture()
-                                .onEnded { event in
-                                    let plotFrame = geometry[proxy.plotFrame]
-                                    let x = event.location.x - plotFrame.origin.x
-                                    guard x >= 0, x <= plotFrame.size.width,
-                                          let date = proxy.value(atX: x, as: Date.self),
-                                          let closest = points.min(by: {
-                                              abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
-                                          }) else { return }
-                                    selectedPoint = closest
-                                }
-                        )
-                }
-            }
-            .frame(height: 250)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Gráfica de líneas de ingresos, gastos y balance acumulado por fecha")
-            .accessibilityHint("Toca una fecha para ver sus importes y comportamiento reciente")
 
             HStack(spacing: 12) {
                 CashFlowLegendItem(label: "Ingresos", color: Color.marcelitoSuccess)
@@ -941,6 +1002,9 @@ private struct CashFlowLineChart: View {
             }
             .font(.caption2)
         }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Gráfica de líneas de ingresos, gastos y balance acumulado por fecha")
+        .accessibilityHint("Toca una fecha para ver sus importes y comportamiento reciente")
     }
 }
 
