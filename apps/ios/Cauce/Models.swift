@@ -241,6 +241,7 @@ final class FinanceStore {
     private let categoryRulesKey = "marcelito.categoryRules.v1"
     private let numericRepairKey = "marcelito.numericRepair.v1"
     private let statementFilesDirectoryName = "ImportedStatements"
+    private var repairInProgress = false
 
     var movements: [Movement]
     var statements: [StatementRecord]
@@ -911,6 +912,10 @@ final class FinanceStore {
         }
         lastImportedFile = defaults.string(forKey: importKey)
         normalizeStoredLedger()
+        DiagnosticsRecorder.record(
+            stage: "store.init",
+            message: "Datos locales cargados: \(statements.count) estado(s), \(movements.count) movimiento(s)."
+        )
     }
 
     func updateCategory(for movement: Movement, to category: String) {
@@ -1036,28 +1041,82 @@ final class FinanceStore {
     /// statement again.
     var hasStoredImportsNeedingRepair: Bool {
         guard !UserDefaults.standard.bool(forKey: numericRepairKey) else { return false }
-        return statements.contains { statementFileURL(for: $0) != nil }
+        return !storedImportRepairCandidates.isEmpty
+    }
+
+    /// Automatic repair is intentionally limited to the newest local state
+    /// for each account/kind. Older states stay available in Documentos
+    /// importados and can be re-read manually, while launch-time work remains
+    /// bounded and cannot run OCR over an entire archive.
+    private var storedImportRepairCandidates: [StatementRecord] {
+        let eligible = statements.filter { statementFileURL(for: $0) != nil }
+        var newestByAccount: [String: StatementRecord] = [:]
+        for statement in eligible {
+            let key = "\(normalizedConcept(statement.source))|\(statementKind(statement).rawValue)"
+            guard let current = newestByAccount[key] else {
+                newestByAccount[key] = statement
+                continue
+            }
+            let statementDate = statementEndDate(for: statement.id)
+            let currentDate = statementEndDate(for: current.id)
+            if statementDate > currentDate || (statementDate == currentDate && statement.importedAt > current.importedAt) {
+                newestByAccount[key] = statement
+            }
+        }
+        return newestByAccount.values.sorted {
+            let leftDate = statementEndDate(for: $0.id)
+            let rightDate = statementEndDate(for: $1.id)
+            if leftDate != rightDate { return leftDate > rightDate }
+            return $0.importedAt > $1.importedAt
+        }
     }
 
     @discardableResult
     func repairStoredImportsIfNeeded() -> Int {
-        guard !UserDefaults.standard.bool(forKey: numericRepairKey) else { return 0 }
-        let files = statements.compactMap { statementFileURL(for: $0) }
+        guard !UserDefaults.standard.bool(forKey: numericRepairKey), !repairInProgress else { return 0 }
+        repairInProgress = true
+        defer { repairInProgress = false }
+        let candidates = storedImportRepairCandidates
+        guard !candidates.isEmpty else {
+            UserDefaults.standard.set(true, forKey: numericRepairKey)
+            return 0
+        }
+        DiagnosticsRecorder.record(
+            stage: "repair.start",
+            message: "Recalculando \(candidates.count) estado(s) reciente(s) sin OCR automático."
+        )
         var repaired = 0
-        for file in files {
+        for statement in candidates {
+            guard let file = statementFileURL(for: statement) else { continue }
             do {
-                _ = try importPDF(from: file)
+                // OCR is deliberately opt-in during launch repair. Vision can
+                // hold the main thread for a long time on scanned documents;
+                // the user can still import those files manually afterwards.
+                _ = try importPDF(from: file, allowOCR: false)
                 repaired += 1
+                DiagnosticsRecorder.record(
+                    stage: "repair.statement",
+                    message: "Estado actualizado: \(statement.source) · \(statement.period)."
+                )
             } catch {
                 // Keep the previous rows if a legacy file is unreadable. It
                 // will remain visible for a manual re-import/review.
+                DiagnosticsRecorder.record(
+                    level: "error",
+                    stage: "repair.error",
+                    message: "No se pudo actualizar \(statement.source) · \(statement.period): \(error.localizedDescription)"
+                )
             }
         }
         UserDefaults.standard.set(true, forKey: numericRepairKey)
+        DiagnosticsRecorder.record(
+            stage: "repair.done",
+            message: "Reparación terminada: \(repaired) de \(candidates.count) estado(s)."
+        )
         return repaired
     }
 
-    func importPDF(from url: URL) throws -> ImportSummary {
+    func importPDF(from url: URL, allowOCR: Bool = true) throws -> ImportSummary {
         let didStartAccessing = url.startAccessingSecurityScopedResource()
         defer {
             if didStartAccessing {
@@ -1078,7 +1137,7 @@ final class FinanceStore {
         let extractedText = (0..<document.pageCount)
             .compactMap { document.page(at: $0)?.string }
             .joined(separator: "\n")
-        let usedOCR = extractedText.trimmingCharacters(in: .whitespacesAndNewlines).count < 120
+        let usedOCR = allowOCR && extractedText.trimmingCharacters(in: .whitespacesAndNewlines).count < 120
         let ocrObservations = usedOCR ? Self.ocrObservations(from: document) : []
         let text = usedOCR ? Self.ocrText(from: ocrObservations) : extractedText
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

@@ -30,6 +30,7 @@ struct HomeView: View {
     @State private var isImporting = false
     @State private var importProgress = 0
     @State private var importStatus = "Preparando…"
+    @State private var isDiagnosticsPresented = false
 
     private var hasData: Bool { !store.movements.isEmpty || !store.statements.isEmpty }
 
@@ -55,6 +56,11 @@ struct HomeView: View {
                 ForEach(store.statements.prefix(4)) { statement in
                     Label("\(statement.source) · \(conciseStatementPeriod(statement))", systemImage: statement.requiresReview ? "exclamationmark.triangle" : "checkmark.circle")
                 }
+            }
+            Button {
+                isDiagnosticsPresented = true
+            } label: {
+                Label("Diagnóstico", systemImage: "stethoscope")
             }
             Button("Eliminar cuenta", role: .destructive) {
                 isDeleteConfirmationPresented = true
@@ -113,6 +119,10 @@ struct HomeView: View {
                     isImporting = true
                     importProgress = 0
                     importStatus = urls.count == 1 ? "Preparando el estado…" : "Preparando \(urls.count) estados…"
+                    DiagnosticsRecorder.record(
+                        stage: "import.start",
+                        message: "Importación iniciada: \(urls.count) PDF(s)."
+                    )
                     Task { @MainActor in
                         var items: [ImportReportItem] = []
                         for (index, url) in urls.enumerated() {
@@ -127,7 +137,16 @@ struct HomeView: View {
                             do {
                                 let summary = try store.importPDF(from: url)
                                 items.append(ImportReportItem(summary: summary))
+                                DiagnosticsRecorder.record(
+                                    stage: "import.file",
+                                    message: "\(summary.source) · \(summary.period): \(summary.imported) movimiento(s)\(summary.usedOCR ? " · OCR" : "")."
+                                )
                             } catch {
+                                DiagnosticsRecorder.record(
+                                    level: "error",
+                                    stage: "import.error",
+                                    message: "\(url.lastPathComponent): \(error.localizedDescription)"
+                                )
                                 items.append(ImportReportItem(
                                     fileName: url.lastPathComponent,
                                     errorMessage: error.localizedDescription
@@ -141,9 +160,14 @@ struct HomeView: View {
                         importStatus = "Listo"
                         isImporting = false
                         importReport = ImportReport(fileCount: urls.count, items: items)
+                        DiagnosticsRecorder.record(
+                            stage: "import.done",
+                            message: "Importación terminada: \(items.filter { $0.errorMessage == nil }.count)/\(urls.count) archivo(s) procesado(s)."
+                        )
                     }
                 case .failure(let error):
                     isImporting = false
+                    DiagnosticsRecorder.record(level: "error", stage: "import.selection", message: error.localizedDescription)
                     importReport = ImportReport(
                         fileCount: 0,
                         items: [],
@@ -153,6 +177,9 @@ struct HomeView: View {
             }
             .sheet(item: $importReport) { report in
                 ImportReportSheet(report: report)
+            }
+            .sheet(isPresented: $isDiagnosticsPresented) {
+                DiagnosticsView()
             }
             .confirmationDialog(
                 "Eliminar cuenta",
