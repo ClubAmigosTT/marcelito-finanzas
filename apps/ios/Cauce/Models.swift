@@ -1672,7 +1672,7 @@ final class FinanceStore {
     }
 
     private func persistStatementFile(_ data: Data, statementId: UUID) -> String? {
-        let localFileName = "(statementId.uuidString).pdf"
+        let localFileName = "\(statementId.uuidString).pdf"
         do {
             try FileManager.default.createDirectory(
                 at: statementFilesDirectoryURL,
