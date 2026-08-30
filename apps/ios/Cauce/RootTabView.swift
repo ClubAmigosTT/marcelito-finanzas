@@ -1,6 +1,7 @@
 import SwiftUI
 import UniformTypeIdentifiers
 import Foundation
+import Charts
 
 struct RootTabView: View {
     var body: some View {
@@ -35,6 +36,7 @@ struct HomeView: View {
             if hasData {
                 NetWorthSummary(store: store)
                 MetricsStrip()
+                CashFlowChart(store: store)
             } else {
                 EmptyDataCard { isImporterPresented = true }
             }
@@ -556,6 +558,119 @@ private struct MetricTile: View {
         .frame(maxWidth: .infinity, minHeight: 106, alignment: .leading)
         .foregroundStyle(Color.marcelitoNavy)
         .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 14, padding: 14)
+    }
+}
+
+private struct CashFlowChart: View {
+    let store: FinanceStore
+
+    private var points: [CashFlowPoint] {
+        store.cashFlowHistory
+    }
+
+    private var yDomain: ClosedRange<Double> {
+        let values = points.flatMap { [$0.income, $0.expense, $0.balance] }
+        guard let minimumValue = values.min(), let maximumValue = values.max() else {
+            return -1...1
+        }
+
+        if abs(maximumValue - minimumValue) < 0.01 {
+            let padding = max(abs(maximumValue) * 0.2, 1)
+            return (minimumValue - padding)...(maximumValue + padding)
+        }
+
+        let lowerBound = min(minimumValue, 0)
+        let upperBound = max(maximumValue, 0)
+        let padding = max((upperBound - lowerBound) * 0.12, 1)
+        return (lowerBound - padding)...(upperBound + padding)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Ingresos, gastos y balance")
+                    .font(.title3.weight(.bold))
+                Text("Monto en MXN · balance acumulado por fecha")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            if points.isEmpty {
+                VStack(alignment: .leading, spacing: 7) {
+                    Image(systemName: "chart.xyaxis.line")
+                        .font(.title2)
+                        .foregroundStyle(Color.marcelitoNavyMid)
+                    Text("Aún no hay movimientos con fecha")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Importa un estado de cuenta para comparar visualmente tus ingresos y gastos.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 16)
+            } else {
+                Chart {
+                    ForEach(points) { point in
+                        LineMark(
+                            x: .value("Fecha", point.date),
+                            y: .value("Monto", point.income),
+                            series: .value("Serie", "Ingresos")
+                        )
+                        .foregroundStyle(by: .value("Serie", "Ingresos"))
+                        .lineStyle(StrokeStyle(lineWidth: 2.5))
+                        .symbol(Circle())
+
+                        LineMark(
+                            x: .value("Fecha", point.date),
+                            y: .value("Monto", point.expense),
+                            series: .value("Serie", "Gastos")
+                        )
+                        .foregroundStyle(by: .value("Serie", "Gastos"))
+                        .lineStyle(StrokeStyle(lineWidth: 2.5))
+                        .symbol(Circle())
+
+                        LineMark(
+                            x: .value("Fecha", point.date),
+                            y: .value("Monto", point.balance),
+                            series: .value("Serie", "Balance acumulado")
+                        )
+                        .foregroundStyle(by: .value("Serie", "Balance acumulado"))
+                        .lineStyle(StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                        .symbol(Circle())
+                    }
+                }
+                .chartForegroundStyleScale([
+                    "Ingresos": Color.marcelitoSuccess,
+                    "Gastos": Color.marcelitoAmber,
+                    "Balance acumulado": Color.marcelitoNavy
+                ])
+                .chartYScale(domain: yDomain)
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: 5)) { _ in
+                        AxisGridLine()
+                        AxisTick()
+                        AxisValueLabel()
+                    }
+                }
+                .chartYAxis {
+                    AxisMarks(position: .leading) { _ in
+                        AxisGridLine()
+                        AxisTick()
+                        AxisValueLabel()
+                    }
+                }
+                .chartLegend(position: .bottom, alignment: .leading, spacing: 12)
+                .frame(height: 250)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Gráfica de líneas de ingresos, gastos y balance acumulado por fecha")
+
+                Text("Transferencias internas y pagos de tarjeta no se muestran para no inflar el gasto.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .foregroundStyle(Color.marcelitoNavy)
+        .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 18)
     }
 }
 

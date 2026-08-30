@@ -203,6 +203,18 @@ struct StatementMetric: Identifiable {
     var pendingPercent: Decimal? { newCharges == 0 ? nil : max(Decimal(0), accumulatedBalance) / newCharges }
 }
 
+/// A daily point used to compare real income, real spending, and the
+/// accumulated balance on the dashboard. Values are already converted to
+/// `Double` so Swift Charts can render them without exposing accounting
+/// formulas in the view layer.
+struct CashFlowPoint: Identifiable {
+    let id: Date
+    let date: Date
+    let income: Double
+    let expense: Double
+    let balance: Double
+}
+
 enum FinanceImportError: LocalizedError {
     case unreadableDocument
     case emptyDocument
@@ -271,16 +283,7 @@ final class FinanceStore {
     var totalExpenses: Decimal { consolidatedRealSpend }
     var realExpenseMovements: [Movement] { movements.filter(isSpend) }
     var realIncome: Decimal {
-        movements.filter { movement in
-            guard movement.flow == .income else { return false }
-            let kind = movementKind(movement)
-            if kind == .credit || kind == .refund { return false }
-            if let statementId = movement.statementId,
-               let statement = statements.first(where: { $0.id == statementId }), statementKind(statement) == .card {
-                return false
-            }
-            return true
-        }.reduce(0) { $0 + absolute($1.amount) }
+        movements.filter(isRealIncome).reduce(0) { $0 + absolute($1.amount) }
     }
     var netFlow: Decimal { realIncome - consolidatedRealSpend }
     var savingsRate: Decimal? { realIncome == 0 ? nil : netFlow / realIncome }
@@ -345,14 +348,47 @@ final class FinanceStore {
         ) ?? .now
         return movements
             .filter { movement in
-                guard movement.date >= monthStart, movement.flow == .income else { return false }
-                let kind = movementKind(movement)
-                return kind != .credit && kind != .refund
+                movement.date >= monthStart && isRealIncome(movement)
             }
             .reduce(0) { $0 + absolute($1.amount) }
     }
 
     var monthlyNetFlow: Decimal { monthlyIncome - monthlyExpense }
+
+    /// Daily cash-flow history for the executive comparison chart. Card
+    /// payments and internal transfers are intentionally excluded so the
+    /// balance line reflects real income minus real spending only.
+    var cashFlowHistory: [CashFlowPoint] {
+        var incomeByDay: [Date: Decimal] = [:]
+        var expenseByDay: [Date: Decimal] = [:]
+        let calendar = Calendar.current
+
+        for movement in movements {
+            let day = calendar.startOfDay(for: movement.date)
+            if isRealIncome(movement) {
+                incomeByDay[day, default: 0] += absolute(movement.amount)
+            } else if isSpend(movement) {
+                expenseByDay[day, default: 0] += absolute(movement.amount)
+            }
+        }
+
+        let days = Set(incomeByDay.keys).union(expenseByDay.keys).sorted()
+        guard !days.isEmpty else { return [] }
+
+        var accumulatedBalance: Decimal = 0
+        return days.map { day in
+            let income = incomeByDay[day, default: 0]
+            let expense = expenseByDay[day, default: 0]
+            accumulatedBalance += income - expense
+            return CashFlowPoint(
+                id: day,
+                date: day,
+                income: NSDecimalNumber(decimal: income).doubleValue,
+                expense: NSDecimalNumber(decimal: expense).doubleValue,
+                balance: NSDecimalNumber(decimal: accumulatedBalance).doubleValue
+            )
+        }
+    }
 
     private func absolute(_ value: Decimal) -> Decimal { value < 0 ? -value : value }
 
@@ -378,6 +414,17 @@ final class FinanceStore {
         if movement.flow == .transfer { return value.contains("transfer") || value.contains("traspaso") ? .bankTransfer : .cardPayment }
         if movement.flow == .income { return value.contains("credito") || value.contains("abono") ? .credit : .income }
         return movement.flow == .expense ? .purchase : .other
+    }
+
+    private func isRealIncome(_ movement: Movement) -> Bool {
+        guard movement.flow == .income else { return false }
+        let kind = movementKind(movement)
+        guard kind != .credit && kind != .refund else { return false }
+        if let statementId = movement.statementId,
+           let statement = statements.first(where: { $0.id == statementId }) {
+            return statementKind(statement) != .card
+        }
+        return true
     }
 
     private func isSpend(_ movement: Movement) -> Bool {
