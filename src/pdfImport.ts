@@ -1,8 +1,9 @@
-import type { ImportResult, StatementKind, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types.ts";
+import type { ImportResult, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types.ts";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
 
 type PdfTextItem = { str: string; transform: number[] };
 
@@ -104,8 +105,9 @@ function detectPeriod(text: string, fileName: string) {
   // Scanned PDFs often have no text layer. Their filename is still useful
   // context, so expose a readable month/year instead of the raw slug.
   const normalizedFileName = fileName.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  const filePeriod = normalizedFileName.match(/(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)[^\d]{0,8}(20\d{2})/i);
-  if (filePeriod?.[0]) return filePeriod[0].replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
+  const filePeriods = Array.from(normalizedFileName.matchAll(/(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)[^\d]{0,8}(20\d{2})/gi));
+  const filePeriod = filePeriods.at(-1)?.[0];
+  if (filePeriod) return filePeriod.replace(/[_-]+/g, " ").replace(/\s+/g, " ").trim();
   const numericPeriod = normalizedFileName.match(/20(\d{2})[-_. ](0?[1-9]|1[0-2])(?:\D|$)/);
   if (numericPeriod) return `${monthNames[Number(numericPeriod[2]) - 1]} 20${numericPeriod[1]}`;
   const reversedNumericPeriod = normalizedFileName.match(/(?:^|\D)(0?[1-9]|1[0-2])[-_. ]20(\d{2})(?:\D|$)/);
@@ -126,30 +128,99 @@ function findSummaryAmount(text: string, labels: string[]) {
   return match?.[1] ? normalizeAmount(match[1]) : undefined;
 }
 
+function findLastSummaryAmount(text: string, labels: string[]) {
+  const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const label = labels.join("|");
+  const money = "-?\\s*\\$?(?:(?:\\d{1,3}(?:[ ,.\\u00a0]\\d{3})+|\\d+)(?:[.,]\\d{1,2})?)";
+  const matches = Array.from(normalized.matchAll(new RegExp(`(?:${label})[^\\d$-]{0,90}(${money})`, "gi")));
+  const value = matches.at(-1)?.[1];
+  return value ? normalizeAmount(value) : undefined;
+}
+
+function findLastClosingBalance(text: string) {
+  const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const money = "-?\\s*\\$?(?:(?:\\d{1,3}(?:[ ,.\\u00a0]\\d{3})+|\\d+)(?:[.,]\\d{1,2})?)";
+  const matches = Array.from(normalized.matchAll(new RegExp(`saldo\\s+final(?!\\s+del\\s+periodo\\s+anterior)[^\\d$-]{0,90}(${money})`, "gi")));
+  const value = matches.at(-1)?.[1];
+  return value ? normalizeAmount(value) : undefined;
+}
+
+const summaryMoneyPattern = /(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?![A-Za-z0-9])/g;
+
+function lineMoneyValues(line: string) {
+  return Array.from(line.matchAll(summaryMoneyPattern)).map((match) => ({ raw: match[0], value: normalizeAmount(match[0]) })).filter((item) => item.value !== 0 && Math.abs(item.value) < 100_000_000);
+}
+
 function parseStatementSummary(text: string, kind: StatementKind): StatementSummary {
   const summary: StatementSummary = {};
-  const values: Array<[keyof StatementSummary, number | undefined]> = [
-    ["previousBalance", findSummaryAmount(text, ["saldo anterior", "saldo previo"])],
-    ["statementBalance", findSummaryAmount(text, ["saldo nuevo", "saldo al corte", "saldo actual", "saldo deudor"])],
-    ["newTransactions", findSummaryAmount(text, ["nuevas transacciones", "compras nuevas"])],
-    ["payments", findSummaryAmount(text, ["pagos realizados", "pagos efectuados"])],
-    ["credits", findSummaryAmount(text, ["pagos y creditos", "creditos", "abonos"])],
-    ["newCharges", findSummaryAmount(text, ["nuevos cargos", "total de cargos"])],
-    ["interest", findSummaryAmount(text, ["intereses", "interes del periodo"])],
-    ["fees", findSummaryAmount(text, ["comisiones", "comision"])],
-    ["creditLimit", findSummaryAmount(text, ["limite de credito", "linea de credito"])],
-    ["creditAvailable", findSummaryAmount(text, ["credito disponible", "disponible para compras"])],
-    ["minimumPayment", findSummaryAmount(text, ["pago minimo"])],
-    ["paymentForNoInterest", findSummaryAmount(text, ["pago para no generar intereses", "pago para no generar interes"])],
-    ["msiPending", findSummaryAmount(text, ["msi pendientes", "saldo msi", "principal diferido"])],
-    ["revolvingBalance", findSummaryAmount(text, ["saldo revolvente", "saldo revolvente al corte"])],
-  ];
+  // Bank statements have different summary vocabulary and often place bare
+  // operation counts next to “Abonos/Cargos”. Do not populate card-only
+  // fields from those incidental numbers; the bank-specific totals below are
+  // the only values that feed cash reconciliation.
+  const values: Array<[keyof StatementSummary, number | undefined]> = kind === "card"
+    ? [
+      ["previousBalance", findSummaryAmount(text, ["saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"])],
+      ["statementBalance", findSummaryAmount(text, ["saldo nuevo", "saldo al corte", "saldo actual", "saldo deudor"])],
+      ["newTransactions", findSummaryAmount(text, ["nuevas transacciones", "compras nuevas"])],
+      ["payments", findSummaryAmount(text, ["pagos realizados", "pagos efectuados"])],
+      ["credits", findSummaryAmount(text, ["pagos y creditos", "creditos", "abonos"])],
+      ["newCharges", findSummaryAmount(text, ["nuevos cargos", "total de cargos"])],
+      ["interest", findSummaryAmount(text, ["intereses", "interes del periodo"])],
+      ["fees", findSummaryAmount(text, ["comisiones", "comision"])],
+      ["creditLimit", findSummaryAmount(text, ["limite de credito", "linea de credito"])],
+      ["creditAvailable", findSummaryAmount(text, ["credito disponible", "disponible para compras"])],
+      ["minimumPayment", findSummaryAmount(text, ["pago minimo"])],
+      ["minimumPlusMsi", findSummaryAmount(text, ["pago minimo mas meses sin intereses", "pago minimo mas msi"])],
+      ["paymentForNoInterest", findSummaryAmount(text, ["pago para no generar intereses", "pago para no generar interes"])],
+      ["msiPending", findSummaryAmount(text, ["msi pendientes", "saldo msi", "principal diferido"])],
+      ["revolvingBalance", findSummaryAmount(text, ["saldo revolvente", "saldo revolvente al corte"])],
+    ]
+    : [["previousBalance", findSummaryAmount(text, ["saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"])]];
   values.forEach(([key, value]) => {
     if (value !== undefined) (summary as unknown as Record<string, number | undefined>)[key] = value;
   });
   if (kind !== "card") {
-    const cashBalance = findSummaryAmount(text, ["saldo disponible", "saldo final", "saldo actual"]);
+    // Bank summaries usually show the opening balance before the closing
+    // balance. Pick the last closing value so an older cutoff cannot win.
+    const cashBalance = findLastClosingBalance(text) ?? findLastSummaryAmount(text, ["saldo disponible", "saldo actual", "saldo al corte"]);
     if (cashBalance !== undefined) summary.cashBalance = cashBalance;
+
+    const normalizedLines = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/\n+/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
+    const summaryLines: string[] = [];
+    for (const line of normalizedLines) {
+      if (/detalle\s+de\s+movimientos|^fecha\b.*(?:descripcion|detalle)/i.test(line)) break;
+      summaryLines.push(line);
+    }
+    summaryLines.forEach((line) => {
+      const normalizedLine = line.toLowerCase();
+      // The BBVA statement repeats deposits/charges in a percentage chart
+      // later in the PDF. Those values are not the declared period totals.
+      const aggregateLabelIndex = normalizedLine.search(/dep.?sitos?|retiros?|abonos?|cargos?/);
+      const percentIndex = normalizedLine.indexOf("%");
+      if (/porcentaje|objetados|certificado|vencimiento|inversion|producto/.test(normalizedLine)
+        || (percentIndex >= 0 && aggregateLabelIndex >= 0 && percentIndex > aggregateLabelIndex)) return;
+      const valuesInLine = lineMoneyValues(line);
+      if (!valuesInLine.length) return;
+      // Counts are often printed next to the amount (e.g. “2 19,500.00”).
+      // Prefer a token with a decimal/thousands separator over a bare count.
+      const monetaryToken = valuesInLine.filter((item) => /[.,$]/.test(item.raw))[0] ?? valuesInLine.at(-1);
+      const monetaryValue = monetaryToken?.value;
+      if (monetaryValue === undefined) return;
+      const isDeposit = /dep.?sitos?|abonos?|total importe abonos?/.test(normalizedLine) && !/retiros?|cargos?/.test(normalizedLine);
+      const isWithdrawal = /retiros?|cargos?|total importe cargos?/.test(normalizedLine) && !/dep.?sitos?|abonos?/.test(normalizedLine);
+      if (isDeposit) {
+        summary.depositTotal = monetaryValue;
+        const count = normalizedLine.match(/total movimientos abonos?\s+(\d{1,4})\b/)?.[1]
+          ?? normalizedLine.match(/dep.?sitos?\s*\/\s*abonos?[^\d]{0,20}(\d{1,4})\s+(?=(?:\$?\s*)?\d{1,3}(?:[,.]\d{3})*[.,]\d{2}\b)/)?.[1];
+        if (count) summary.depositCount = Number(count);
+      }
+      if (isWithdrawal) {
+        summary.withdrawalTotal = monetaryValue;
+        const count = normalizedLine.match(/total movimientos cargos?\s+(\d{1,4})\b/)?.[1]
+          ?? normalizedLine.match(/retiros?\s*\/\s*cargos?[^\d]{0,20}(\d{1,4})\s+(?=(?:\$?\s*)?\d{1,3}(?:[,.]\d{3})*[.,]\d{2}\b)/)?.[1];
+        if (count) summary.withdrawalCount = Number(count);
+      }
+    });
   }
 
   const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
@@ -198,8 +269,97 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
       summary.creditLimit = parseToken(creditSection[1]);
       summary.creditAvailable = parseToken(creditSection[2]);
     }
+
+    // Amex's MSI table ends with the remaining principal followed by the
+    // aggregate monthly installment load (for example “Total de Plan ...
+    // 10,401.06 16,382.40”). These are future obligations, not new spend.
+    const msiTotal = normalized.match(new RegExp(`total\\s+de\\s+plan\\s+de\\s+meses\\s+sin\\s+intereses[^\\d$-]{0,40}(${decimalMoneyToken})[^\\d$-]{0,30}(${decimalMoneyToken})`, "i"));
+    if (msiTotal) {
+      summary.msiPending = parseToken(msiTotal[1]);
+      summary.msiMonthlyLoad = parseToken(msiTotal[2]);
+    } else {
+      const monthlyTotal = normalized.match(new RegExp(`total\\s+de\\s+meses\\s+sin\\s+intereses[^\\d$-]{0,40}(${decimalMoneyToken})`, "i"));
+      if (monthlyTotal) summary.msiMonthlyLoad = parseToken(monthlyTotal[1]);
+    }
   }
   return summary;
+}
+
+export { parseStatementSummary };
+
+function transactionKindForReconciliation(transaction: Transaction) {
+  const kind = transaction.kind;
+  if (kind) return kind;
+  const normalized = normalizeText(`${transaction.description} ${transaction.category}`);
+  if (/gracias por su pago|pago.*(?:tarjeta|credito|amex)|tarjeta.*pago|abono.*(?:tarjeta|credito)/.test(normalized)) return "cardPayment";
+  if (/transfer|traspaso|spei/.test(normalized)) return "bankTransfer";
+  if (/devolucion|reembolso|bonificacion|refund/.test(normalized)) return "refund";
+  if (/monto a diferir/.test(normalized)) return "credit";
+  if (/msi|meses sin intereses|meses en automatico|diferid/.test(normalized)) return "msi";
+  return transaction.flow === "income" ? "credit" : "purchase";
+}
+
+function sumAbsolute(values: number[]) {
+  return values.reduce((total, value) => total + Math.abs(value), 0);
+}
+
+/**
+ * Compares extracted rows with totals printed by the issuer. Invalid imports
+ * are kept out of the ledger; pending imports remain visible but provisional.
+ */
+export function reconcileStatementImport(kind: StatementKind, summary: StatementSummary | undefined, transactions: Transaction[]): StatementReconciliation {
+  const tolerance = 0.05;
+  if (!summary) return { status: "pending", tolerance, extractedMovementCount: transactions.length, reason: "El estado no contiene un resumen de totales" };
+
+  if (kind === "bank") {
+    const extractedDepositTotal = sumAbsolute(transactions.filter((transaction) => transaction.amount > 0).map((transaction) => transaction.amount));
+    const extractedWithdrawalTotal = sumAbsolute(transactions.filter((transaction) => transaction.amount < 0).map((transaction) => transaction.amount));
+    const expectedDeposit = summary.depositTotal;
+    const expectedWithdrawal = summary.withdrawalTotal;
+    const missingTotals = expectedDeposit === undefined || expectedWithdrawal === undefined;
+    if (missingTotals) {
+      return { status: "pending", tolerance, extractedDepositTotal, extractedWithdrawalTotal, extractedMovementCount: transactions.length, reason: "No se pudieron leer depósitos y retiros declarados" };
+    }
+    const depositDifference = extractedDepositTotal - expectedDeposit;
+    const withdrawalDifference = extractedWithdrawalTotal - expectedWithdrawal;
+    const countMismatch = (summary.depositCount !== undefined && summary.depositCount !== transactions.filter((transaction) => transaction.amount > 0).length)
+      || (summary.withdrawalCount !== undefined && summary.withdrawalCount !== transactions.filter((transaction) => transaction.amount < 0).length);
+    const invalid = transactions.length === 0 && (expectedDeposit > tolerance || expectedWithdrawal > tolerance)
+      || Math.abs(depositDifference) > tolerance
+      || Math.abs(withdrawalDifference) > tolerance
+      || countMismatch;
+    return {
+      status: invalid ? "invalid" : "valid",
+      tolerance,
+      extractedDepositTotal,
+      extractedWithdrawalTotal,
+      extractedMovementCount: transactions.length,
+      reason: invalid ? `Las filas no concilian con el resumen (depósitos ${depositDifference.toFixed(2)}, retiros ${withdrawalDifference.toFixed(2)})` : undefined,
+    };
+  }
+
+  if (kind === "card") {
+    const charges = transactions.filter((transaction) => transaction.amount < 0 && !["cardPayment", "bankTransfer", "refund", "credit"].includes(transactionKindForReconciliation(transaction)));
+    const payments = transactions.filter((transaction) => transactionKindForReconciliation(transaction) === "cardPayment");
+    const extractedChargeTotal = sumAbsolute(charges.map((transaction) => transaction.amount));
+    const extractedPaymentTotal = sumAbsolute(payments.map((transaction) => transaction.amount));
+    const declaredCharges = summary.newCharges ?? summary.newTransactions;
+    if (declaredCharges === undefined) return { status: "pending", tolerance, extractedChargeTotal, extractedPaymentTotal, extractedMovementCount: transactions.length, reason: "El estado no contiene total de cargos" };
+    const chargeDifference = extractedChargeTotal - declaredCharges;
+    const paymentDifference = summary.payments !== undefined ? extractedPaymentTotal - summary.payments : 0;
+    const invalid = transactions.length === 0 && declaredCharges > tolerance
+      || Math.abs(chargeDifference) > tolerance
+      || (summary.payments !== undefined && Math.abs(paymentDifference) > tolerance);
+    return {
+      status: invalid ? "invalid" : "valid",
+      tolerance,
+      extractedChargeTotal,
+      extractedPaymentTotal,
+      extractedMovementCount: transactions.length,
+      reason: invalid ? `Las filas no concilian con cargos/pagos del estado (cargos ${chargeDifference.toFixed(2)}, pagos ${paymentDifference.toFixed(2)})` : undefined,
+    };
+  }
+  return { status: "pending", tolerance, extractedMovementCount: transactions.length, reason: "Tipo de estado no identificado" };
 }
 
 function guessCategory(description: string) {
@@ -223,36 +383,51 @@ function guessCategory(description: string) {
   return "Sin categoría";
 }
 
-function inferImportedKind(description: string, amount: number, isCredit: boolean): TransactionKind {
+function inferImportedKind(description: string, amount: number, isCredit: boolean, statementKind: StatementKind): TransactionKind {
   const value = normalizeText(description);
-  if (/msi|meses sin intereses|meses en automatico|monto a diferir|diferir|diferid/.test(value)) return "msi";
+  if (/monto a diferir/.test(value) && amount > 0) return "credit";
+  if (/msi|meses sin intereses|meses en automatico|diferir|diferid/.test(value)) return "msi";
   if (/interes|interes moratorio/.test(value)) return "interest";
   if (/comision|anualidad/.test(value)) return "fee";
   if (/devolucion|reembolso|bonificacion/.test(value) && amount > 0) return "refund";
   if (/gracias por su pago|pago en linea|pago.*(tarjeta|amex|credito|recibido)|tarjeta.*pago|abono.*(tarjeta|credito|recibido)|american express/.test(value)) return "cardPayment";
   if (/transfer|traspaso/.test(value)) return "bankTransfer";
-  if (isCredit || amount > 0) return "credit";
+  // Positive bank rows are real income (deposit, payroll or external SPEI),
+  // whereas positive card rows are issuer-side credits and must not inflate
+  // income. Keep the two ledgers semantically separate from import time.
+  if (isCredit || amount > 0) return statementKind === "card" ? "credit" : "income";
   return "purchase";
 }
 
 export function extractTransactions(text: string, source: StatementSource, fileName: string, kind: StatementKind): Transaction[] {
   const lines = text.split(/\n+/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
   const results: Transaction[] = [];
-  const datePattern = /^(?:(\d{1,2})\s+(?:de\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)(?:\s+(?:de\s+)?(\d{2,4}))?|(?:(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4}))|(?:(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})))/i;
+  // Bank OCR commonly emits 16-JUL-2026 or 23/JUL, while Amex's text
+  // layer uses “20 de Junio 2026”. Keep the optional year narrow so a
+  // merchant such as “125TH FINEST” cannot be swallowed as year 125.
+  const datePattern = new RegExp(
+    `^(?:(\\d{1,2})\\s+(?:de\\s*)?(${monthTokenPattern})(?:\\s*(?:de\\s*)?((?:20\\d{2}|\\d{2})(?!\\d)))?|(?:(\\d{1,2})[-/.](\\d{1,2})[-/.](20\\d{2}|\\d{2}))|(?:(20\\d{2})[-/.](\\d{1,2})[-/.](\\d{1,2}))|(?:(\\d{1,2})[-/](${monthTokenPattern})(?:[-/](20\\d{2}|\\d{2}))?))`,
+    "i",
+  );
   const amountPattern = /(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?:\s*CR)?(?![A-Za-z0-9])/gi;
   const importKey = normalizeText(fileName).replace(/[^a-z0-9]+/g, "-").slice(0, 28) || "estado";
   const inferredYear = fileName.match(/20\d{2}/)?.[0] ?? text.match(/20\d{2}/)?.[0] ?? String(new Date().getFullYear());
+  let previousRunningBalance = kind === "bank"
+    ? findSummaryAmount(text, ["saldo final del periodo anterior", "saldo anterior", "saldo inicial"])
+    : undefined;
   const monthIndex = (token: string) => {
-    const value = normalizeText(token);
+    const value = normalizeText(token).replace(/^ag0?$/, "ago");
     const full = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
     const index = full.findIndex((month) => month.startsWith(value) || value.startsWith(month.slice(0, 3)));
     if (value.startsWith("sep") || value.startsWith("set")) return 8;
     return index >= 0 ? index : 0;
   };
   const formatDate = (match: RegExpMatchArray) => {
-    if (match[1] && match[2]) return `${match[1]} ${monthNames[monthIndex(match[2])]} ${match[3] ?? inferredYear}`;
-    if (match[4] && match[5] && match[6]) return `${match[4]} ${monthNames[Math.max(0, Number(match[5]) - 1)]} ${match[6]}`;
+    const yearValue = (value?: string) => value ? (value.length === 2 ? `20${value}` : value) : inferredYear;
+    if (match[1] && match[2]) return `${match[1]} ${monthNames[monthIndex(match[2])]} ${yearValue(match[3])}`;
+    if (match[4] && match[5] && match[6]) return `${match[4]} ${monthNames[Math.max(0, Number(match[5]) - 1)]} ${yearValue(match[6])}`;
     if (match[7] && match[8] && match[9]) return `${match[9]} ${monthNames[Math.max(0, Number(match[8]) - 1)]} ${match[7]}`;
+    if (match[10] && match[11]) return `${match[10]} ${monthNames[monthIndex(match[11])]} ${yearValue(match[12])}`;
     return "Sin fecha";
   };
 
@@ -289,11 +464,18 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     const date = line.match(datePattern);
     if (!date) return;
     const tail = line.slice(date[0].length).trim();
-    const allCandidates = Array.from(tail.matchAll(amountPattern)).map((match) => ({
-      raw: match[0],
-      index: match.index ?? 0,
-      value: normalizeAmount(match[0]),
-    })).filter((candidate) => candidate.value !== 0 && Math.abs(candidate.value) < 100_000_000);
+    const allCandidates = Array.from(tail.matchAll(amountPattern)).map((match) => {
+      const index = match.index ?? 0;
+      const before = tail.slice(0, index);
+      // OCR frequently joins the last digit of a time with the following
+      // amount (e.g. “15:20:49 100.00” -> “49 100.00”). Recover the amount
+      // suffix instead of dropping the whole token or using the running
+      // balance as the transaction amount.
+      const joinedAmount = /:\s*$/.test(before) ? match[0].match(/\s(\$?\d{1,3}(?:[,.]\d{3})*[.,]\d{2})$/) : undefined;
+      const raw = joinedAmount?.[1] ?? match[0];
+      const adjustedIndex = joinedAmount ? index + match[0].lastIndexOf(raw) : index;
+      return { raw, index: adjustedIndex, value: normalizeAmount(raw) };
+    }).filter((candidate) => candidate.value !== 0 && Math.abs(candidate.value) < 100_000_000);
     // Prefer tokens that look like money. This prevents terminal numbers in
     // merchant names (store IDs, references and route numbers) from winning.
     const candidates = allCandidates.filter((candidate) => /[.,]\d{1,2}|\$|\bCR\b/i.test(candidate.raw));
@@ -305,14 +487,38 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     // Bank rows often finish with a running balance. Select the preceding
     // amount so the balance is not recorded as a purchase.
     const amount = foreignCurrency
-      ? usableCandidates[0]
+      ? (usableCandidates.filter((candidate) => {
+        const currencyIndex = tail.search(/d[oó]lar|euro|peso(?:s)?\s+colombiano?s?|tipo\s+de\s+cambio|\btc\b/i);
+        return currencyIndex < 0 || candidate.index < currencyIndex;
+      }).at(-1) ?? usableCandidates[0])
       : bankLike && usableCandidates.length > 1
-        ? usableCandidates[usableCandidates.length - 2]
+        ? usableCandidates[0]
         : usableCandidates[usableCandidates.length - 1];
+    let amountValue = amount.value;
+    if (bankLike) {
+      // Bank rows expose a running balance immediately after the movement
+      // amount. When OCR misreads the amount (for example 160.00 instead of
+      // 60.00), the balance delta is the authoritative correction. If a row
+      // has no balance, reset the chain rather than guessing across it.
+      const runningBalance = usableCandidates.length > 1 ? usableCandidates[1] : undefined;
+      if (runningBalance && previousRunningBalance !== undefined) {
+        const delta = runningBalance.value - previousRunningBalance;
+        if (Number.isFinite(delta) && Math.abs(delta) > 0 && Math.abs(delta) < 100_000_000
+          && Math.abs(Math.abs(delta) - Math.abs(amountValue)) > 0.05) {
+          amountValue = Math.abs(delta);
+        }
+        previousRunningBalance = runningBalance.value;
+      } else if (!runningBalance) {
+        previousRunningBalance = undefined;
+      }
+    }
     const rawDescription = tail.slice(0, amount.index).trim();
     // Foreign Amex rows include currency and exchange-rate metadata before
     // the local amount. Keep the merchant name and discard that metadata.
     const description = rawDescription
+      // BBVA prints operation and settlement dates before the merchant. They
+      // are already represented by `date`, so do not pollute merchant keys.
+      .replace(/^\d{1,2}[-/]\w+(?:[-/](?:20)?\d{2})?(?:\s+\d{1,2}[-/]\w+(?:[-/](?:20)?\d{2})?)?\s+/i, "")
       .replace(/\s+(?:d[oó]lar(?:es)?(?:\s+u\.s\.a\.)?|euro?s?|peso(?:s)?\s+colombiano?s?|tipo\s+de\s+cambio).*$/i, "")
       .replace(/\s+/g, " ")
       .trim();
@@ -320,16 +526,20 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     const normalizedDescription = normalizeConcept(description);
     const isRefund = /devolucion|reembolso|bonificacion/.test(normalizedDescription);
     const isCardPayment = /gracias por su pago|pago de tarjeta|pago.*(?:tarjeta|credito|recibido)|tarjeta.*pago|abono.*(?:tarjeta|credito|recibido)/.test(normalizedDescription);
-    const isIncome = /nomina|sueldo|salario|deposito|abono|ingreso|transferencia recibida/.test(normalizedDescription);
+    const isIncome = /nomina|sueldo|salario|deposito|abono|ingreso|recibid|transferencia recibida|spei recibido/.test(normalizedDescription);
     const isTransfer = /transfer|traspaso|spei|entre cuentas|clabe/.test(normalizedDescription);
-    const isCredit = /\bcr\b/i.test(amount.raw) || isRefund || isIncome;
+    // In text-layer PDFs the issuer sometimes places “CR” on the next line;
+    // the explicit Amex “monto a diferir” concept is already an issuer-side
+    // credit, so do not make recognition depend on that line break.
+    const isDeferredCredit = kind === "card" && /monto a diferir/.test(normalizedDescription);
+    const isCredit = /\bcr\b/i.test(amount.raw) || isRefund || isIncome || isDeferredCredit;
     const directionSignal = kind === "card"
       || (bankLike && usableCandidates.length > 1)
       || isRefund
       || isCardPayment
       || isIncome
       || isTransfer
-      || /\b(?:cargo|retiro|compra|pago|deposito|abono|nomina|sueldo|salario|credito|devolucion|reembolso)\b/.test(normalizedDescription)
+      || /\b(?:cargo|retiro|compra|consumo|domiciliacion|pago|deposito|abono|nomina|sueldo|salario|credito|devolucion|reembolso|comision|interes|cobro)\b/.test(normalizedDescription)
       || amount.raw.includes("-")
       || amount.raw.includes("+")
       || /\bcr\b/i.test(amount.raw);
@@ -337,9 +547,10 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     // signed amount or semantic direction, retaining it would turn a PDF
     // heading into a financial event, so send it to review by rejecting it.
     if (!directionSignal) return;
-    const flow: Transaction["flow"] = isRefund || isIncome ? "income" : isCardPayment ? "debt" : isTransfer ? "transfer" : "expense";
-    const value = amount.value * (flow === "income" ? 1 : -1);
-    const importedKind = inferImportedKind(description, value, isCredit);
+    const cardCredit = kind === "card" && isCredit && !isCardPayment;
+    const flow: Transaction["flow"] = isRefund || isIncome || isDeferredCredit || cardCredit ? "income" : isCardPayment ? "debt" : isTransfer ? "transfer" : "expense";
+    const value = Math.round(amountValue * 100) / 100 * (flow === "income" ? 1 : -1);
+    const importedKind = inferImportedKind(description, value, isCredit, kind);
     const category = importedKind === "cardPayment" || importedKind === "bankTransfer" ? "Transferencia" : guessCategory(description);
     const travelRelated = /viaje|hotel|hospedaje|aerolinea|vuelo|avion|transporte|uber|taxi|metro|renta de auto|destino|equipaje|airbnb|aeropuerto/i.test(normalizedDescription);
     results.push({
@@ -425,6 +636,8 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
   const parsed = extractTransactions(text, source, file.name, kind);
+  const summary = parseStatementSummary(text, kind);
+  const reconciliation = reconcileStatementImport(kind, summary, parsed);
   onProgress(100, "Listo para revisar");
 
   return {
@@ -434,6 +647,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
     fileName: file.name,
     mode,
     transactions: parsed,
-    summary: parseStatementSummary(text, kind),
+    summary,
+    reconciliation,
   };
 }

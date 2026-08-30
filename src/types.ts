@@ -31,6 +31,20 @@ export type StatementSource = "Amex" | "Santander" | "BBVA" | "Desconocido" | (s
 
 export type StatementStatus = "ready" | "review";
 
+/** Resultado de contrastar las filas extraídas contra los totales del estado. */
+export type StatementReconciliationStatus = "valid" | "invalid" | "pending";
+
+export type StatementReconciliation = {
+  status: StatementReconciliationStatus;
+  tolerance: number;
+  extractedDepositTotal?: number;
+  extractedWithdrawalTotal?: number;
+  extractedChargeTotal?: number;
+  extractedPaymentTotal?: number;
+  extractedMovementCount?: number;
+  reason?: string;
+};
+
 export type Transaction = {
   id: string;
   date: string;
@@ -70,6 +84,8 @@ export type StatementSummary = {
   creditLimit?: number;
   creditAvailable?: number;
   minimumPayment?: number;
+  /** Minimum payment plus active MSI installments, when the issuer prints it. */
+  minimumPlusMsi?: number;
   paymentForNoInterest?: number;
   paymentDueDate?: string;
   cashBalance?: number;
@@ -78,6 +94,11 @@ export type StatementSummary = {
   revolvingBalance?: number;
   msiInstallments?: number;
   msiMonthlyLoad?: number;
+  /** Totales declarados en estados de cuenta bancarios. */
+  depositTotal?: number;
+  withdrawalTotal?: number;
+  depositCount?: number;
+  withdrawalCount?: number;
 };
 
 export type ImportResult = {
@@ -89,6 +110,7 @@ export type ImportResult = {
   mode: "text" | "ocr";
   transactions: Transaction[];
   summary?: StatementSummary;
+  reconciliation?: StatementReconciliation;
 };
 
 export type Statement = {
@@ -102,6 +124,9 @@ export type Statement = {
   status: StatementStatus;
   kind?: StatementKind;
   summary?: StatementSummary;
+  /** Undefined is accepted only for legacy/programmatic data; the app migrates it to pending. */
+  reconciliationStatus?: StatementReconciliationStatus;
+  reconciliation?: StatementReconciliation;
 };
 
 export type ImportCommit = {
@@ -112,6 +137,7 @@ export type ImportCommit = {
   mode: ImportResult["mode"];
   transactions: Transaction[];
   summary?: StatementSummary;
+  reconciliation?: StatementReconciliation;
   /** User corrections learned from this review, keyed by normalized merchant. */
   categoryRules?: Record<string, string>;
 };

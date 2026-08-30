@@ -91,8 +91,8 @@ function fold(value: string) {
 /** Canonical concept used by deduplication and merchant grouping. */
 export function normalizeConcept(value: string) {
   return fold(value)
-    .replace(/\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizacion)?|operacion)\s*[:#./_-]+\s*[a-z0-9-]+/g, " ")
-    .replace(/\b(?:rfc|ref)[a-z0-9_-]+\b/g, " ")
+    .replace(/\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizacion)?|operacion)\s*[:#./_-]*\s*[a-z0-9-]+/g, " ")
+    .replace(/\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizacion)?)\b/g, " ")
     .replace(/\b\d{2,}\b/g, " ")
     .replace(/[^a-z0-9]+/g, " ")
     .replace(/\s+/g, " ")
@@ -105,7 +105,7 @@ const administrativePhrases = [
   "total importe cargos", "total importe abonos", "total de cargos", "total de abonos",
   "del al", "fecha de corte", "fecha y detalle", "numero de cuenta", "no de cuenta",
   "numero de cliente", "no de cliente", "cuenta clabe", "cuenta clave", "rfc",
-  "estado de cuenta", "resumen de cuenta", "periodo de facturacion", "periodo",
+  "estado de cuenta", "estado de cue", "estado de cta", "resumen de cuenta", "periodo de facturacion", "periodo",
   "saldo inicial", "saldo anterior", "saldo final", "saldo al corte", "saldo disponible",
   "saldo", "total de movimientos", "total de transacciones", "total", "pagina",
   "informacion al cliente", "titular de la cuenta", "fecha limite", "pago minimo",
@@ -134,6 +134,10 @@ function statementKind(statement: Statement | undefined): StatementKind {
 function kindFromText(transaction: Transaction): TransactionKind {
   if (transaction.kind) return transaction.kind;
   const text = normalizeConcept(`${transaction.description} ${transaction.category}`);
+  // Amex uses “monto a diferir … CR” for a credit that moves a purchase into
+  // an MSI plan. It reduces the card balance and must never be counted as a
+  // new expense or as an MSI installment itself.
+  if (/monto a diferir/.test(text) && (transaction.amount > 0 || transaction.flow === "income")) return "credit";
   if (/msi|meses sin intereses|meses en automatico|diferid/.test(text)) return "msi";
   if (/interes/.test(text)) return "interest";
   if (/comision|anualidad/.test(text)) return "fee";
@@ -154,24 +158,77 @@ function hasCardPaymentHint(transaction: Transaction) {
 }
 
 function hasIncomeHint(transaction: Transaction) {
-  return /nomina|sueldo|salario|deposito|abono|ingreso|transferencia recibida|spei recibido|pago de nomina/.test(normalizeConcept(transaction.description));
+  return /nomina|sueldo|salario|deposito|abono|ingreso|recibid|transferencia recibida|spei recibido|pago de nomina/.test(normalizeConcept(transaction.description));
 }
 
 function hasRefundHint(transaction: Transaction) {
   return /devolucion|reembolso|bonificacion|refund|cashback/.test(normalizeConcept(transaction.description));
 }
 
-function periodKeyFromLabel(value: string) {
+const monthPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
+
+function monthNumber(value: string) {
+  const month = monthLookup[fold(value).replace(/^ag0?$/, "ago")];
+  return month;
+}
+
+function periodKeyFromParts(year: number, month: number) {
+  return `${year}-${String(month).padStart(2, "0")}`;
+}
+
+/** Returns the month of the last explicit date in a statement period label. */
+export function periodKeyFromLabel(value: string) {
   const normalized = fold(value);
-  const matches = Array.from(normalized.matchAll(/(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)[^0-9]{0,8}(20\d{2})/g));
+  const fullDatePattern = new RegExp(
+    `(?:\\b(20\\d{2})[-/.](\\d{1,2})[-/.](\\d{1,2})\\b|\\b(\\d{1,2})[-/.](\\d{1,2})[-/.](20\\d{2})\\b|\\b(\\d{1,2})[-/](\\w+)[-/](20\\d{2})\\b)`,
+    "gi",
+  );
+  const dateMatches = Array.from(normalized.matchAll(fullDatePattern));
+  const lastDate = dateMatches.at(-1);
+  if (lastDate) {
+    if (lastDate[1] && lastDate[2]) return periodKeyFromParts(Number(lastDate[1]), Number(lastDate[2]));
+    if (lastDate[4] && lastDate[5]) return periodKeyFromParts(Number(lastDate[6]), Number(lastDate[5]));
+    if (lastDate[7] && lastDate[8]) {
+      const month = monthNumber(lastDate[8]);
+      if (month) return periodKeyFromParts(Number(lastDate[9]), month);
+    }
+  }
+
+  const matches = Array.from(normalized.matchAll(new RegExp(`(${monthPattern})[^0-9]{0,20}(20\\d{2})`, "gi")));
   const match = matches.at(-1);
-  if (match) return `${match[2]}-${String(monthLookup[match[1]] ?? 1).padStart(2, "0")}`;
-  const numeric = normalized.match(/(20\d{2})[-/. ](\d{1,2})/);
-  if (numeric) return `${numeric[1]}-${String(Number(numeric[2])).padStart(2, "0")}`;
+  if (match) return periodKeyFromParts(Number(match[2]), monthNumber(match[1]) ?? 1);
+  const numeric = normalized.match(/\b(20\d{2})[-/. ](\d{1,2})\b/);
+  if (numeric && Number(numeric[2]) >= 1 && Number(numeric[2]) <= 12) return periodKeyFromParts(Number(numeric[1]), Number(numeric[2]));
   return undefined;
 }
 
-function parseDate(value: string, fallbackPeriod?: string) {
+/** Timestamp of the statement cutoff, used to choose the latest account state. */
+export function statementPeriodEndTimestamp(value: string, importedAt?: string) {
+  const normalized = fold(value);
+  const fullDatePattern = new RegExp(
+    `(?:\\b(20\\d{2})[-/.](\\d{1,2})[-/.](\\d{1,2})\\b|\\b(\\d{1,2})[-/.](\\d{1,2})[-/.](20\\d{2})\\b|\\b(\\d{1,2})[-/](\\w+)[-/](20\\d{2})\\b)`,
+    "gi",
+  );
+  const matches = Array.from(normalized.matchAll(fullDatePattern));
+  const last = matches.at(-1);
+  if (last) {
+    const year = last[1] ? Number(last[1]) : last[6] ? Number(last[6]) : Number(last[9]);
+    const month = last[2] ? Number(last[2]) : last[5] ? Number(last[5]) : monthNumber(last[8]) ?? 0;
+    const day = last[3] ? Number(last[3]) : last[4] ? Number(last[4]) : Number(last[7]);
+    const date = new Date(year, month - 1, day);
+    if (date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day) return date.getTime();
+  }
+  const key = periodKeyFromLabel(value);
+  if (key) {
+    const [year, month] = key.split("-").map(Number);
+    return new Date(year, month, 0, 23, 59, 59, 999).getTime();
+  }
+  const imported = importedAt ? Date.parse(importedAt) : Number.NaN;
+  return Number.isFinite(imported) ? imported : 0;
+}
+
+/** Parses all date formats emitted by bank/card PDF text and OCR. */
+export function parseDate(value: string, fallbackPeriod?: string) {
   const normalized = fold(value).trim();
   const calendarDate = (year: number, month: number, day: number) => {
     const date = new Date(year, month - 1, day);
@@ -183,9 +240,17 @@ function parseDate(value: string, fallbackPeriod?: string) {
   if (match) return calendarDate(Number(match[1]), Number(match[2]), Number(match[3]));
   match = normalized.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})$/);
   if (match) return calendarDate(Number(match[3]), Number(match[2]), Number(match[1]));
-  match = normalized.match(/^(\d{1,2})\s+(?:de\s+)?([a-z]+)(?:\s+(?:de\s+)?(\d{2,4}))?$/);
+  match = normalized.match(new RegExp(`^(\\d{1,2})[-/\\.](${monthPattern})(?:[-/\\.](20\\d{2}|\\d{2}))?$`, "i"));
+  if (match) {
+    const fallbackKey = fallbackPeriod ? periodKeyFromLabel(fallbackPeriod) : undefined;
+    const year = match[3] ? Number(match[3]) : fallbackKey ? Number(fallbackKey.slice(0, 4)) : undefined;
+    const month = monthNumber(match[2]);
+    if (month && year !== undefined) return calendarDate(year < 100 ? 2000 + year : year, month, Number(match[1]));
+    return undefined;
+  }
+  match = normalized.match(new RegExp(`^(\\d{1,2})\\s+(?:de\\s*)?(${monthPattern})(?:\\s*(?:de\\s*)?(20\\d{2}|\\d{2}))?$`, "i"));
   if (!match) return undefined;
-  const month = monthLookup[match[2]];
+  const month = monthNumber(match[2]);
   const fallbackKey = fallbackPeriod ? periodKeyFromLabel(fallbackPeriod) : undefined;
   const year = match[3] ? Number(match[3]) : fallbackKey ? Number(fallbackKey.slice(0, 4)) : undefined;
   if (!month || year === undefined) return undefined;
@@ -243,7 +308,10 @@ export function buildDeduplicationKey(transaction: Transaction) {
   const amount = Math.round(Math.abs(transaction.amount) * 100).toString();
   const description = transaction.normalizedDescription || normalizeConcept(transaction.description);
   const kind = kindFromText(transaction);
-  return [account, date, amount, description, kind].join("|");
+  // Keep the signed flow in the identity as a final guard for legacy rows
+  // whose free text does not reveal whether an operation is a transfer,
+  // income or purchase yet.
+  return [account, date, amount, description, kind, transaction.flow].join("|");
 }
 
 function absolute(value: number) {
@@ -341,15 +409,25 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
     if (!periods.has(key)) periods.set(key, emptyAuditPeriod(key, statement.period));
   });
 
+  // The base hash intentionally omits the statement id so an overlapping
+  // period can be recognised as the same movement.  Add an occurrence ordinal
+  // per statement, however, so two legitimate identical purchases are not
+  // collapsed when one statement contains one copy and the next contains two.
+  // (Issuer PDFs do not expose a stable transaction id for this edge case.)
+  const occurrenceByStatement = new Map<string, number>();
   const normalized = input.map((transaction) => {
     const description = transaction.description.replace(/\s+/g, " ").trim();
     const normalizedDescription = normalizeConcept(description);
     const status = validateTransaction({ ...transaction, description }, statements);
+    const baseDeduplicationKey = buildDeduplicationKey({ ...transaction, description, normalizedDescription });
+    const occurrenceScope = `${transaction.statementId ?? "manual"}|${baseDeduplicationKey}`;
+    const occurrence = status.status === "invalid" ? -1 : occurrenceByStatement.get(occurrenceScope) ?? 0;
+    if (occurrence >= 0) occurrenceByStatement.set(occurrenceScope, occurrence + 1);
     const next: Transaction = {
       ...transaction,
       description,
       normalizedDescription,
-      deduplicationKey: buildDeduplicationKey({ ...transaction, description, normalizedDescription }),
+      deduplicationKey: `${baseDeduplicationKey}|ocurrencia:${occurrence}`,
       validationStatus: status.status,
     };
     const auditPeriod = ensurePeriod(next);
@@ -473,12 +551,22 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
       kind = "cardPayment";
       flow = isCardTransaction(reconciled, statements) ? "debt" : "expense";
     } else if (hasTransferHint(reconciled) || kind === "bankTransfer") {
-      const ownTransferText = /entre cuentas|cuenta propia|mismo titular|traspaso interno/.test(text);
+      const ownAccountMention = statements.some((statement) => {
+        const source = normalizeConcept(statement.source);
+        return source.length >= 3 && source !== normalizeConcept(reconciled.account) && text.includes(source);
+      });
+      const ownTransferText = /entre cuentas|cuenta propia|mismo titular|traspaso interno/.test(text) || ownAccountMention;
       // An unmatched incoming SPEI/transfer is external income. Only an
       // explicit own-account signal (or a matched pair above) is excluded.
       if (reconciled.amount > 0 && isBankTransaction(reconciled, statements) && !ownTransferText) {
         kind = "income";
         flow = "income";
+      } else if (reconciled.amount < 0 && isBankTransaction(reconciled, statements) && !ownTransferText) {
+        // A bank transfer to an external person or merchant is still a real
+        // outflow. Only a matched own-account pair (handled above) or an
+        // explicit internal-transfer label should be excluded from spend.
+        kind = "purchase";
+        flow = "expense";
       } else {
         kind = "bankTransfer";
         flow = "transfer";

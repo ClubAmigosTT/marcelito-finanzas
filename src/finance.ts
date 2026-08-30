@@ -6,7 +6,7 @@ import type {
   Transaction,
   TransactionKind,
 } from "./types.ts";
-import { normalizeConcept, runTransactionPipeline, transactionPeriodKey, type PipelineAudit, type PipelineResult } from "./reconciliation.ts";
+import { normalizeConcept, parseDate, periodKeyFromLabel, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey, type PipelineAudit, type PipelineResult } from "./reconciliation.ts";
 
 export type PeriodMetrics = {
   key: string;
@@ -34,6 +34,7 @@ export type PeriodMetrics = {
   creditUtilizationRate?: number;
   paymentForNoInterest?: number;
   minimumPayment?: number;
+  minimumPlusMsi?: number;
   msiOriginalDeferred?: number;
   msiPending?: number;
   revolvingBalance?: number;
@@ -41,6 +42,9 @@ export type PeriodMetrics = {
   msiMonthlyLoad?: number;
   cashBalance?: number;
   debtBalance?: number;
+  /** Used for latest-cutoff selection; never inferred from array order. */
+  statementEndTimestamp: number;
+  importedAt: string;
 };
 
 export type AnalyticsPeriod = {
@@ -226,10 +230,6 @@ export type FinanceMetrics = {
   creditUtilizationRate?: number;
 };
 
-const monthNames = [
-  "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic",
-];
-
 function normalize(value: string) {
   return value
     .normalize("NFD")
@@ -268,6 +268,7 @@ export function defaultStatementKind(source: StatementSource): StatementKind {
 export function inferTransactionKind(transaction: Transaction): TransactionKind {
   if (transaction.kind) return transaction.kind;
   const text = normalize(`${transaction.description} ${transaction.category}`);
+  if (/monto a diferir/.test(text) && (transaction.amount > 0 || transaction.flow === "income")) return "credit";
   if (/msi|meses sin intereses|meses en automatico|monto a diferir|diferir|diferid/.test(text)) return "msi";
   if (/interes|interes moratorio|interest/.test(text)) return "interest";
   if (/comision|comision anual|anualidad|fee/.test(text)) return "fee";
@@ -319,21 +320,8 @@ function merchantLabel(description: string) {
     .slice(0, 46) || "Sin descripción";
 }
 
-function dateValue(value: string) {
-  const normalized = normalize(value);
-  const iso = normalized.match(/^(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})$/);
-  if (iso) return new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3])).getTime();
-  const numeric = normalized.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})$/);
-  if (numeric) return new Date(Number(numeric[3]), Number(numeric[2]) - 1, Number(numeric[1])).getTime();
-  const match = normalized.match(/(\d{1,2})\s+(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\s+(\d{2,4})/);
-  if (!match) return undefined;
-  const fullMonthNames = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
-  const month = match[2].startsWith("set") || match[2].startsWith("sep")
-    ? 8
-    : fullMonthNames.findIndex((name) => name.startsWith(match[2]) || match[2].startsWith(name.slice(0, 3)));
-  if (month < 0) return undefined;
-  const year = Number(match[3]);
-  return new Date(year < 100 ? 2000 + year : year, month, Number(match[1])).getTime();
+function dateValue(value: string, fallbackPeriod?: string) {
+  return parseDate(value, fallbackPeriod);
 }
 
 function metricVariation(current: number | undefined, previous: number | undefined) {
@@ -471,24 +459,19 @@ function buildExecutiveAlerts(
 }
 
 function periodKey(period: string) {
-  const normalized = normalize(period);
-  const matches = Array.from(normalized.matchAll(/(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)[^0-9]{0,8}(20\d{2})/g));
-  const last = matches.at(-1);
-  if (last) {
-    const month = monthNames.findIndex((name) => last[1].startsWith(name));
-    return `${last[2]}-${String(month + 1).padStart(2, "0")}`;
-  }
-  return normalized.replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "sin-periodo";
+  const detected = periodKeyFromLabel(period);
+  return detected ?? (normalize(period).replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") || "sin-periodo");
 }
 
 function statementPeriodKeys(period: string) {
   const normalized = normalize(period);
-  const matches = Array.from(normalized.matchAll(/(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)[^0-9]{0,8}(20\d{2})/g));
-  const keys = matches.map((match) => {
-    const month = match[1].startsWith("set") ? 8 : monthNames.findIndex((name) => match[1].startsWith(name));
-    return `${match[2]}-${String(month + 1).padStart(2, "0")}`;
-  }).filter((key) => !key.endsWith("-00"));
-  return keys.length ? keys : [periodKey(period)];
+  const matches = Array.from(normalized.matchAll(/(?:\b(20\d{2})[-/.](\d{1,2})[-/.]\d{1,2}\b|\b\d{1,2}[-/.](\d{1,2})[-/.](20\d{2})\b)/g));
+  const keys = matches.map((match) => match[1]
+    ? `${match[1]}-${String(Number(match[2])).padStart(2, "0")}`
+    : `${match[4]}-${String(Number(match[3])).padStart(2, "0")}`)
+    .filter((key) => !key.endsWith("-00"));
+  const key = periodKeyFromLabel(period);
+  return keys.length ? Array.from(new Set(keys)) : key ? [key] : [periodKey(period)];
 }
 
 function linkedTransactions(statement: Statement, transactions: Transaction[]) {
@@ -551,9 +534,14 @@ export function calculatePeriod(statement: Statement, transactions: Transaction[
   const creditAvailable = hasNumber(summary?.creditAvailable) ? absolute(summary.creditAvailable) : undefined;
   const creditUsed = creditLimit !== undefined && creditAvailable !== undefined ? Math.max(0, creditLimit - creditAvailable) : undefined;
   const creditUtilizationRate = creditUsed !== undefined && creditLimit ? creditUsed / creditLimit : undefined;
-  const debtBalance = hasNumber(summary?.debtBalance)
-    ? absolute(summary.debtBalance)
-    : kind === "card" && hasNumber(summary?.statementBalance) ? absolute(summary.statementBalance) : undefined;
+  // For cards, the issuer's limit/disponible pair captures the committed
+  // balance including future MSI. Prefer it over the statement balance,
+  // which usually excludes installments that have not yet posted.
+  const debtBalance = kind === "card" && creditUsed !== undefined
+    ? creditUsed
+    : hasNumber(summary?.debtBalance)
+      ? absolute(summary.debtBalance)
+      : kind === "card" && hasNumber(summary?.statementBalance) ? absolute(summary.statementBalance) : undefined;
   const msiPending = hasNumber(summary?.msiPending)
     ? absolute(summary.msiPending)
     : hasNumber(summary?.msiOriginalDeferred)
@@ -591,6 +579,7 @@ export function calculatePeriod(statement: Statement, transactions: Transaction[
     creditUtilizationRate,
     paymentForNoInterest,
     minimumPayment: hasNumber(summary?.minimumPayment) ? absolute(summary.minimumPayment) : undefined,
+    minimumPlusMsi: hasNumber(summary?.minimumPlusMsi) ? absolute(summary.minimumPlusMsi) : undefined,
     msiOriginalDeferred: hasNumber(summary?.msiOriginalDeferred) ? absolute(summary.msiOriginalDeferred) : undefined,
     msiPending,
     revolvingBalance,
@@ -598,6 +587,8 @@ export function calculatePeriod(statement: Statement, transactions: Transaction[
     msiMonthlyLoad: hasNumber(summary?.msiMonthlyLoad) ? absolute(summary.msiMonthlyLoad) : msiInstallments || undefined,
     cashBalance: hasNumber(summary?.cashBalance) ? summary.cashBalance : undefined,
     debtBalance,
+    statementEndTimestamp: statementPeriodEndTimestamp(statement.period, statement.importedAt),
+    importedAt: statement.importedAt,
   };
 }
 
@@ -612,7 +603,17 @@ function lastDefined(periods: PeriodMetrics[], selector: (period: PeriodMetrics)
 function latestBySource(periods: PeriodMetrics[]) {
   const latest = new Map<string, PeriodMetrics>();
   periods.forEach((period) => {
-    if (!latest.has(period.source)) latest.set(period.source, period);
+    // Keep a bank account and a card from the same issuer independent. The
+    // issuer name alone is not an account identity (e.g. Santander checking
+    // plus a Santander credit card can both be present).
+    const accountKey = `${period.source}|${period.kind}`;
+    const current = latest.get(accountKey);
+    if (!current
+      || period.statementEndTimestamp > current.statementEndTimestamp
+      || (period.statementEndTimestamp === current.statementEndTimestamp && period.importedAt > current.importedAt)
+      || (period.statementEndTimestamp === current.statementEndTimestamp && period.importedAt === current.importedAt && period.statementId > current.statementId)) {
+      latest.set(accountKey, period);
+    }
   });
   return Array.from(latest.values());
 }
@@ -635,8 +636,20 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   // invalid rows, overlapping statements, own transfers and card payments
   // are removed or linked before any KPI is calculated.
   const pipeline = providedPipeline ?? runTransactionPipeline(inputTransactions, statements);
-  const transactions = pipeline.transactions;
-  const statementsWithoutRows = statements.filter((statement) => {
+  const blockedStatementIds = new Set(statements
+    .filter((statement) => statement.reconciliationStatus && statement.reconciliationStatus !== "valid")
+    .map((statement) => statement.id));
+  if (blockedStatementIds.size > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("conciliación de estado"))) {
+    pipeline.audit.criticalIssues.push(`${blockedStatementIds.size} estado(s) quedaron fuera de los KPI por conciliación de estado`);
+  }
+  // A document that failed issuer-total reconciliation can remain visible in
+  // the audit screen, but none of its rows or summary values may feed an
+  // executive KPI. The UI migrates legacy records without a status to
+  // `pending` before this point; direct callers may still opt into legacy
+  // behavior explicitly by omitting the status.
+  const transactions = pipeline.transactions.filter((transaction) => !transaction.statementId || !blockedStatementIds.has(transaction.statementId));
+  const eligibleStatements = statements.filter((statement) => !blockedStatementIds.has(statement.id));
+  const statementsWithoutRows = eligibleStatements.filter((statement) => {
     const hasRows = transactions.some((transaction) => transaction.statementId === statement.id);
     const summaryHasFinancialValue = statement.summary && [statement.summary.newCharges, statement.summary.newTransactions, statement.summary.cashBalance, statement.summary.debtBalance, statement.summary.statementBalance].some((value) => value !== undefined);
     return !hasRows && (statement.transactionCount > 0 || Boolean(summaryHasFinancialValue));
@@ -644,7 +657,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   if (statementsWithoutRows.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("sin filas válidas"))) {
     pipeline.audit.criticalIssues.push(`${statementsWithoutRows.length} estado(s) tienen resumen pero no filas válidas; los KPI son provisionales`);
   }
-  const periods = statements.map((statement) => calculatePeriod(statement, transactions));
+  const periods = eligibleStatements.map((statement) => calculatePeriod(statement, transactions));
   periods.sort((left, right) => {
     const byPeriod = right.key.localeCompare(left.key);
     if (byPeriod) return byPeriod;
@@ -714,7 +727,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   const latestBankPeriods = latestBySource(periods.filter((period) => period.kind === "bank"));
   const latestCardPeriods = latestBySource(cardPeriods);
   const latestCardPaymentForNoInterest = sumKnown(latestCardPeriods.map((period) => period.paymentForNoInterest));
-  const latestCardMinimumPayment = sumKnown(latestCardPeriods.map((period) => period.minimumPayment));
+  const latestCardMinimumPayment = sumKnown(latestCardPeriods.map((period) => period.minimumPlusMsi ?? period.minimumPayment));
   const latestCardInterest = sumKnown(latestCardPeriods.map((period) => period.interest));
   const cashAvailable = sumKnown(latestBankPeriods.map((period) => period.cashBalance));
   // Coalesce per card before summing so one issuer with a statement balance
