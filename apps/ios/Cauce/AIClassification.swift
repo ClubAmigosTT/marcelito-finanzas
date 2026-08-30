@@ -162,7 +162,7 @@ enum ZenExpenseClassifier {
             throw ClassificationError.invalidResponse
         }
 
-        return payloads.compactMap { payload in
+        return payloads.compactMap { (payload: ClassificationPayload) -> AIClassification? in
             guard let movementID = UUID(uuidString: payload.id),
                   let category = canonicalCategory(payload.category) else { return nil }
             return AIClassification(
