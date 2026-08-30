@@ -344,7 +344,11 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   );
 }
 
+type DashboardMetricKey = "patrimony" | "cash" | "debt" | "expense" | "flow";
+type MetricSeriesPoint = { key: string; label: string; value: number };
+
 function Home({ transactions, statements, metrics, goals, setGoals, onImport }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; goals: FinancialGoal[]; setGoals: React.Dispatch<React.SetStateAction<FinancialGoal[]>>; onImport: () => void }) {
+  const [selectedMetric, setSelectedMetric] = useState<DashboardMetricKey | null>(null);
   if (!transactions.length && !statements.length) return <RealDataEmpty onImport={onImport} />;
 
   const trend = metrics.liquidPatrimonyChangePercent;
@@ -359,15 +363,16 @@ function Home({ transactions, statements, metrics, goals, setGoals, onImport }: 
         <div><p className="summary-eyebrow">Tu situación financiera</p><h1>Una lectura clara de tu dinero.</h1><p>Actualizado con tus estados y movimientos reales.</p></div>
         <span className="month-button data-period">{latestPeriodLabel}</span>
       </section>
-      <section className="summary-hero" aria-label="Patrimonio líquido">
+      <button type="button" className="summary-hero summary-hero-action" aria-label="Ver detalle del patrimonio líquido" onClick={() => setSelectedMetric("patrimony")}>
         <div><span>Patrimonio líquido</span><strong>{displayMoney(metrics.liquidPatrimony)}</strong><p className={`summary-trend ${trendTone}`}>{trendLabel}</p></div>
-      </section>
+      </button>
       <section className="summary-kpis" aria-label="Indicadores principales">
-        <Metric label="Efectivo disponible" value={displayMoney(metrics.cashAvailable)} delta={comparisonMoney(metrics.cashAvailable, metrics.analyticsPeriods[1]?.cashAvailable)} tone="income" icon={Wallet} />
-        <Metric label="Deuda total" value={displayMoney(metrics.debtTotal)} delta={comparisonMoney(metrics.debtTotal, metrics.analyticsPeriods[1]?.debtTotal)} tone="debt" icon={CreditCard} />
-        <Metric label="Gasto del mes" value={displayMoney(metrics.currentMonthSpend)} delta={comparisonPercent(metrics.analyticsPeriods[0]?.variationPercent)} tone="expense" icon={Receipt} />
-        <Metric label="Flujo neto" value={displayMoney(metrics.currentMonthNetFlow)} delta={comparisonMoney(metrics.currentMonthNetFlow, metrics.analyticsPeriods[1]?.netFlow)} tone={metrics.currentMonthNetFlow >= 0 ? "income" : "debt"} icon={ChartLineUp} />
+        <Metric label="Efectivo disponible" value={displayMoney(metrics.cashAvailable)} delta={comparisonMoney(metrics.cashAvailable, metrics.analyticsPeriods[1]?.cashAvailable)} tone="income" icon={Wallet} onSelect={() => setSelectedMetric("cash")} />
+        <Metric label="Deuda total" value={displayMoney(metrics.debtTotal)} delta={comparisonMoney(metrics.debtTotal, metrics.analyticsPeriods[1]?.debtTotal)} tone="debt" icon={CreditCard} onSelect={() => setSelectedMetric("debt")} />
+        <Metric label="Gasto del mes" value={displayMoney(metrics.currentMonthSpend)} delta={comparisonPercent(metrics.analyticsPeriods[0]?.variationPercent)} tone="expense" icon={Receipt} onSelect={() => setSelectedMetric("expense")} />
+        <Metric label="Flujo neto" value={displayMoney(metrics.currentMonthNetFlow)} delta={comparisonMoney(metrics.currentMonthNetFlow, metrics.analyticsPeriods[1]?.netFlow)} tone={metrics.currentMonthNetFlow >= 0 ? "income" : "debt"} icon={ChartLineUp} onSelect={() => setSelectedMetric("flow")} />
       </section>
+      {selectedMetric && <MetricDetailPanel metric={selectedMetric} metrics={metrics} onClose={() => setSelectedMetric(null)} />}
       <ExecutiveSummary metrics={metrics} />
       <SpendTrendChart periods={metrics.analyticsPeriods} />
       <CashFlowTrendChart points={metrics.cashFlowHistory} />
@@ -549,6 +554,7 @@ function SpendTrendChart({ periods }: { periods: AnalyticsPeriod[] }) {
 }
 
 function CashFlowTrendChart({ points }: { points: CashFlowPoint[] }) {
+  const [selectedPoint, setSelectedPoint] = useState<CashFlowPoint | null>(null);
   const chartPoints = points.slice(-180);
   if (!chartPoints.length) return null;
 
@@ -570,6 +576,8 @@ function CashFlowTrendChart({ points }: { points: CashFlowPoint[] }) {
   const labelIndexes = Array.from(new Set([0, Math.floor((chartPoints.length - 1) / 2), chartPoints.length - 1]));
   const yTicks = [0, 0.5, 1].map((ratio) => domainMin + (domainMax - domainMin) * ratio);
   const formatAxisMoney = (value: number) => new Intl.NumberFormat("es-MX", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+  const selectedIndex = selectedPoint ? chartPoints.findIndex((point) => point.key === selectedPoint.key) : -1;
+  const selectedTrend = selectedIndex >= 0 ? chartPoints.slice(Math.max(0, selectedIndex - 3), Math.min(chartPoints.length, selectedIndex + 4)) : [];
 
   return <section className="executive-card cash-flow-trend-card" aria-labelledby="cash-flow-trend-title">
     <div className="section-heading"><div><h2 id="cash-flow-trend-title">Ingresos, gastos y balance</h2><p>Comparación por fecha · balance acumulado = ingresos − gastos.</p></div><span className="summary-period-chip">{chartPoints.length > 1 ? `Últimas ${chartPoints.length} fechas` : "1 fecha"}</span></div>
@@ -581,12 +589,17 @@ function CashFlowTrendChart({ points }: { points: CashFlowPoint[] }) {
         <polyline points={linePoints("expense")} className="cash-flow-line cash-flow-expense" />
         <polyline points={linePoints("balance")} className="cash-flow-line cash-flow-balance" />
         {chartPoints.map((point, index) => <g key={point.key}>
-          <circle cx={xFor(index)} cy={yFor(point.income)} r="3.5" className="cash-flow-point cash-flow-income-point"><title>{`${point.date} · Ingresos: ${displayMoney(point.income)}`}</title></circle>
-          <circle cx={xFor(index)} cy={yFor(point.expense)} r="3.5" className="cash-flow-point cash-flow-expense-point"><title>{`${point.date} · Gastos: ${displayMoney(point.expense)}`}</title></circle>
-          <circle cx={xFor(index)} cy={yFor(point.balance)} r="3.5" className="cash-flow-point cash-flow-balance-point"><title>{`${point.date} · Balance acumulado: ${displayMoney(point.balance)}`}</title></circle>
+          <circle cx={xFor(index)} cy={yFor(point.income)} r="3.5" className="cash-flow-point cash-flow-income-point" onClick={() => setSelectedPoint(point)} role="button" tabIndex={0} aria-label={"Ingresos " + point.date}><title>{`${point.date} · Ingresos: ${displayMoney(point.income)}`}</title></circle>
+          <circle cx={xFor(index)} cy={yFor(point.expense)} r="3.5" className="cash-flow-point cash-flow-expense-point" onClick={() => setSelectedPoint(point)} role="button" tabIndex={0} aria-label={"Gastos " + point.date}><title>{`${point.date} · Gastos: ${displayMoney(point.expense)}`}</title></circle>
+          <circle cx={xFor(index)} cy={yFor(point.balance)} r="3.5" className="cash-flow-point cash-flow-balance-point" onClick={() => setSelectedPoint(point)} role="button" tabIndex={0} aria-label={"Balance acumulado " + point.date}><title>{`${point.date} · Balance acumulado: ${displayMoney(point.balance)}`}</title></circle>
         </g>)}
         {labelIndexes.map((index) => <text key={chartPoints[index].key} x={xFor(index)} y={height - 10} textAnchor={index === 0 ? "start" : index === chartPoints.length - 1 ? "end" : "middle"} className="cash-flow-axis-label">{chartPoints[index].date}</text>)}
       </svg>
+      {selectedPoint && <div className="cash-flow-selected" aria-live="polite">
+        <div className="cash-flow-selected-head"><div><span>Fecha seleccionada</span><strong>{selectedPoint.date}</strong></div><button type="button" className="row-action" onClick={() => setSelectedPoint(null)} aria-label="Cerrar detalle"><X size={16} /></button></div>
+        <div className="cash-flow-selected-values"><span><b>Ingresos</b>{displayMoney(selectedPoint.income)}</span><span><b>Gastos</b>{displayMoney(selectedPoint.expense)}</span><span><b>Balance acumulado</b>{displayMoney(selectedPoint.balance)}</span></div>
+        <MiniCashFlowTrend points={selectedTrend.length ? selectedTrend : [selectedPoint]} />
+      </div>}
       <div className="cash-flow-legend" aria-label="Series de la gráfica">
         <span className="cash-flow-legend-income">Ingresos</span>
         <span className="cash-flow-legend-expense">Gastos</span>
@@ -595,6 +608,27 @@ function CashFlowTrendChart({ points }: { points: CashFlowPoint[] }) {
       <p className="cash-flow-note">Transferencias internas y pagos de tarjeta no se muestran para no inflar el gasto.</p>
     </div>
   </section>;
+}
+
+function MiniCashFlowTrend({ points }: { points: CashFlowPoint[] }) {
+  const width = 720;
+  const height = 140;
+  const padding = { top: 12, right: 10, bottom: 12, left: 10 };
+  const values = points.flatMap((point) => [point.income, point.expense, point.balance]);
+  const minimum = Math.min(0, ...values);
+  const maximum = Math.max(0, ...values);
+  const range = Math.max(maximum - minimum, 1);
+  const domainMin = minimum - range * 0.12;
+  const domainMax = maximum + range * 0.12;
+  const xFor = (index: number) => padding.left + (points.length === 1 ? (width - padding.left - padding.right) / 2 : (index / (points.length - 1)) * (width - padding.left - padding.right));
+  const yFor = (value: number) => height - padding.bottom - ((value - domainMin) / (domainMax - domainMin)) * (height - padding.top - padding.bottom);
+  const linePoints = (key: "income" | "expense" | "balance") => points.map((point, index) => xFor(index) + "," + yFor(point[key])).join(" ");
+  return <svg className="cash-flow-mini-chart" viewBox={"0 0 " + width + " " + height} role="img" aria-label="Mini gráfica de ingresos, gastos y balance">
+    <line x1={padding.left} x2={width - padding.right} y1={yFor(0)} y2={yFor(0)} className="cash-flow-zero" />
+    <polyline points={linePoints("income")} className="cash-flow-line cash-flow-income" />
+    <polyline points={linePoints("expense")} className="cash-flow-line cash-flow-expense" />
+    <polyline points={linePoints("balance")} className="cash-flow-line cash-flow-balance" />
+  </svg>;
 }
 
 function SpendingSplit({ period }: { period?: AnalyticsPeriod }) {
@@ -654,8 +688,71 @@ function RealDataEmpty({ onImport }: { onImport: () => void }) {
   return <section className="real-data-empty"><div className="real-data-icon"><FilePdf size={32} /></div><h1>Empieza con tus estados reales</h1><p>Marcelito no carga cifras de muestra. Importa un PDF mensual y revisa banco, periodo, movimientos y categorías antes de guardarlo.</p><button className="primary-button" onClick={onImport}><UploadSimple size={18} />Importar primer estado</button><small>El archivo se procesa localmente y no se sube a ningún servidor.</small></section>;
 }
 
-function Metric({ label, value, delta, tone, icon: Icon }: { label: string; value: string; delta: string; tone: string; icon: typeof Wallet }) {
-  return <article className={`metric metric-${tone}`}><div className="metric-icon"><Icon size={20} /></div><div><span>{label}</span><strong>{value}</strong><small>{delta}</small></div></article>;
+function Metric({ label, value, delta, tone, icon: Icon, onSelect }: { label: string; value: string; delta: string; tone: string; icon: typeof Wallet; onSelect?: () => void }) {
+  return <button type="button" className={"metric metric-button metric-" + tone} onClick={onSelect} aria-label={"Ver detalle de " + label}><div className="metric-icon"><Icon size={20} /></div><div><span>{label}</span><strong>{value}</strong><small>{delta}</small></div></button>;
+}
+
+function metricSeries(metric: DashboardMetricKey, metrics: ReturnType<typeof buildFinanceMetrics>): MetricSeriesPoint[] {
+  if (metric === "expense") return metrics.cashFlowHistory.slice(-12).map((point) => ({ key: point.key, label: point.date, value: point.expense }));
+  if (metric === "flow") return metrics.cashFlowHistory.slice(-12).map((point) => ({ key: point.key, label: point.date, value: point.balance }));
+  const periods = metrics.analyticsPeriods.slice().reverse();
+  const valueFor = metric === "patrimony"
+    ? (period: AnalyticsPeriod) => period.liquidPatrimony
+    : metric === "cash"
+      ? (period: AnalyticsPeriod) => period.cashAvailable
+      : (period: AnalyticsPeriod) => period.debtTotal;
+  return periods
+    .map((period) => ({ key: period.key, label: period.label, value: valueFor(period) }))
+    .filter((point): point is MetricSeriesPoint => point.value !== undefined);
+}
+
+function metricCurrentValue(metric: DashboardMetricKey, metrics: ReturnType<typeof buildFinanceMetrics>) {
+  if (metric === "patrimony") return metrics.liquidPatrimony;
+  if (metric === "cash") return metrics.cashAvailable;
+  if (metric === "debt") return metrics.debtTotal;
+  if (metric === "expense") return metrics.currentMonthSpend;
+  return metrics.currentMonthNetFlow;
+}
+
+function metricExplanation(metric: DashboardMetricKey) {
+  if (metric === "patrimony") return "Efectivo disponible menos deuda total.";
+  if (metric === "cash") return "Saldo consolidado de tus cuentas de efectivo.";
+  if (metric === "debt") return "Deuda registrada en tarjetas al último corte.";
+  if (metric === "expense") return "Gasto real del periodo, sin pagos internos.";
+  return "Ingresos reales menos gasto real.";
+}
+
+function MetricDetailPanel({ metric, metrics, onClose }: { metric: DashboardMetricKey; metrics: ReturnType<typeof buildFinanceMetrics>; onClose: () => void }) {
+  const points = metricSeries(metric, metrics);
+  const current = metricCurrentValue(metric, metrics);
+  const comparison = points.length > 1 ? comparisonMoney(points.at(-1)?.value, points.at(-2)?.value) : "Aún no hay comparativo";
+  const color = metric === "expense" ? "var(--expense)" : metric === "debt" ? "var(--debt)" : metric === "patrimony" ? "var(--navy)" : "var(--income)";
+  return <section className="metric-detail-panel" aria-live="polite" aria-labelledby="metric-detail-title">
+    <div className="metric-detail-head"><div><span>Detalle del indicador</span><h2 id="metric-detail-title">{metric === "patrimony" ? "Patrimonio líquido" : metric === "cash" ? "Efectivo disponible" : metric === "debt" ? "Deuda total" : metric === "expense" ? "Gasto del mes" : "Flujo neto"}</h2></div><button type="button" className="row-action" aria-label="Cerrar detalle" onClick={onClose}><X size={17} /></button></div>
+    <div className="metric-detail-summary"><strong>{displayMoney(current)}</strong><span>{comparison}</span><p>{metricExplanation(metric)}</p></div>
+    {points.length ? <MiniMetricChart points={points} color={color} /> : <p className="metric-detail-empty">Aún no hay suficientes datos para dibujar una tendencia.</p>}
+  </section>;
+}
+
+function MiniMetricChart({ points, color }: { points: MetricSeriesPoint[]; color: string }) {
+  const width = 720;
+  const height = 150;
+  const padding = { top: 14, right: 12, bottom: 20, left: 12 };
+  const minimum = Math.min(0, ...points.map((point) => point.value));
+  const maximum = Math.max(0, ...points.map((point) => point.value));
+  const range = Math.max(maximum - minimum, 1);
+  const domainMin = minimum - range * 0.1;
+  const domainMax = maximum + range * 0.1;
+  const xFor = (index: number) => padding.left + (points.length === 1 ? (width - padding.left - padding.right) / 2 : (index / (points.length - 1)) * (width - padding.left - padding.right));
+  const yFor = (value: number) => height - padding.bottom - ((value - domainMin) / (domainMax - domainMin)) * (height - padding.top - padding.bottom);
+  return <div className="metric-detail-chart-wrap">
+    <svg className="metric-detail-chart" viewBox={"0 0 " + width + " " + height} role="img" aria-label="Tendencia del indicador seleccionado">
+      <line x1={padding.left} x2={width - padding.right} y1={yFor(0)} y2={yFor(0)} className="metric-detail-zero" />
+      <polyline points={points.map((point, index) => xFor(index) + "," + yFor(point.value)).join(" ")} className="metric-detail-line" style={{ stroke: color }} />
+      {points.map((point, index) => <circle key={point.key} cx={xFor(index)} cy={yFor(point.value)} r="4" className="metric-detail-point" style={{ stroke: color }}><title>{point.label + ": " + displayMoney(point.value)}</title></circle>)}
+    </svg>
+    <div className="metric-detail-range"><span>{points[0].label}</span><strong>{points.length > 1 ? "Evolución reciente" : "Primer dato"}</strong><span>{points.at(-1)?.label}</span></div>
+  </div>;
 }
 
 function Movements({ transactions, statements, setTransactions, onLearnCategory, onImport, embedded = false }: { transactions: Transaction[]; statements: Statement[]; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>>; onLearnCategory: (description: string, category: string) => void; onImport: () => void; embedded?: boolean }) {
