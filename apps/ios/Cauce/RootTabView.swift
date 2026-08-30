@@ -873,8 +873,8 @@ private struct CashFlowLineChart: View {
                 )
                 .foregroundStyle(by: .value("Serie", "Ingresos"))
                 .lineStyle(StrokeStyle(lineWidth: 2.5))
-                .symbol(Circle())
-
+            }
+            ForEach(points) { point in
                 LineMark(
                     x: .value("Fecha", point.date),
                     y: .value("Monto", point.expense),
@@ -882,8 +882,8 @@ private struct CashFlowLineChart: View {
                 )
                 .foregroundStyle(by: .value("Serie", "Gastos"))
                 .lineStyle(StrokeStyle(lineWidth: 2.5))
-                .symbol(Circle())
-
+            }
+            ForEach(points) { point in
                 LineMark(
                     x: .value("Fecha", point.date),
                     y: .value("Monto", point.balance),
@@ -891,7 +891,6 @@ private struct CashFlowLineChart: View {
                 )
                 .foregroundStyle(by: .value("Serie", "Balance acumulado"))
                 .lineStyle(StrokeStyle(lineWidth: 2, dash: [6, 4]))
-                .symbol(Circle())
             }
             if let selectedPoint {
                 RuleMark(x: .value("Fecha seleccionada", selectedPoint.date))
