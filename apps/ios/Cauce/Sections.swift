@@ -1,6 +1,7 @@
 import SwiftUI
 import PDFKit
 import UIKit
+import Charts
 
 func conciseStatementPeriod(_ statement: StatementRecord) -> String {
     let monthNames: [(token: String, label: String)] = [
@@ -356,6 +357,7 @@ private struct MovementDetailView: View {
 
 struct ExpensesView: View {
     @Environment(FinanceStore.self) private var store
+    @State private var selectedCategory: ExpenseCategorySelection?
 
     private var groups: [(category: String, amount: Decimal)] {
         Dictionary(grouping: store.realExpenseMovements, by: { $0.category })
@@ -383,7 +385,9 @@ struct ExpensesView: View {
     private var identifiedExpensesSection: some View {
         Section("Gasto identificado") {
             ForEach(Array(groups.enumerated()), id: \.element.category) { index, item in
-                ExpenseRow(name: item.category, amount: item.amount, share: expenseShare(for: item.amount), color: expenseColor(for: index))
+                ExpenseRow(name: item.category, amount: item.amount, share: expenseShare(for: item.amount), color: expenseColor(for: index)) {
+                    selectedCategory = ExpenseCategorySelection(category: item.category)
+                }
             }
         }
     }
@@ -430,8 +434,16 @@ struct ExpensesView: View {
                 .foregroundStyle(Color.marcelitoNavy)
                 .scrollContentBackground(.hidden)
                 .background(Color.marcelitoCream)
+                .sheet(item: $selectedCategory) { selection in
+                    ExpenseCategoryDetailView(category: selection.category, store: store)
+                }
         }
     }
+}
+
+private struct ExpenseCategorySelection: Identifiable {
+    let category: String
+    var id: String { category }
 }
 
 private struct ExpenseRow: View {
@@ -439,15 +451,135 @@ private struct ExpenseRow: View {
     let amount: Decimal
     let share: String
     let color: Color
+    let action: () -> Void
 
     var body: some View {
-        HStack {
-            Circle().fill(color).frame(width: 10, height: 10).accessibilityHidden(true)
-            Text(name)
-            Spacer()
-            Text(share).foregroundStyle(.secondary)
-            Text(amount, format: .currency(code: "MXN").precision(.fractionLength(0))).monospacedDigit()
+        Button(action: action) {
+            HStack {
+                Circle().fill(color).frame(width: 10, height: 10).accessibilityHidden(true)
+                Text(name)
+                Spacer()
+                Text(share).foregroundStyle(.secondary)
+                Text(amount, format: .currency(code: "MXN").precision(.fractionLength(0))).monospacedDigit()
+                Image(systemName: "chevron.right")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
         }
+        .buttonStyle(.plain)
+        .accessibilityHint("Toca para ver el detalle y la tendencia de esta categoría")
+    }
+}
+
+private struct ExpenseTrendPoint: Identifiable {
+    let id: Date
+    let date: Date
+    let value: Double
+}
+
+private struct ExpenseCategoryDetailView: View {
+    let category: String
+    let store: FinanceStore
+    @Environment(\.dismiss) private var dismiss
+
+    private var movements: [Movement] {
+        store.realExpenseMovements.filter { $0.category == category }
+    }
+
+    private var total: Decimal {
+        movements.reduce(Decimal(0)) { $0 + abs($1.amount) }
+    }
+
+    private var points: [ExpenseTrendPoint] {
+        let calendar = Calendar.current
+        var byDay: [Date: Decimal] = [:]
+        movements.forEach { movement in
+            let day = calendar.startOfDay(for: movement.date)
+            byDay[day, default: 0] += abs(movement.amount)
+        }
+        return byDay.keys.sorted().map { day in
+            ExpenseTrendPoint(
+                id: day,
+                date: day,
+                value: NSDecimalNumber(decimal: byDay[day, default: 0]).doubleValue
+            )
+        }
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(category, systemImage: "chart.pie.fill")
+                            .font(.headline)
+                            .foregroundStyle(Color.marcelitoAmber)
+                        Text(total, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                            .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                            .monospacedDigit()
+                        Text("\(movements.count) movimientos identificados en esta categoría.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if points.isEmpty {
+                        Text("Aún no hay fechas suficientes para mostrar una tendencia.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Comportamiento por fecha")
+                                .font(.subheadline.weight(.semibold))
+                            Chart {
+                                ForEach(points) { point in
+                                    LineMark(
+                                        x: .value("Fecha", point.date),
+                                        y: .value("Monto", point.value),
+                                        series: .value("Serie", category)
+                                    )
+                                    .foregroundStyle(Color.marcelitoAmber)
+                                    .lineStyle(StrokeStyle(lineWidth: 2.5))
+                                    PointMark(
+                                        x: .value("Fecha", point.date),
+                                        y: .value("Monto", point.value)
+                                    )
+                                    .foregroundStyle(Color.marcelitoAmber)
+                                }
+                            }
+                            .chartXAxis {
+                                AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                                    AxisGridLine()
+                                    AxisTick()
+                                    AxisValueLabel()
+                                }
+                            }
+                            .chartYAxis {
+                                AxisMarks(position: .leading) { _ in
+                                    AxisGridLine()
+                                    AxisTick()
+                                    AxisValueLabel()
+                                }
+                            }
+                            .frame(height: 170)
+                        }
+                    }
+                }
+                .padding(20)
+            }
+            .scrollIndicators(.hidden)
+            .background(Color.marcelitoCream.ignoresSafeArea())
+            .navigationTitle("Detalle de gasto")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Cerrar") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(Color.marcelitoCream)
     }
 }
 
@@ -470,20 +602,24 @@ struct AccountsView: View {
                         let metric = latest.flatMap { statement in store.periodMetrics.first(where: { $0.id == statement.id }) }
                         let kind = latest?.kind ?? (source == "Amex" ? .card : .bank)
                         let balance = kind == .card ? metric?.debtBalance : metric?.cashBalance
-                        VStack(alignment: .leading, spacing: 6) {
-                            HStack(spacing: 12) {
-                                Image(systemName: kind == .card ? "creditcard.fill" : "building.columns.fill")
-                                    .foregroundStyle(Color.marcelitoNavyMid)
-                                Text(source)
-                                    .font(.headline)
-                                Spacer()
-                                Text(balance.map { kind == .card ? "−\($0.formatted(.currency(code: "MXN").precision(.fractionLength(0))))" : $0.formatted(.currency(code: "MXN").precision(.fractionLength(0))) } ?? "Pendiente")
-                                    .font(.subheadline.weight(.semibold))
-                                    .monospacedDigit()
+                        NavigationLink {
+                            AccountDetailView(source: source, kind: kind)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 6) {
+                                HStack(spacing: 12) {
+                                    Image(systemName: kind == .card ? "creditcard.fill" : "building.columns.fill")
+                                        .foregroundStyle(Color.marcelitoNavyMid)
+                                    Text(source)
+                                        .font(.headline)
+                                    Spacer()
+                                    Text(balance.map { kind == .card ? "−\($0.formatted(.currency(code: "MXN").precision(.fractionLength(0))))" : $0.formatted(.currency(code: "MXN").precision(.fractionLength(0))) } ?? "Pendiente")
+                                        .font(.subheadline.weight(.semibold))
+                                        .monospacedDigit()
+                                }
+                                Text(kind == .card ? "Pago próximo: \(metric?.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")" : "Cuenta de efectivo")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
-                            Text(kind == .card ? "Pago próximo: \(metric?.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")" : "Cuenta de efectivo")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
                         }
                     }
                     NavigationLink {
@@ -541,6 +677,124 @@ struct AccountsView: View {
             .scrollContentBackground(.hidden)
             .background(Color.marcelitoCream)
         }
+    }
+}
+
+private struct AccountTrendPoint: Identifiable {
+    let id: UUID
+    let label: String
+    let value: Double
+}
+
+private struct AccountDetailView: View {
+    @Environment(FinanceStore.self) private var store
+    let source: String
+    let kind: StatementKind
+
+    private var metrics: [StatementMetric] {
+        store.periodMetrics
+            .filter { $0.source == source && $0.kind == kind }
+            .reversed()
+    }
+
+    private var latest: StatementMetric? {
+        metrics.last
+    }
+
+    private var balance: Decimal? {
+        kind == .card ? latest?.debtBalance : latest?.cashBalance
+    }
+
+    private var trend: [AccountTrendPoint] {
+        metrics.compactMap { metric in
+            let value = kind == .card ? metric.debtBalance : metric.cashBalance
+            guard let value else { return nil }
+            return AccountTrendPoint(
+                id: metric.id,
+                label: metric.period,
+                value: NSDecimalNumber(decimal: value).doubleValue
+            )
+        }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Label(source, systemImage: kind == .card ? "creditcard.fill" : "building.columns.fill")
+                        .font(.headline)
+                        .foregroundStyle(Color.marcelitoNavyMid)
+                    Text(balance?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
+                        .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                        .monospacedDigit()
+                        .foregroundStyle(Color.marcelitoNavy)
+                    Text(kind == .card ? "Deuda registrada al último corte." : "Efectivo disponible al último corte.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                if let latest, kind == .card {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Próxima decisión")
+                            .font(.subheadline.weight(.semibold))
+                        LabeledContent("Pago para no generar intereses", value: latest.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
+                        LabeledContent("Pago mínimo", value: latest.minimumPayment?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
+                    }
+                    .foregroundStyle(Color.marcelitoNavy)
+                    .padding(16)
+                    .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+
+                if trend.isEmpty {
+                    Text("Aún no hay suficientes cortes para mostrar una tendencia.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Evolución por corte")
+                            .font(.subheadline.weight(.semibold))
+                        Chart {
+                            ForEach(trend) { point in
+                                LineMark(
+                                    x: .value("Periodo", point.label),
+                                    y: .value("Monto", point.value),
+                                    series: .value("Serie", source)
+                                )
+                                .foregroundStyle(kind == .card ? Color.marcelitoNavy : Color.marcelitoNavyMid)
+                                .lineStyle(StrokeStyle(lineWidth: 2.5))
+                                PointMark(
+                                    x: .value("Periodo", point.label),
+                                    y: .value("Monto", point.value)
+                                )
+                                .foregroundStyle(kind == .card ? Color.marcelitoNavy : Color.marcelitoNavyMid)
+                            }
+                        }
+                        .chartXAxis {
+                            AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                                AxisGridLine()
+                                AxisTick()
+                                AxisValueLabel()
+                            }
+                        }
+                        .chartYAxis {
+                            AxisMarks(position: .leading) { _ in
+                                AxisGridLine()
+                                AxisTick()
+                                AxisValueLabel()
+                            }
+                        }
+                        .frame(height: 180)
+                    }
+                    .foregroundStyle(Color.marcelitoNavy)
+                }
+            }
+            .padding(20)
+        }
+        .scrollIndicators(.hidden)
+        .background(Color.marcelitoCream.ignoresSafeArea())
+        .navigationTitle("Detalle de cuenta")
+        .navigationBarTitleDisplayMode(.inline)
+        .foregroundStyle(Color.marcelitoNavy)
     }
 }
 
@@ -737,6 +991,7 @@ private struct StatementSummaryEditor: View {
 
 struct NetWorthView: View {
     @Environment(FinanceStore.self) private var store
+    @State private var selectedMetric: DashboardMetric?
 
     private var patrimonyText: String {
         store.liquidPatrimony?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "—"
@@ -746,14 +1001,21 @@ struct NetWorthView: View {
         NavigationStack {
             List {
                 Section {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Patrimonio líquido").foregroundStyle(.secondary)
-                        Text(patrimonyText)
-                            .font(.largeTitle.bold())
-                            .monospacedDigit()
-                        Text(store.liquidPatrimony == nil ? "Pendiente de saldos al corte" : "Efectivo disponible menos deuda")
-                            .foregroundStyle(Color.marcelitoNavyMid)
+                    Button {
+                        selectedMetric = .patrimony
+                    } label: {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Patrimonio líquido").foregroundStyle(.secondary)
+                            Text(patrimonyText)
+                                .font(.largeTitle.bold())
+                                .monospacedDigit()
+                            Text(store.liquidPatrimony == nil ? "Pendiente de saldos al corte" : "Efectivo disponible menos deuda")
+                                .foregroundStyle(Color.marcelitoNavyMid)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .buttonStyle(.plain)
+                    .accessibilityHint("Toca para ver el detalle y la tendencia del patrimonio")
                     .padding(.vertical, 10)
                 }
                 Section("Saldos calculados") {
@@ -768,6 +1030,9 @@ struct NetWorthView: View {
             .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)
             .background(Color.marcelitoCream)
+            .sheet(item: $selectedMetric) { metric in
+                MetricDetailSheet(metric: metric, store: store)
+            }
         }
     }
 }

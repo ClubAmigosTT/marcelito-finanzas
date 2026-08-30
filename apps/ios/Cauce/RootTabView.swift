@@ -417,7 +417,7 @@ private struct EmptyDataCard: View {
     }
 }
 
-private enum DashboardMetric: String, Identifiable {
+enum DashboardMetric: String, Identifiable {
     case patrimony
     case cash
     case debt
@@ -636,7 +636,7 @@ private struct MetricTrendPoint: Identifiable {
     let value: Double
 }
 
-private struct MetricDetailSheet: View {
+struct MetricDetailSheet: View {
     let metric: DashboardMetric
     let store: FinanceStore
     @Environment(\.dismiss) private var dismiss
