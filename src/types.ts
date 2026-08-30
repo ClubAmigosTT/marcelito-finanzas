@@ -139,6 +139,7 @@ export type Statement = {
   /** Undefined is accepted only for legacy/programmatic data; the app migrates it to pending. */
   reconciliationStatus?: StatementReconciliationStatus;
   reconciliation?: StatementReconciliation;
+  sourceDetection?: SourceDetection;
 };
 
 export type ImportCommit = {
@@ -150,6 +151,7 @@ export type ImportCommit = {
   transactions: Transaction[];
   summary?: StatementSummary;
   reconciliation?: StatementReconciliation;
+  sourceDetection?: SourceDetection;
   /** User corrections learned from this review, keyed by normalized merchant. */
   categoryRules?: Record<string, string>;
 };

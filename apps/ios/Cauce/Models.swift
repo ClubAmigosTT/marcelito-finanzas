@@ -90,6 +90,23 @@ enum StatementReconciliationStatus: String, Codable {
     case pending
 }
 
+enum SourceDetectionStatus: String, Codable, Equatable {
+    case verified
+    case review
+    case unknown
+}
+
+/// Evidence captured at import time. The body mention list is diagnostic only:
+/// a counterparty such as Santander in a BBVA transfer must never identify the
+/// issuer of the statement.
+struct SourceDetectionEvidence: Codable {
+    let source: String
+    let confidence: Double
+    let status: SourceDetectionStatus
+    let evidence: [String]
+    let ignoredBodyMentions: [String]
+}
+
 /// Evidence that an imported statement was compared with the issuer totals.
 /// Keeping this next to the statement makes the quality gate reproducible
 /// after an app restart instead of inferring it from the current dashboard.
@@ -187,6 +204,10 @@ struct StatementRecord: Identifiable, Codable {
     var kind: StatementKind? = nil
     var summary: StatementSummaryRecord? = nil
     var reconciliation: StatementReconciliationRecord? = nil
+    var sourceDetection: SourceDetectionEvidence? = nil
+    /// SHA-256 of the original PDF bytes. This is the stable document identity
+    /// used to reprocess a UUID-named stored file without relying on its name.
+    var sourceFingerprint: String? = nil
 }
 
 struct ImportSummary {
@@ -199,6 +220,8 @@ struct ImportSummary {
     let summary: StatementSummaryRecord?
     let usedOCR: Bool
     let reconciliation: StatementReconciliationRecord?
+    let sourceDetection: SourceDetectionEvidence
+    let sourceFingerprint: String
 }
 
 struct StatementMetric: Identifiable {
@@ -1706,21 +1729,24 @@ final class FinanceStore {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FinanceImportError.emptyDocument
         }
-        let fileSource = Self.accountName(from: url.lastPathComponent)
-        let source = fileSource == "Importado"
-            ? Self.accountName(from: text)
-            : fileSource
+        let sourceFingerprint = pdfFingerprint(documentData)
+        // Institutional text wins over the filename. During a canonical
+        // rebuild the stored PDF has a UUID filename, and on a first import a
+        // user may have renamed it incorrectly. Transaction counterparties
+        // are excluded by sourceDetection's header scope.
+        let sourceDetection = Self.sourceDetection(from: text, fileName: url.lastPathComponent)
+        let source = sourceDetection.source
         let detectedKind = Self.statementKind(from: text, source: source)
         let parsedCandidates: [Movement]
         if usedOCR, source == "Santander" {
             let santanderCandidates = Self.parseSantanderOCR(ocrObservations, fileName: url.lastPathComponent)
             parsedCandidates = santanderCandidates.isEmpty
-                ? Self.parse(text: text, fileName: url.lastPathComponent)
+                ? Self.parse(text: text, fileName: url.lastPathComponent, sourceHint: source)
                 : santanderCandidates
         } else if usedOCR, source == "Amex" {
             let amexCandidates = Self.parseAmexOCR(Self.ocrLines(from: ocrObservations), fileName: url.lastPathComponent)
             parsedCandidates = amexCandidates.isEmpty
-                ? Self.parse(text: text, fileName: url.lastPathComponent)
+                ? Self.parse(text: text, fileName: url.lastPathComponent, sourceHint: source)
                 : amexCandidates
         } else if usedOCR {
             let genericCandidates = Self.parseGenericOCR(
@@ -1730,10 +1756,10 @@ final class FinanceStore {
                 kind: detectedKind
             )
             parsedCandidates = genericCandidates.isEmpty
-                ? Self.parse(text: text, fileName: url.lastPathComponent)
+                ? Self.parse(text: text, fileName: url.lastPathComponent, sourceHint: source)
                 : genericCandidates
         } else {
-            parsedCandidates = Self.parse(text: text, fileName: url.lastPathComponent)
+            parsedCandidates = Self.parse(text: text, fileName: url.lastPathComponent, sourceHint: source)
         }
         let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
         let candidates = parsedCandidates.map { candidate -> Movement in
@@ -1767,6 +1793,7 @@ final class FinanceStore {
             || summary == nil
             || detectedKind == .unknown
             || reconciliation.status != .valid
+            || sourceDetection.status != .verified
             || fresh.contains { $0.category == "Por revisar" }
 
         // Invalid/pending rows are quarantined by omission: the statement and
@@ -1789,7 +1816,9 @@ final class FinanceStore {
             requiresReview: needsReview,
             kind: detectedKind,
             summary: summary,
-            reconciliation: reconciliation
+            reconciliation: reconciliation,
+            sourceDetection: sourceDetection,
+            sourceFingerprint: sourceFingerprint
         )
         if let index = statements.firstIndex(where: { $0.id == statementId }) {
             statements[index] = statement
@@ -1812,7 +1841,9 @@ final class FinanceStore {
             requiresReview: needsReview,
             summary: summary,
             usedOCR: usedOCR,
-            reconciliation: reconciliation
+            reconciliation: reconciliation,
+            sourceDetection: sourceDetection,
+            sourceFingerprint: sourceFingerprint
         )
     }
 
@@ -1964,7 +1995,7 @@ final class FinanceStore {
         let text: String
     }
 
-    private static func parse(text: String, fileName: String) -> [Movement] {
+    private static func parse(text: String, fileName: String, sourceHint: String? = nil) -> [Movement] {
         let dateRegex = try? NSRegularExpression(
             pattern: #"(?<!\d)(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?!\d)"#
         )
@@ -1989,7 +2020,7 @@ final class FinanceStore {
         let defaultYear = inferredYear(in: fileName)
             ?? inferredYear(in: text)
             ?? Calendar.current.component(.year, from: .now)
-        let filenameAccount = accountName(from: fileName)
+        let filenameAccount = sourceHint ?? accountName(from: fileName)
         let documentNormalized = text.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: .current
@@ -3166,7 +3197,7 @@ final class FinanceStore {
         let normalized = value.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: .current
-        )
+        ).lowercased()
         var header: [String] = []
         for line in normalized.components(separatedBy: .newlines).prefix(120) {
             let compact = line.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
@@ -3177,6 +3208,48 @@ final class FinanceStore {
             if !compact.isEmpty { header.append(compact) }
         }
         return header.joined(separator: " ")
+    }
+
+    private static func sourceDetection(from text: String, fileName: String) -> SourceDetectionEvidence {
+        let normalizedText = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+        let normalizedFileName = fileName.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+        let header = institutionalHeader(from: text)
+        let sourceFromFile: String? = {
+            if normalizedFileName.range(of: #"\bbbva\b|bancomer"#, options: .regularExpression) != nil { return "BBVA" }
+            if normalizedFileName.range(of: #"american\s+express|\bamex\b"#, options: .regularExpression) != nil { return "Amex" }
+            if normalizedFileName.range(of: #"\bsantander\b"#, options: .regularExpression) != nil { return "Santander" }
+            return nil
+        }()
+        let sourceFromHeader: String? = {
+            if header.contains("bbva mexico") || header.contains("grupo financiero bbva") || header.contains("bbva.mx") || header.contains("bba830831lj2") || header.range(of: #"\bbbva\b|bancomer"#, options: .regularExpression) != nil { return "BBVA" }
+            if header.contains("american express") || header.contains("the platinum credit card") || header.range(of: #"\bamex\b"#, options: .regularExpression) != nil { return "Amex" }
+            if header.contains("banco santander") || header.contains("santander mexico") || header.contains("grupo financiero santander") || header.contains("santander.com") || header.range(of: #"\bsantander\b"#, options: .regularExpression) != nil { return "Santander" }
+            return nil
+        }()
+        let source = sourceFromHeader ?? sourceFromFile ?? "Importado"
+        var evidence: [String] = []
+        if sourceFromHeader != nil { evidence.append("encabezado institucional \(source)") }
+        if sourceFromFile == source { evidence.append("nombre de archivo (source)") }
+        if evidence.isEmpty, source != "Importado" { evidence.append("marca parcial; falta encabezado institucional") }
+
+        let tableStartMarkers = ["detalle de movimientos", "movimientos realizados", "fecha folio descripcion", "fecha y detalle"]
+        let body: String
+        if let marker = tableStartMarkers.compactMap({ normalizedText.range(of: $0) }).min(by: { $0.lowerBound < $1.lowerBound }) {
+            body = String(normalizedText[marker.lowerBound...])
+        } else {
+            body = ""
+        }
+        let ignoredBodyMentions = ["Santander", "BBVA", "Amex"].filter {
+            body.contains($0.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased())
+                && $0 != source
+        }
+        let confidence: Double
+        if sourceFromHeader != nil, sourceFromFile == source { confidence = 0.999 }
+        else if sourceFromHeader != nil { confidence = 0.998 }
+        else if sourceFromFile != nil { confidence = 0.90 }
+        else { confidence = 0 }
+        let status: SourceDetectionStatus = confidence >= 0.99 ? .verified : confidence > 0 ? .review : .unknown
+        return SourceDetectionEvidence(source: source, confidence: confidence, status: status, evidence: evidence, ignoredBodyMentions: ignoredBodyMentions)
     }
 
     private static func accountName(from fileName: String) -> String {

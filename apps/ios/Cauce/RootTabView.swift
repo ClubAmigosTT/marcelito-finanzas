@@ -301,6 +301,7 @@ private struct ImportReportItem: Identifiable {
     let requiresReview: Bool
     let usedOCR: Bool
     let errorMessage: String?
+    let sourceDetection: SourceDetectionEvidence?
 
     init(summary: ImportSummary) {
         fileName = summary.fileName
@@ -311,6 +312,7 @@ private struct ImportReportItem: Identifiable {
         requiresReview = summary.requiresReview
         usedOCR = summary.usedOCR
         errorMessage = nil
+        sourceDetection = summary.sourceDetection
     }
 
     init(fileName: String, errorMessage: String) {
@@ -322,6 +324,7 @@ private struct ImportReportItem: Identifiable {
         requiresReview = false
         usedOCR = false
         self.errorMessage = errorMessage
+        sourceDetection = nil
     }
 
     var state: State {
@@ -456,6 +459,19 @@ private struct ImportReportRow: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+
+                if let detection = item.sourceDetection {
+                    Text("Emisor \(Int((detection.confidence * 100).rounded()))% · \(detection.evidence.joined(separator: ", "))")
+                        .font(.caption2)
+                        .foregroundStyle(detection.status == .verified ? Color.marcelitoSuccess : Color.marcelitoAmber)
+                        .fixedSize(horizontal: false, vertical: true)
+                    if !detection.ignoredBodyMentions.isEmpty {
+                        Text("Mención(es) ignorada(s) en movimientos: \(detection.ignoredBodyMentions.joined(separator: ", "))")
+                            .font(.caption2)
+                            .foregroundStyle(Color.marcelitoNavyMid)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
 
                 if item.skipped > 0 || item.requiresReview {
                     HStack(spacing: 6) {
