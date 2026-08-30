@@ -117,7 +117,10 @@ struct HomeView: View {
                         var items: [ImportReportItem] = []
                         for (index, url) in urls.enumerated() {
                             importStatus = "Leyendo \(url.lastPathComponent)…"
-                            importProgress = Int((Double(index) / Double(urls.count)) * 100)
+                            let completedCount = Double(index)
+                            let totalCount = max(Double(urls.count), 1)
+                            let completedPercent = (completedCount / totalCount) * 100
+                            importProgress = Int(completedPercent.rounded())
                             // Give SwiftUI one frame to present the loading
                             // overlay before PDFKit/Vision starts its work.
                             await Task.yield()
@@ -130,7 +133,9 @@ struct HomeView: View {
                                     errorMessage: error.localizedDescription
                                 ))
                             }
-                            importProgress = Int((Double(index + 1) / Double(urls.count)) * 100)
+                            let finishedCount = Double(index + 1)
+                            let finishedPercent = (finishedCount / totalCount) * 100
+                            importProgress = Int(finishedPercent.rounded())
                             await Task.yield()
                         }
                         importStatus = "Listo"
