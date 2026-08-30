@@ -29,11 +29,12 @@ import {
 } from "@phosphor-icons/react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { categories } from "./data";
+import { createAuditRun } from "./audit";
 import { buildFinanceMetrics, defaultStatementKind, isSpendTransaction, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
 import { inspectPdf, reconcileStatementImport } from "./pdfImport";
 import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
 import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey } from "./reconciliation";
-import type { FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementSource, StatementSummary, Transaction } from "./types";
+import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementSource, StatementSummary, Transaction } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
 const moneyPrecise = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 2 });
@@ -41,6 +42,7 @@ const transactionStorageKey = "marcelito-transactions.v2";
 const statementStorageKey = "marcelito-statements.v1";
 const categoryRulesStorageKey = "marcelito-category-rules.v1";
 const goalsStorageKey = "marcelito-goals.v1";
+const auditStorageKey = "marcelito-audit.last.v1";
 type LocalAccount = { username: string; passwordHash: string };
 const seededAccount: LocalAccount = { username: "Marcelodiazs", passwordHash: "ed6357244f855d10e821359702d859df700ba81431a98b88ba1de5156a1e9f61" };
 
@@ -271,15 +273,16 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   const [statements, setStatements] = useState<Statement[]>(() => prepareStoredStatements(readStored<Statement[]>(statementStorageKey, [])));
   const [categoryRules, setCategoryRules] = useState<CategoryRules>(() => readStored(categoryRulesStorageKey, {}));
   const [goals, setGoals] = useState<FinancialGoal[]>(() => readStored(goalsStorageKey, []));
+  const [lastAuditRun, setLastAuditRun] = useState<AuditRunRecord | null>(() => readStored<AuditRunRecord | null>(auditStorageKey, null));
   const [importOpen, setImportOpen] = useState(false);
   const reduceMotion = useReducedMotion();
   const latestStatement = latestStatementFor(statements);
   const pipeline = useMemo(() => runTransactionPipeline(transactions, statements), [transactions, statements]);
-  const ledgerTransactions = pipeline.transactions.filter((transaction) => {
+  const ledgerTransactions = useMemo(() => pipeline.transactions.filter((transaction) => {
     if (!transaction.statementId) return true;
     const statement = statements.find((item) => item.id === transaction.statementId);
     return statement?.reconciliationStatus === "valid";
-  });
+  }), [pipeline, statements]);
   // All screens receive the same post-pipeline ledger. Raw extracted rows are
   // retained only for audit/reprocessing and are never an aggregate source.
   const metrics = useMemo(() => buildFinanceMetrics(ledgerTransactions, statements, pipeline), [ledgerTransactions, statements, pipeline]);
@@ -299,6 +302,18 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   useEffect(() => {
     localStorage.setItem(goalsStorageKey, JSON.stringify(goals));
   }, [goals]);
+
+  // Persist one deterministic audit record per ledger generation. The
+  // fingerprint prevents render loops and makes it possible to correlate a
+  // production report with the exact canonical rows that were shown.
+  const auditedFingerprint = useRef("");
+  useEffect(() => {
+    const next = createAuditRun(pipeline, statements, ledgerTransactions, lastAuditRun ? "foreground" : "startup");
+    if (next.ledgerFingerprint === auditedFingerprint.current && lastAuditRun?.status === next.status) return;
+    auditedFingerprint.current = next.ledgerFingerprint;
+    setLastAuditRun(next);
+    localStorage.setItem(auditStorageKey, JSON.stringify(next));
+  }, [pipeline, statements, ledgerTransactions, lastAuditRun]);
 
   function saveImport(commit: ImportCommit) {
     // An issuer-total mismatch is not safe to merge into an existing ledger.
@@ -386,7 +401,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
         </header>
         <AnimatePresence mode="wait">
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
-            {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} onImport={() => setImportOpen(true)} />}
+            {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => setImportOpen(true)} />}
             {section === "Gastos" && <Expenses transactions={ledgerTransactions} statements={statements} metrics={metrics} onImport={() => setImportOpen(true)} />}
             {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
             {section === "Patrimonio" && <NetWorth metrics={metrics} />}
@@ -404,7 +419,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
 type DashboardMetricKey = "patrimony" | "cash" | "debt" | "expense" | "flow";
 type MetricSeriesPoint = { key: string; label: string; value: number };
 
-function Home({ transactions, statements, metrics, goals, setGoals, onImport }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; goals: FinancialGoal[]; setGoals: React.Dispatch<React.SetStateAction<FinancialGoal[]>>; onImport: () => void }) {
+function Home({ transactions, statements, metrics, goals, setGoals, auditRun, onImport }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; goals: FinancialGoal[]; setGoals: React.Dispatch<React.SetStateAction<FinancialGoal[]>>; auditRun: AuditRunRecord | null; onImport: () => void }) {
   const [selectedMetric, setSelectedMetric] = useState<DashboardMetricKey | null>(null);
   if (!transactions.length && !statements.length) return <RealDataEmpty onImport={onImport} />;
 
@@ -443,7 +458,7 @@ function Home({ transactions, statements, metrics, goals, setGoals, onImport }: 
         <GoalsPanel metrics={metrics} goals={goals} setGoals={setGoals} />
       </>}
       <DataQualityIndicator metrics={metrics} />
-      <AuditDiagnostics metrics={metrics} />
+      <AuditDiagnostics metrics={metrics} auditRun={auditRun} />
     </>
   );
 }
@@ -723,10 +738,11 @@ function DebtBreakdown({ metrics }: { metrics: ReturnType<typeof buildFinanceMet
   return <section className="debt-breakdown" aria-label="Desglose de deuda"><div><span>Saldo total de deuda</span><strong>{displayMoney(metrics.debtTotal)}</strong><small>Tarjetas y créditos al último corte</small></div><div><span>Pago próximo</span><strong>{displayMoney(metrics.latestPaymentDue)}</strong><small>Mínimo + MSI del estado</small></div><div><span>Pago para no generar intereses</span><strong>{displayMoney(metrics.latestPaymentForNoInterest)}</strong><small>Importe del estado</small></div><div><span>MSI pendientes</span><strong>{displayMoney(metrics.latestMsiPending)}</strong><small>{metrics.latestMsiInstallmentsCount ? `${metrics.latestMsiInstallmentsCount} mensualidades` : "Principal diferido"}</small></div></section>;
 }
 
-function AuditDiagnostics({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+function AuditDiagnostics({ metrics, auditRun }: { metrics: ReturnType<typeof buildFinanceMetrics>; auditRun: AuditRunRecord | null }) {
   const audit = metrics.audit;
   return <details className="audit-diagnostics">
-    <summary><div><strong>Auditoría de importación y conciliación</strong><span>Diagnóstico temporal reproducible · {audit.stages.join(" → ")}</span></div><b>{audit.periods.length} periodos</b></summary>
+     <summary><div><strong>Auditoría de importación y conciliación</strong><span>Diagnóstico temporal reproducible · {audit.stages.join(" → ")}</span></div><b>{audit.periods.length} periodos</b></summary>
+     {auditRun && <div className="audit-run-meta"><span>Auditoría {auditRun.id} · libro {auditRun.ledgerFingerprint}</span><b className={`audit-status-${auditRun.status}`}>{auditRun.status === "passed" ? "Verificado" : auditRun.status === "warning" ? "Advertencias" : "Bloqueado"}</b></div>}
     {audit.criticalIssues.length > 0 && <div className="audit-critical">{audit.criticalIssues.join(" · ")}</div>}
     <div className="audit-table" role="table" aria-label="Auditoría por periodo"><div className="audit-row audit-head" role="row"><span>Periodo</span><span>Importados / válidos</span><span>Duplicados</span><span>Traspasos</span><span>Pagos tarjeta</span><span>Ingresos</span><span>Gasto real</span><span>Reembolsos / revisar</span></div>{audit.periods.map((period) => <div className="audit-row" role="row" key={period.key}><strong>{period.label}</strong><span>{period.importedCount} / {period.validCount}<small>{displayMoney(period.importedAmount)} / {displayMoney(period.validAmount)}</small></span><span>{period.duplicateCount}<small>{displayMoney(period.duplicateAmount)}</small></span><span>{period.internalTransferCount}<small>{displayMoney(period.internalTransferAmount)}</small></span><span>{period.cardPaymentCount}<small>{displayMoney(period.cardPaymentAmount)}</small></span><span>{period.incomeCount}<small>{displayMoney(period.incomeAmount)}</small></span><span>{period.expenseCount}<small>{displayMoney(period.expenseAmount)}</small></span><span>{period.refundCount} / {period.reviewCount}<small>{displayMoney(period.refundAmount)} / {displayMoney(period.reviewAmount)}</small></span></div>)}</div><div className="audit-totals"><span>Totales</span><b>{audit.importedCount} · {displayMoney(audit.importedAmount)} importados</b><b>{audit.validCount} · {displayMoney(audit.validAmount)} válidos</b><b>{audit.invalidCount} · {displayMoney(audit.invalidAmount)} rechazados</b><b>{audit.duplicateCount} · {displayMoney(audit.duplicateAmount)} duplicados</b><b>{audit.internalTransferCount} traspasos</b><b>{audit.cardPaymentCount} pagos tarjeta</b><b>{displayMoney(audit.incomeAmount)} ingresos</b><b>{displayMoney(audit.expenseAmount)} gasto</b></div><div className="consistency-list"><strong>Consistencias contables</strong>{metrics.consistencyChecks.map((check) => <span className={check.passed ? "check-pass" : "check-fail"} key={check.id}>{check.passed ? "✓" : "!"} {check.label}{check.difference === undefined ? " · pendiente" : ` · diferencia ${displayMoney(check.difference)}`}</span>)}</div>
   </details>;

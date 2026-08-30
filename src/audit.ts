@@ -1,0 +1,55 @@
+import { buildDeduplicationKey, type PipelineResult } from "./reconciliation.ts";
+import type { AuditRunRecord, AuditRunStatus, Statement, Transaction } from "./types.ts";
+
+/**
+ * Stable, non-secret fingerprint of the canonical ledger. It is intentionally
+ * not a cryptographic hash: its purpose is to detect a changed generation and
+ * correlate an audit run, never to identify a user or a PDF.
+ */
+export function canonicalLedgerFingerprint(transactions: Transaction[]) {
+  const rows = transactions
+    .map((transaction) => [
+      transaction.id,
+      transaction.statementId ?? "manual",
+      transaction.deduplicationKey ?? buildDeduplicationKey(transaction),
+      transaction.kind ?? "other",
+      transaction.amount.toFixed(2),
+    ].join("|"))
+    .sort();
+  let hash = 2_166_136_261;
+  for (const character of rows.join("\n")) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16_777_619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
+export function createAuditRun(
+  pipeline: PipelineResult,
+  statements: Statement[],
+  transactions: Transaction[],
+  trigger: AuditRunRecord["trigger"],
+): AuditRunRecord {
+  const pendingStatements = statements.filter((statement) => statement.reconciliationStatus !== "valid").length;
+  const issueCount = pendingStatements
+    + pipeline.audit.invalidCount
+    + pipeline.audit.duplicateCount
+    + pipeline.audit.relevantReviewCount;
+  const status: AuditRunStatus = pipeline.audit.criticalIssues.length || pendingStatements > 0
+    ? "blocked"
+    : pipeline.audit.reviewCount > 0
+      ? "warning"
+      : "passed";
+  return {
+    id: `audit-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`,
+    ranAt: new Date().toISOString(),
+    trigger,
+    status,
+    ledgerFingerprint: canonicalLedgerFingerprint(transactions),
+    statementCount: statements.length,
+    reconciledStatementCount: statements.length - pendingStatements,
+    canonicalMovementCount: transactions.length,
+    issueCount,
+    message: pipeline.audit.criticalIssues[0] ?? (pendingStatements ? `${pendingStatements} estado(s) pendientes de conciliación.` : undefined),
+  };
+}

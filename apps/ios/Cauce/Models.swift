@@ -293,6 +293,40 @@ struct LedgerConsistencyCheck: Identifiable {
     let passed: Bool
 }
 
+enum LedgerAuditStatus: String, Codable {
+    case passed
+    case warning
+    case blocked
+}
+
+/// Persisted evidence for the last automatic audit. The audit id is also
+/// written to the diagnostic trail so a TestFlight crash can be correlated
+/// with the exact ledger version without exporting financial data.
+struct LedgerAuditRun: Codable, Identifiable {
+    let id: UUID
+    let startedAt: Date
+    let completedAt: Date
+    let trigger: String
+    let status: LedgerAuditStatus
+    let ledgerVersion: UUID
+    let statementCount: Int
+    let canonicalMovementCount: Int
+    let reconciledPercent: Double
+    let issueCount: Int
+    let message: String?
+}
+
+/// Single-key envelope used as the active ledger pointer. Keeping movements
+/// and statements in one value prevents a crash between two UserDefaults
+/// writes from producing a mixed-generation ledger.
+private struct LedgerEnvelope: Codable {
+    let schemaVersion: Int
+    let version: UUID
+    let savedAt: Date
+    let movements: [Movement]
+    let statements: [StatementRecord]
+}
+
 @Observable
 final class FinanceStore {
     private let movementKey = "marcelito.movements.v2"
@@ -302,11 +336,18 @@ final class FinanceStore {
     private let numericRepairKey = "marcelito.numericRepair.v1"
     private let canonicalRebuildKey = "marcelito.canonicalRebuild.v1"
     private let canonicalRebuildExpectedCountKey = "marcelito.canonicalRebuild.expectedCount.v1"
+    private let ledgerEnvelopeKey = "marcelito.ledger.active.v1"
+    private let ledgerBackupKey = "marcelito.ledger.backup.v1"
+    private let rebuildStateKey = "marcelito.ledger.rebuildState.v1"
+    private let auditRunKey = "marcelito.ledger.lastAudit.v1"
+    private let ledgerSchemaVersion = 1
     private let statementFilesDirectoryName = "ImportedStatements"
     private var repairInProgress = false
 
     var movements: [Movement]
     var statements: [StatementRecord]
+    private(set) var ledgerVersion: UUID
+    private(set) var lastAuditRun: LedgerAuditRun?
 
     private(set) var lastImportedFile: String?
 
@@ -368,6 +409,45 @@ final class FinanceStore {
     }
 
     var dashboardIsBlocked: Bool { ledgerQuality.isBlocking }
+
+    /// Re-runs the complete set of cheap local controls and persists the
+    /// result. This is intentionally deterministic: it never mutates a row
+    /// based on a guess, and any blocking issue remains visible to the UI.
+    @discardableResult
+    func runAutomaticAudit(trigger: String = "foreground") -> LedgerAuditRun {
+        let startedAt = Date()
+        normalizeStoredLedger()
+        let quality = ledgerQuality
+        let status: LedgerAuditStatus = quality.isBlocking
+            ? .blocked
+            : quality.reviewMovementCount > 0
+                ? .warning
+                : .passed
+        let run = LedgerAuditRun(
+            id: UUID(),
+            startedAt: startedAt,
+            completedAt: .now,
+            trigger: trigger,
+            status: status,
+            ledgerVersion: ledgerVersion,
+            statementCount: quality.statementCount,
+            canonicalMovementCount: quality.movementCount,
+            reconciledPercent: quality.reconciledPercent,
+            issueCount: quality.invalidStatementCount + quality.pendingStatementCount + quality.absurdMovementCount + quality.reviewMovementCount,
+            message: quality.message
+        )
+        lastAuditRun = run
+        if let data = try? JSONEncoder().encode(run) {
+            UserDefaults.standard.set(data, forKey: auditRunKey)
+        }
+        persist()
+        DiagnosticsRecorder.record(
+            level: quality.isBlocking ? "error" : "info",
+            stage: "audit.\(trigger)",
+            message: "Auditoría \(run.id.uuidString.prefix(8)): \(status.rawValue), \(quality.reconciledPercent.rounded())% conciliado, \(quality.movementCount) movimiento(s) canónico(s)."
+        )
+        return run
+    }
 
     var consistencyChecks: [LedgerConsistencyCheck] {
         let tolerance = Decimal(string: "0.05", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(0.05)
@@ -1060,23 +1140,37 @@ final class FinanceStore {
 
     init() {
         let defaults = UserDefaults.standard
-        if let data = defaults.data(forKey: movementKey),
-           let saved = try? JSONDecoder().decode([Movement].self, from: data) {
-            movements = saved
+        if let data = defaults.data(forKey: ledgerEnvelopeKey),
+           let envelope = try? JSONDecoder().decode(LedgerEnvelope.self, from: data),
+           envelope.schemaVersion == ledgerSchemaVersion {
+            movements = envelope.movements
+            statements = envelope.statements
+            ledgerVersion = envelope.version
         } else {
-            movements = []
+            // One-time compatibility path for versions that stored the two
+            // arrays separately. The next persist() writes the atomic envelope.
+            if let data = defaults.data(forKey: movementKey),
+               let saved = try? JSONDecoder().decode([Movement].self, from: data) {
+                movements = saved
+            } else {
+                movements = []
+            }
+            if let data = defaults.data(forKey: statementKey),
+               let saved = try? JSONDecoder().decode([StatementRecord].self, from: data) {
+                statements = saved
+            } else {
+                statements = []
+            }
+            ledgerVersion = UUID()
         }
-        if let data = defaults.data(forKey: statementKey),
-           let saved = try? JSONDecoder().decode([StatementRecord].self, from: data) {
-            statements = saved
-        } else {
-            statements = []
-        }
+        lastAuditRun = defaults.data(forKey: auditRunKey).flatMap { try? JSONDecoder().decode(LedgerAuditRun.self, from: $0) }
         lastImportedFile = defaults.string(forKey: importKey)
+        recoverInterruptedRebuildIfNeeded()
         normalizeStoredLedger()
+        persist()
         DiagnosticsRecorder.record(
             stage: "store.init",
-            message: "Datos locales cargados: \(statements.count) estado(s), \(movements.count) movimiento(s)."
+            message: "Libro \(ledgerVersion.uuidString.prefix(8)) cargado: \(statements.count) estado(s), \(movements.count) movimiento(s)."
         )
     }
 
@@ -1201,6 +1295,10 @@ final class FinanceStore {
         defaults.removeObject(forKey: numericRepairKey)
         defaults.removeObject(forKey: canonicalRebuildKey)
         defaults.removeObject(forKey: canonicalRebuildExpectedCountKey)
+        defaults.removeObject(forKey: ledgerEnvelopeKey)
+        defaults.removeObject(forKey: ledgerBackupKey)
+        defaults.removeObject(forKey: rebuildStateKey)
+        defaults.removeObject(forKey: auditRunKey)
         try? FileManager.default.removeItem(at: statementFilesDirectoryURL)
     }
 
@@ -1233,6 +1331,41 @@ final class FinanceStore {
         let defaults = UserDefaults.standard
         guard !defaults.bool(forKey: canonicalRebuildKey) else { return false }
         return !statements.isEmpty || !storedPDFURLs.isEmpty
+    }
+
+    private func currentEnvelope() -> LedgerEnvelope {
+        LedgerEnvelope(
+            schemaVersion: ledgerSchemaVersion,
+            version: ledgerVersion,
+            savedAt: .now,
+            movements: movements,
+            statements: statements
+        )
+    }
+
+    /// If the process died during a rebuild, discard its partial writes and
+    /// restore the last complete snapshot. `canonicalRebuildKey` remains false
+    /// so the next foreground launch retries the rebuild from the PDFs.
+    private func recoverInterruptedRebuildIfNeeded() {
+        let defaults = UserDefaults.standard
+        guard defaults.string(forKey: rebuildStateKey) == "inProgress",
+              let data = defaults.data(forKey: ledgerBackupKey),
+              let backup = try? JSONDecoder().decode(LedgerEnvelope.self, from: data) else {
+            defaults.removeObject(forKey: rebuildStateKey)
+            defaults.removeObject(forKey: ledgerBackupKey)
+            return
+        }
+        movements = backup.movements
+        statements = backup.statements
+        ledgerVersion = backup.version
+        defaults.set(false, forKey: canonicalRebuildKey)
+        defaults.removeObject(forKey: rebuildStateKey)
+        defaults.removeObject(forKey: ledgerBackupKey)
+        DiagnosticsRecorder.record(
+            level: "error",
+            stage: "rebuild.recover",
+            message: "Se restauró el último libro completo tras una interrupción; la reconstrucción se reintentará."
+        )
     }
 
     private func pdfFingerprint(_ data: Data) -> String {
@@ -1277,6 +1410,14 @@ final class FinanceStore {
         })
         defaults.set(max(candidates.count, statementKeys.count), forKey: canonicalRebuildExpectedCountKey)
 
+        // Save the last complete generation before any destructive operation.
+        // Imports below may persist intermediate rows, but they can always be
+        // rolled back if the app is killed or crashes mid-rebuild.
+        if let backupData = try? JSONEncoder().encode(currentEnvelope()) {
+            defaults.set(backupData, forKey: ledgerBackupKey)
+        }
+        defaults.set("inProgress", forKey: rebuildStateKey)
+
         movements = movements.filter { $0.statementId == nil }
         statements = []
         normalizeStoredLedger()
@@ -1285,6 +1426,8 @@ final class FinanceStore {
         guard !candidates.isEmpty else {
             defaults.set(true, forKey: canonicalRebuildKey)
             defaults.set(true, forKey: numericRepairKey)
+            defaults.set("complete", forKey: rebuildStateKey)
+            defaults.removeObject(forKey: ledgerBackupKey)
             DiagnosticsRecorder.record(stage: "rebuild.done", message: "No había PDFs locales para reconstruir; el libro quedó limpio.")
             return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
         }
@@ -1330,6 +1473,8 @@ final class FinanceStore {
         }
         defaults.set(true, forKey: canonicalRebuildKey)
         defaults.set(true, forKey: numericRepairKey)
+        defaults.set("complete", forKey: rebuildStateKey)
+        defaults.removeObject(forKey: ledgerBackupKey)
         persist()
         DiagnosticsRecorder.record(
             stage: "rebuild.done",
@@ -1670,10 +1815,17 @@ final class FinanceStore {
     }
 
     private func persist() {
-        guard let data = try? JSONEncoder().encode(movements) else { return }
-        UserDefaults.standard.set(data, forKey: movementKey)
-        if let data = try? JSONEncoder().encode(statements) {
-            UserDefaults.standard.set(data, forKey: statementKey)
+        let defaults = UserDefaults.standard
+        guard let envelopeData = try? JSONEncoder().encode(currentEnvelope()) else { return }
+        // The envelope is the authoritative pointer. Keep the old keys for a
+        // single-version compatibility window so an older installed build can
+        // still open the app if the user rolls back from TestFlight.
+        defaults.set(envelopeData, forKey: ledgerEnvelopeKey)
+        if let movementsData = try? JSONEncoder().encode(movements) {
+            defaults.set(movementsData, forKey: movementKey)
+        }
+        if let statementsData = try? JSONEncoder().encode(statements) {
+            defaults.set(statementsData, forKey: statementKey)
         }
     }
 

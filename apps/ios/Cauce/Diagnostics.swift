@@ -130,6 +130,19 @@ struct DiagnosticsView: View {
                 }
 
                 Section("Libro canónico") {
+                    if let audit = store.lastAuditRun {
+                        let auditStatus: String = switch audit.status {
+                        case .passed: "Verificado"
+                        case .warning: "Advertencias"
+                        case .blocked: "Bloqueado"
+                        }
+                        LabeledContent("Última auditoría", value: auditStatus)
+                        LabeledContent("Disparador", value: audit.trigger)
+                        LabeledContent("Versión del libro", value: String(audit.ledgerVersion.uuidString.prefix(8)))
+                        Text("Ejecutada (audit.completedAt, style: .relative) · (audit.id.uuidString.prefix(8))")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                     LabeledContent("Estados", value: "\(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount) conciliados")
                     LabeledContent("Movimientos canónicos", value: "\(store.ledgerQuality.movementCount)")
                     LabeledContent("Importes fuera de rango", value: "\(store.ledgerQuality.absurdMovementCount)")

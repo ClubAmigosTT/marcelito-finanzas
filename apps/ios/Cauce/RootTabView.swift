@@ -218,6 +218,7 @@ struct HomeView: View {
                 }
                 await Task.yield()
                 isImporting = false
+                store.runAutomaticAudit(trigger: "launch")
             }
         }
     }

@@ -141,3 +141,19 @@ export type ImportCommit = {
   /** User corrections learned from this review, keyed by normalized merchant. */
   categoryRules?: Record<string, string>;
 };
+
+export type AuditRunStatus = "passed" | "warning" | "blocked";
+
+/** Persisted evidence for the last deterministic client-side audit. */
+export type AuditRunRecord = {
+  id: string;
+  ranAt: string;
+  trigger: "startup" | "foreground" | "import" | "edit";
+  status: AuditRunStatus;
+  ledgerFingerprint: string;
+  statementCount: number;
+  reconciledStatementCount: number;
+  canonicalMovementCount: number;
+  issueCount: number;
+  message?: string;
+};

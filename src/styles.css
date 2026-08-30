@@ -495,6 +495,11 @@ body { background: var(--bg); color: var(--ink); }
 .provisional-banner { display: flex; align-items: center; gap: 9px; margin-top: 16px; padding: 10px 13px; border: 1px solid color-mix(in srgb, var(--expense) 45%, var(--line)); border-radius: var(--radius-control); background: color-mix(in srgb, var(--expense) 8%, var(--surface)); color: var(--expense); font-size: 12px; font-weight: 700; }
 .audit-diagnostics summary { cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 17px; color: var(--navy); list-style: none; }
 .audit-diagnostics summary::-webkit-details-marker { display: none; }
+.audit-run-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 17px 12px; padding: 8px 10px; border-radius: 8px; background: var(--surface-raised); color: var(--muted); font-size: 10px; }
+.audit-run-meta b { white-space: nowrap; font-size: 10px; }
+.audit-status-passed { color: var(--income); }
+.audit-status-warning { color: var(--warning); }
+.audit-status-blocked { color: var(--expense); }
 .audit-diagnostics summary > div { display: grid; gap: 3px; }
 .audit-diagnostics summary strong { font-size: 13px; }
 .audit-diagnostics summary span, .audit-diagnostics summary b { color: var(--muted); font-size: 11px; font-weight: 600; }

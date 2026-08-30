@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { extractTransactions, parseStatementSummary, reconcileStatementImport } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
 import { buildFinanceMetrics } from "../src/finance.ts";
+import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
 import type { Statement, Transaction } from "../src/types.ts";
 
 const bank = (id: string, source: string, period: string): Statement => ({
@@ -328,4 +329,19 @@ test("los tres saldos de prueba producen efectivo y patrimonio auditables", () =
   assert.equal(metrics.cashAvailable, 28685.18);
   assert.ok(Math.abs((metrics.debtTotal ?? 0) - 50367.21) < 0.001);
   assert.ok(Math.abs((metrics.liquidPatrimony ?? 0) - (-21682.03)) < 0.001);
+});
+
+test("la auditoría es determinista respecto al orden de importación", () => {
+  const statements = [bank("bbva-ago", "BBVA", "agosto 2026")];
+  const rows = [
+    movement({ id: "salary", date: "01 ago 2026", description: "NOMINA", account: "BBVA", amount: 10000, flow: "income", statementId: "bbva-ago", category: "Ingresos" }),
+    movement({ id: "food", date: "02 ago 2026", description: "SUPERMERCADO", account: "BBVA", amount: -1200, flow: "expense", statementId: "bbva-ago", category: "Alimentos" }),
+  ];
+  const first = runTransactionPipeline(rows, statements);
+  const reversed = runTransactionPipeline(rows.slice().reverse(), statements);
+  assert.equal(canonicalLedgerFingerprint(first.transactions), canonicalLedgerFingerprint(reversed.transactions));
+  const firstAudit = createAuditRun(first, statements, first.transactions, "startup");
+  const secondAudit = createAuditRun(reversed, statements, reversed.transactions, "startup");
+  assert.equal(firstAudit.ledgerFingerprint, secondAudit.ledgerFingerprint);
+  assert.equal(firstAudit.canonicalMovementCount, secondAudit.canonicalMovementCount);
 });

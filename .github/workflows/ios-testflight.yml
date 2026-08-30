@@ -38,6 +38,20 @@ jobs:
       - name: Descargar el repositorio
         uses: actions/checkout@v4
 
+      - name: Auditar motor financiero antes de publicar
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Ejecutar pruebas del libro canónico
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm test
+          npm run build
+
       - name: Mostrar toolchain de Apple
         shell: bash
         run: |
