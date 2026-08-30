@@ -1,9 +1,56 @@
 import SwiftUI
+import PDFKit
+import UIKit
+
+func conciseStatementPeriod(_ statement: StatementRecord) -> String {
+    let monthNames: [(token: String, label: String)] = [
+        ("enero", "Enero"), ("ene", "Enero"),
+        ("febrero", "Febrero"), ("feb", "Febrero"),
+        ("marzo", "Marzo"), ("mar", "Marzo"),
+        ("abril", "Abril"), ("abr", "Abril"),
+        ("mayo", "Mayo"), ("may", "Mayo"),
+        ("junio", "Junio"), ("jun", "Junio"),
+        ("julio", "Julio"), ("jul", "Julio"),
+        ("agosto", "Agosto"), ("ago", "Agosto"),
+        ("septiembre", "Septiembre"), ("setiembre", "Septiembre"), ("sep", "Septiembre"), ("set", "Septiembre"),
+        ("octubre", "Octubre"), ("oct", "Octubre"),
+        ("noviembre", "Noviembre"), ("nov", "Noviembre"),
+        ("diciembre", "Diciembre"), ("dic", "Diciembre")
+    ]
+    let source = "\(statement.period) \(statement.fileName)"
+        .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        .lowercased()
+    var found: [String] = []
+    for month in monthNames {
+        guard source.range(of: "\\b\(month.token)\\b", options: .regularExpression) != nil else { continue }
+        if !found.contains(month.label) { found.append(month.label) }
+    }
+    let year = source.range(of: "20\\d{2}", options: .regularExpression)
+        .map { String(source[$0]) }
+    if let first = found.first {
+        let month = found.count > 1 ? "\(first)–\(found.last!)" : first
+        return year.map { "\(month) \($0)" } ?? month
+    }
+    let fallback = statement.period
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    return fallback.count <= 24 && !fallback.isEmpty ? fallback : "Sin periodo"
+}
 
 struct MovementsView: View {
     @Environment(FinanceStore.self) private var store
     @State private var query = ""
     @State private var isAddPresented = false
+    @State private var isAISettingsPresented = false
+    @State private var isAIConfirmationPresented = false
+    @State private var isAIProcessing = false
+    @State private var aiMessage: String?
+    @State private var aiErrorMessage: String?
+
+    private var pendingForAI: [Movement] {
+        store.movements.filter {
+            $0.flow == .expense && ["Por revisar", "Sin categoría"].contains($0.category)
+        }
+    }
 
     private var filtered: [Movement] {
         guard !query.isEmpty else { return store.movements }
@@ -64,6 +111,32 @@ struct MovementsView: View {
                     }
                     .accessibilityLabel("Agregar movimiento")
                 }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Menu {
+                        Button {
+                            isAISettingsPresented = true
+                        } label: {
+                            Label("Configurar clasificación IA", systemImage: "gearshape")
+                        }
+                        Button {
+                            if ZenAPIKeyStore.apiKey == nil {
+                                isAISettingsPresented = true
+                            } else {
+                                isAIConfirmationPresented = true
+                            }
+                        } label: {
+                            Label("Clasificar pendientes (\(pendingForAI.count))", systemImage: "wand.and.stars")
+                        }
+                        .disabled(pendingForAI.isEmpty || isAIProcessing)
+                    } label: {
+                        if isAIProcessing {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "wand.and.stars")
+                        }
+                    }
+                    .accessibilityLabel("Clasificación asistida por IA")
+                }
             }
             .listRowBackground(Color.marcelitoCreamSoft)
             .foregroundStyle(Color.marcelitoNavy)
@@ -71,6 +144,66 @@ struct MovementsView: View {
             .background(Color.marcelitoCream)
             .sheet(isPresented: $isAddPresented) {
                 AddMovementView()
+            }
+            .sheet(isPresented: $isAISettingsPresented) {
+                AISettingsView()
+            }
+            .confirmationDialog(
+                "Clasificar movimientos pendientes",
+                isPresented: $isAIConfirmationPresented,
+                titleVisibility: .visible
+            ) {
+                Button("Clasificar \(pendingForAI.count) movimientos") {
+                    classifyPending()
+                }
+                Button("Cancelar", role: .cancel) { }
+            } message: {
+                Text("Se enviarán al modelo gratuito de OpenCode Zen el comercio, cuenta, importe y fecha de estos movimientos. No se envían PDFs ni movimientos ya clasificados.")
+            }
+            .alert("Clasificación lista", isPresented: Binding(
+                get: { aiMessage != nil },
+                set: { if !$0 { aiMessage = nil } }
+            )) {
+                Button("Aceptar", role: .cancel) { aiMessage = nil }
+            } message: {
+                Text(aiMessage ?? "")
+            }
+            .alert("No se pudo clasificar", isPresented: Binding(
+                get: { aiErrorMessage != nil },
+                set: { if !$0 { aiErrorMessage = nil } }
+            )) {
+                Button("Aceptar", role: .cancel) { aiErrorMessage = nil }
+                Button("Configurar IA") { isAISettingsPresented = true }
+            } message: {
+                Text(aiErrorMessage ?? "")
+            }
+        }
+    }
+
+    private func classifyPending() {
+        guard let apiKey = ZenAPIKeyStore.apiKey else {
+            isAISettingsPresented = true
+            return
+        }
+        let items = pendingForAI
+        guard !items.isEmpty else { return }
+        let model = ZenAPIKeyStore.selectedModel
+        isAIProcessing = true
+        Task { @MainActor in
+            do {
+                let classifications = try await ZenExpenseClassifier.classify(
+                    movements: items,
+                    apiKey: apiKey,
+                    model: model
+                )
+                store.applyAIClassifications(classifications)
+                isAIProcessing = false
+                aiMessage = classifications.isEmpty
+                    ? "La IA no encontró categorías confiables. Puedes corregirlas manualmente."
+                    : "Se actualizaron \(classifications.count) movimientos y Marcelito recordará esas categorías para próximos estados."
+            } catch {
+                isAIProcessing = false
+                aiErrorMessage = error.localizedDescription
             }
         }
     }
@@ -80,7 +213,7 @@ struct MovementsView: View {
               let statement = store.statements.first(where: { $0.id == statementId }) else {
             return "Manual"
         }
-        return "\(statement.source) · \(statement.period)"
+        return "\(statement.source) · \(conciseStatementPeriod(statement))"
     }
 }
 
@@ -182,7 +315,7 @@ private struct MovementDetailView: View {
             LabeledContent("Importe") { Text(movement.amount, format: .currency(code: "MXN")).monospacedDigit() }
             LabeledContent("Cuenta", value: movement.account)
             if let statement = movement.statementId.flatMap({ id in store.statements.first(where: { $0.id == id }) }) {
-                LabeledContent("Estado", value: "\(statement.source) · \(statement.period)")
+                LabeledContent("Estado", value: "\(statement.source) · \(conciseStatementPeriod(statement))")
                 LabeledContent("Archivo", value: statement.fileName)
             } else {
                 LabeledContent("Estado", value: "Movimiento manual")
@@ -364,22 +497,21 @@ struct AccountsView: View {
                         Text("Aún no hay documentos importados. Usa el botón de carga en Resumen.")
                             .foregroundStyle(.secondary)
                     } else {
-                        ForEach(store.statements) { statement in
-                            VStack(alignment: .leading, spacing: 4) {
-                                HStack {
-                                    Image(systemName: statement.requiresReview ? "exclamationmark.triangle" : "checkmark.circle.fill")
-                                        .foregroundStyle(statement.requiresReview ? .orange : .marcelitoNavyMid)
-                                    Text("\(statement.source) · \(statement.period)")
-                                    Spacer()
-                                    Text("\(statement.transactionCount) mov.")
-                                        .font(.caption)
-                                        .monospacedDigit()
+                        LazyVGrid(
+                            columns: [GridItem(.adaptive(minimum: 142), spacing: 12)],
+                            spacing: 12
+                        ) {
+                            ForEach(store.statements) { statement in
+                                NavigationLink {
+                                    StatementDocumentView(statement: statement)
+                                } label: {
+                                    StatementDocumentTile(statement: statement)
                                 }
-                                Text(statement.fileName)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
+                                .buttonStyle(.plain)
                             }
                         }
+                        .padding(.vertical, 6)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 8, trailing: 0))
                     }
                 }
                 Section("Editar cifras del corte") {
@@ -392,7 +524,7 @@ struct AccountsView: View {
                                 StatementSummaryEditor(statement: statement)
                             } label: {
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text("\(statement.source) · \(statement.period)")
+                                    Text("\(statement.source) · \(conciseStatementPeriod(statement))")
                                     Text("Saldos, pagos, crédito y MSI")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -409,6 +541,102 @@ struct AccountsView: View {
             .scrollContentBackground(.hidden)
             .background(Color.marcelitoCream)
         }
+    }
+}
+
+private struct StatementDocumentTile: View {
+    let statement: StatementRecord
+
+    private var iconName: String {
+        statement.kind == .card || statement.source.localizedCaseInsensitiveContains("amex")
+            ? "creditcard.fill"
+            : "building.columns.fill"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .top) {
+                Image(systemName: iconName)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.marcelitoNavyMid)
+                    .frame(width: 28, height: 28)
+                    .background(Color.marcelitoNavy.opacity(0.08), in: Circle())
+                Spacer(minLength: 8)
+                Image(systemName: statement.requiresReview ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                    .font(.caption)
+                    .foregroundStyle(statement.requiresReview ? Color.marcelitoAmber : Color.marcelitoSuccess)
+                    .accessibilityLabel(statement.requiresReview ? "Pendiente de revisión" : "Revisado")
+            }
+            Text(statement.source)
+                .font(.headline)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+            Text(conciseStatementPeriod(statement))
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(Color.marcelitoNavyMid)
+                .lineLimit(1)
+            Text("\(statement.transactionCount) mov.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+        }
+        .frame(maxWidth: .infinity, minHeight: 126, alignment: .leading)
+        .padding(14)
+        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.marcelitoLine.opacity(0.62), lineWidth: 1)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("\(statement.source), \(conciseStatementPeriod(statement))")
+        .accessibilityHint("Abre el estado de cuenta")
+    }
+}
+
+private struct StatementDocumentView: View {
+    @Environment(FinanceStore.self) private var store
+    let statement: StatementRecord
+
+    var body: some View {
+        Group {
+            if let url = store.statementFileURL(for: statement),
+               let document = PDFDocument(url: url) {
+                PDFDocumentRepresentable(document: document)
+                    .ignoresSafeArea(edges: .bottom)
+            } else {
+                ContentUnavailableView(
+                    "Archivo no disponible",
+                    systemImage: "doc.text.magnifyingglass",
+                    description: Text("Este estado se importó antes de guardar documentos localmente. Puedes volver a importarlo para abrirlo desde aquí.")
+                )
+            }
+        }
+        .navigationTitle("\(statement.source) · \(conciseStatementPeriod(statement))")
+        .navigationBarTitleDisplayMode(.inline)
+        .background(Color.marcelitoCream)
+        .foregroundStyle(Color.marcelitoNavy)
+    }
+}
+
+private struct PDFDocumentRepresentable: UIViewRepresentable {
+    let document: PDFDocument
+
+    func makeUIView(context: Context) -> PDFView {
+        let view = PDFView()
+        view.document = document
+        view.autoScales = true
+        view.displayMode = .singlePageContinuous
+        view.displayDirection = .vertical
+        view.backgroundColor = UIColor(red: 0.96, green: 0.94, blue: 0.88, alpha: 1)
+        return view
+    }
+
+    func updateUIView(_ view: PDFView, context: Context) {
+        if view.document !== document {
+            view.document = document
+        }
+        view.autoScales = true
     }
 }
 

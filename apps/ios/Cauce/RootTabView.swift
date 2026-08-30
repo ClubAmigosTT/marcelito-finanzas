@@ -48,7 +48,7 @@ struct HomeView: View {
                 Label("Sin estados importados", systemImage: "doc.text")
             } else {
                 ForEach(store.statements.prefix(4)) { statement in
-                    Label("\(statement.source) · \(statement.period)", systemImage: statement.requiresReview ? "exclamationmark.triangle" : "checkmark.circle")
+                    Label("\(statement.source) · \(conciseStatementPeriod(statement))", systemImage: statement.requiresReview ? "exclamationmark.triangle" : "checkmark.circle")
                 }
             }
             Button("Eliminar cuenta", role: .destructive) {
@@ -566,7 +566,7 @@ private struct DecisionCallout: View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Revisión de origen", systemImage: "doc.text.magnifyingglass")
                 .font(.headline)
-            Text(statement.map { "\($0.source) · \($0.period) está guardado como \($0.transactionCount) movimientos. Corrige categorías desde Movimientos antes de usarlo para decidir." } ?? "Importa un estado de cuenta para empezar a revisar.")
+            Text(statement.map { "\($0.source) · \(conciseStatementPeriod($0)) está guardado como \($0.transactionCount) movimientos. Corrige categorías desde Movimientos antes de usarlo para decidir." } ?? "Importa un estado de cuenta para empezar a revisar.")
                 .foregroundStyle(.secondary)
         }
         .foregroundStyle(Color.marcelitoNavy)

@@ -150,6 +150,9 @@ struct StatementRecord: Identifiable, Codable {
     var source: String
     var period: String
     var fileName: String
+    /// Nombre relativo del PDF que guardamos en Application Support para poder
+    /// volver a abrirlo desde la tarjeta de documentos.
+    var localFileName: String? = nil
     var importedAt: Date
     var transactionCount: Int
     var requiresReview: Bool
@@ -220,6 +223,7 @@ final class FinanceStore {
     private let statementKey = "marcelito.statements.v1"
     private let importKey = "marcelito.lastImport"
     private let categoryRulesKey = "marcelito.categoryRules.v1"
+    private let statementFilesDirectoryName = "ImportedStatements"
 
     var movements: [Movement]
     var statements: [StatementRecord]
@@ -522,6 +526,21 @@ final class FinanceStore {
         persist()
     }
 
+    func applyAIClassifications(_ classifications: [AIClassification]) {
+        var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
+        for classification in classifications {
+            guard let index = movements.firstIndex(where: { $0.id == classification.movementID }) else { continue }
+            movements[index].category = classification.category
+            movements[index].travelRelated = classification.travelRelated
+            let key = Self.categoryRuleKey(movements[index].title)
+            if !key.isEmpty {
+                rules[key] = classification.category
+            }
+        }
+        UserDefaults.standard.set(rules, forKey: categoryRulesKey)
+        persist()
+    }
+
     func updateClassification(for movement: Movement, kind: MovementKind, travelRelated: Bool) {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return }
         movements[index].kind = kind
@@ -594,6 +613,17 @@ final class FinanceStore {
         defaults.removeObject(forKey: statementKey)
         defaults.removeObject(forKey: importKey)
         defaults.removeObject(forKey: categoryRulesKey)
+        try? FileManager.default.removeItem(at: statementFilesDirectoryURL)
+    }
+
+    /// Devuelve la URL local del PDF importado. Solo se aceptan nombres de
+    /// archivo relativos generados por Marcelito para evitar rutas externas.
+    func statementFileURL(for statement: StatementRecord) -> URL? {
+        guard let localFileName = statement.localFileName?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !localFileName.isEmpty else { return nil }
+        let safeFileName = URL(fileURLWithPath: localFileName).lastPathComponent
+        let url = statementFilesDirectoryURL.appendingPathComponent(safeFileName, isDirectory: false)
+        return FileManager.default.fileExists(atPath: url.path) ? url : nil
     }
 
     func importPDF(from url: URL) throws -> ImportSummary {
@@ -677,11 +707,14 @@ final class FinanceStore {
 
         movements.removeAll { $0.statementId == statementId }
         movements.insert(contentsOf: fresh.reversed(), at: 0)
+        let storedFileName = persistStatementFile(documentData, statementId: statementId)
+            ?? existingStatement?.localFileName
         let statement = StatementRecord(
             id: statementId,
             source: source,
             period: period,
             fileName: url.lastPathComponent,
+            localFileName: storedFileName,
             importedAt: .now,
             transactionCount: fresh.count,
             requiresReview: needsReview,
@@ -716,6 +749,30 @@ final class FinanceStore {
         UserDefaults.standard.set(data, forKey: movementKey)
         if let data = try? JSONEncoder().encode(statements) {
             UserDefaults.standard.set(data, forKey: statementKey)
+        }
+    }
+
+    private var statementFilesDirectoryURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent(statementFilesDirectoryName, isDirectory: true)
+    }
+
+    private func persistStatementFile(_ data: Data, statementId: UUID) -> String? {
+        let localFileName = "(statementId.uuidString).pdf"
+        do {
+            try FileManager.default.createDirectory(
+                at: statementFilesDirectoryURL,
+                withIntermediateDirectories: true
+            )
+            try data.write(
+                to: statementFilesDirectoryURL.appendingPathComponent(localFileName),
+                options: [.atomic]
+            )
+            return localFileName
+        } catch {
+            // La importación contable sigue siendo válida aunque iOS no pueda
+            // conservar el archivo; en ese caso la tarjeta lo indicará.
+            return nil
         }
     }
 
