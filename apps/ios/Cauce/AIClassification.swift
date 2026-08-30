@@ -168,7 +168,7 @@ enum ZenExpenseClassifier {
             return AIClassification(
                 movementID: movementID,
                 category: category,
-                travelRelated: payload.travelRelated ?? category == "Viajes"
+                travelRelated: payload.travelRelated ?? (category == "Viajes")
             )
         }
     }
