@@ -121,6 +121,15 @@ struct StatementReconciliationRecord: Codable {
     var reason: String? = nil
 }
 
+/// Provenance for a single reconstructed row.  Keeping the method and page
+/// with the movement makes an accepted amount traceable without retaining the
+/// whole PDF text in the ledger.
+struct MovementExtractionEvidence: Codable {
+    var method: String
+    var page: Int? = nil
+    var confidence: Double
+}
+
 struct Movement: Identifiable, Codable {
     var id: UUID
     var date: Date
@@ -132,6 +141,7 @@ struct Movement: Identifiable, Codable {
     var statementId: UUID?
     var kind: MovementKind?
     var travelRelated: Bool
+    var extractionEvidence: MovementExtractionEvidence?
 
     init(
         id: UUID = UUID(),
@@ -143,7 +153,8 @@ struct Movement: Identifiable, Codable {
         flow: FlowKind,
         statementId: UUID? = nil,
         kind: MovementKind? = nil,
-        travelRelated: Bool = false
+        travelRelated: Bool = false,
+        extractionEvidence: MovementExtractionEvidence? = nil
     ) {
         self.id = id
         self.date = date
@@ -155,10 +166,11 @@ struct Movement: Identifiable, Codable {
         self.statementId = statementId
         self.kind = kind
         self.travelRelated = travelRelated
+        self.extractionEvidence = extractionEvidence
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, date, title, account, category, amount, flow, statementId, kind, travelRelated
+        case id, date, title, account, category, amount, flow, statementId, kind, travelRelated, extractionEvidence
     }
 
     init(from decoder: Decoder) throws {
@@ -173,6 +185,7 @@ struct Movement: Identifiable, Codable {
         statementId = try container.decodeIfPresent(UUID.self, forKey: .statementId)
         kind = try container.decodeIfPresent(MovementKind.self, forKey: .kind)
         travelRelated = try container.decodeIfPresent(Bool.self, forKey: .travelRelated) ?? false
+        extractionEvidence = try container.decodeIfPresent(MovementExtractionEvidence.self, forKey: .extractionEvidence)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -187,6 +200,7 @@ struct Movement: Identifiable, Codable {
         try container.encodeIfPresent(statementId, forKey: .statementId)
         try container.encodeIfPresent(kind, forKey: .kind)
         try container.encode(travelRelated, forKey: .travelRelated)
+        try container.encodeIfPresent(extractionEvidence, forKey: .extractionEvidence)
     }
 }
 
@@ -2219,7 +2233,11 @@ final class FinanceStore {
                 amount: signedAmount,
                 flow: flow,
                 kind: kind,
-                travelRelated: travelRelated
+                travelRelated: travelRelated,
+                extractionEvidence: MovementExtractionEvidence(
+                    method: "pdf-text",
+                    confidence: 0.93
+                )
             )
         }
     }
@@ -2487,7 +2505,12 @@ final class FinanceStore {
             amount: signedAmount,
             flow: flow,
             kind: movementKind,
-            travelRelated: travelRelated
+            travelRelated: travelRelated,
+            extractionEvidence: MovementExtractionEvidence(
+                method: "vision-ocr",
+                page: row.first.map { $0.page + 1 },
+                confidence: 0.90
+            )
         )
     }
 
@@ -2691,7 +2714,12 @@ final class FinanceStore {
             amount: signedAmount,
             flow: flow,
             kind: kind,
-            travelRelated: travelRelated
+            travelRelated: travelRelated,
+            extractionEvidence: MovementExtractionEvidence(
+                method: "vision-ocr",
+                page: row.first.map { $0.page + 1 },
+                confidence: 0.90
+            )
         )
     }
 
@@ -2906,7 +2934,12 @@ final class FinanceStore {
             amount: signedAmount,
             flow: flow,
             kind: kind,
-            travelRelated: travelRelated
+            travelRelated: travelRelated,
+            extractionEvidence: MovementExtractionEvidence(
+                method: "vision-ocr",
+                page: row.first.map { $0.page + 1 },
+                confidence: 0.90
+            )
         )
     }
 

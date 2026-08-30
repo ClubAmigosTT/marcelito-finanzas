@@ -623,6 +623,10 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       kind: importedKind,
       travelRelated,
       confidence: category === "Sin categoría" ? 0.62 : 0.92,
+      extractionEvidence: {
+        method: "pdf-text",
+        confidence: category === "Sin categoría" ? 0.78 : 0.95,
+      },
     });
   });
 
@@ -695,7 +699,15 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   const kind = detectStatementKind(text, source);
   onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
-  const parsed = extractTransactions(text, source, file.name, kind);
+  const parsed = extractTransactions(text, source, file.name, kind).map((transaction) => ({
+    ...transaction,
+    // The parser is shared by text and OCR input. Preserve the actual method
+    // selected by inspectPdf so diagnostics never call an OCR row "text".
+    extractionEvidence: {
+      ...(transaction.extractionEvidence ?? { confidence: transaction.confidence ?? 0.75 }),
+      method: mode === "ocr" ? "ocr" as const : "pdf-text" as const,
+    },
+  }));
   const summary = parseStatementSummary(text, kind);
   const reconciliation = reconcileStatementImport(kind, summary, parsed);
   onProgress(100, "Listo para revisar");

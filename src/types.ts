@@ -31,6 +31,15 @@ export type StatementSource = "Amex" | "Santander" | "BBVA" | "Desconocido" | (s
 
 export type SourceDetectionStatus = "verified" | "review" | "unknown";
 
+export type ExtractionMethod = "pdf-text" | "ocr" | "manual";
+
+/** Provenance retained for each parsed row so an accepted amount is auditable. */
+export type TransactionExtractionEvidence = {
+  method: ExtractionMethod;
+  page?: number;
+  confidence: number;
+};
+
 /** Evidence used to identify the issuer without trusting transaction text. */
 export type SourceDetection = {
   source: StatementSource;
@@ -67,6 +76,7 @@ export type Transaction = {
   kind?: TransactionKind;
   travelRelated?: boolean;
   confidence?: number;
+  extractionEvidence?: TransactionExtractionEvidence;
   statementId?: string;
   /** Canonical merchant/concept used for reconciliation and grouping. */
   normalizedDescription?: string;

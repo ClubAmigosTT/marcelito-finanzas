@@ -321,6 +321,11 @@ private struct MovementDetailView: View {
             } else {
                 LabeledContent("Estado", value: "Movimiento manual")
             }
+            if let evidence = movement.extractionEvidence {
+                let method = evidence.method == "vision-ocr" ? "OCR visual" : evidence.method == "pdf-text" ? "Texto del PDF" : evidence.method
+                let page = evidence.page.map { " · página \($0)" } ?? ""
+                LabeledContent("Origen de lectura", value: "\(method)\(page)")
+            }
             Picker("Categoría", selection: Binding(
                 get: { selectedCategory },
                 set: {

@@ -262,6 +262,39 @@ test("el estado BBVA completo reconstruye sus 11 filas y concilia los totales", 
   assert.equal(rows.filter((row) => row.amount < 0).length, 9);
   assert.equal(rows.find((row) => row.description.includes("RECIBIDOSANTANDER"))?.amount, 4500);
   assert.equal(reconcileStatementImport("bank", summary, rows).status, "valid");
+  assert.equal(rows.every((row) => row.extractionEvidence?.method === "pdf-text"), true);
+});
+
+test("Santander selecciona el cargo o abono y no el saldo corrido", () => {
+  const text = [
+    "BANCO SANTANDER MEXICO GRUPO FINANCIERO SANTANDER",
+    "Saldo inicial 10,000.00",
+    "Depósitos 1 5,000.00",
+    "Retiros 1 60.00",
+    "Detalle de movimientos",
+    "16-JUL-2026 17-JUL-2026 CARGO TELCEL 60.00 9,940.00",
+    "17-JUL-2026 17-JUL-2026 NOMINA 5,000.00 14,940.00",
+  ].join("\n");
+  const rows = extractTransactions(text, "Santander", "Santander julio 2026.pdf", "bank");
+  assert.deepEqual(rows.map((row) => [row.description, row.amount]), [
+    ["CARGO TELCEL", -60],
+    ["NOMINA", 5000],
+  ]);
+});
+
+test("Amex separa compras y pagos sin convertir el pago en gasto", () => {
+  const text = [
+    "American Express",
+    "Nuevas transacciones 2,500.00",
+    "28 de Julio HOTEL 2,500.00",
+    "29 de Julio GRACIAS POR SU PAGO 3,000.00",
+  ].join("\n");
+  const rows = extractTransactions(text, "Amex", "Amex julio 2026.pdf", "card");
+  assert.equal(rows.find((row) => row.description === "HOTEL")?.amount, -2500);
+  const payment = rows.find((row) => row.description.includes("GRACIAS POR SU PAGO"));
+  assert.equal(payment?.kind, "cardPayment");
+  assert.equal(payment?.flow, "debt");
+  assert.equal(payment?.amount, -3000);
 });
 
 test("BBVA no se convierte en Santander por una contraparte dentro de movimientos", () => {
