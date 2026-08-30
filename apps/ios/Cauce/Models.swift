@@ -196,8 +196,8 @@ struct StatementMetric: Identifiable {
     let cashBalance: Decimal?
     let debtBalance: Decimal?
 
-    var paidPercent: Decimal? { newTransactions == 0 ? nil : realPayments / newTransactions }
-    var pendingPercent: Decimal? { newTransactions == 0 ? nil : max(Decimal(0), accumulatedBalance) / newTransactions }
+    var paidPercent: Decimal? { newCharges == 0 ? nil : realPayments / newCharges }
+    var pendingPercent: Decimal? { newCharges == 0 ? nil : max(Decimal(0), accumulatedBalance) / newCharges }
 }
 
 enum FinanceImportError: LocalizedError {
@@ -235,10 +235,10 @@ final class FinanceStore {
     var totalRealPayments: Decimal { cardPeriodMetrics.reduce(0) { $0 + $1.realPayments } }
     var totalCredits: Decimal { cardPeriodMetrics.reduce(0) { $0 + $1.credits } }
     var totalRefunds: Decimal { cardPeriodMetrics.reduce(0) { $0 + $1.refunds } }
-    var accumulatedBalance: Decimal { totalNewTransactions - totalRealPayments }
+    var accumulatedBalance: Decimal { totalNewCharges - totalRealPayments - totalCredits }
     var latestDifference: Decimal { cardPeriodMetrics.first?.difference ?? 0 }
-    var paidPercent: Decimal? { totalNewTransactions == 0 ? nil : totalRealPayments / totalNewTransactions }
-    var pendingPercent: Decimal? { totalNewTransactions == 0 ? nil : max(Decimal(0), accumulatedBalance) / totalNewTransactions }
+    var paidPercent: Decimal? { totalNewCharges == 0 ? nil : totalRealPayments / totalNewCharges }
+    var pendingPercent: Decimal? { totalNewCharges == 0 ? nil : max(Decimal(0), accumulatedBalance) / totalNewCharges }
     var travelSpend: Decimal { periodMetrics.reduce(0) { $0 + $1.travelSpend } }
     var travelPercent: Decimal? { consolidatedRealSpend == 0 ? nil : travelSpend / consolidatedRealSpend }
     var ordinarySpend: Decimal { max(Decimal(0), consolidatedRealSpend - travelSpend) }
@@ -292,6 +292,23 @@ final class FinanceStore {
         guard let cashAvailable, let debtTotal else { return nil }
         return cashAvailable - debtTotal
     }
+    var liquidPatrimonyChangePercent: Decimal? {
+        var groups: [[StatementMetric]] = []
+        for metric in periodMetrics {
+            let key = periodKey(metric.period)
+            if let index = groups.firstIndex(where: { periodKey($0[0].period) == key }) {
+                groups[index].append(metric)
+            } else {
+                groups.append([metric])
+            }
+        }
+        guard groups.count > 1,
+              let current = patrimony(for: groups[0]),
+              let previous = patrimony(for: groups[1]),
+              previous != 0 else { return nil }
+        let absolutePrevious = previous < 0 ? -previous : previous
+        return (current - previous) / absolutePrevious
+    }
     var creditLimit: Decimal? {
         let values = latestMetricsBySource(cardPeriodMetrics).compactMap { $0.creditLimit }
         return values.isEmpty ? nil : values.reduce(0, +)
@@ -317,6 +334,21 @@ final class FinanceStore {
             .filter { isSpend($0) && $0.date >= monthStart }
             .reduce(0) { $0 + absolute($1.amount) }
     }
+
+    var monthlyIncome: Decimal {
+        let monthStart = Calendar.current.date(
+            from: Calendar.current.dateComponents([.year, .month], from: .now)
+        ) ?? .now
+        return movements
+            .filter { movement in
+                guard movement.date >= monthStart, movement.flow == .income else { return false }
+                let kind = movementKind(movement)
+                return kind != .credit && kind != .refund
+            }
+            .reduce(0) { $0 + absolute($1.amount) }
+    }
+
+    var monthlyNetFlow: Decimal { monthlyIncome - monthlyExpense }
 
     private func absolute(_ value: Decimal) -> Decimal { value < 0 ? -value : value }
 
@@ -370,6 +402,13 @@ final class FinanceStore {
             latest[metric.source] = metric
         }
         return Array(latest.values)
+    }
+
+    private func patrimony(for metrics: [StatementMetric]) -> Decimal? {
+        let bank = latestMetricsBySource(metrics.filter { $0.kind == .bank }).compactMap { $0.cashBalance }
+        let cards = latestMetricsBySource(metrics.filter { $0.kind == .card }).compactMap { $0.debtBalance }
+        guard !bank.isEmpty, !cards.isEmpty else { return nil }
+        return bank.reduce(0, +) - cards.reduce(0, +)
     }
 
     private func calculateMetric(for statement: StatementRecord) -> StatementMetric {
@@ -433,8 +472,8 @@ final class FinanceStore {
             realPayments: realPayments,
             credits: creditTotal,
             refunds: refundTotal,
-            difference: newTransactions - realPayments,
-            accumulatedBalance: newTransactions - realPayments,
+            difference: newCharges - realPayments,
+            accumulatedBalance: newCharges - realPayments - creditTotal,
             travelSpend: travel,
             ordinarySpend: max(Decimal(0), newCharges - travel),
             creditLimit: creditLimit,
@@ -625,10 +664,7 @@ final class FinanceStore {
         let summary = Self.summary(from: text, source: source)
         let existingStatement = statements.first(where: { $0.fileName == url.lastPathComponent })
         let statementId = existingStatement?.id ?? UUID()
-        let existingKeys = Set(movements.filter { $0.statementId != statementId }.map(Self.identityKey))
-        let fresh = candidates.compactMap { candidate -> Movement? in
-            let keyed = Self.identityKey(candidate)
-            guard !existingKeys.contains(keyed) else { return nil }
+        let fresh = candidates.map { candidate -> Movement in
             var imported = candidate
             imported.statementId = statementId
             return imported
@@ -666,7 +702,9 @@ final class FinanceStore {
             period: period,
             fileName: url.lastPathComponent,
             imported: fresh.count,
-            skipped: candidates.count - fresh.count,
+            // Rows are scoped to their statement; identical purchases from a
+            // different import are legitimate and are never treated as repeats.
+            skipped: 0,
             requiresReview: needsReview,
             summary: summary,
             usedOCR: usedOCR
@@ -679,10 +717,6 @@ final class FinanceStore {
         if let data = try? JSONEncoder().encode(statements) {
             UserDefaults.standard.set(data, forKey: statementKey)
         }
-    }
-
-    private static func identityKey(_ movement: Movement) -> String {
-        "\(Calendar.current.startOfDay(for: movement.date).timeIntervalSince1970)|\(movement.title.lowercased())|\(movement.account.lowercased())|\(movement.amount)"
     }
 
     private static let demoMovements: [Movement] = [/*

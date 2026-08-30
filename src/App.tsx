@@ -12,9 +12,7 @@ import {
   CircleNotch,
   CreditCard,
   FilePdf,
-  Fingerprint,
   House,
-  Lightbulb,
   ListMagnifyingGlass,
   LockKey,
   PencilSimple,
@@ -22,7 +20,6 @@ import {
   Receipt,
   ShieldCheck,
   SignOut,
-  Sparkle,
   Trash,
   UploadSimple,
   User,
@@ -32,31 +29,19 @@ import {
 } from "@phosphor-icons/react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { categories } from "./data";
-import { buildFinanceMetrics, defaultStatementKind, inferTransactionKind, isSpendTransaction } from "./finance";
+import { buildFinanceMetrics, defaultStatementKind, type AnalyticsPeriod, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
 import { inspectPdf } from "./pdfImport";
 import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
-import type { ImportCommit, ImportResult, Section, Statement, StatementKind, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types";
+import type { FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementSource, StatementSummary, Transaction } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
 const moneyPrecise = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 2 });
 const transactionStorageKey = "marcelito-transactions.v2";
 const statementStorageKey = "marcelito-statements.v1";
 const categoryRulesStorageKey = "marcelito-category-rules.v1";
+const goalsStorageKey = "marcelito-goals.v1";
 type LocalAccount = { username: string; passwordHash: string };
 const seededAccount: LocalAccount = { username: "Marcelodiazs", passwordHash: "ed6357244f855d10e821359702d859df700ba81431a98b88ba1de5156a1e9f61" };
-
-const kindLabels: Record<TransactionKind, string> = {
-  purchase: "Compra",
-  cardPayment: "Pago tarjeta",
-  bankTransfer: "Traspaso propio",
-  income: "Ingreso",
-  credit: "Crédito contable",
-  refund: "Devolución",
-  msi: "MSI",
-  interest: "Interés",
-  fee: "Comisión",
-  other: "Otro",
-};
 
 async function passwordDigest(username: string, password: string) {
   const bytes = new TextEncoder().encode(`${username}:${password}`);
@@ -87,6 +72,11 @@ function deleteLocalAccount() {
   localStorage.removeItem(transactionStorageKey);
   localStorage.removeItem(statementStorageKey);
   localStorage.removeItem(categoryRulesStorageKey);
+  localStorage.removeItem(goalsStorageKey);
+}
+
+function clearLocalSession() {
+  localStorage.removeItem("marcelito-profile");
 }
 
 function readStored<T>(key: string, fallback: T): T {
@@ -103,16 +93,38 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
-function amountFor(transactions: Transaction[], flow: Transaction["flow"]) {
-  return transactions.filter((item) => item.flow === flow).reduce((sum, item) => sum + Math.abs(item.amount), 0);
-}
-
 function displayMoney(value: number | undefined | null) {
   return value === undefined || value === null || !Number.isFinite(value) ? "Pendiente" : money.format(value);
 }
 
 function displayPercent(value: number | null | undefined) {
   return value === undefined || value === null || !Number.isFinite(value) ? "Pendiente" : `${Math.round(value * 100)}%`;
+}
+
+function comparisonPercent(value: number | null | undefined) {
+  if (value === undefined || value === null || !Number.isFinite(value)) return "Sin comparativo";
+  const percent = Math.round(Math.abs(value) * 100);
+  return `${value >= 0 ? "+" : "−"}${percent}% vs. mes anterior`;
+}
+
+function comparisonMoney(current: number | undefined, previous: number | undefined) {
+  if (current === undefined || previous === undefined) return "Sin comparativo";
+  const delta = current - previous;
+  return `${delta >= 0 ? "+" : "−"}${money.format(Math.abs(delta))} vs. mes anterior`;
+}
+
+function signedMoney(value: number | undefined | null) {
+  if (value === undefined || value === null || !Number.isFinite(value)) return "Pendiente";
+  return money.format(value);
+}
+
+function signedDeltaMoney(value: number | undefined | null) {
+  if (value === undefined || value === null || !Number.isFinite(value)) return "Pendiente";
+  return `${value >= 0 ? "+" : "−"}${money.format(Math.abs(value))}`;
+}
+
+function periodLabel(period?: AnalyticsPeriod) {
+  return period?.label ?? "Periodo actual";
 }
 
 function statementDate(statement: Statement) {
@@ -129,8 +141,7 @@ function sourceColor(source: StatementSource) {
 }
 
 const navItems: { label: Section; icon: typeof House }[] = [
-  { label: "Inicio", icon: House },
-  { label: "Movimientos", icon: Receipt },
+  { label: "Resumen", icon: House },
   { label: "Gastos", icon: ChartDonut },
   { label: "Cuentas", icon: CreditCard },
   { label: "Patrimonio", icon: ChartLineUp },
@@ -217,10 +228,11 @@ function AuthGate({ onEnter }: { onEnter: (name: string) => void }) {
 }
 
 function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOut: () => void; onDeleteAccount: () => void }) {
-  const [section, setSection] = useState<Section>("Inicio");
+  const [section, setSection] = useState<Section>("Resumen");
   const [transactions, setTransactions] = useState<Transaction[]>(() => readStored(transactionStorageKey, []));
   const [statements, setStatements] = useState<Statement[]>(() => readStored(statementStorageKey, []));
   const [categoryRules, setCategoryRules] = useState<CategoryRules>(() => readStored(categoryRulesStorageKey, {}));
+  const [goals, setGoals] = useState<FinancialGoal[]>(() => readStored(goalsStorageKey, []));
   const [importOpen, setImportOpen] = useState(false);
   const reduceMotion = useReducedMotion();
   const latestStatement = statements[0];
@@ -238,12 +250,15 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
     localStorage.setItem(categoryRulesStorageKey, JSON.stringify(categoryRules));
   }, [categoryRules]);
 
+  useEffect(() => {
+    localStorage.setItem(goalsStorageKey, JSON.stringify(goals));
+  }, [goals]);
+
   function saveImport(commit: ImportCommit) {
     // The same PDF may have been imported before with a wrong bank label.
     // Match by filename first so a corrected detection replaces that record
     // instead of leaving a stale duplicate in the account ledger.
-    const previous = statements.find((item) => item.fileName === commit.fileName)
-      ?? statements.find((item) => item.source === commit.source && item.period === commit.period);
+    const previous = statements.find((item) => item.fileName === commit.fileName);
     const statementId = previous?.id ?? createId("statement");
     const importedAt = new Date().toISOString();
     const importedTransactions = commit.transactions
@@ -272,8 +287,11 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
     setStatements((current) => previous ? current.map((item) => item.id === statementId ? statement : item) : [statement, ...current]);
     setTransactions((current) => {
       const withoutPrevious = previous ? current.filter((item) => item.statementId !== statementId) : current;
-      const fresh = importedTransactions.filter((item) => !withoutPrevious.some((saved) => saved.date === item.date && saved.description === item.description && saved.amount === item.amount && saved.account === item.account));
-      return [...fresh, ...withoutPrevious];
+      // A date/description/amount/account match is not a stable identity:
+      // two genuine purchases can share all four values. Re-importing the
+      // same file is already safe because its statement rows were removed
+      // above, so every row from a different statement must be retained.
+      return [...importedTransactions, ...withoutPrevious];
     });
     setImportOpen(false);
   }
@@ -311,11 +329,10 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
         </header>
         <AnimatePresence mode="wait">
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
-            {section === "Inicio" && <Home transactions={transactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} />}
-            {section === "Movimientos" && <Movements transactions={transactions} statements={statements} setTransactions={setTransactions} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
-            {section === "Gastos" && <Expenses transactions={transactions} statements={statements} />}
-            {section === "Cuentas" && <Accounts transactions={transactions} statements={statements} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} />}
-            {section === "Patrimonio" && <NetWorth transactions={transactions} statements={statements} metrics={metrics} />}
+            {section === "Resumen" && <Home transactions={transactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} onImport={() => setImportOpen(true)} />}
+            {section === "Gastos" && <Expenses transactions={transactions} statements={statements} metrics={metrics} onImport={() => setImportOpen(true)} />}
+            {section === "Cuentas" && <Accounts transactions={transactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
+            {section === "Patrimonio" && <NetWorth metrics={metrics} />}
           </motion.div>
         </AnimatePresence>
       </main>
@@ -327,77 +344,228 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   );
 }
 
-function Home({ transactions, statements, metrics, setTransactions, onImport }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>>; onImport: () => void }) {
-  const expenseTotal = metrics.consolidatedRealSpend;
-  const incomeTotal = metrics.realIncome;
-  const transferTotal = amountFor(transactions, "transfer");
-  const latest = statements[0];
-  const accountEntries = Array.from(transactions.reduce((map, item) => {
-    const current = map.get(item.account) ?? { total: 0, count: 0 };
-    map.set(item.account, { total: current.total + Math.abs(item.amount), count: current.count + 1 });
-    return map;
-  }, new Map<string, { total: number; count: number }>()).entries()).sort((a, b) => b[1].total - a[1].total).slice(0, 2);
-  const displayAccounts: Array<[string, { total: number; count: number }]> = accountEntries.length ? accountEntries : [["Sin banco", { total: 0, count: 0 }]];
-  const categoryEntries = Array.from(transactions.filter(isSpendTransaction).reduce((map, item) => map.set(item.category, (map.get(item.category) ?? 0) + Math.abs(item.amount)), new Map<string, number>()).entries()).sort((a, b) => b[1] - a[1]).slice(0, 5);
+function Home({ transactions, statements, metrics, goals, setGoals, onImport }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; goals: FinancialGoal[]; setGoals: React.Dispatch<React.SetStateAction<FinancialGoal[]>>; onImport: () => void }) {
+  if (!transactions.length && !statements.length) return <RealDataEmpty onImport={onImport} />;
 
-  if (!transactions.length && !statements.length) {
-    return <RealDataEmpty onImport={onImport} />;
-  }
+  const trend = metrics.liquidPatrimonyChangePercent;
+  const trendLabel = comparisonPercent(trend);
+  const trendTone = trend === null ? "" : trend >= 0 ? "positive" : "negative";
+  const latestPeriodLabel = statements[0]?.period ?? periodLabel(metrics.analyticsPeriods[0]);
 
   return (
     <>
-      <section className="home-heading">
-        <div><h1>Tu dinero, explicado.</h1><p>{latest ? `Último estado: ${latest.source} · ${latest.period}. Revisa cada movimiento antes de tomar decisiones.` : "Agrega movimientos manuales o importa tu primer estado de cuenta."}</p></div>
-        <span className="month-button data-period">{latest?.period ?? "Sin periodo"}</span>
+      <CFOBrief metrics={metrics} />
+      <section className="summary-heading">
+        <div><p className="summary-eyebrow">Tu situación financiera</p><h1>Una lectura clara de tu dinero.</h1><p>Actualizado con tus estados y movimientos reales.</p></div>
+        <span className="month-button data-period">{latestPeriodLabel}</span>
       </section>
-      <section className="hero-balance">
-        <div className="balance-main">
-          <span>Gasto identificado</span>
-          <strong>{money.format(expenseTotal)}</strong>
-          <p>{transactions.length} movimientos · {statements.length} estados importados</p>
-        </div>
-        <div className="balance-story">
-          <Sparkle size={24} weight="fill" />
-          <div><strong>{latest ? "Datos reales listos para revisar" : "Movimientos manuales"}</strong><p>{latest ? `El archivo ${latest.fileName} se guardó con su banco y periodo. Los saldos de corte se mantienen pendientes hasta capturarlos.` : "Estos movimientos no provienen de un estado asociado. Importa un PDF para conservar el origen."}</p></div>
-          <button aria-label="Importar otro estado" onClick={onImport}><ArrowRight size={19} /></button>
-        </div>
+      <section className="summary-hero" aria-label="Patrimonio líquido">
+        <div><span>Patrimonio líquido</span><strong>{displayMoney(metrics.liquidPatrimony)}</strong><p className={`summary-trend ${trendTone}`}>{trendLabel}</p></div>
       </section>
-      <section className="live-metrics" aria-label="Indicadores de los datos importados">
-        <Metric label="Ingresos detectados" value={money.format(incomeTotal)} delta="Desde tus estados" tone="income" icon={Wallet} />
-        <Metric label="Transferencias" value={money.format(transferTotal)} delta="Flujo interno" tone="transfer" icon={ArrowsLeftRight} />
-        <Metric label="Gasto identificado" value={money.format(expenseTotal)} delta={`${categoryEntries.length} categorías`} tone="expense" icon={Receipt} />
+      <section className="summary-kpis" aria-label="Indicadores principales">
+        <Metric label="Efectivo disponible" value={displayMoney(metrics.cashAvailable)} delta={comparisonMoney(metrics.cashAvailable, metrics.analyticsPeriods[1]?.cashAvailable)} tone="income" icon={Wallet} />
+        <Metric label="Deuda total" value={displayMoney(metrics.debtTotal)} delta={comparisonMoney(metrics.debtTotal, metrics.analyticsPeriods[1]?.debtTotal)} tone="debt" icon={CreditCard} />
+        <Metric label="Gasto del mes" value={displayMoney(metrics.currentMonthSpend)} delta={comparisonPercent(metrics.analyticsPeriods[0]?.variationPercent)} tone="expense" icon={Receipt} />
+        <Metric label="Flujo neto" value={displayMoney(metrics.currentMonthNetFlow)} delta={comparisonMoney(metrics.currentMonthNetFlow, metrics.analyticsPeriods[1]?.netFlow)} tone={metrics.currentMonthNetFlow >= 0 ? "income" : "debt"} icon={ChartLineUp} />
       </section>
-      <CalculationSummary metrics={metrics} />
-      <PeriodCalculationTable metrics={metrics} />
-      <ConsolidatedBreakdown metrics={metrics} />
-      <RefinementPanel transactions={transactions} setTransactions={setTransactions} />
-      <section className="money-section">
-        <div className="section-heading"><div><h2>Así se movió tu dinero</h2><p>Los importes salen únicamente de movimientos que cargaste o agregaste.</p></div><div className="legend"><span className="income-text">Ingreso</span><span className="transfer-text">Transferencia</span><span className="expense-text">Gasto</span></div></div>
-        <div className="money-map">
-          <FlowNode icon={Wallet} title="Ingresos" value={money.format(incomeTotal)} tone="income" detail={`${transactions.filter((item) => item.flow === "income").length} movimientos`} />
-          <FlowConnector tone="income" value={money.format(incomeTotal)} />
-          <div className="account-nodes">
-            {displayAccounts.map(([account, data]) => <FlowNode key={account} icon={Bank} title={account} value={money.format(data.total)} tone="transfer" detail={`${data.count} movimientos`} />)}
-          </div>
-          <FlowConnector tone="transfer" value={money.format(transferTotal)} />
-          <FlowNode icon={ArrowsLeftRight} title="Transferencias" value={money.format(transferTotal)} tone="transfer" detail="Movimientos internos" />
-          <FlowConnector tone="expense" value={money.format(expenseTotal)} />
-          <FlowNode icon={Receipt} title="Gasto real" value={money.format(expenseTotal)} tone="expense" detail="Sin saldos inventados" />
-        </div>
-      </section>
-      <section className="decision-grid">
-        <div className="decision-list">
-          <div className="section-heading simple"><div><h2>Revisión pendiente</h2><p>Conserva el contexto de cada archivo antes de conciliar.</p></div></div>
-          {latest && <Insight icon={FilePdf} title={`${latest.source} · ${latest.period}`} body={`${latest.transactionCount} movimientos guardados desde ${latest.fileName}. Estado: ${latest.status === "ready" ? "revisado" : "requiere revisión"}.`} action="Ver en Cuentas" />}
-          <Insight icon={ListMagnifyingGlass} title={`${transactions.filter((item) => !item.category || item.category === "Sin categoría").length} movimientos sin categoría`} body="Pulir las categorías cambia la lectura de gasto, pero nunca modifica el archivo original." action="Revisar movimientos" />
-        </div>
-        <div className="spending-shape">
-          <div className="shape-head"><div><h3>En qué se fue</h3><span>{money.format(expenseTotal)} identificado</span></div><button aria-label="Ver gastos"><ArrowRight size={18} /></button></div>
-          {categoryEntries.length ? <div className="shape-grid">{categoryEntries.map(([category, amount], index) => <div className={`shape ${["travel", "food", "dining", "services", "other"][index] ?? "other"}`} key={category}><strong>{category}</strong><span>{money.format(amount)}</span><small>{expenseTotal ? `${Math.round(amount / expenseTotal * 100)}%` : "0%"}</small></div>)}</div> : <EmptyState title="Sin gastos todavía" body="Importa un estado o agrega un movimiento para construir tu lectura real." />}
-        </div>
-      </section>
+      <ExecutiveSummary metrics={metrics} />
+      <SpendTrendChart periods={metrics.analyticsPeriods} />
+      <SpendingSplit period={metrics.analyticsPeriods[0]} />
+      <ProjectionPanel projection={metrics.projection} />
+      <ScenarioSimulator metrics={metrics} />
+      <ExecutiveAlerts alerts={metrics.executiveAlerts} />
+      <GoalsPanel metrics={metrics} goals={goals} setGoals={setGoals} />
+      <DataQualityIndicator metrics={metrics} />
     </>
   );
+}
+
+function CFOBrief({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  const current = metrics.analyticsPeriods[0];
+  const risk = metrics.executiveAlerts[0];
+  const situation = current ? `Gastaste ${displayMoney(current.spend)} y tu flujo neto fue ${displayMoney(current.netFlow)}.` : "Todavía no hay suficiente historial para explicar tu situación.";
+  const riskText = risk?.title ?? "No hay un riesgo ejecutivo relevante detectado";
+  const action = risk?.action ?? "Mantén el ritmo y revisa tu proyección de 90 días.";
+  return <section className="cfo-brief" aria-labelledby="cfo-brief-title"><div className="cfo-brief-label"><span className="cfo-brief-mark">CFO</span><div><h2 id="cfo-brief-title">CFO Brief</h2><small>La decisión financiera más importante del momento.</small></div></div><p><strong>Situación:</strong> {situation} <strong>Riesgo:</strong> {riskText}. <strong>Acción:</strong> {action}</p></section>;
+}
+
+function ProjectionPanel({ projection }: { projection: ReturnType<typeof buildFinanceMetrics>["projection"] }) {
+  const horizons: Array<{ label: string; period: ProjectionMonth; tone: string }> = [
+    { label: "3 meses", period: projection.horizon3, tone: "short" },
+    { label: "6 meses", period: projection.horizon6, tone: "medium" },
+    { label: "12 meses", period: projection.horizon12, tone: "long" },
+  ];
+  return <section className="projection-panel" aria-labelledby="projection-title"><div className="section-heading"><div><h2 id="projection-title">Próximos 90 días</h2><p>Qué podría pasar si mantienes tu comportamiento reciente.</p></div><span className="estimate-badge">Estimación</span></div><div className="projection-table" role="table" aria-label="Proyección de los próximos 90 días"><div className="projection-row projection-head" role="row"><span>Periodo</span><span>Ingresos</span><span>Gasto fijo</span><span>Pagos / MSI</span><span>Liquidez</span><span>Patrimonio</span></div>{projection.next90Days.map((period) => <div className="projection-row" role="row" key={period.key}><strong>{period.label}</strong><span>{displayMoney(period.expectedIncome)}</span><span>{displayMoney(period.fixedSpend)}</span><span>{displayMoney(period.projectedPayments)}<small>{period.projectedMsi ? `MSI ${displayMoney(period.projectedMsi)}` : ""}</small></span><span>{displayMoney(period.projectedLiquidity)}</span><span>{displayMoney(period.projectedPatrimony)}</span></div>)}</div><div className="projection-horizons"><div className="section-heading"><div><h3>Proyección de largo plazo</h3><p>Gasto, ahorro, deuda y patrimonio estimados.</p></div></div><div className="projection-horizon-grid">{horizons.map(({ label, period, tone }) => <article className={`projection-horizon horizon-${tone}`} key={label}><span>{label}</span><strong>{displayMoney(period.projectedPatrimony)}</strong><small>Patrimonio estimado</small><div><span>Gasto acumulado</span><b>{displayMoney(period.projectedSpend * period.monthOffset)}</b></div><div><span>Ahorro acumulado</span><b>{displayMoney(period.projectedSavings * period.monthOffset)}</b></div><div><span>Deuda</span><b>{displayMoney(period.projectedDebt)}</b></div></article>)}</div></div><p className="estimate-note">{projection.assumption}</p></section>;
+}
+
+type ScenarioResult = {
+  payment: number;
+  remainingDebt: number;
+  interestEstimated: number;
+  cashAvailable: number | undefined;
+  utilizationRate: number | undefined;
+  liquidationMonths: number;
+  liquidationLabel: string;
+  liquidPatrimony: number | undefined;
+  patrimonyGain: number;
+};
+
+function ScenarioSimulator({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  const debt = metrics.debtTotal ?? 0;
+  const minimum = Math.min(debt, metrics.latestMinimumPayment ?? (debt ? debt * 0.05 : 0));
+  const noInterest = Math.min(debt, metrics.latestPaymentForNoInterest ?? debt);
+  const [scenarioA, setScenarioA] = useState(minimum);
+  const [scenarioB, setScenarioB] = useState(noInterest);
+  const monthlyRate = debt > 0 && metrics.latestInterest ? Math.min(0.05, Math.max(0.005, metrics.latestInterest / debt)) : 0.02;
+  useEffect(() => {
+    setScenarioA((current) => current === 0 ? minimum : current);
+    setScenarioB((current) => current === 0 ? noInterest : current);
+  }, [minimum, noInterest]);
+
+  function simulate(paymentValue: number, baselineInterest: number): ScenarioResult {
+    const payment = Math.min(debt, Math.max(0, Number.isFinite(paymentValue) ? paymentValue : 0));
+    const remainingDebt = Math.max(0, debt - payment);
+    let balance = remainingDebt;
+    let interestEstimated = 0;
+    let liquidationMonths = 0;
+    while (balance > 0.5 && liquidationMonths < 120) {
+      const interest = balance * monthlyRate;
+      interestEstimated += interest;
+      balance = Math.max(0, balance + interest - payment);
+      liquidationMonths += 1;
+      if (payment <= interest && liquidationMonths === 120) break;
+    }
+    const liquidationLabel = balance > 0.5 ? ">10 años" : liquidationMonths === 0 ? "Este mes" : `En ${liquidationMonths} meses`;
+    const cashAvailable = metrics.cashAvailable === undefined ? undefined : metrics.cashAvailable - payment;
+    const utilizationRate = metrics.creditLimit ? Math.max(0, (metrics.creditUsed ?? debt) - payment) / metrics.creditLimit : undefined;
+    return { payment, remainingDebt, interestEstimated, cashAvailable, utilizationRate, liquidationMonths, liquidationLabel, liquidPatrimony: metrics.liquidPatrimony, patrimonyGain: baselineInterest - interestEstimated };
+  }
+
+  const baseline = simulate(minimum, 0);
+  const resultA = simulate(scenarioA, baseline.interestEstimated);
+  const resultB = simulate(scenarioB, baseline.interestEstimated);
+  const winner = (metric: "cashAvailable" | "interestEstimated" | "patrimonyGain") => {
+    const left = resultA[metric];
+    const right = resultB[metric];
+    if (left === undefined || right === undefined || left === right) return 0;
+    const leftWins = metric === "interestEstimated" ? left < right : left > right;
+    return leftWins ? 1 : -1;
+  };
+  return <section className="scenario-panel" aria-labelledby="scenario-title"><div className="section-heading"><div><h2 id="scenario-title">Simulador de escenarios</h2><p>Compara cuánto pagar y el impacto probable en tu deuda y liquidez.</p></div><span className="estimate-badge">Estimación</span></div>{debt ? <><div className="scenario-controls"><ScenarioControl label="Escenario A" value={scenarioA} minimum={minimum} noInterest={noInterest} onChange={setScenarioA} /><ScenarioControl label="Escenario B" value={scenarioB} minimum={minimum} noInterest={noInterest} onChange={setScenarioB} /></div><div className="scenario-grid"><ScenarioCard label="Escenario A" result={resultA} cashWinner={winner("cashAvailable") === 1} interestWinner={winner("interestEstimated") === 1} patrimonyWinner={winner("patrimonyGain") === 1} /><ScenarioCard label="Escenario B" result={resultB} cashWinner={winner("cashAvailable") === -1} interestWinner={winner("interestEstimated") === -1} patrimonyWinner={winner("patrimonyGain") === -1} /></div><p className="estimate-note">El interés se estima con la tasa observada en tu último corte; si no existe, se usa una referencia del 2% mensual. El pago reduce efectivo y deuda por el mismo importe, por eso el patrimonio inmediato no cambia.</p></> : <EmptyState title="Sin deuda para simular" body="Completa la deuda al corte en Cuentas para comparar opciones de pago." />}</section>;
+}
+
+function ScenarioControl({ label, value, minimum, noInterest, onChange }: { label: string; value: number; minimum: number; noInterest: number; onChange: (value: number) => void }) {
+  return <div className="scenario-control"><strong>{label}</strong><div className="scenario-presets"><button className="text-button" onClick={() => onChange(minimum)}>Pago mínimo</button><button className="text-button" onClick={() => onChange(noInterest)}>No generar intereses</button></div><label><span>Monto personalizado</span><div className="scenario-input"><span>$</span><input type="number" min="0" step="100" value={Math.round(value)} onChange={(event) => onChange(Number(event.target.value))} /></div></label></div>;
+}
+
+function ScenarioCard({ label, result, cashWinner, interestWinner, patrimonyWinner }: { label: string; result: ScenarioResult; cashWinner: boolean; interestWinner: boolean; patrimonyWinner: boolean }) {
+  return <article className="scenario-card"><div className="scenario-card-head"><div><span>{label}</span><strong>{displayMoney(result.payment)}</strong></div><small>Pago elegido</small></div><div className="scenario-outcomes"><div><span>Deuda restante</span><strong>{displayMoney(result.remainingDebt)}</strong></div><div className={cashWinner ? "scenario-winner" : ""}><span>Efectivo disponible</span><strong>{displayMoney(result.cashAvailable)}</strong>{cashWinner && <small>Más liquidez</small>}</div><div className={interestWinner ? "scenario-winner" : ""}><span>Intereses estimados</span><strong>{displayMoney(result.interestEstimated)}</strong>{interestWinner && <small>Menos intereses</small>}</div><div><span>Liquidación probable</span><strong>{result.liquidationLabel}</strong></div><div><span>Uso de crédito</span><strong>{result.utilizationRate === undefined ? "Pendiente" : `${Math.round(result.utilizationRate * 100)}%`}</strong></div><div className={patrimonyWinner ? "scenario-winner" : ""}><span>Patrimonio líquido</span><strong>{displayMoney(result.liquidPatrimony)}</strong><small>{patrimonyWinner ? "Mejor impacto futuro" : `${signedDeltaMoney(result.patrimonyGain)} vs pago mínimo`}</small></div></div></article>;
+}
+
+function ExecutiveAlerts({ alerts }: { alerts: ExecutiveAlert[] }) {
+  return <section className="alerts-panel" aria-labelledby="alerts-title"><div className="section-heading"><div><h2 id="alerts-title">Alertas ejecutivas</h2><p>Señales que pueden cambiar tu próxima decisión.</p></div></div>{alerts.length ? <div className="alert-list">{alerts.map((alert) => <article className={`executive-alert alert-${alert.severity}`} key={alert.id}><span className="alert-dot" /><div><strong>{alert.title}</strong><p>{alert.body}</p><small>{alert.action}</small></div></article>)}</div> : <div className="alerts-clear"><strong>Sin riesgos relevantes detectados.</strong><span>Tu historial reciente no activa alertas de desviación.</span></div>}</section>;
+}
+
+function GoalsPanel({ metrics, goals, setGoals }: { metrics: ReturnType<typeof buildFinanceMetrics>; goals: FinancialGoal[]; setGoals: React.Dispatch<React.SetStateAction<FinancialGoal[]>> }) {
+  const [kind, setKind] = useState<FinancialGoalKind>("patrimony");
+  const [target, setTarget] = useState("");
+  function addGoal() {
+    const value = Number(target);
+    if (!Number.isFinite(value) || value <= 0) return;
+    setGoals((current) => [...current, { id: `goal-${Date.now()}`, kind, target: value }]);
+    setTarget("");
+  }
+  return <section className="goals-panel" aria-labelledby="goals-title"><div className="section-heading"><div><h2 id="goals-title">Metas financieras</h2><p>Define un objetivo y sigue su avance con la proyección actual.</p></div></div><div className="goal-form"><select aria-label="Tipo de meta" value={kind} onChange={(event) => setKind(event.target.value as FinancialGoalKind)}><option value="patrimony">Patrimonio objetivo</option><option value="debt">Deuda objetivo</option><option value="maxSpend">Gasto máximo mensual</option><option value="savings">Ahorro mensual</option></select><div className="goal-input"><span>$</span><input aria-label="Valor de la meta" type="number" min="1" step="100" value={target} onChange={(event) => setTarget(event.target.value)} placeholder="Tu objetivo" /></div><button className="primary-button" onClick={addGoal}>Agregar meta</button></div>{goals.length ? <div className="goal-list">{goals.map((goal) => <GoalCard key={goal.id} goal={goal} metrics={metrics} onDelete={() => setGoals((current) => current.filter((item) => item.id !== goal.id))} />)}</div> : <div className="goals-empty"><strong>Aún no tienes metas.</strong><span>Empieza con un patrimonio, deuda, límite de gasto o ahorro mensual.</span></div>}</section>;
+}
+
+function GoalCard({ goal, metrics, onDelete }: { goal: FinancialGoal; metrics: ReturnType<typeof buildFinanceMetrics>; onDelete: () => void }) {
+  const current = goal.kind === "patrimony" ? metrics.liquidPatrimony : goal.kind === "debt" ? metrics.debtTotal : goal.kind === "maxSpend" ? metrics.currentMonthSpend : metrics.currentMonthNetFlow;
+  const currentValue = current ?? 0;
+  const progress = goal.kind === "patrimony" ? Math.min(1, Math.max(0, currentValue / goal.target)) : goal.kind === "debt" ? currentValue <= goal.target ? 1 : Math.max(0, 1 - currentValue / Math.max(currentValue + goal.target, 1)) : goal.kind === "maxSpend" ? currentValue <= goal.target ? 1 : Math.min(1, goal.target / Math.max(currentValue, 1)) : Math.min(1, Math.max(0, currentValue / goal.target));
+  const estimate = goalEstimate(goal, metrics);
+  return <article className="goal-card"><div className="goal-card-head"><div><span>{goalTitle(goal.kind)}</span><strong>{displayMoney(goal.target)}</strong></div><button className="row-action" aria-label={`Eliminar meta de ${goalTitle(goal.kind)}`} onClick={onDelete}><Trash size={16} /></button></div><div className="goal-progress"><span style={{ width: `${Math.round(progress * 100)}%` }} /></div><div className="goal-card-foot"><span>{Math.round(progress * 100)}% de avance</span><small>{estimate}</small></div></article>;
+}
+
+function goalTitle(kind: FinancialGoalKind) {
+  return kind === "patrimony" ? "Patrimonio objetivo" : kind === "debt" ? "Deuda objetivo" : kind === "maxSpend" ? "Gasto máximo mensual" : "Ahorro mensual";
+}
+
+function goalEstimate(goal: FinancialGoal, metrics: ReturnType<typeof buildFinanceMetrics>) {
+  const current = goal.kind === "patrimony" ? metrics.liquidPatrimony : goal.kind === "debt" ? metrics.debtTotal : goal.kind === "maxSpend" ? metrics.currentMonthSpend : metrics.currentMonthNetFlow;
+  const currentValue = current ?? 0;
+  const reached = goal.kind === "debt" || goal.kind === "maxSpend" ? currentValue <= goal.target : currentValue >= goal.target;
+  if (reached) return "Objetivo alcanzado";
+  if (goal.kind === "maxSpend") return "Ajustar este mes";
+  const projection = metrics.projection.months;
+  const match = projection.find((period) => {
+    const value = goal.kind === "patrimony" ? period.projectedPatrimony : goal.kind === "debt" ? period.projectedDebt : period.projectedSavings;
+    return value !== undefined && (goal.kind === "debt" ? value <= goal.target : value >= goal.target);
+  });
+  return match ? `Fecha estimada: ${match.label}` : "No visible en 12 meses";
+}
+
+function ExecutiveSummary({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  const current = metrics.analyticsPeriods[0];
+  const previous = metrics.analyticsPeriods[1];
+  const spend = current?.spend ?? metrics.currentMonthSpend;
+  const change = current?.variationPercent ?? null;
+  const cause = metrics.primaryCause;
+  const causeText = cause
+    ? `El principal cambio vino de ${cause.label}: ${comparisonMoney(cause.current, cause.previous)}.`
+    : previous ? "No hay una categoría con aumento suficiente para explicar el cambio." : "Aún no hay un mes anterior con el que comparar.";
+  const payment = current?.paymentTotal ?? metrics.totalRealPayments;
+  const debt = metrics.debtTotal;
+  return <section className="executive-card executive-summary" aria-labelledby="executive-summary-title">
+    <div className="section-heading"><div><h2 id="executive-summary-title">Qué pasó este mes</h2><p>Una lectura automática de gasto, cambios y saldos relevantes.</p></div><span className="summary-period-chip">{periodLabel(current)}</span></div>
+    <p className="executive-conclusion">Este mes gastaste <strong>{displayMoney(spend)}</strong>{change === null ? ", sin comparativo disponible" : `, ${comparisonPercent(change)}`}. {causeText} {payment ? `Registraste ${displayMoney(payment)} en pagos relevantes` : "No se detectaron pagos relevantes"} y cerraste con <strong>{displayMoney(debt)}</strong> de deuda.</p>
+  </section>;
+}
+
+function SpendTrendChart({ periods }: { periods: AnalyticsPeriod[] }) {
+  const chartPeriods = periods.slice(0, 6).reverse();
+  if (!chartPeriods.length) return null;
+  const width = 720;
+  const height = 220;
+  const padding = { top: 24, right: 22, bottom: 30, left: 22 };
+  const maxSpend = Math.max(...chartPeriods.map((period) => period.spend), 1);
+  const step = chartPeriods.length === 1 ? 0 : (width - padding.left - padding.right) / (chartPeriods.length - 1);
+  const points = chartPeriods.map((period, index) => {
+    const x = padding.left + index * step;
+    const y = height - padding.bottom - (period.spend / maxSpend) * (height - padding.top - padding.bottom);
+    return { period, x, y };
+  });
+  return <section className="executive-card spend-trend-card" aria-labelledby="spend-trend-title">
+    <div className="section-heading"><div><h2 id="spend-trend-title">Gasto por periodo</h2><p>Últimos {chartPeriods.length} periodos · valores absolutos y variación mensual.</p></div></div>
+    <div className="trend-chart-wrap">
+      <svg className="spend-trend-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Evolución del gasto por periodo">
+        <line x1={padding.left} x2={width - padding.right} y1={height - padding.bottom} y2={height - padding.bottom} className="trend-baseline" />
+        <polyline points={points.map(({ x, y }) => `${x},${y}`).join(" ")} className="trend-line" />
+        {points.map(({ period, x, y }) => <circle key={period.key} cx={x} cy={y} r="5" className="trend-point"><title>{`${period.label}: ${displayMoney(period.spend)}`}</title></circle>)}
+      </svg>
+      <div className="trend-values">{chartPeriods.map((period) => <div key={period.key}><span>{period.label}</span><strong>{displayMoney(period.spend)}</strong><small className={period.variationPercent !== null && period.variationPercent < 0 ? "trend-down" : "trend-up"}>{comparisonPercent(period.variationPercent)}</small></div>)}</div>
+    </div>
+  </section>;
+}
+
+function SpendingSplit({ period }: { period?: AnalyticsPeriod }) {
+  const ordinary = period?.ordinarySpend ?? 0;
+  const extraordinary = period?.extraordinarySpend ?? 0;
+  const total = ordinary + extraordinary;
+  const ordinaryWidth = total ? ordinary / total * 100 : 0;
+  return <section className="executive-card spending-split" aria-labelledby="spending-split-title">
+    <div className="section-heading"><div><h2 id="spending-split-title">Gasto ordinario y extraordinario</h2><p>Separamos costo de vida recurrente de viajes, compras atípicas y eventos.</p></div><span className="summary-period-chip">{periodLabel(period)}</span></div>
+    <div className="split-values"><div><span>Gasto ordinario</span><strong>{displayMoney(ordinary)}</strong><small>{total ? `${Math.round(ordinary / total * 100)}% del periodo` : "Sin datos identificados"}</small></div><div><span>Gasto extraordinario</span><strong>{displayMoney(extraordinary)}</strong><small>{total ? `${Math.round(extraordinary / total * 100)}% del periodo` : "Sin datos identificados"}</small></div></div>
+    <div className="split-bar" aria-label={`Gasto ordinario ${Math.round(ordinaryWidth)} por ciento y extraordinario ${Math.round(100 - ordinaryWidth)} por ciento`}><span style={{ width: `${ordinaryWidth}%` }} /><span style={{ width: `${100 - ordinaryWidth}%` }} /></div>
+  </section>;
+}
+
+function DataQualityIndicator({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  const quality = metrics.dataQuality;
+  const alert = quality.relevantReviewCount > 0;
+  return <section className={`data-quality${alert ? " has-alert" : ""}`} aria-label="Calidad de datos y conciliación">
+    <div><span>Calidad de datos / conciliación</span><strong>{Math.round(quality.classifiedPercent)}%</strong><small>{quality.classifiedCount} de {quality.totalCount} movimientos clasificados</small></div>
+    {alert ? <p className="quality-alert">Revisa {quality.relevantReviewCount} movimiento{quality.relevantReviewCount === 1 ? " relevante" : "s relevantes"} antes de tomar decisiones.</p> : <p className="quality-ok">Sin alertas relevantes de clasificación.</p>}
+  </section>;
 }
 
 function CalculationSummary({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
@@ -406,27 +574,6 @@ function CalculationSummary({ metrics }: { metrics: ReturnType<typeof buildFinan
 
 function CalculationRow({ label, value, detail, tone }: { label: string; value: string; detail: string; tone?: "positive" | "warning" }) {
   return <div className={`calculation-row${tone ? ` ${tone}` : ""}`}><div><span>{label}</span><small>{detail}</small></div><strong>{value}</strong></div>;
-}
-
-function PeriodCalculationTable({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
-  if (!metrics.cardPeriods.length) return null;
-  return <section className="period-calculation"><div className="section-heading"><div><h2>Comparación por corte</h2><p>La diferencia mensual muestra cargos nuevos menos abonos reales en cada periodo.</p></div></div><div className="period-table"><div className="period-table-head"><span>Periodo</span><span>Gasto nuevo</span><span>Abonos</span><span>Diferencia</span><span>% pagado</span></div>{metrics.cardPeriods.map((period) => <div className="period-table-row" key={period.statementId}><div><strong>{period.label}</strong><small>{period.source}</small></div><strong>{displayMoney(period.newTransactions)}</strong><strong>{displayMoney(period.realPayments)}</strong><strong className={period.difference > 0 ? "period-negative" : "period-positive"}>{displayMoney(period.difference)}</strong><strong>{displayPercent(period.paidPercent)}</strong></div>)}</div></section>;
-}
-
-function RefinementPanel({ transactions, setTransactions }: { transactions: Transaction[]; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>> }) {
-  if (!transactions.length) return null;
-  const rows = transactions.slice(0, 8);
-  function updateKind(id: string, kind: TransactionKind) {
-    setTransactions((items) => items.map((item) => item.id === id ? { ...item, kind, flow: ["cardPayment", "bankTransfer"].includes(kind) ? "transfer" : ["credit", "refund", "income"].includes(kind) ? "income" : "expense" } : item));
-  }
-  function updateTravel(id: string, travelRelated: boolean) {
-    setTransactions((items) => items.map((item) => item.id === id ? { ...item, travelRelated } : item));
-  }
-  return <section className="refinement-section"><div className="section-heading"><div><h2>Pulir la lectura</h2><p>Marca pagos, MSI y viajes para que el consolidado no cuente dos veces el mismo peso.</p></div><span className="calculation-periods">{transactions.length} movimientos</span></div><div className="refinement-list">{rows.map((item) => { const kind = inferTransactionKind(item); return <div className="refinement-row" key={item.id}><div><strong>{item.description}</strong><small>{item.account} · {item.date}</small></div><select aria-label={`Tipo de ${item.description}`} value={kind} onChange={(event) => updateKind(item.id, event.target.value as TransactionKind)}>{Object.entries(kindLabels).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select><label className="travel-toggle"><input type="checkbox" checked={Boolean(item.travelRelated)} onChange={(event) => updateTravel(item.id, event.target.checked)} />Viaje</label></div>; })}</div>{transactions.length > rows.length && <p className="refinement-note">Mostrando 8 movimientos. El resto se puede pulir desde Movimientos.</p>}</section>;
-}
-
-function ConsolidatedBreakdown({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
-  return <section className="consolidated-breakdown"><div className="section-heading"><div><h2>Cómo se construye el gasto real</h2><p>La conciliación separa compras, pagos de tarjeta y traspasos entre tus cuentas.</p></div></div><div className="calculation-ledger"><CalculationRow label="Gasto con tarjeta" value={displayMoney(metrics.cardSpend)} detail="Nuevos cargos de tarjeta" /><CalculationRow label="Gasto directo de cuentas" value={displayMoney(metrics.directBankSpend)} detail="Cargos de cualquier banco importado" /><CalculationRow label="Pagos de tarjeta excluidos" value={displayMoney(metrics.excludedCardPayments)} detail="No son gasto nuevo" /><CalculationRow label="Traspasos propios excluidos" value={displayMoney(metrics.excludedInternalTransfers)} detail="No son consumo" /><CalculationRow label="Devoluciones aplicadas" value={displayMoney(metrics.totalRefunds)} detail="Ajustan el gasto" /><CalculationRow label="Gasto real consolidado" value={displayMoney(metrics.consolidatedRealSpend)} detail="Resultado para decisiones" tone="positive" /><CalculationRow label="Patrimonio líquido" value={displayMoney(metrics.liquidPatrimony)} detail="Efectivo disponible − deuda" tone="positive" /></div></section>;
 }
 
 function StatementSummaryForm({ source, kind, summary, onChange }: { source: StatementSource; kind: Statement["kind"]; summary: StatementSummary; onChange: (key: keyof StatementSummary, value: string) => void }) {
@@ -461,58 +608,149 @@ function Metric({ label, value, delta, tone, icon: Icon }: { label: string; valu
   return <article className={`metric metric-${tone}`}><div className="metric-icon"><Icon size={20} /></div><div><span>{label}</span><strong>{value}</strong><small>{delta}</small></div></article>;
 }
 
-function FlowNode({ icon: Icon, title, value, tone, detail }: { icon: typeof Wallet; title: string; value: string; tone: string; detail: string }) {
-  return <div className={`flow-node node-${tone}`}><div className="node-icon"><Icon size={21} /></div><div><span>{title}</span><strong>{value}</strong><small>{detail}</small></div></div>;
-}
-
-function FlowConnector({ tone, value }: { tone: string; value: string }) {
-  return <div className={`flow-connector connector-${tone}`}><span>{value}</span><ArrowRight size={17} weight="bold" /></div>;
-}
-
-function Insight({ icon: Icon, title, body, action }: { icon: typeof Lightbulb; title: string; body: string; action: string }) {
-  return <article className="insight"><div className="insight-icon"><Icon size={21} /></div><div><strong>{title}</strong><p>{body}</p></div><button>{action}<ArrowRight size={16} /></button></article>;
-}
-
-function Movements({ transactions, statements, setTransactions, onLearnCategory }: { transactions: Transaction[]; statements: Statement[]; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>>; onLearnCategory: (description: string, category: string) => void }) {
+function Movements({ transactions, statements, setTransactions, onLearnCategory, onImport, embedded = false }: { transactions: Transaction[]; statements: Statement[]; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>>; onLearnCategory: (description: string, category: string) => void; onImport: () => void; embedded?: boolean }) {
   const [query, setQuery] = useState("");
   const filtered = transactions.filter((item) => {
     const statement = statements.find((source) => source.id === item.statementId);
     return `${item.description} ${item.category} ${item.account} ${statementLabel(statement)} ${statement?.fileName ?? ""}`.toLowerCase().includes(query.toLowerCase());
   });
   function updateCategory(id: string, category: string) { setTransactions((items) => items.map((item) => item.id === id ? { ...item, category } : item)); const movement = transactions.find((item) => item.id === id); if (movement) onLearnCategory(movement.description, category); }
-  return <section><PageHeading title="Movimientos" body="Busca, corrige y conecta cada movimiento con su estado de cuenta." action="Agregar movimiento" /><div className="filter-row"><div className="search-box"><ListMagnifyingGlass size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar comercio, banco, periodo o categoría" /></div><span className="result-count">{filtered.length} de {transactions.length}</span></div>{filtered.length ? <div className="movement-list">{filtered.map((item) => { const statement = statements.find((source) => source.id === item.statementId); return <div className="movement-row" key={item.id}><span className={`movement-glyph glyph-${item.flow}`}>{item.flow === "transfer" ? <ArrowsLeftRight size={18} /> : item.flow === "income" ? <ArrowDown size={18} /> : <Receipt size={18} />}</span><div className="movement-name"><strong>{item.description}</strong><span>{item.date} · {item.account} · {statementLabel(statement)}</span></div><select aria-label={`Categoría de ${item.description}`} value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><strong className={item.amount > 0 ? "amount positive" : "amount"}>{moneyPrecise.format(item.amount)}</strong><button className="row-action" aria-label={`Editar ${item.description}`}><PencilSimple size={17} /></button></div>; })}</div> : <EmptyState title="No hay movimientos reales" body="Importa un estado de cuenta o agrega un movimiento manual para empezar." />}</section>;
+  return <section className={embedded ? "movements-detail" : undefined}>{!embedded && <PageHeading title="Movimientos" body="Busca, corrige y conecta cada movimiento con su estado de cuenta." action="Importar estado" onAction={onImport} />}<div className="filter-row"><div className="search-box"><ListMagnifyingGlass size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar comercio, banco, periodo o categoría" /></div><span className="result-count">{filtered.length} de {transactions.length}</span></div>{filtered.length ? <div className="movement-list">{filtered.map((item) => { const statement = statements.find((source) => source.id === item.statementId); return <div className="movement-row" key={item.id}><span className={`movement-glyph glyph-${item.flow}`}>{item.flow === "transfer" ? <ArrowsLeftRight size={18} /> : item.flow === "income" ? <ArrowDown size={18} /> : <Receipt size={18} />}</span><div className="movement-name"><strong>{item.description}</strong><span>{item.date} · {item.account} · {statementLabel(statement)}</span></div><select aria-label={`Categoría de ${item.description}`} value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><strong className={item.amount > 0 ? "amount positive" : "amount"}>{moneyPrecise.format(item.amount)}</strong><button className="row-action" aria-label={`Editar ${item.description}`}><PencilSimple size={17} /></button></div>; })}</div> : <EmptyState title="No hay movimientos reales" body="Importa un estado de cuenta o agrega un movimiento manual para empezar." />}</section>;
 }
 
-function Expenses({ transactions, statements }: { transactions: Transaction[]; statements: Statement[] }) {
-  const groups = Array.from(transactions.filter(isSpendTransaction).reduce((map, item) => map.set(item.category, (map.get(item.category) ?? 0) + Math.abs(item.amount)), new Map<string, number>()).entries()).sort((a, b) => b[1] - a[1]);
-  const total = groups.reduce((sum, [, amount]) => sum + amount, 0);
-  const latest = statements[0];
-  if (!transactions.length) return <section><PageHeading title="Gastos" body="El gasto real se calcula a partir de tus movimientos importados." action="Importar estado" /><EmptyState title="Todavía no hay gastos" body="Carga un PDF mensual para ver categorías construidas con tus datos." /></section>;
-  const top = groups[0];
-  return <section><PageHeading title="Gastos" body="El gasto real excluye transferencias y conserva el origen de cada movimiento." action="Revisar categorías" /><div className="expense-layout"><div className="expense-map">{groups.length ? <div className="shape-grid large">{groups.slice(0, 5).map(([category, amount], index) => <div className={`shape ${["travel", "food", "dining", "services", "other"][index] ?? "other"}`} key={category}><strong>{category}</strong><span>{money.format(amount)}</span><small>{total ? `${Math.round(amount / total * 100)}% del gasto` : ""}</small></div>)}</div> : <EmptyState title="Sin gastos identificados" body="Tus movimientos todavía no tienen cargos clasificados." />}</div><aside className="story-card"><span className="story-month">{latest ? `${latest.source} · ${latest.period}` : "Movimientos manuales"}</span><h2>{top ? top[0] : "Sin categoría"}</h2><p>{top ? `Es la categoría con mayor peso: ${money.format(top[1])} de ${money.format(total)} identificados. Puedes corregir cada movimiento desde Movimientos.` : "Cuando importe un estado, aquí aparecerá la historia que más explica tu gasto."}</p><div className="story-total"><span>Total identificado</span><strong>{money.format(total)}</strong></div></aside></div></section>;
+function Expenses({ transactions, statements, metrics, onImport }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; onImport: () => void }) {
+  if (!transactions.length && !statements.length) return <section><PageHeading title="Gastos" body="El gasto real se calcula a partir de tus movimientos importados." action="Importar estado" onAction={onImport} /><EmptyState title="Todavía no hay gastos" body="Carga un PDF mensual para ver categorías construidas con tus datos." /></section>;
+  const current = metrics.analyticsPeriods[0];
+  const previous = metrics.analyticsPeriods[1];
+  return <section>
+    <PageHeading title="Gastos" body="Entiende cuánto gastaste, cómo cambió y qué lo explica." action="Importar estado" onAction={onImport} />
+    <section className="expense-summary-kpis" aria-label="Resumen de gastos">
+      <Metric label="Gasto del mes" value={displayMoney(metrics.currentMonthSpend)} delta={comparisonPercent(current?.variationPercent)} tone="expense" icon={Receipt} />
+      <Metric label="Promedio móvil 3 meses" value={displayMoney(current?.movingAverage3)} delta={comparisonMoney(current?.movingAverage3, previous?.movingAverage3)} tone="income" icon={ChartLineUp} />
+      <Metric label="Gasto extraordinario" value={displayMoney(current?.extraordinarySpend)} delta={current?.spend ? `${Math.round((current.extraordinarySpend / current.spend) * 100)}% del gasto · ${comparisonMoney(current.extraordinarySpend, previous?.extraordinarySpend)}` : "Sin datos identificados"} tone="debt" icon={Warning} />
+    </section>
+    <SpendingSplit period={current} />
+    <div className="expense-analysis-grid">
+      <CategoryDistribution categories={metrics.categoryDistribution} period={current} />
+      <MerchantRanking merchants={metrics.topMerchants} period={current} />
+    </div>
+    <div className="expense-analysis-grid">
+      <MovementRanking movements={metrics.topMovements} period={current} />
+      <TravelTrips trips={metrics.travelTrips} period={current} />
+    </div>
+    <DataQualityIndicator metrics={metrics} />
+  </section>;
 }
 
-function Accounts({ transactions, statements, onImport, onMarkReviewed }: { transactions: Transaction[]; statements: Statement[]; onImport: () => void; onMarkReviewed: (statementId: string) => void }) {
+function CategoryDistribution({ categories, period }: { categories: ReturnType<typeof buildFinanceMetrics>["categoryDistribution"]; period?: AnalyticsPeriod }) {
+  const max = Math.max(...categories.map((category) => category.total), 1);
+  return <section className="detail-card" aria-labelledby="category-distribution-title"><div className="section-heading"><div><h2 id="category-distribution-title">Distribución por categorías</h2><p>{periodLabel(period)} · gasto identificado.</p></div></div>{categories.length ? <div className="category-list">{categories.map((category) => <div className="category-row" key={category.name}><div className="category-row-label"><span>{category.name}</span><strong>{displayMoney(category.total)}</strong></div><div className="category-track"><span style={{ width: `${Math.max(4, category.total / max * 100)}%` }} /></div><small>{Math.round(category.share * 100)}%</small></div>)}</div> : <EmptyState title="Sin categorías todavía" body="Revisa las categorías desde Cuentas › Movimientos." />}</section>;
+}
+
+function MerchantRanking({ merchants, period }: { merchants: ReturnType<typeof buildFinanceMetrics>["topMerchants"]; period?: AnalyticsPeriod }) {
+  return <section className="detail-card" aria-labelledby="merchant-ranking-title"><div className="section-heading"><div><h2 id="merchant-ranking-title">Top 5 comercios</h2><p>{periodLabel(period)} · ordenados por gasto.</p></div></div>{merchants.length ? <ol className="ranking-list">{merchants.map((merchant) => <li key={merchant.name}><span className="ranking-index" /><div><strong>{merchant.name}</strong><small>{merchant.count} movimiento{merchant.count === 1 ? "" : "s"} · {Math.round(merchant.share * 100)}%</small></div><strong>{displayMoney(merchant.total)}</strong></li>)}</ol> : <EmptyState title="Sin comercios identificados" body="Importa y revisa un estado para ver concentración por comercio." />}</section>;
+}
+
+function MovementRanking({ movements, period }: { movements: ReturnType<typeof buildFinanceMetrics>["topMovements"]; period?: AnalyticsPeriod }) {
+  return <section className="detail-card" aria-labelledby="movement-ranking-title"><div className="section-heading"><div><h2 id="movement-ranking-title">Top 5 movimientos</h2><p>{periodLabel(period)} · desembolsos más grandes.</p></div></div>{movements.length ? <ol className="ranking-list movement-ranking">{movements.map((movement) => <li key={movement.id}><span className="ranking-index" /><div><strong>{movement.description}</strong><small>{movement.date} · {movement.category || "Sin categoría"}</small></div><strong>{signedMoney(-Math.abs(movement.amount))}</strong></li>)}</ol> : <EmptyState title="Sin movimientos identificados" body="Aquí aparecerán tus desembolsos más relevantes." />}</section>;
+}
+
+function TravelTrips({ trips, period }: { trips: TravelTrip[]; period?: AnalyticsPeriod }) {
+  const total = trips.reduce((sum, trip) => sum + trip.total, 0);
+  return <section className="detail-card travel-trips" aria-labelledby="travel-trips-title"><div className="section-heading"><div><h2 id="travel-trips-title">Viajes</h2><p>{periodLabel(period)} · {period?.spend ? `${Math.round(total / period.spend * 100)}% del gasto` : "sin porcentaje disponible"}.</p></div><strong className="detail-total">{displayMoney(total)}</strong></div>{trips.length ? <div className="travel-list">{trips.map((trip) => <article className="travel-trip" key={trip.id}><div className="travel-trip-head"><div><h3>{trip.name}</h3><small>{trip.startDate}{trip.endDate !== trip.startDate ? ` → ${trip.endDate}` : ""}</small></div><strong>{displayMoney(trip.total)}</strong></div><div className="travel-breakdown">{trip.movements.map((movement) => <div key={movement.id}><span>{movement.description}</span><small>{movement.date}</small><strong>{signedMoney(-Math.abs(movement.amount))}</strong></div>)}</div></article>)}</div> : <EmptyState title="Sin viajes identificados" body="Los movimientos de viaje aparecerán aquí agrupados por fechas." />}</section>;
+}
+
+function Accounts({ transactions, statements, metrics, setTransactions, onImport, onMarkReviewed, onLearnCategory }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>>; onImport: () => void; onMarkReviewed: (statementId: string) => void; onLearnCategory: (description: string, category: string) => void }) {
   const [sourceFilter, setSourceFilter] = useState<StatementSource | "Todos">("Todos");
   const [periodFilter, setPeriodFilter] = useState("Todos");
+  const [view, setView] = useState<"accounts" | "movements">("accounts");
   const periods = Array.from(new Set(statements.map((item) => item.period)));
   const filteredStatements = statements.filter((item) => (sourceFilter === "Todos" || item.source === sourceFilter) && (periodFilter === "Todos" || item.period === periodFilter));
-  const knownSources: StatementSource[] = Array.from(new Set<StatementSource>(["Santander", "BBVA", "Amex", "Desconocido", ...statements.map((item) => item.source)]));
-  return <section><PageHeading title="Cuentas" body="Aquí puedes ver qué banco y qué periodo alimentan tus datos." action="Importar estado" onAction={onImport} /><div className="statement-ledger"><div className="section-heading"><div><h2>Estados de cuenta</h2><p>{statements.length ? `${statements.length} archivos guardados localmente.` : "Aún no has guardado ningún estado."}</p></div><div className="statement-filters"><select aria-label="Filtrar por banco" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as StatementSource | "Todos")}><option value="Todos">Todos los bancos</option>{knownSources.map((source) => <option key={source} value={source}>{source}</option>)}</select><select aria-label="Filtrar por periodo" value={periodFilter} onChange={(event) => setPeriodFilter(event.target.value)}><option value="Todos">Todos los periodos</option>{periods.map((period) => <option key={period} value={period}>{period}</option>)}</select></div></div>{filteredStatements.length ? <div className="statement-list">{filteredStatements.map((statement) => <article className="statement-row" key={statement.id}><span className={`statement-icon ${sourceColor(statement.source)}`}><FilePdf size={20} /></span><div className="statement-main"><strong>{statement.source}</strong><span>{statement.period} · {statement.fileName}</span><small>Importado {statementDate(statement)} · {statement.transactionCount} movimientos · {statement.mode === "text" ? "lectura directa" : "requiere revisión visual"}</small></div><span className={`statement-status ${statement.status}`}>{statement.status === "ready" ? "Revisado" : "Pendiente"}</span>{statement.status === "review" && <button className="text-button statement-action" onClick={() => onMarkReviewed(statement.id)}>Marcar revisado</button>}</article>)}</div> : <EmptyState title="No coincide ningún estado" body="Prueba otro banco o periodo, o importa un nuevo PDF." />}</div><div className="accounts-layout"><div className="account-list">{knownSources.map((source) => { const sourceStatements = statements.filter((item) => item.source === source); const sourceTransactions = transactions.filter((item) => item.statementId && sourceStatements.some((statement) => statement.id === item.statementId)); const latest = sourceStatements[0]; return <article className="account-row" key={source}><span className={`account-icon ${sourceColor(source)}`}><Bank size={22} /></span><div><h3>{source}</h3><p>{latest ? `${sourceStatements.length} estado(s) · último: ${latest.period}` : "Sin estados importados"}</p></div><strong>{sourceTransactions.length} mov.</strong><button aria-label={`Filtrar ${source}`} onClick={() => setSourceFilter(source)}><ArrowRight size={18} /></button></article>; })}</div><aside className="account-rule"><Fingerprint size={26} /><h3>Origen visible</h3><p>Cada movimiento conserva el banco, el periodo y el nombre del archivo que lo originó. Los saldos de corte se incorporarán cuando estén disponibles en el documento.</p></aside></div></section>;
+  const importedSources = Array.from(new Set<StatementSource>(statements.map((item) => item.source)));
+  const preferredSources: StatementSource[] = ["Santander", "BBVA", "Amex"];
+  const knownSources: StatementSource[] = [
+    ...preferredSources.filter((source) => importedSources.includes(source)),
+    ...importedSources.filter((source) => !preferredSources.includes(source)).sort((left, right) => left.localeCompare(right)),
+  ];
+  const tabs = <div className="accounts-tabs" role="tablist" aria-label="Contenido de cuentas">
+    <button role="tab" aria-selected={view === "accounts"} className={view === "accounts" ? "active" : ""} onClick={() => setView("accounts")}>Cuentas <span>{knownSources.length}</span></button>
+    <button role="tab" aria-selected={view === "movements"} className={view === "movements" ? "active" : ""} onClick={() => setView("movements")}>Movimientos <span>{transactions.length}</span></button>
+  </div>;
+
+  if (view === "movements") {
+    const movementTransactions = sourceFilter === "Todos" ? transactions : transactions.filter((item) => statements.find((statement) => statement.id === item.statementId)?.source === sourceFilter);
+    return <section>{tabs}<Movements transactions={movementTransactions} statements={statements} setTransactions={setTransactions} onLearnCategory={onLearnCategory} onImport={onImport} embedded /></section>;
+  }
+
+  return <section>
+    <PageHeading title="Cuentas" body="Tus saldos por cuenta, separados de los documentos que los respaldan." action="Importar estado" onAction={onImport} />
+    {tabs}
+    <section className="accounts-overview" aria-label="Resumen de cuentas">
+      {knownSources.length ? <div className="account-card-grid">{knownSources.map((source) => {
+        const sourceStatements = statements.filter((item) => item.source === source);
+        const latest = sourceStatements[0];
+        const period = latest ? metrics.periods.find((item) => item.statementId === latest.id) : undefined;
+        const kind = latest?.kind ?? defaultStatementKind(source);
+        const balance = kind === "card" ? period?.debtBalance : kind === "bank" ? period?.cashBalance : undefined;
+        const balanceLabel = balance === undefined ? "Pendiente" : kind === "card" ? `−${money.format(balance)}` : money.format(balance);
+        const sourceTransactions = transactions.filter((item) => item.statementId && sourceStatements.some((statement) => statement.id === item.statementId));
+        return <article className="account-card" key={source}>
+          <div className="account-card-head"><span className={`account-icon ${sourceColor(source)}`}>{kind === "card" ? <CreditCard size={22} /> : <Bank size={22} />}</span><small>{kind === "card" ? "Tarjeta de crédito" : kind === "bank" ? "Cuenta de efectivo" : "Tipo pendiente"}</small></div>
+          <h3>{source}</h3>
+          <strong className={kind === "card" ? "account-card-balance debt" : "account-card-balance"}>{balanceLabel}</strong>
+          <p>{kind === "card" ? `Pago próximo: ${displayMoney(period?.paymentForNoInterest)}` : kind === "bank" ? "Cuenta de efectivo" : "Confirma el tipo en el documento importado"}</p>
+          <small>{sourceTransactions.length} movimientos · {sourceStatements.length} estado(s)</small>
+          <button className="account-card-link" onClick={() => { setSourceFilter(source); setView("movements"); }}>Ver movimientos <ArrowRight size={16} /></button>
+        </article>;
+      })}</div> : <EmptyState title="Aún no hay cuentas" body="Importa un estado de cuenta para construir tus saldos reales." />}
+    </section>
+    <details className="documents-panel">
+      <summary><div><h2>Documentos importados</h2><span>{statements.length ? `${statements.length} archivos guardados localmente.` : "Aquí aparecerán tus PDFs revisados."}</span></div><strong>{statements.length}</strong></summary>
+      <div className="documents-content">
+        {statements.length ? <><div className="statement-filters"><select aria-label="Filtrar por banco" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as StatementSource | "Todos")}><option value="Todos">Todos los bancos</option>{importedSources.map((source) => <option key={source} value={source}>{source}</option>)}</select><select aria-label="Filtrar por periodo" value={periodFilter} onChange={(event) => setPeriodFilter(event.target.value)}><option value="Todos">Todos los periodos</option>{periods.map((period) => <option key={period} value={period}>{period}</option>)}</select></div>{filteredStatements.length ? <div className="statement-list">{filteredStatements.map((statement) => <article className="statement-row" key={statement.id}><span className={`statement-icon ${sourceColor(statement.source)}`}><FilePdf size={20} /></span><div className="statement-main"><strong>{statement.source}</strong><span>{statement.period}</span><small>{statement.fileName} · Importado {statementDate(statement)} · {statement.transactionCount} movimientos · {statement.mode === "text" ? "lectura directa" : "OCR en el dispositivo"}</small></div><span className={`statement-status ${statement.status}`}>{statement.status === "ready" ? "Revisado" : "Pendiente"}</span>{statement.status === "review" && <button className="text-button statement-action" onClick={() => onMarkReviewed(statement.id)}>Marcar revisado</button>}</article>)}</div> : <EmptyState title="No coincide ningún documento" body="Prueba otro banco o periodo." />}</> : <EmptyState title="No hay documentos importados" body="Tus estados de cuenta aparecerán aquí después de revisarlos." />}
+      </div>
+    </details>
+  </section>;
+}
+function NetWorthBase({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  const trend = metrics.liquidPatrimonyChangePercent;
+  const trendLabel = comparisonPercent(trend);
+  return <section>
+    <PageHeading title="Patrimonio" body="Cuánto tienes, cómo cambió y qué parte está en efectivo o deuda." />
+    <div className="patrimony-analytics-grid">
+      <section className="detail-card patrimony-chart-card" aria-labelledby="patrimony-history-title"><div className="section-heading"><div><h2 id="patrimony-history-title">Evolución histórica</h2><p>Patrimonio líquido por periodo · efectivo menos deuda.</p></div></div><PatrimonyChart periods={metrics.analyticsPeriods} /></section>
+      <section className="patrimony-balances" aria-label="Saldos de patrimonio"><BalanceMetric label="Efectivo" value={displayMoney(metrics.cashAvailable)} comparison={comparisonMoney(metrics.cashAvailable, metrics.analyticsPeriods[1]?.cashAvailable)} tone="cash" /><BalanceMetric label="Deuda" value={displayMoney(metrics.debtTotal)} comparison={comparisonMoney(metrics.debtTotal, metrics.analyticsPeriods[1]?.debtTotal)} tone="debt" /><BalanceMetric label="Patrimonio neto" value={displayMoney(metrics.liquidPatrimony)} comparison={trendLabel} tone="net" /></section>
+    </div>
+  </section>;
 }
 
-function NetWorthBase({ transactions, statements }: { transactions: Transaction[]; statements: Statement[] }) {
-  const expenses = amountFor(transactions, "expense");
-  const income = amountFor(transactions, "income");
-  return <section><PageHeading title="Patrimonio" body="No mostramos un patrimonio inventado: primero necesitamos saldos al corte conciliados." action="Ver estados" /><div className="networth-hero"><div><span>Patrimonio líquido</span><strong>—</strong><p>Saldo pendiente de capturar desde tus estados.</p></div><div className="balance-story"><Sparkle size={24} weight="fill" /><div><strong>La historia ya está separada</strong><p>{statements.length ? `${statements.length} estados alimentan ${transactions.length} movimientos: ${money.format(income)} de ingresos y ${money.format(expenses)} de gasto.` : "Importa un estado para comenzar a conciliar ingresos, deuda y saldos."}</p></div></div></div><div className="timeline">{statements.length ? statements.map((statement) => <div className="timeline-row" key={statement.id}><span>{statement.period}</span><strong>{statement.transactionCount} mov.</strong><p>{statement.source} · {statement.fileName} · {statement.status === "ready" ? "revisado" : "pendiente de revisión"}</p></div>) : <EmptyState title="Sin historial financiero" body="Cuando importes tus PDFs, aquí quedará la línea de tiempo por banco y periodo." />}</div></section>;
+function NetWorth({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  return <><NetWorthBase metrics={metrics} /><details className="technical-details"><summary>Ver detalle de conciliación</summary><CalculationSummary metrics={metrics} /></details></>;
 }
 
-function NetWorth({ transactions, statements, metrics }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics> }) {
-  return <><NetWorthBase transactions={transactions} statements={statements} /><CalculationSummary metrics={metrics} /></>;
+function PatrimonyChart({ periods }: { periods: AnalyticsPeriod[] }) {
+  const chartPeriods = periods.filter((period) => period.liquidPatrimony !== undefined).slice(0, 6).reverse();
+  if (!chartPeriods.length) return <EmptyState title="Sin historial de saldos" body="Completa efectivo y deuda en Cuentas para construir la evolución histórica." />;
+  const width = 720;
+  const height = 220;
+  const padding = { top: 22, right: 22, bottom: 30, left: 22 };
+  const values = chartPeriods.map((period) => period.liquidPatrimony ?? 0);
+  const minValue = Math.min(...values, 0);
+  const maxValue = Math.max(...values, 0);
+  const range = maxValue - minValue || 1;
+  const step = chartPeriods.length === 1 ? 0 : (width - padding.left - padding.right) / (chartPeriods.length - 1);
+  const yFor = (value: number) => height - padding.bottom - ((value - minValue) / range) * (height - padding.top - padding.bottom);
+  const zeroY = yFor(0);
+  const points = chartPeriods.map((period, index) => ({ period, x: padding.left + index * step, y: yFor(period.liquidPatrimony ?? 0) }));
+  return <div className="patrimony-chart-wrap"><svg className="patrimony-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Evolución histórica del patrimonio líquido"><line x1={padding.left} x2={width - padding.right} y1={zeroY} y2={zeroY} className="trend-baseline" /><polyline points={points.map(({ x, y }) => `${x},${y}`).join(" ")} className="patrimony-line" />{points.map(({ period, x, y }) => <circle key={period.key} cx={x} cy={y} r="5" className="patrimony-point"><title>{`${period.label}: ${displayMoney(period.liquidPatrimony)}`}</title></circle>)}</svg><div className="trend-values patrimony-values">{chartPeriods.map((period) => <div key={period.key}><span>{period.label}</span><strong>{displayMoney(period.liquidPatrimony)}</strong><small>{comparisonPercent(period.patrimonyVariationPercent)}</small></div>)}</div></div>;
 }
 
-function PageHeading({ title, body, action, onAction }: { title: string; body: string; action: string; onAction?: () => void }) {
-  return <div className="page-heading"><div><h1>{title}</h1><p>{body}</p></div><button className="secondary-button" onClick={onAction}><Plus size={17} />{action}</button></div>;
+function BalanceMetric({ label, value, comparison, tone }: { label: string; value: string; comparison: string; tone: "cash" | "debt" | "net" }) {
+  return <article className={`balance-metric balance-${tone}`}><span>{label}</span><strong>{value}</strong><small>{comparison}</small></article>;
+}
+
+function PageHeading({ title, body, action, onAction }: { title: string; body: string; action?: string; onAction?: () => void }) {
+  return <div className="page-heading"><div><h1>{title}</h1><p>{body}</p></div>{action && <button className="secondary-button" onClick={onAction}><Plus size={17} />{action}</button>}</div>;
 }
 
 function EmptyState({ title, body }: { title: string; body: string }) {
@@ -574,10 +812,10 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
     return key && previous && previous !== item.category && item.category !== "Sin categoría" ? [[key, item.category]] : [];
   }));
   return <dialog ref={dialog} className="import-dialog" onCancel={(event) => { event.preventDefault(); resetAndClose(); }}><div className="dialog-head"><div><span className="dialog-icon"><FilePdf size={21} /></span><div><h2>Importar estado de cuenta</h2><p>El archivo se procesa localmente y conserva su origen.</p></div></div><button className="icon-button" aria-label="Cerrar" onClick={resetAndClose}><X size={20} /></button></div>
-    {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se detectarán banco, periodo y movimientos. Los estados escaneados quedan pendientes de revisión.</span><span className="file-button">Elegir archivo</span></label>}
+    {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se detectarán banco, periodo y movimientos. Los estados escaneados se leen con OCR y quedan pendientes de confirmación.</span><span className="file-button">Elegir archivo</span></label>}
     {stage === "processing" && <div className="processing-state"><CircleNotch size={34} className="spinner" /><h3>{progressLabel}</h3><p>No cierres esta ventana mientras organizamos los movimientos.</p><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><small>{progress}%</small></div>}
     {stage === "error" && <div className="error-state"><Warning size={34} /><h3>No pudimos completar la importación</h3><p>{error}</p><button className="secondary-button" onClick={() => setStage("pick")}>Intentar de nuevo</button></div>}
-    {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Origen detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.mode === "text" ? "Lectura directa" : "Revisión visual"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div></div><div className="review-source-editor"><label><span>Nombre que se guardará</span><input value={reviewSource} onChange={(event) => setReviewSource(event.target.value as StatementSource)} placeholder="Ej. Santander, Nómina o Banco personal" /></label><label><span>Tipo de archivo</span><select value={reviewKind} onChange={(event) => setReviewKind(event.target.value as StatementKind)}><option value="card">Tarjeta de crédito</option><option value="bank">Cuenta bancaria</option><option value="unknown">No identificado</option></select></label><p>Corrige el origen aquí si el PDF usa una marca o formato que todavía no conocemos. Las categorías que ajustes se recordarán para el siguiente mes.</p></div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>El archivo no trae texto seleccionable. En iOS se intentará leerlo con OCR; en la web puedes capturar o corregir los movimientos antes de guardarlo.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
+    {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Origen detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.mode === "text" ? "Lectura directa" : "OCR en el dispositivo"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div></div><div className="review-source-editor"><label><span>Nombre que se guardará</span><input value={reviewSource} onChange={(event) => setReviewSource(event.target.value as StatementSource)} placeholder="Ej. Santander, Nómina o Banco personal" /></label><label><span>Tipo de archivo</span><select value={reviewKind} onChange={(event) => setReviewKind(event.target.value as StatementKind)}><option value="card">Tarjeta de crédito</option><option value="bank">Cuenta bancaria</option><option value="unknown">No identificado</option></select></label><p>Corrige el origen aquí si el PDF usa una marca o formato que todavía no conocemos. Las categorías que ajustes se recordarán para el siguiente mes.</p></div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>Marcelito convirtió sus páginas a imagen y ejecutó OCR en tu navegador. Confirma los importes y agrega cualquier movimiento que no se haya reconocido.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
       <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" onClick={() => onSave({ source: reviewSource.trim() || "Desconocido", kind: reviewKind, period: result.period, fileName: result.fileName, mode: result.mode, transactions: validItems.map((item) => ({ ...item, account: reviewSource.trim() || item.account })) , summary, categoryRules: learnedCategories })}><Check size={18} />{validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado para revisar"}</button></div></div>}
     {stage === "review" && result && <StatementSummaryForm source={reviewSource} kind={reviewKind} summary={summary} onChange={updateSummary} />}
   </dialog>;
@@ -591,5 +829,9 @@ export default function App() {
     deleteLocalAccount();
     setUser("");
   }
-  return user ? <AppShell user={user} onSignOut={() => setUser("")} onDeleteAccount={handleDeleteAccount} /> : <AuthGate onEnter={setUser} />;
+  function handleSignOut() {
+    clearLocalSession();
+    setUser("");
+  }
+  return user ? <AppShell user={user} onSignOut={handleSignOut} onDeleteAccount={handleDeleteAccount} /> : <AuthGate onEnter={setUser} />;
 }

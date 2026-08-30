@@ -6,9 +6,7 @@ struct RootTabView: View {
     var body: some View {
         TabView {
             HomeView()
-                .tabItem { Label("Inicio", systemImage: "house.fill") }
-            MovementsView()
-                .tabItem { Label("Movimientos", systemImage: "list.bullet.rectangle") }
+                .tabItem { Label("Resumen", systemImage: "house.fill") }
             ExpensesView()
                 .tabItem { Label("Gastos", systemImage: "chart.pie.fill") }
             AccountsView()
@@ -36,15 +34,7 @@ struct HomeView: View {
         LazyVStack(alignment: .leading, spacing: 18) {
             if hasData {
                 NetWorthSummary(store: store)
-                MetricsStrip(income: store.totalIncome, transfers: store.totalTransfers, monthlyExpense: store.monthlyExpense)
-                DecisionMetricsView()
-                DecisionCallout(statement: store.statements.first)
-                MoneyFlowView(store: store)
-                if let lastImportedFile = store.lastImportedFile {
-                    Label("Último estado importado: \(lastImportedFile)", systemImage: "checkmark.circle.fill")
-                        .font(.footnote)
-                        .foregroundStyle(Color.marcelitoNavyMid)
-                }
+                MetricsStrip()
             } else {
                 EmptyDataCard { isImporterPresented = true }
             }
@@ -78,7 +68,7 @@ struct HomeView: View {
             }
             .scrollIndicators(.hidden)
             .background(Color.marcelitoCream.ignoresSafeArea())
-            .navigationTitle("Inicio")
+            .navigationTitle("Resumen")
             .navigationBarTitleDisplayMode(.large)
             .toolbarBackground(Color.marcelitoCream, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
@@ -433,6 +423,12 @@ private struct NetWorthSummary: View {
         return value.formatted(.currency(code: "MXN").precision(.fractionLength(0)))
     }
 
+    private var trendText: String {
+        guard let trend = store.liquidPatrimonyChangePercent else { return "Compara con tu siguiente corte" }
+        let percent = Int((NSDecimalNumber(decimal: trend).doubleValue * 100).rounded())
+        return "\(percent >= 0 ? "+" : "−")\(abs(percent))% vs mes anterior"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -448,7 +444,7 @@ private struct NetWorthSummary: View {
                 .monospacedDigit()
                 .lineLimit(1)
                 .minimumScaleFactor(0.65)
-            Text(store.liquidPatrimony == nil ? "Pendiente de saldos al corte" : "Efectivo disponible menos deuda")
+            Text(trendText)
                 .font(.subheadline)
                 .foregroundStyle(Color.marcelitoCream.opacity(0.78))
         }
@@ -478,9 +474,9 @@ private struct DecisionMetricsView: View {
             CalculationLine(label: "Gasto total de tarjeta", value: money(store.totalNewTransactions), detail: "Compras nuevas")
             CalculationLine(label: "Promedio mensual", value: money(store.averageMonthlySpend), detail: "Compras / periodos")
             CalculationLine(label: "Abonos reales", value: money(store.totalRealPayments), detail: "Pagos, sin créditos contables")
-            CalculationLine(label: "Saldo acumulado", value: money(store.accumulatedBalance), detail: "Gasto − abonos")
-            CalculationLine(label: "Porcentaje pagado", value: percent(store.paidPercent), detail: "Abonos / gasto total")
-            CalculationLine(label: "Porcentaje pendiente", value: percent(store.pendingPercent), detail: "Saldo / gasto total")
+            CalculationLine(label: "Saldo acumulado", value: money(store.accumulatedBalance), detail: "Cargos − abonos − créditos")
+            CalculationLine(label: "Porcentaje pagado", value: percent(store.paidPercent), detail: "Abonos / nuevos cargos")
+            CalculationLine(label: "Porcentaje pendiente", value: percent(store.pendingPercent), detail: "Saldo / nuevos cargos")
             Divider().padding(.vertical, 4)
             CalculationLine(label: "Gasto real consolidado", value: money(store.consolidatedRealSpend), detail: "Tarjeta + bancos, sin pagos propios")
             CalculationLine(label: "Gasto de viaje", value: money(store.travelSpend), detail: store.travelPercent.map { "\(percent($0)) del consolidado" } ?? "Pendiente de identificar")
@@ -527,22 +523,25 @@ private struct CalculationLine: View {
 }
 
 private struct MetricsStrip: View {
-    let income: Decimal
-    let transfers: Decimal
-    let monthlyExpense: Decimal
+    @Environment(FinanceStore.self) private var store
+
+    private func money(_ value: Decimal?) -> String {
+        value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
+    }
 
     var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: 10)], spacing: 10) {
-            MetricTile(title: "Ingresos", value: income, symbol: "arrow.down.circle.fill", color: Color.marcelitoSuccess)
-            MetricTile(title: "Transferencias", value: transfers, symbol: "arrow.left.arrow.right.circle.fill", color: Color.marcelitoNavyMid)
-            MetricTile(title: "Gasto del mes", value: monthlyExpense, symbol: "receipt.fill", color: Color.marcelitoAmber)
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+            MetricTile(title: "Efectivo disponible", value: money(store.cashAvailable), symbol: "wallet.pass.fill", color: Color.marcelitoNavyMid)
+            MetricTile(title: "Deuda total", value: money(store.debtTotal), symbol: "creditcard.fill", color: Color.marcelitoNavy)
+            MetricTile(title: "Gasto del mes", value: money(store.monthlyExpense), symbol: "receipt.fill", color: Color.marcelitoAmber)
+            MetricTile(title: "Flujo neto", value: money(store.monthlyNetFlow), symbol: "chart.line.uptrend.xyaxis", color: Color.marcelitoNavyMid)
         }
     }
 }
 
 private struct MetricTile: View {
     let title: String
-    let value: Decimal
+    let value: String
     let symbol: String
     let color: Color
 
@@ -550,7 +549,7 @@ private struct MetricTile: View {
         VStack(alignment: .leading, spacing: 8) {
             Image(systemName: symbol).foregroundStyle(color)
             Text(title).font(.caption).foregroundStyle(.secondary)
-            Text(value, format: .currency(code: "MXN").precision(.fractionLength(0)))
+            Text(value)
                 .font(.headline)
                 .monospacedDigit()
         }

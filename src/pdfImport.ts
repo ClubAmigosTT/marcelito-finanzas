@@ -1,4 +1,5 @@
 import type { ImportResult, StatementKind, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types";
+import type { PDFDocumentProxy } from "pdfjs-dist";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 
@@ -339,6 +340,41 @@ function extractTransactions(text: string, source: StatementSource, fileName: st
   return results;
 }
 
+async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: number, label: string) => void) {
+  onProgress(82, "Preparando reconocimiento visual");
+  const { createWorker } = await import("tesseract.js");
+  const worker = await createWorker("spa", 1, {
+    logger: ({ progress }) => {
+      const normalized = Math.max(0, Math.min(1, progress));
+      onProgress(82 + Math.round(normalized * 6), "Preparando reconocimiento visual");
+    },
+  });
+  const pages: string[] = [];
+
+  try {
+    for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
+      const page = await document.getPage(pageNumber);
+      const viewport = page.getViewport({ scale: 2 });
+      const canvas = window.document.createElement("canvas");
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      const context = canvas.getContext("2d", { willReadFrequently: true });
+      if (!context) throw new Error("No se pudo preparar el lienzo para OCR");
+
+      await page.render({ canvas: null, canvasContext: context, viewport }).promise;
+      const result = await worker.recognize(canvas);
+      pages.push(result.data.text);
+      onProgress(88 + Math.round((pageNumber / document.numPages) * 10), `Reconociendo página ${pageNumber} de ${document.numPages}`);
+      canvas.width = 0;
+      canvas.height = 0;
+    }
+  } finally {
+    await worker.terminate();
+  }
+
+  return pages.join("\n");
+}
+
 export async function inspectPdf(file: File, onProgress: (value: number, label: string) => void): Promise<ImportResult> {
   onProgress(12, "Abriendo el estado de cuenta");
   const [pdfjs, workerModule] = await Promise.all([
@@ -357,13 +393,16 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
     onProgress(12 + Math.round((pageNumber / document.numPages) * 58), `Leyendo pagina ${pageNumber} de ${document.numPages}`);
   }
 
-  const text = pageTexts.join("\n");
+  const extractedText = pageTexts.join("\n");
+  const mode = extractedText.replace(/\s/g, "").length > 500 ? "text" : "ocr";
+  const text = mode === "ocr"
+    ? await recognizePdfText(document, onProgress)
+    : extractedText;
   const source = detectSource(text, file.name);
   const kind = detectStatementKind(text, source);
-  const mode = text.replace(/\s/g, "").length > 500 ? "text" : "ocr";
-  onProgress(82, mode === "ocr" ? "El PDF requiere reconocimiento visual" : "Conciliando cargos y pagos");
+  onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
-  const parsed = mode === "text" ? extractTransactions(text, source, file.name, kind) : [];
+  const parsed = extractTransactions(text, source, file.name, kind);
   onProgress(100, "Listo para revisar");
 
   return {

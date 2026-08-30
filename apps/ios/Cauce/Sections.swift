@@ -261,7 +261,7 @@ struct ExpensesView: View {
                 Text("\(groups.count) categorías explican")
                 Text(total, format: .currency(code: "MXN").precision(.fractionLength(0)))
                     .font(.headline)
-                Text("Puedes corregir el origen o la categoría desde Movimientos.")
+                Text("Puedes corregir el origen o la categoría desde Cuentas > Movimientos.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -330,9 +330,38 @@ struct AccountsView: View {
     var body: some View {
         NavigationStack {
             List {
-                Section("Estados de cuenta") {
+                Section("Cuentas") {
+                    ForEach(displayedSources, id: \.self) { source in
+                        let sourceStatements = store.statements.filter { $0.source == source }
+                        let latest = sourceStatements.first
+                        let metric = latest.flatMap { statement in store.periodMetrics.first(where: { $0.id == statement.id }) }
+                        let kind = latest?.kind ?? (source == "Amex" ? .card : .bank)
+                        let balance = kind == .card ? metric?.debtBalance : metric?.cashBalance
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 12) {
+                                Image(systemName: kind == .card ? "creditcard.fill" : "building.columns.fill")
+                                    .foregroundStyle(Color.marcelitoNavyMid)
+                                Text(source)
+                                    .font(.headline)
+                                Spacer()
+                                Text(balance.map { kind == .card ? "−\($0.formatted(.currency(code: "MXN").precision(.fractionLength(0))))" : $0.formatted(.currency(code: "MXN").precision(.fractionLength(0))) } ?? "Pendiente")
+                                    .font(.subheadline.weight(.semibold))
+                                    .monospacedDigit()
+                            }
+                            Text(kind == .card ? "Pago próximo: \(metric?.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")" : "Cuenta de efectivo")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    NavigationLink {
+                        MovementsView()
+                    } label: {
+                        Label("Movimientos", systemImage: "list.bullet.rectangle")
+                    }
+                }
+                Section("Documentos importados") {
                     if store.statements.isEmpty {
-                        Text("Aún no hay estados importados. Usa el botón de carga en Inicio.")
+                        Text("Aún no hay documentos importados. Usa el botón de carga en Resumen.")
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(store.statements) { statement in
@@ -369,26 +398,6 @@ struct AccountsView: View {
                                         .foregroundStyle(.secondary)
                                 }
                             }
-                        }
-                    }
-                }
-                Section("Bancos") {
-                    ForEach(displayedSources, id: \.self) { source in
-                        let statements = store.statements.filter { $0.source == source }
-                        let movementCount = store.movements.filter { movement in
-                            guard let statementId = movement.statementId else { return false }
-                            return statements.contains(where: { $0.id == statementId })
-                        }.count
-                        HStack(spacing: 12) {
-                            Image(systemName: (source == "Amex" || statements.contains(where: { $0.kind == .card })) ? "creditcard.fill" : "building.columns.fill")
-                                .foregroundStyle(Color.marcelitoNavyMid)
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(source)
-                                Text(statements.isEmpty ? "Sin estados importados" : "\(statements.count) estado(s) · \(movementCount) movimientos")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
                         }
                     }
                 }
@@ -523,16 +532,6 @@ struct NetWorthView: View {
                     LabeledContent("Efectivo disponible", value: store.cashAvailable?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
                     LabeledContent("Deuda total", value: store.debtTotal?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
                     LabeledContent("Utilización de crédito", value: store.creditUtilizationRate.map { "\(Int((NSDecimalNumber(decimal: $0).doubleValue * 100).rounded()))%" } ?? "Pendiente")
-                }
-                Section("Estados que alimentan la historia") {
-                    if store.statements.isEmpty {
-                        Text("Importa tus PDFs para construir la línea de tiempo por cuenta y periodo.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(store.statements) { statement in
-                            LabeledContent("\(statement.period) · \(statement.source)", value: "\(statement.transactionCount) mov.")
-                        }
-                    }
                 }
             }
             .navigationTitle("Patrimonio")

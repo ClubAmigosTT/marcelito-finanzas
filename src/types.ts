@@ -1,4 +1,12 @@
-export type Section = "Inicio" | "Movimientos" | "Gastos" | "Cuentas" | "Patrimonio";
+export type Section = "Resumen" | "Gastos" | "Cuentas" | "Patrimonio";
+
+export type FinancialGoalKind = "patrimony" | "debt" | "maxSpend" | "savings";
+
+export type FinancialGoal = {
+  id: string;
+  kind: FinancialGoalKind;
+  target: number;
+};
 
 export type FlowType = "income" | "transfer" | "expense" | "debt";
 
@@ -64,6 +72,7 @@ export type ImportResult = {
   kind: StatementKind;
   period: string;
   fileName: string;
+  /** The parser either used the PDF text layer or rendered pages through OCR. */
   mode: "text" | "ocr";
   transactions: Transaction[];
   summary?: StatementSummary;
