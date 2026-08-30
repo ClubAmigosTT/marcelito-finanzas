@@ -29,10 +29,10 @@ import {
 } from "@phosphor-icons/react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { categories } from "./data";
-import { buildFinanceMetrics, defaultStatementKind, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
+import { buildFinanceMetrics, defaultStatementKind, isSpendTransaction, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
 import { inspectPdf, reconcileStatementImport } from "./pdfImport";
 import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
-import { runTransactionPipeline, statementPeriodEndTimestamp } from "./reconciliation";
+import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey } from "./reconciliation";
 import type { FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementSource, StatementSummary, Transaction } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
@@ -151,6 +151,14 @@ function signedDeltaMoney(value: number | undefined | null) {
 
 function periodLabel(period?: AnalyticsPeriod) {
   return period?.label ?? "Periodo actual";
+}
+
+function compactMerchantName(description: string) {
+  return description
+    .replace(/\s+/g, " ")
+    .replace(/\b(?:aut\.?|ref\.?|folio|no\.?|num\.?)\s*[:#-]?\s*[a-z0-9-]+/gi, "")
+    .trim()
+    .slice(0, 46) || "Sin descripción";
 }
 
 function statementDate(statement: Statement) {
@@ -840,7 +848,7 @@ function Expenses({ transactions, statements, metrics, onImport }: { transaction
     </section>
     <SpendingSplit period={current} />
     <div className="expense-analysis-grid">
-      <CategoryDistribution categories={metrics.categoryDistribution} period={current} />
+      <CategoryDistribution categories={metrics.categoryDistribution} period={current} transactions={transactions} statements={statements} />
       <MerchantRanking merchants={metrics.topMerchants} period={current} />
     </div>
     <div className="expense-analysis-grid">
@@ -851,9 +859,56 @@ function Expenses({ transactions, statements, metrics, onImport }: { transaction
   </section>;
 }
 
-function CategoryDistribution({ categories, period }: { categories: ReturnType<typeof buildFinanceMetrics>["categoryDistribution"]; period?: AnalyticsPeriod }) {
+function CategoryDistribution({ categories, period, transactions, statements }: { categories: ReturnType<typeof buildFinanceMetrics>["categoryDistribution"]; period?: AnalyticsPeriod; transactions: Transaction[]; statements: Statement[] }) {
+  const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const max = Math.max(...categories.map((category) => category.total), 1);
-  return <section className="detail-card" aria-labelledby="category-distribution-title"><div className="section-heading"><div><h2 id="category-distribution-title">Distribución por categorías</h2><p>{periodLabel(period)} · gasto identificado.</p></div></div>{categories.length ? <div className="category-list">{categories.map((category) => <div className="category-row" key={category.name}><div className="category-row-label"><span>{category.name}</span><strong>{displayMoney(category.total)}</strong></div><div className="category-track"><span style={{ width: `${Math.max(4, category.total / max * 100)}%` }} /></div><small>{Math.round(category.share * 100)}%</small></div>)}</div> : <EmptyState title="Sin categorías todavía" body="Revisa las categorías desde Cuentas › Movimientos." />}</section>;
+  const selectedTransactions = useMemo(() => {
+    if (!selectedCategory) return [];
+    const selectedKey = normalizeConcept(selectedCategory);
+    return transactions.filter((transaction) => {
+      if (!isSpendTransaction(transaction)) return false;
+      if (period?.key && transactionPeriodKey(transaction, statements) !== period.key) return false;
+      return normalizeConcept(transaction.category) === selectedKey;
+    });
+  }, [period?.key, selectedCategory, statements, transactions]);
+  const detailTotal = selectedTransactions.reduce((total, transaction) => total + Math.abs(transaction.amount), 0);
+  const recurring = useMemo(() => {
+    const grouped = new Map<string, { name: string; total: number; count: number }>();
+    selectedTransactions.forEach((transaction) => {
+      const key = merchantKey(transaction.description) || normalizeConcept(transaction.description) || transaction.description.trim().toLowerCase();
+      const current = grouped.get(key);
+      if (current) {
+        current.total += Math.abs(transaction.amount);
+        current.count += 1;
+      } else {
+        grouped.set(key, { name: compactMerchantName(transaction.description), total: Math.abs(transaction.amount), count: 1 });
+      }
+    });
+    return Array.from(grouped.values()).sort((left, right) => right.count - left.count || right.total - left.total).slice(0, 5);
+  }, [selectedTransactions]);
+  const highest = useMemo(() => selectedTransactions.slice().sort((left, right) => Math.abs(right.amount) - Math.abs(left.amount)).slice(0, 5), [selectedTransactions]);
+  const detailId = selectedCategory ? `category-detail-${normalizeConcept(selectedCategory).replace(/\s+/g, "-")}` : undefined;
+
+  function toggleCategory(category: string) {
+    setSelectedCategory((current) => current === category ? null : category);
+  }
+
+  return <section className="detail-card" aria-labelledby="category-distribution-title"><div className="section-heading"><div><h2 id="category-distribution-title">Distribución por categorías</h2><p>{periodLabel(period)} · pulsa una categoría para ver sus gastos recurrentes y más altos.</p></div></div>{categories.length ? <div className="category-list">{categories.map((category) => {
+    const selected = selectedCategory === category.name;
+    return <button type="button" className={`category-row category-row-button${selected ? " selected" : ""}`} key={category.name} onClick={() => toggleCategory(category.name)} aria-expanded={selected} aria-controls={detailId}>
+      <span className="category-row-label"><span>{category.name}</span><strong>{displayMoney(category.total)}</strong></span>
+      <span className="category-track"><span style={{ width: `${Math.max(4, category.total / max * 100)}%` }} /></span>
+      <small>{Math.round(category.share * 100)}%</small>
+    </button>;
+  })}</div> : <EmptyState title="Sin categorías todavía" body="Revisa las categorías desde Cuentas › Movimientos." />}
+    {selectedCategory && <div className="category-detail-panel" id={detailId} aria-label={`Detalle de ${selectedCategory}`}>
+      <div className="category-detail-head"><div><span className="eyebrow">Detalle de categoría</span><h3>{selectedCategory}</h3><p>{selectedTransactions.length} movimiento{selectedTransactions.length === 1 ? "" : "s"} · {displayMoney(detailTotal)} en {periodLabel(period)}</p></div><button type="button" className="icon-button" aria-label="Cerrar detalle de categoría" onClick={() => setSelectedCategory(null)}><X size={18} /></button></div>
+      {selectedTransactions.length ? <div className="category-detail-grid">
+        <div><h4>Gastos más recurrentes</h4><p className="category-detail-caption">Comercios que aparecen con mayor frecuencia.</p>{recurring.length ? <ol className="category-detail-list">{recurring.map((merchant, index) => <li key={merchant.name}><span className="category-detail-rank">{index + 1}</span><div><strong>{merchant.name}</strong><small>{merchant.count} movimiento{merchant.count === 1 ? "" : "s"}</small></div><strong>{displayMoney(merchant.total)}</strong></li>)}</ol> : <p className="category-detail-empty">Sin recurrencias identificadas.</p>}</div>
+        <div><h4>Gastos más altos</h4><p className="category-detail-caption">Movimientos de mayor importe en el periodo.</p>{highest.length ? <ol className="category-detail-list">{highest.map((transaction, index) => <li key={transaction.id}><span className="category-detail-rank">{index + 1}</span><div><strong>{compactMerchantName(transaction.description)}</strong><small>{transaction.date} · {transaction.account}</small></div><strong>{displayMoney(Math.abs(transaction.amount))}</strong></li>)}</ol> : <p className="category-detail-empty">Sin movimientos destacados.</p>}</div>
+      </div> : <p className="category-detail-empty">No hay movimientos válidos de esta categoría en el periodo seleccionado.</p>}
+    </div>}
+  </section>;
 }
 
 function MerchantRanking({ merchants, period }: { merchants: ReturnType<typeof buildFinanceMetrics>["topMerchants"]; period?: AnalyticsPeriod }) {
@@ -985,7 +1040,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
   async function handleFile(file?: File) {
     if (!file) return;
     if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) { setError("Selecciona un archivo PDF válido."); setStage("error"); return; }
-    setStage("processing"); setError("");
+    setStage("processing"); setProgress(0); setProgressLabel("Cargando estado de cuenta…"); setError("");
     try {
       const inspected = await inspectPdf(file, (value, label) => { setProgress(value); setProgressLabel(label); });
       const withLearnedCategories = inspected.transactions.map((item) => {
@@ -1003,7 +1058,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
   function updateAmount(id: string, value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, amount: Math.abs(Number(value) || 0) * (item.amount > 0 ? 1 : -1) } : item)); }
   function addManualItem() { setItems((current) => [...current, { id: `manual-${Date.now()}`, date: "Sin fecha", description: "Movimiento por revisar", account: result?.source ?? "Desconocido", category: "Sin categoría", amount: -1, flow: "expense", confidence: 1 }]); }
 
-  function resetAndClose() { setStage("pick"); setProgress(0); setResult(null); setItems([]); setSummary({}); setReviewSource("Desconocido"); setReviewKind("unknown"); setError(""); initialCategories.current = {}; onClose(); }
+  function resetAndClose() { setStage("pick"); setProgress(0); setProgressLabel(""); setResult(null); setItems([]); setSummary({}); setReviewSource("Desconocido"); setReviewKind("unknown"); setError(""); initialCategories.current = {}; onClose(); }
 
   function updateSummary(key: keyof StatementSummary, value: string) {
     setSummary((current) => {
@@ -1024,7 +1079,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
   }));
   return <dialog ref={dialog} className="import-dialog" onCancel={(event) => { event.preventDefault(); resetAndClose(); }}><div className="dialog-head"><div><span className="dialog-icon"><FilePdf size={21} /></span><div><h2>Importar estado de cuenta</h2><p>El archivo se procesa localmente y conserva su origen.</p></div></div><button className="icon-button" aria-label="Cerrar" onClick={resetAndClose}><X size={20} /></button></div>
     {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se detectarán banco, periodo y movimientos. Los estados escaneados se leen con OCR y quedan pendientes de confirmación.</span><span className="file-button">Elegir archivo</span></label>}
-    {stage === "processing" && <div className="processing-state"><CircleNotch size={34} className="spinner" /><h3>{progressLabel}</h3><p>No cierres esta ventana mientras organizamos los movimientos.</p><div className="progress-track"><span style={{ width: `${progress}%` }} /></div><small>{progress}%</small></div>}
+    {stage === "processing" && <div className="processing-state" role="status" aria-live="polite" aria-busy="true"><div className="loading-orbit" aria-hidden="true"><CircleNotch size={34} className="spinner" /><span className="loading-pulse"><i /><i /><i /></span></div><h3>{progressLabel || "Cargando estado de cuenta…"}</h3><p>Estamos leyendo y conciliando tu estado. No cierres esta ventana.</p><div className="progress-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div><small>{progress}% completado</small></div>}
     {stage === "error" && <div className="error-state"><Warning size={34} /><h3>No pudimos completar la importación</h3><p>{error}</p><button className="secondary-button" onClick={() => setStage("pick")}>Intentar de nuevo</button></div>}
     {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Origen detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.mode === "text" ? "Lectura directa" : "OCR en el dispositivo"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div></div><div className={`reconciliation-callout ${currentReconciliation?.status ?? "pending"}`} role="status"><div><strong>{currentReconciliation?.status === "valid" ? "Importación conciliada" : currentReconciliation?.status === "invalid" ? "Importación bloqueada" : "Conciliación pendiente"}</strong><p>{currentReconciliation?.status === "valid" ? "Las filas extraídas coinciden con los totales declarados por el estado." : currentReconciliation?.reason ?? "Completa o revisa los totales declarados antes de guardar."}</p></div><small>{currentReconciliation ? `Tolerancia ±${currentReconciliation.tolerance.toFixed(2)}` : ""}</small></div><div className="review-source-editor"><label><span>Nombre que se guardará</span><input value={reviewSource} onChange={(event) => setReviewSource(event.target.value as StatementSource)} placeholder="Ej. Santander, Nómina o Banco personal" /></label><label><span>Tipo de archivo</span><select value={reviewKind} onChange={(event) => setReviewKind(event.target.value as StatementKind)}><option value="card">Tarjeta de crédito</option><option value="bank">Cuenta bancaria</option><option value="unknown">No identificado</option></select></label><p>Corrige el origen aquí si el PDF usa una marca o formato que todavía no conocemos. Las categorías que ajustes se recordarán para el siguiente mes.</p></div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>Marcelito convirtió sus páginas a imagen y ejecutó OCR en tu navegador. Confirma los importes y agrega cualquier movimiento que no se haya reconocido.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
       <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "No se puede guardar hasta conciliar el estado" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: reviewSource.trim() || "Desconocido", kind: reviewKind, period: result.period, fileName: result.fileName, mode: result.mode, transactions: validItems.map((item) => ({ ...item, account: reviewSource.trim() || item.account })) , summary, reconciliation: currentReconciliation, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Corregir conciliación para guardar" : validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado conciliado"}</button></div></div>}
