@@ -1092,7 +1092,11 @@ final class FinanceStore {
                 // OCR is deliberately opt-in during launch repair. Vision can
                 // hold the main thread for a long time on scanned documents;
                 // the user can still import those files manually afterwards.
-                _ = try importPDF(from: file, allowOCR: false)
+                _ = try importPDF(
+                    from: file,
+                    allowOCR: false,
+                    preserveExistingOnEmpty: true
+                )
                 repaired += 1
                 DiagnosticsRecorder.record(
                     stage: "repair.statement",
@@ -1116,7 +1120,11 @@ final class FinanceStore {
         return repaired
     }
 
-    func importPDF(from url: URL, allowOCR: Bool = true) throws -> ImportSummary {
+    func importPDF(
+        from url: URL,
+        allowOCR: Bool = true,
+        preserveExistingOnEmpty: Bool = false
+    ) throws -> ImportSummary {
         let didStartAccessing = url.startAccessingSecurityScopedResource()
         defer {
             if didStartAccessing {
@@ -1188,6 +1196,9 @@ final class FinanceStore {
             var imported = candidate
             imported.statementId = statementId
             return imported
+        }
+        if preserveExistingOnEmpty, fresh.isEmpty, existingStatement != nil {
+            throw FinanceImportError.emptyDocument
         }
         let needsReview = fresh.isEmpty
             || usedOCR
