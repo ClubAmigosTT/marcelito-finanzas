@@ -417,8 +417,59 @@ private struct EmptyDataCard: View {
     }
 }
 
+private enum DashboardMetric: String, Identifiable {
+    case patrimony
+    case cash
+    case debt
+    case expense
+    case flow
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .patrimony: "Patrimonio líquido"
+        case .cash: "Efectivo disponible"
+        case .debt: "Deuda total"
+        case .expense: "Gasto del mes"
+        case .flow: "Flujo neto"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .patrimony: "chart.line.uptrend.xyaxis"
+        case .cash: "wallet.pass.fill"
+        case .debt: "creditcard.fill"
+        case .expense: "receipt.fill"
+        case .flow: "arrow.left.arrow.right"
+        }
+    }
+
+    var color: Color {
+        switch self {
+        case .patrimony: Color.marcelitoNavy
+        case .cash: Color.marcelitoNavyMid
+        case .debt: Color.marcelitoNavy
+        case .expense: Color.marcelitoAmber
+        case .flow: Color.marcelitoNavyMid
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .patrimony: "Efectivo disponible menos la deuda total registrada."
+        case .cash: "Suma de los saldos de tus cuentas de efectivo en los últimos cortes."
+        case .debt: "Deuda registrada en tus tarjetas en los últimos cortes."
+        case .expense: "Gasto real del mes, sin pagos de tarjeta ni transferencias internas."
+        case .flow: "Ingresos reales menos gasto real del periodo."
+        }
+    }
+}
+
 private struct NetWorthSummary: View {
     let store: FinanceStore
+    @State private var selectedMetric: DashboardMetric?
 
     private var displayValue: String {
         guard let value = store.liquidPatrimony else { return "—" }
@@ -432,27 +483,36 @@ private struct NetWorthSummary: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack {
-                Text("Patrimonio líquido")
-                    .font(.subheadline.weight(.medium))
-                Spacer()
-                Image(systemName: "arrow.up.right")
-                    .font(.subheadline.weight(.semibold))
-            }
-            .foregroundStyle(Color.marcelitoCream.opacity(0.78))
-            Text(displayValue)
-                .font(.system(.largeTitle, design: .rounded).weight(.bold))
-                .monospacedDigit()
-                .lineLimit(1)
-                .minimumScaleFactor(0.65)
-            Text(trendText)
-                .font(.subheadline)
+        Button {
+            selectedMetric = .patrimony
+        } label: {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("Patrimonio líquido")
+                        .font(.subheadline.weight(.medium))
+                    Spacer()
+                    Image(systemName: "arrow.up.right")
+                        .font(.subheadline.weight(.semibold))
+                }
                 .foregroundStyle(Color.marcelitoCream.opacity(0.78))
+                Text(displayValue)
+                    .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+                Text(trendText)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.marcelitoCream.opacity(0.78))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .foregroundStyle(Color.marcelitoCream)
+            .marcelitoCard(fill: Color.marcelitoNavy, radius: 18, padding: 20)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .foregroundStyle(Color.marcelitoCream)
-        .marcelitoCard(fill: Color.marcelitoNavy, radius: 18, padding: 20)
+        .buttonStyle(.plain)
+        .accessibilityHint("Toca para ver el detalle y la tendencia del patrimonio")
+        .sheet(item: $selectedMetric) { metric in
+            MetricDetailSheet(metric: metric, store: store)
+        }
     }
 }
 
@@ -526,6 +586,7 @@ private struct CalculationLine: View {
 
 private struct MetricsStrip: View {
     @Environment(FinanceStore.self) private var store
+    @State private var selectedMetric: DashboardMetric?
 
     private func money(_ value: Decimal?) -> String {
         value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
@@ -533,10 +594,13 @@ private struct MetricsStrip: View {
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-            MetricTile(title: "Efectivo disponible", value: money(store.cashAvailable), symbol: "wallet.pass.fill", color: Color.marcelitoNavyMid)
-            MetricTile(title: "Deuda total", value: money(store.debtTotal), symbol: "creditcard.fill", color: Color.marcelitoNavy)
-            MetricTile(title: "Gasto del mes", value: money(store.monthlyExpense), symbol: "receipt.fill", color: Color.marcelitoAmber)
-            MetricTile(title: "Flujo neto", value: money(store.monthlyNetFlow), symbol: "chart.line.uptrend.xyaxis", color: Color.marcelitoNavyMid)
+            MetricTile(title: "Efectivo disponible", value: money(store.cashAvailable), symbol: "wallet.pass.fill", color: Color.marcelitoNavyMid) { selectedMetric = .cash }
+            MetricTile(title: "Deuda total", value: money(store.debtTotal), symbol: "creditcard.fill", color: Color.marcelitoNavy) { selectedMetric = .debt }
+            MetricTile(title: "Gasto del mes", value: money(store.monthlyExpense), symbol: "receipt.fill", color: Color.marcelitoAmber) { selectedMetric = .expense }
+            MetricTile(title: "Flujo neto", value: money(store.monthlyNetFlow), symbol: "chart.line.uptrend.xyaxis", color: Color.marcelitoNavyMid) { selectedMetric = .flow }
+        }
+        .sheet(item: $selectedMetric) { metric in
+            MetricDetailSheet(metric: metric, store: store)
         }
     }
 }
@@ -546,23 +610,193 @@ private struct MetricTile: View {
     let value: String
     let symbol: String
     let color: Color
+    let action: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Image(systemName: symbol).foregroundStyle(color)
-            Text(title).font(.caption).foregroundStyle(.secondary)
-            Text(value)
-                .font(.headline)
-                .monospacedDigit()
+        Button(action: action) {
+            VStack(alignment: .leading, spacing: 8) {
+                Image(systemName: symbol).foregroundStyle(color)
+                Text(title).font(.caption).foregroundStyle(.secondary)
+                Text(value)
+                    .font(.headline)
+                    .monospacedDigit()
+            }
+            .frame(maxWidth: .infinity, minHeight: 106, alignment: .leading)
+            .foregroundStyle(Color.marcelitoNavy)
+            .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 14, padding: 14)
         }
-        .frame(maxWidth: .infinity, minHeight: 106, alignment: .leading)
-        .foregroundStyle(Color.marcelitoNavy)
-        .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 14, padding: 14)
+        .buttonStyle(.plain)
+        .accessibilityHint("Toca para ver el detalle y la tendencia")
+    }
+}
+
+private struct MetricTrendPoint: Identifiable {
+    let id: String
+    let label: String
+    let value: Double
+}
+
+private struct MetricDetailSheet: View {
+    let metric: DashboardMetric
+    let store: FinanceStore
+    @Environment(\.dismiss) private var dismiss
+
+    private var value: Decimal? {
+        switch metric {
+        case .patrimony: store.liquidPatrimony
+        case .cash: store.cashAvailable
+        case .debt: store.debtTotal
+        case .expense: store.monthlyExpense
+        case .flow: store.monthlyNetFlow
+        }
+    }
+
+    private var trend: [MetricTrendPoint] {
+        switch metric {
+        case .patrimony:
+            patrimonyTrend()
+        case .cash:
+            statementTrend(kind: .bank, keyPath: \.cashBalance)
+        case .debt:
+            statementTrend(kind: .card, keyPath: \.debtBalance)
+        case .expense:
+            store.cashFlowHistory.suffix(12).map { point in
+                MetricTrendPoint(id: point.id.description, label: dateLabel(point.date), value: point.expense)
+            }
+        case .flow:
+            store.cashFlowHistory.suffix(12).map { point in
+                MetricTrendPoint(id: point.id.description, label: dateLabel(point.date), value: point.balance)
+            }
+        }
+    }
+
+    private func dateLabel(_ date: Date) -> String {
+        date.formatted(.dateTime.day().month(.abbreviated))
+    }
+
+    private func statementTrend(kind: StatementKind, keyPath: KeyPath<StatementMetric, Decimal?>) -> [MetricTrendPoint] {
+        var seen = Set<String>()
+        let points = store.periodMetrics.reversed().compactMap { metric -> MetricTrendPoint? in
+            guard metric.kind == kind, seen.insert(metric.period).inserted else { return nil }
+            let values = store.periodMetrics
+                .filter { $0.kind == kind && $0.period == metric.period }
+                .compactMap { $0[keyPath: keyPath] }
+            guard !values.isEmpty else { return nil }
+            let total = values.reduce(Decimal(0), +)
+            return MetricTrendPoint(
+                id: "(kind.rawValue)-(metric.period)",
+                label: metric.period,
+                value: NSDecimalNumber(decimal: total).doubleValue
+            )
+        }
+        return Array(points.suffix(8))
+    }
+
+    private func patrimonyTrend() -> [MetricTrendPoint] {
+        var seen = Set<String>()
+        let points = store.periodMetrics.reversed().compactMap { metric -> MetricTrendPoint? in
+            guard seen.insert(metric.period).inserted else { return nil }
+            let group = store.periodMetrics.filter { $0.period == metric.period }
+            let cash = group.filter { $0.kind == .bank }.compactMap(\.cashBalance).reduce(Decimal(0), +)
+            let debt = group.filter { $0.kind == .card }.compactMap(\.debtBalance).reduce(Decimal(0), +)
+            guard group.contains(where: { $0.kind == .bank && $0.cashBalance != nil }),
+                  group.contains(where: { $0.kind == .card && $0.debtBalance != nil }) else { return nil }
+            return MetricTrendPoint(
+                id: "patrimony-(metric.period)",
+                label: metric.period,
+                value: NSDecimalNumber(decimal: cash - debt).doubleValue
+            )
+        }
+        return Array(points.suffix(8))
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Label(metric.title, systemImage: metric.symbol)
+                            .font(.headline)
+                            .foregroundStyle(metric.color)
+                        Text(value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
+                            .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                            .monospacedDigit()
+                            .foregroundStyle(Color.marcelitoNavy)
+                        Text(metric.explanation)
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    if trend.isEmpty {
+                        Text("Aún no hay suficientes periodos para mostrar una tendencia.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .padding(.vertical, 18)
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Comportamiento reciente")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color.marcelitoNavy)
+                            Chart {
+                                ForEach(trend) { point in
+                                    LineMark(
+                                        x: .value("Periodo", point.label),
+                                        y: .value("Monto", point.value),
+                                        series: .value("Serie", metric.title)
+                                    )
+                                    .foregroundStyle(metric.color)
+                                    .lineStyle(StrokeStyle(lineWidth: 2.5))
+                                    PointMark(
+                                        x: .value("Periodo", point.label),
+                                        y: .value("Monto", point.value)
+                                    )
+                                    .foregroundStyle(metric.color)
+                                }
+                            }
+                            .chartXAxis {
+                                AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                                    AxisGridLine()
+                                    AxisTick()
+                                    AxisValueLabel()
+                                }
+                            }
+                            .chartYAxis {
+                                AxisMarks(position: .leading) { _ in
+                                    AxisGridLine()
+                                    AxisTick()
+                                    AxisValueLabel()
+                                }
+                            }
+                            .frame(height: 170)
+                        }
+                    }
+
+                    Text("Los valores se actualizan al importar o corregir movimientos y estados de cuenta.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(20)
+            }
+            .scrollIndicators(.hidden)
+            .background(Color.marcelitoCream.ignoresSafeArea())
+            .navigationTitle("Detalle")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Cerrar") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(Color.marcelitoCream)
     }
 }
 
 private struct CashFlowChart: View {
     let store: FinanceStore
+    @State private var selectedPoint: CashFlowPoint?
 
     private var points: [CashFlowPoint] {
         store.cashFlowHistory
@@ -638,6 +872,11 @@ private struct CashFlowChart: View {
                         .lineStyle(StrokeStyle(lineWidth: 2, dash: [6, 4]))
                         .symbol(Circle())
                     }
+                    if let selectedPoint {
+                        RuleMark(x: .value("Fecha seleccionada", selectedPoint.date))
+                            .foregroundStyle(Color.marcelitoNavy.opacity(0.35))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                    }
                 }
                 .chartForegroundStyleScale([
                     "Ingresos": Color.marcelitoSuccess,
@@ -660,9 +899,30 @@ private struct CashFlowChart: View {
                     }
                 }
                 .chartLegend(position: .bottom, alignment: .leading, spacing: 12)
+                .chartOverlay { proxy in
+                    GeometryReader { geometry in
+                        Rectangle()
+                            .fill(.clear)
+                            .contentShape(Rectangle())
+                            .gesture(
+                                SpatialTapGesture()
+                                    .onEnded { event in
+                                        let plotFrame = geometry[proxy.plotAreaFrame]
+                                        let x = event.location.x - plotFrame.origin.x
+                                        guard x >= 0, x <= plotFrame.size.width,
+                                              let date = proxy.value(atX: x, as: Date.self),
+                                              let closest = points.min(by: {
+                                                  abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
+                                              }) else { return }
+                                        selectedPoint = closest
+                                    }
+                            )
+                    }
+                }
                 .frame(height: 250)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Gráfica de líneas de ingresos, gastos y balance acumulado por fecha")
+                .accessibilityHint("Toca una fecha para ver sus importes y comportamiento reciente")
 
                 Text("Transferencias internas y pagos de tarjeta no se muestran para no inflar el gasto.")
                     .font(.caption2)
@@ -671,6 +931,125 @@ private struct CashFlowChart: View {
         }
         .foregroundStyle(Color.marcelitoNavy)
         .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 18)
+        .sheet(item: $selectedPoint) { point in
+            CashFlowPointDetail(point: point, points: points)
+        }
+    }
+}
+
+private struct CashFlowPointDetail: View {
+    let point: CashFlowPoint
+    let points: [CashFlowPoint]
+    @Environment(\.dismiss) private var dismiss
+
+    private var nearbyPoints: [CashFlowPoint] {
+        guard let index = points.firstIndex(where: { $0.id == point.id }) else { return [point] }
+        let start = max(0, index - 3)
+        let end = min(points.count, index + 4)
+        return Array(points[start..<end])
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 18) {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text(point.date.formatted(.dateTime.day().month(.wide).year()))
+                            .font(.title2.weight(.bold))
+                        Text("Detalle del movimiento financiero")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    }
+
+                    HStack(spacing: 10) {
+                        CashFlowDetailValue(title: "Ingresos", value: point.income, color: Color.marcelitoSuccess)
+                        CashFlowDetailValue(title: "Gastos", value: point.expense, color: Color.marcelitoAmber)
+                    }
+                    CashFlowDetailValue(title: "Balance acumulado", value: point.balance, color: Color.marcelitoNavy)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Comportamiento cercano")
+                            .font(.subheadline.weight(.semibold))
+                        MiniCashFlowChart(points: nearbyPoints)
+                            .frame(height: 150)
+                        Text("El balance acumula ingresos menos gastos desde la primera fecha registrada.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .foregroundStyle(Color.marcelitoNavy)
+                }
+                .padding(20)
+            }
+            .scrollIndicators(.hidden)
+            .background(Color.marcelitoCream.ignoresSafeArea())
+            .navigationTitle("Detalle")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Cerrar") { dismiss() }
+                        .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+        .presentationBackground(Color.marcelitoCream)
+    }
+}
+
+private struct CashFlowDetailValue: View {
+    let title: String
+    let value: Double
+    let color: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                .font(.headline)
+                .monospacedDigit()
+                .foregroundStyle(color)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+private struct MiniCashFlowChart: View {
+    let points: [CashFlowPoint]
+
+    var body: some View {
+        Chart {
+            ForEach(points) { point in
+                LineMark(
+                    x: .value("Fecha", point.date),
+                    y: .value("Monto", point.income),
+                    series: .value("Serie", "Ingresos")
+                )
+                .foregroundStyle(Color.marcelitoSuccess)
+                LineMark(
+                    x: .value("Fecha", point.date),
+                    y: .value("Monto", point.expense),
+                    series: .value("Serie", "Gastos")
+                )
+                .foregroundStyle(Color.marcelitoAmber)
+                LineMark(
+                    x: .value("Fecha", point.date),
+                    y: .value("Monto", point.balance),
+                    series: .value("Serie", "Balance")
+                )
+                .foregroundStyle(Color.marcelitoNavy)
+                .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
+            }
+        }
+        .chartXAxis(.hidden)
+        .chartYAxis(.hidden)
+        .chartLegend(.hidden)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Mini gráfica del comportamiento de ingresos, gastos y balance")
     }
 }
 
