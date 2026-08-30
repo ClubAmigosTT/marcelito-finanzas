@@ -813,9 +813,12 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
     if (timestamp === undefined) return;
     const date = new Date(timestamp);
     const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    const isIncome = isRealIncomeTransaction(transaction, statements);
+    const isExpense = isSpendTransaction(transaction);
+    if (!isIncome && !isExpense) return;
     const current = cashFlowByDay.get(key) ?? { timestamp, income: 0, expense: 0 };
-    if (isRealIncomeTransaction(transaction, statements)) current.income += absolute(transaction.amount);
-    else if (isSpendTransaction(transaction)) current.expense += absolute(transaction.amount);
+    if (isIncome) current.income += absolute(transaction.amount);
+    else if (isExpense) current.expense += absolute(transaction.amount);
     cashFlowByDay.set(key, current);
   });
   let runningBalance = 0;
