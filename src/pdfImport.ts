@@ -1,4 +1,4 @@
-import type { ImportResult, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types.ts";
+import type { ImportResult, SourceDetection, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types.ts";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
 
@@ -54,34 +54,60 @@ function normalizeText(value: string) {
  * transaction description (for example "SPEI RECIBIDO SANTANDER" on a BBVA
  * statement) is a counterparty, not the issuer of the document.
  */
-export function detectSource(text: string, fileName: string): StatementSource {
+export function detectSourceEvidence(text: string, fileName: string): SourceDetection {
   const normalizedFileName = normalizeText(fileName);
-  if (/\bbbva\b|bancomer/.test(normalizedFileName)) return "BBVA";
-  if (/american express|\bamex\b/.test(normalizedFileName)) return "Amex";
-  if (/\bsantander\b/.test(normalizedFileName)) return "Santander";
+  const filenameSource: StatementSource | undefined = /\bbbva\b|bancomer/.test(normalizedFileName)
+    ? "BBVA"
+    : /american express|\bamex\b/.test(normalizedFileName)
+      ? "Amex"
+      : /\bsantander\b/.test(normalizedFileName)
+        ? "Santander"
+        : undefined;
 
   const normalizedLines = normalizeText(text)
     .split(/\n+/)
     .map((line) => line.replace(/\s+/g, " ").trim())
     .filter(Boolean);
   const institutionalLines: string[] = [];
+  let tableStart = normalizedLines.length;
   for (const line of normalizedLines.slice(0, 120)) {
     // The movement table is deliberately excluded from issuer detection.
-    if (/detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripcion|fecha\s+y\s+detalle/.test(line)) break;
+    if (/detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripcion|fecha\s+y\s+detalle/.test(line)) {
+      tableStart = institutionalLines.length;
+      break;
+    }
     institutionalLines.push(line);
   }
   const institutional = institutionalLines.join(" ");
+  const body = normalizedLines.slice(tableStart).join(" ");
+  const knownBodyMentions = ["Santander", "BBVA", "Amex"].filter((name) => {
+    const marker = normalizeText(name);
+    return body.includes(marker) && filenameSource !== name;
+  });
+  const result = (source: StatementSource, confidence: number, evidence: string[]): SourceDetection => ({
+    source,
+    confidence,
+    status: confidence >= 0.99 ? "verified" : confidence > 0 ? "review" : "unknown",
+    evidence,
+    ignoredBodyMentions: knownBodyMentions,
+  });
 
   // Prefer issuer legal names, domains, and other stable header markers over
   // short brand mentions that can legitimately occur in a transfer row.
-  if (/bbva\s+m(?:e|é)xico|grupo\s+financiero\s+bbva|bbva\.mx|bba830831lj2/.test(institutional)) return "BBVA";
-  if (/american\s+express|the\s+platinum\s+credit\s+card|amex/.test(institutional)) return "Amex";
-  if (/banco\s+santander|santander\s+m(?:e|é)xico|grupo\s+financiero\s+santander|santander\.com/.test(institutional)) return "Santander";
+  if (/bbva\s+m(?:e|é)xico|grupo\s+financiero\s+bbva|bbva\.mx|bba830831lj2/.test(institutional)) {
+    return result("BBVA", filenameSource === "BBVA" ? 0.999 : 0.998, ["encabezado institucional BBVA", ...(filenameSource === "BBVA" ? ["nombre de archivo BBVA"] : [])]);
+  }
+  if (/american\s+express|the\s+platinum\s+credit\s+card|amex/.test(institutional)) {
+    return result("Amex", filenameSource === "Amex" ? 0.999 : 0.998, ["encabezado institucional Amex", ...(filenameSource === "Amex" ? ["nombre de archivo Amex"] : [])]);
+  }
+  if (/banco\s+santander|santander\s+m(?:e|é)xico|grupo\s+financiero\s+santander|santander\.com/.test(institutional)) {
+    return result("Santander", filenameSource === "Santander" ? 0.999 : 0.998, ["encabezado institucional Santander", ...(filenameSource === "Santander" ? ["nombre de archivo Santander"] : [])]);
+  }
 
   // A standalone brand in the institutional zone is acceptable when the PDF
   // omits its legal name, but never search the complete transaction body.
-  if (/\bbbva\b|bancomer/.test(institutional)) return "BBVA";
-  if (/\bsantander\b/.test(institutional)) return "Santander";
+  if (/\bbbva\b|bancomer/.test(institutional)) return result("BBVA", filenameSource === "BBVA" ? 0.98 : 0.96, ["marca BBVA en encabezado", ...(filenameSource === "BBVA" ? ["nombre de archivo BBVA"] : [])]);
+  if (/\bsantander\b/.test(institutional)) return result("Santander", filenameSource === "Santander" ? 0.98 : 0.96, ["marca Santander en encabezado", ...(filenameSource === "Santander" ? ["nombre de archivo Santander"] : [])]);
   const otherBanks: Array<[string, RegExp]> = [
     ["Banorte", /\bbanorte\b/],
     ["HSBC", /\bhsbc\b/],
@@ -99,8 +125,13 @@ export function detectSource(text: string, fileName: string): StatementSource {
     ["Ualá", /\buala\b/],
   ];
   const detected = otherBanks.find(([, marker]) => marker.test(institutional))?.[0];
-  if (detected) return detected;
-  return "Desconocido";
+  if (detected) return result(detected, filenameSource === detected ? 0.98 : 0.95, [`marca ${detected} en encabezado`]);
+  if (filenameSource) return result(filenameSource, 0.9, ["nombre de archivo; falta evidencia institucional"]);
+  return result("Desconocido", 0, []);
+}
+
+export function detectSource(text: string, fileName: string): StatementSource {
+  return detectSourceEvidence(text, fileName).source;
 }
 
 function detectStatementKind(text: string, source: StatementSource): StatementKind {
@@ -659,7 +690,8 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   const text = mode === "ocr"
     ? await recognizePdfText(document, onProgress)
     : extractedText;
-  const source = detectSource(text, file.name);
+  const sourceDetection = detectSourceEvidence(text, file.name);
+  const source = sourceDetection.source;
   const kind = detectStatementKind(text, source);
   onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
@@ -670,6 +702,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
 
   return {
     source,
+    sourceDetection,
     kind,
     period: detectPeriod(text, file.name),
     fileName: file.name,

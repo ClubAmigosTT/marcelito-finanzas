@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectSource, extractTransactions, parseStatementSummary, reconcileStatementImport } from "../src/pdfImport.ts";
+import { detectSource, detectSourceEvidence, extractTransactions, parseStatementSummary, reconcileStatementImport } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
 import { buildFinanceMetrics } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
@@ -276,6 +276,10 @@ test("BBVA no se convierte en Santander por una contraparte dentro de movimiento
 
   assert.equal(detectSource(text, "estado-7A3F.pdf"), "BBVA");
   assert.equal(detectSource(text, "BBVA agosto.pdf"), "BBVA");
+  const evidence = detectSourceEvidence(text, "estado-7A3F.pdf");
+  assert.equal(evidence.status, "verified");
+  assert.equal(evidence.confidence >= 0.99, true);
+  assert.deepEqual(evidence.ignoredBodyMentions, ["Santander"]);
 });
 
 test("una mención de Santander solo en el cuerpo no basta para identificar el emisor", () => {

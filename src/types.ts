@@ -29,6 +29,17 @@ export type ReconciliationType = "internalTransfer" | "cardPayment";
 // from any other bank retain the name detected from its document or filename.
 export type StatementSource = "Amex" | "Santander" | "BBVA" | "Desconocido" | (string & {});
 
+export type SourceDetectionStatus = "verified" | "review" | "unknown";
+
+/** Evidence used to identify the issuer without trusting transaction text. */
+export type SourceDetection = {
+  source: StatementSource;
+  confidence: number;
+  status: SourceDetectionStatus;
+  evidence: string[];
+  ignoredBodyMentions: string[];
+};
+
 export type StatementStatus = "ready" | "review";
 
 /** Resultado de contrastar las filas extraídas contra los totales del estado. */
@@ -103,6 +114,7 @@ export type StatementSummary = {
 
 export type ImportResult = {
   source: StatementSource;
+  sourceDetection?: SourceDetection;
   kind: StatementKind;
   period: string;
   fileName: string;
