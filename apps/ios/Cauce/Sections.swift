@@ -583,6 +583,62 @@ private struct ExpenseCategoryDetailView: View {
     }
 }
 
+private struct AccountSummaryRow: View {
+    @Environment(FinanceStore.self) private var store
+
+    let source: String
+
+    private var statement: StatementRecord? {
+        store.statements.first { $0.source == source }
+    }
+
+    private var metric: StatementMetric? {
+        guard let statementID = statement?.id else { return nil }
+        return store.metric(for: statementID)
+    }
+
+    private var kind: StatementKind {
+        statement?.kind ?? (source == "Amex" ? .card : .bank)
+    }
+
+    private var balanceText: String {
+        guard let balance = kind == .card ? metric?.debtBalance : metric?.cashBalance else {
+            return "Pendiente"
+        }
+        let formatted = balance.formatted(.currency(code: "MXN").precision(.fractionLength(0)))
+        return kind == .card ? "−\(formatted)" : formatted
+    }
+
+    private var detailText: String {
+        guard kind == .card else { return "Cuenta de efectivo" }
+        let minimum = metric?.minimumPayment?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
+        let noInterest = metric?.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
+        return "Pago próximo: \(minimum) · No intereses: \(noInterest)"
+    }
+
+    var body: some View {
+        NavigationLink {
+            AccountDetailView(source: source, kind: kind)
+        } label: {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 12) {
+                    Image(systemName: kind == .card ? "creditcard.fill" : "building.columns.fill")
+                        .foregroundStyle(Color.marcelitoNavyMid)
+                    Text(source)
+                        .font(.headline)
+                    Spacer()
+                    Text(balanceText)
+                        .font(.subheadline.weight(.semibold))
+                        .monospacedDigit()
+                }
+                Text(detailText)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
 struct AccountsView: View {
     @Environment(FinanceStore.self) private var store
 
@@ -597,36 +653,7 @@ struct AccountsView: View {
             List {
                 Section("Cuentas") {
                     ForEach(displayedSources, id: \.self) { source in
-                        let sourceStatements = store.statements.filter { $0.source == source }
-                        let latest = sourceStatements.first
-                        let latestID = latest?.id
-                        let metric: StatementMetric?
-                        if let statementID = latestID {
-                            metric = store.metric(for: statementID)
-                        } else {
-                            metric = nil
-                        }
-                        let kind = latest?.kind ?? (source == "Amex" ? .card : .bank)
-                        let balance = kind == .card ? metric?.debtBalance : metric?.cashBalance
-                        NavigationLink {
-                            AccountDetailView(source: source, kind: kind)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack(spacing: 12) {
-                                    Image(systemName: kind == .card ? "creditcard.fill" : "building.columns.fill")
-                                        .foregroundStyle(Color.marcelitoNavyMid)
-                                    Text(source)
-                                        .font(.headline)
-                                    Spacer()
-                                    Text(balance.map { kind == .card ? "−\($0.formatted(.currency(code: "MXN").precision(.fractionLength(0))))" : $0.formatted(.currency(code: "MXN").precision(.fractionLength(0))) } ?? "Pendiente")
-                                        .font(.subheadline.weight(.semibold))
-                                        .monospacedDigit()
-                                }
-                                Text(kind == .card ? "Pago próximo: \(metric?.minimumPayment?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente") · No intereses: \(metric?.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")" : "Cuenta de efectivo")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
-                        }
+                        AccountSummaryRow(source: source)
                     }
                     NavigationLink {
                         MovementsView()
