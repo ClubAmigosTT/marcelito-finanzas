@@ -722,6 +722,9 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     return kind === "bank";
   }).map((transaction) => absolute(transaction.amount)));
   const consolidatedRealSpend = Math.max(0, cardSpend + directBankSpend + manualSpend - refunds);
+  const canonicalGrossSpend = sum(transactions.filter(isSpendTransaction).map((transaction) => absolute(transaction.amount)));
+  const canonicalNetSpend = Math.max(0, canonicalGrossSpend - refunds);
+  const spendExceedsCanonical = consolidatedRealSpend > canonicalNetSpend + Math.max(1, canonicalNetSpend * 0.01);
   const realIncome = sum(transactions.filter((transaction) => isRealIncomeTransaction(transaction, statements)).map((transaction) => absolute(transaction.amount)));
   const netFlow = realIncome - consolidatedRealSpend;
   const latestBankPeriods = latestBySource(periods.filter((period) => period.kind === "bank"));
@@ -943,6 +946,11 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     duplicateCount: pipeline.audit.duplicateCount,
     critical: pipeline.audit.criticalIssues.length > 0,
   };
+  if (spendExceedsCanonical) {
+    const issue = "El gasto consolidado supera la suma de movimientos canónicos; KPI bloqueado";
+    if (!pipeline.audit.criticalIssues.includes(issue)) pipeline.audit.criticalIssues.push(issue);
+    dataQuality.critical = true;
+  }
   const currentPatrimony = currentPeriodKey ? periodPatrimony(periodGroups.get(currentPeriodKey) ?? []) : undefined;
   const previousPatrimony = periodKeys[1] ? periodPatrimony(periodGroups.get(periodKeys[1]) ?? []) : undefined;
   const liquidPatrimonyChangePercent = currentPatrimony !== undefined && previousPatrimony !== undefined && previousPatrimony !== 0

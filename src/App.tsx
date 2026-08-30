@@ -123,6 +123,10 @@ function displayMoney(value: number | undefined | null) {
   return value === undefined || value === null || !Number.isFinite(value) ? "Pendiente" : money.format(value);
 }
 
+function dashboardMoney(blocked: boolean, value: number | undefined | null) {
+  return blocked ? "Bloqueado por conciliación" : displayMoney(value);
+}
+
 function displayPercent(value: number | null | undefined) {
   return value === undefined || value === null || !Number.isFinite(value) ? "Pendiente" : `${Math.round(value * 100)}%`;
 }
@@ -271,8 +275,14 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   const reduceMotion = useReducedMotion();
   const latestStatement = latestStatementFor(statements);
   const pipeline = useMemo(() => runTransactionPipeline(transactions, statements), [transactions, statements]);
-  const ledgerTransactions = pipeline.transactions;
-  const metrics = useMemo(() => buildFinanceMetrics(transactions, statements, pipeline), [transactions, statements, pipeline]);
+  const ledgerTransactions = pipeline.transactions.filter((transaction) => {
+    if (!transaction.statementId) return true;
+    const statement = statements.find((item) => item.id === transaction.statementId);
+    return statement?.reconciliationStatus === "valid";
+  });
+  // All screens receive the same post-pipeline ledger. Raw extracted rows are
+  // retained only for audit/reprocessing and are never an aggregate source.
+  const metrics = useMemo(() => buildFinanceMetrics(ledgerTransactions, statements, pipeline), [ledgerTransactions, statements, pipeline]);
 
   useEffect(() => {
     localStorage.setItem(transactionStorageKey, JSON.stringify(transactions));
@@ -412,24 +422,26 @@ function Home({ transactions, statements, metrics, goals, setGoals, onImport }: 
         <span className="month-button data-period">{latestPeriodLabel}</span>
       </section>
       <button type="button" className="summary-hero summary-hero-action" aria-label="Ver detalle del patrimonio líquido" onClick={() => setSelectedMetric("patrimony")}>
-        <div><span>Patrimonio líquido</span><strong>{displayMoney(metrics.liquidPatrimony)}</strong><p className={`summary-trend ${trendTone}`}>{trendLabel}</p></div>
+        <div><span>Patrimonio líquido</span><strong>{dashboardMoney(metrics.isProvisional, metrics.liquidPatrimony)}</strong><p className={`summary-trend ${trendTone}`}>{metrics.isProvisional ? "Conciliación requerida" : trendLabel}</p></div>
       </button>
       <section className="summary-kpis" aria-label="Indicadores principales">
-        <Metric label="Efectivo disponible" value={displayMoney(metrics.cashAvailable)} delta={comparisonMoney(metrics.cashAvailable, metrics.analyticsPeriods[1]?.cashAvailable)} tone="income" icon={Wallet} onSelect={() => setSelectedMetric("cash")} />
-        <Metric label="Deuda total" value={displayMoney(metrics.debtTotal)} delta={comparisonMoney(metrics.debtTotal, metrics.analyticsPeriods[1]?.debtTotal)} tone="debt" icon={CreditCard} onSelect={() => setSelectedMetric("debt")} />
-        <Metric label="Gasto del mes" value={displayMoney(metrics.currentMonthSpend)} delta={comparisonPercent(metrics.analyticsPeriods[0]?.variationPercent)} tone="expense" icon={Receipt} onSelect={() => setSelectedMetric("expense")} />
-        <Metric label="Flujo neto" value={displayMoney(metrics.currentMonthNetFlow)} delta={comparisonMoney(metrics.currentMonthNetFlow, metrics.analyticsPeriods[1]?.netFlow)} tone={metrics.currentMonthNetFlow >= 0 ? "income" : "debt"} icon={ChartLineUp} onSelect={() => setSelectedMetric("flow")} />
+        <Metric label="Efectivo disponible" value={dashboardMoney(metrics.isProvisional, metrics.cashAvailable)} delta={metrics.isProvisional ? "Conciliación requerida" : comparisonMoney(metrics.cashAvailable, metrics.analyticsPeriods[1]?.cashAvailable)} tone="income" icon={Wallet} onSelect={() => setSelectedMetric("cash")} />
+        <Metric label="Deuda total" value={dashboardMoney(metrics.isProvisional, metrics.debtTotal)} delta={metrics.isProvisional ? "Conciliación requerida" : comparisonMoney(metrics.debtTotal, metrics.analyticsPeriods[1]?.debtTotal)} tone="debt" icon={CreditCard} onSelect={() => setSelectedMetric("debt")} />
+        <Metric label="Gasto del mes" value={dashboardMoney(metrics.isProvisional, metrics.currentMonthSpend)} delta={metrics.isProvisional ? "Conciliación requerida" : comparisonPercent(metrics.analyticsPeriods[0]?.variationPercent)} tone="expense" icon={Receipt} onSelect={() => setSelectedMetric("expense")} />
+        <Metric label="Flujo neto" value={dashboardMoney(metrics.isProvisional, metrics.currentMonthNetFlow)} delta={metrics.isProvisional ? "Conciliación requerida" : comparisonMoney(metrics.currentMonthNetFlow, metrics.analyticsPeriods[1]?.netFlow)} tone={metrics.currentMonthNetFlow >= 0 ? "income" : "debt"} icon={ChartLineUp} onSelect={() => setSelectedMetric("flow")} />
       </section>
       {selectedMetric && <MetricDetailPanel metric={selectedMetric} metrics={metrics} onClose={() => setSelectedMetric(null)} />}
-      <ExecutiveSummary metrics={metrics} />
-      <SpendTrendChart periods={metrics.analyticsPeriods} />
-      <CashFlowTrendChart points={metrics.cashFlowHistory} />
-      <SpendingSplit period={metrics.analyticsPeriods[0]} />
-      <DebtBreakdown metrics={metrics} />
-      <ProjectionPanel projection={metrics.projection} />
-      <ScenarioSimulator metrics={metrics} />
-      <ExecutiveAlerts alerts={metrics.executiveAlerts} />
-      <GoalsPanel metrics={metrics} goals={goals} setGoals={setGoals} />
+      {metrics.isProvisional ? <DashboardBlockedNotice metrics={metrics} /> : <>
+        <ExecutiveSummary metrics={metrics} />
+        <SpendTrendChart periods={metrics.analyticsPeriods} />
+        <CashFlowTrendChart points={metrics.cashFlowHistory} />
+        <SpendingSplit period={metrics.analyticsPeriods[0]} />
+        <DebtBreakdown metrics={metrics} />
+        <ProjectionPanel projection={metrics.projection} />
+        <ScenarioSimulator metrics={metrics} />
+        <ExecutiveAlerts alerts={metrics.executiveAlerts} />
+        <GoalsPanel metrics={metrics} goals={goals} setGoals={setGoals} />
+      </>}
       <DataQualityIndicator metrics={metrics} />
       <AuditDiagnostics metrics={metrics} />
     </>
@@ -702,6 +714,11 @@ function DataQualityIndicator({ metrics }: { metrics: ReturnType<typeof buildFin
   </section>;
 }
 
+function DashboardBlockedNotice({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  const issue = metrics.audit.criticalIssues[0] ?? "Los estados aún no concilian contra sus totales originales.";
+  return <section className="provisional-banner dashboard-blocked" role="alert"><Warning size={20} /><div><strong>Dashboard histórico bloqueado</strong><p>{issue}</p><small>Corrige o vuelve a importar los estados señalados. Las filas rechazadas no alimentan ningún KPI.</small></div></section>;
+}
+
 function DebtBreakdown({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
   return <section className="debt-breakdown" aria-label="Desglose de deuda"><div><span>Saldo total de deuda</span><strong>{displayMoney(metrics.debtTotal)}</strong><small>Tarjetas y créditos al último corte</small></div><div><span>Pago próximo</span><strong>{displayMoney(metrics.latestPaymentDue)}</strong><small>Mínimo + MSI del estado</small></div><div><span>Pago para no generar intereses</span><strong>{displayMoney(metrics.latestPaymentForNoInterest)}</strong><small>Importe del estado</small></div><div><span>MSI pendientes</span><strong>{displayMoney(metrics.latestMsiPending)}</strong><small>{metrics.latestMsiInstallmentsCount ? `${metrics.latestMsiInstallmentsCount} mensualidades` : "Principal diferido"}</small></div></section>;
 }
@@ -799,8 +816,8 @@ function MetricDetailPanel({ metric, metrics, onClose }: { metric: DashboardMetr
   const color = metric === "expense" ? "var(--expense)" : metric === "debt" ? "var(--debt)" : metric === "patrimony" ? "var(--navy)" : "var(--income)";
   return <section className="metric-detail-panel" aria-live="polite" aria-labelledby="metric-detail-title">
     <div className="metric-detail-head"><div><span>Detalle del indicador</span><h2 id="metric-detail-title">{metric === "patrimony" ? "Patrimonio líquido" : metric === "cash" ? "Efectivo disponible" : metric === "debt" ? "Deuda total" : metric === "expense" ? "Gasto del mes" : "Flujo neto"}</h2></div><button type="button" className="row-action" aria-label="Cerrar detalle" onClick={onClose}><X size={17} /></button></div>
-    <div className="metric-detail-summary"><strong>{displayMoney(current)}</strong><span>{comparison}</span><p>{metricExplanation(metric)}</p></div>
-    {points.length ? <MiniMetricChart points={points} color={color} /> : <p className="metric-detail-empty">Aún no hay suficientes datos para dibujar una tendencia.</p>}
+    <div className="metric-detail-summary"><strong>{dashboardMoney(metrics.isProvisional, current)}</strong><span>{metrics.isProvisional ? "Conciliación requerida" : comparison}</span><p>{metricExplanation(metric)}</p></div>
+    {metrics.isProvisional ? <p className="metric-detail-empty">La tendencia se habilitará cuando los estados concilien.</p> : points.length ? <MiniMetricChart points={points} color={color} /> : <p className="metric-detail-empty">Aún no hay suficientes datos para dibujar una tendencia.</p>}
   </section>;
 }
 
@@ -837,6 +854,7 @@ function Movements({ transactions, statements, setTransactions, onLearnCategory,
 
 function Expenses({ transactions, statements, metrics, onImport }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; onImport: () => void }) {
   if (!transactions.length && !statements.length) return <section><PageHeading title="Gastos" body="El gasto real se calcula a partir de tus movimientos importados." action="Importar estado" onAction={onImport} /><EmptyState title="Todavía no hay gastos" body="Carga un PDF mensual para ver categorías construidas con tus datos." /></section>;
+  if (metrics.isProvisional) return <section><PageHeading title="Gastos" body="El gasto real se calcula a partir de movimientos conciliados." action="Importar estado" onAction={onImport} /><DashboardBlockedNotice metrics={metrics} /><DataQualityIndicator metrics={metrics} /></section>;
   const current = metrics.analyticsPeriods[0];
   const previous = metrics.analyticsPeriods[1];
   return <section>
@@ -956,13 +974,13 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
         const period = latest ? metrics.periods.find((item) => item.statementId === latest.id) : undefined;
         const kind = latest?.kind ?? defaultStatementKind(source);
         const balance = kind === "card" ? period?.debtBalance : kind === "bank" ? period?.cashBalance : undefined;
-        const balanceLabel = balance === undefined ? "Pendiente" : kind === "card" ? `−${money.format(balance)}` : money.format(balance);
+        const balanceLabel = metrics.isProvisional ? "Bloqueado por conciliación" : balance === undefined ? "Pendiente" : kind === "card" ? `−${money.format(balance)}` : money.format(balance);
         const sourceTransactions = transactions.filter((item) => item.statementId && sourceStatements.some((statement) => statement.id === item.statementId));
         return <article className="account-card" key={source}>
           <div className="account-card-head"><span className={`account-icon ${sourceColor(source)}`}>{kind === "card" ? <CreditCard size={22} /> : <Bank size={22} />}</span><small>{kind === "card" ? "Tarjeta de crédito" : kind === "bank" ? "Cuenta de efectivo" : "Tipo pendiente"}</small></div>
           <h3>{source}</h3>
           <strong className={kind === "card" ? "account-card-balance debt" : "account-card-balance"}>{balanceLabel}</strong>
-          <p>{kind === "card" ? `Pago próximo: ${displayMoney(period?.minimumPlusMsi ?? period?.minimumPayment)} · No intereses: ${displayMoney(period?.paymentForNoInterest)}` : kind === "bank" ? "Cuenta de efectivo" : "Confirma el tipo en el documento importado"}</p>
+          <p>{metrics.isProvisional ? "Valida los estados antes de mostrar el saldo" : kind === "card" ? `Pago próximo: ${displayMoney(period?.minimumPlusMsi ?? period?.minimumPayment)} · No intereses: ${displayMoney(period?.paymentForNoInterest)}` : kind === "bank" ? "Cuenta de efectivo" : "Confirma el tipo en el documento importado"}</p>
           <small>{sourceTransactions.length} movimientos · {sourceStatements.length} estado(s)</small>
           <button className="account-card-link" onClick={() => { setSourceFilter(source); setView("movements"); }}>Ver movimientos <ArrowRight size={16} /></button>
         </article>;
@@ -979,6 +997,7 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
 function NetWorthBase({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
   const trend = metrics.liquidPatrimonyChangePercent;
   const trendLabel = comparisonPercent(trend);
+  if (metrics.isProvisional) return <section><PageHeading title="Patrimonio" body="Los saldos se muestran cuando cada estado concilia." /><DashboardBlockedNotice metrics={metrics} /><DataQualityIndicator metrics={metrics} /></section>;
   return <section>
     <PageHeading title="Patrimonio" body="Cuánto tienes, cómo cambió y qué parte está en efectivo o deuda." />
     <div className="patrimony-analytics-grid">

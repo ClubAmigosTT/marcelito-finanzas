@@ -76,6 +76,32 @@ struct StatementSummaryRecord: Codable {
     var revolvingBalance: Decimal? = nil
     var msiInstallments: Int? = nil
     var msiMonthlyLoad: Decimal? = nil
+    /// Totals declared by bank statements. They are used as a hard control
+    /// against the rows reconstructed from the PDF table.
+    var depositTotal: Decimal? = nil
+    var withdrawalTotal: Decimal? = nil
+    var depositCount: Int? = nil
+    var withdrawalCount: Int? = nil
+}
+
+enum StatementReconciliationStatus: String, Codable {
+    case valid
+    case invalid
+    case pending
+}
+
+/// Evidence that an imported statement was compared with the issuer totals.
+/// Keeping this next to the statement makes the quality gate reproducible
+/// after an app restart instead of inferring it from the current dashboard.
+struct StatementReconciliationRecord: Codable {
+    var status: StatementReconciliationStatus
+    var tolerance: Decimal
+    var extractedDepositTotal: Decimal? = nil
+    var extractedWithdrawalTotal: Decimal? = nil
+    var extractedChargeTotal: Decimal? = nil
+    var extractedPaymentTotal: Decimal? = nil
+    var extractedMovementCount: Int? = nil
+    var reason: String? = nil
 }
 
 struct Movement: Identifiable, Codable {
@@ -160,6 +186,7 @@ struct StatementRecord: Identifiable, Codable {
     var requiresReview: Bool
     var kind: StatementKind? = nil
     var summary: StatementSummaryRecord? = nil
+    var reconciliation: StatementReconciliationRecord? = nil
 }
 
 struct ImportSummary {
@@ -171,6 +198,7 @@ struct ImportSummary {
     let requiresReview: Bool
     let summary: StatementSummaryRecord?
     let usedOCR: Bool
+    let reconciliation: StatementReconciliationRecord?
 }
 
 struct StatementMetric: Identifiable {
@@ -222,6 +250,7 @@ struct CashFlowPoint: Identifiable {
 enum FinanceImportError: LocalizedError {
     case unreadableDocument
     case emptyDocument
+    case invalidReconciliation(String)
 
     var errorDescription: String? {
         switch self {
@@ -229,8 +258,39 @@ enum FinanceImportError: LocalizedError {
             "No pudimos leer este PDF. Verifica que sea un estado de cuenta válido."
         case .emptyDocument:
             "Este PDF no contiene texto ni movimientos reconocibles. Revisa que sea un estado de cuenta y, si es un escaneo, confirma los importes en Movimientos después de importarlo."
+        case .invalidReconciliation(let reason):
+            "El estado no concilia contra los totales declarados por el banco. \(reason) No se incorporó al libro canónico."
         }
     }
+}
+
+struct LedgerQuality {
+    let statementCount: Int
+    let validatedStatementCount: Int
+    let invalidStatementCount: Int
+    let pendingStatementCount: Int
+    let movementCount: Int
+    let reviewMovementCount: Int
+    let absurdMovementCount: Int
+    let reconciledPercent: Double
+    let isBlocking: Bool
+    let message: String?
+}
+
+struct CanonicalRebuildResult {
+    let candidateCount: Int
+    let importedCount: Int
+    let invalidCount: Int
+}
+
+struct LedgerConsistencyCheck: Identifiable {
+    let id: String
+    let label: String
+    let expected: Decimal?
+    let actual: Decimal?
+    let difference: Decimal?
+    let tolerance: Decimal
+    let passed: Bool
 }
 
 @Observable
@@ -240,6 +300,8 @@ final class FinanceStore {
     private let importKey = "marcelito.lastImport"
     private let categoryRulesKey = "marcelito.categoryRules.v1"
     private let numericRepairKey = "marcelito.numericRepair.v1"
+    private let canonicalRebuildKey = "marcelito.canonicalRebuild.v1"
+    private let canonicalRebuildExpectedCountKey = "marcelito.canonicalRebuild.expectedCount.v1"
     private let statementFilesDirectoryName = "ImportedStatements"
     private var repairInProgress = false
 
@@ -248,11 +310,105 @@ final class FinanceStore {
 
     private(set) var lastImportedFile: String?
 
+    /// `movements` is the persisted canonical ledger. Raw parser candidates
+    /// are never stored separately or consumed by any screen; every
+    /// aggregate below is derived only after normalization, deduplication and
+    /// account matching have completed.
+    var canonicalMovements: [Movement] { movements }
+
+    /// Quality gate shared by Resumen, Gastos, Cuentas, Patrimonio and all
+    /// historical charts. A statement that has not reconciled is visible in
+    /// diagnostics, but cannot silently feed executive figures.
+    var ledgerQuality: LedgerQuality {
+        let validated = statements.filter { $0.reconciliation?.status == .valid }
+        let invalid = statements.filter { $0.reconciliation?.status == .invalid }
+        let pending = statements.filter { $0.reconciliation?.status != .valid }
+        let reviewCount = movements.filter { $0.category == "Por revisar" || $0.category == "Sin categoría" }.count
+        let absurdCount = movements.filter { abs($0.amount) >= 10_000_000 || !isValidStoredMovement($0) }.count
+        let statementCount = statements.count
+        let reconciledPercent = statementCount == 0 ? 100 : Double(validated.count) / Double(statementCount) * 100
+        let expectedRebuildCount = UserDefaults.standard.integer(forKey: canonicalRebuildExpectedCountKey)
+        let missingRebuiltStatements = UserDefaults.standard.bool(forKey: canonicalRebuildKey)
+            && expectedRebuildCount > 0
+            && validated.count < expectedRebuildCount
+        let canonicalGross = movements.filter(isSpend).reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let canonicalRefunds = movements.filter { movementKind($0) == .refund }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let canonicalNetSpend = max(Decimal(0), canonicalGross - canonicalRefunds)
+        let spendMismatch = consolidatedRealSpend > canonicalNetSpend + max(Decimal(1), canonicalNetSpend * Decimal(string: "0.01")!)
+        let failedChecks = consistencyChecks.filter { !$0.passed }
+        let blocking = invalid.count > 0 || pending.count > 0 || absurdCount > 0 || spendMismatch || !failedChecks.isEmpty || missingRebuiltStatements
+        let message: String?
+        if invalid.count > 0 {
+            message = "\(invalid.count) estado(s) no concilian contra sus totales originales."
+        } else if pending.count > 0 {
+            message = "\(pending.count) estado(s) aún no tienen conciliación validada."
+        } else if absurdCount > 0 {
+            message = "Hay \(absurdCount) movimiento(s) con importes fuera de rango."
+        } else if spendMismatch {
+            message = "El gasto consolidado supera los movimientos canónicos; se bloqueó el KPI."
+        } else if let failed = failedChecks.first {
+            message = "La conciliación no cuadra: \(failed.label)."
+        } else if missingRebuiltStatements {
+            message = "Faltan \(expectedRebuildCount - validated.count) estado(s) validado(s) de la reconstrucción."
+        } else {
+            message = nil
+        }
+        return LedgerQuality(
+            statementCount: statementCount,
+            validatedStatementCount: validated.count,
+            invalidStatementCount: invalid.count,
+            pendingStatementCount: pending.count,
+            movementCount: movements.count,
+            reviewMovementCount: reviewCount,
+            absurdMovementCount: absurdCount,
+            reconciledPercent: reconciledPercent,
+            isBlocking: blocking,
+            message: message
+        )
+    }
+
+    var dashboardIsBlocked: Bool { ledgerQuality.isBlocking }
+
+    var consistencyChecks: [LedgerConsistencyCheck] {
+        let tolerance = Decimal(string: "0.05", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(0.05)
+        func check(_ id: String, _ label: String, expected: Decimal?, actual: Decimal?) -> LedgerConsistencyCheck {
+            guard let expected, let actual else {
+                return LedgerConsistencyCheck(id: id, label: label, expected: expected, actual: actual, difference: nil, tolerance: tolerance, passed: true)
+            }
+            let difference = actual - expected
+            return LedgerConsistencyCheck(id: id, label: label, expected: expected, actual: actual, difference: difference, tolerance: tolerance, passed: absolute(difference) <= tolerance)
+        }
+
+        var checks = [
+            check("flow", "Ingresos − gasto real = flujo neto", expected: realIncome - consolidatedRealSpend, actual: netFlow),
+            check("patrimony", "Efectivo − deuda = patrimonio líquido", expected: cashAvailable.flatMap { cash in debtTotal.map { cash - $0 } }, actual: liquidPatrimony),
+            check("credit", "Límite − crédito disponible = deuda utilizada", expected: creditLimit.flatMap { limit in creditAvailable.map { limit - $0 } }, actual: creditUsed),
+        ]
+        for metric in latestMetricsBySource(periodMetrics.filter { $0.kind == .bank }) {
+            guard let opening = statements.first(where: { $0.id == metric.id })?.summary?.previousBalance,
+                  let closing = metric.cashBalance else { continue }
+            let delta = movements
+                .filter { $0.statementId == metric.id }
+                .reduce(Decimal(0)) { $0 + $1.amount }
+            checks.append(check(
+                "cash-\(metric.id)",
+                "Saldo inicial + movimientos = saldo final (\(metric.source))",
+                expected: opening + delta,
+                actual: closing
+            ))
+        }
+        return checks
+    }
+
     /// Calculated statements are always ordered by their real cutoff date.
     /// Import order is not a financial ordering: importing May after August
     /// must never make May look like the current balance.
     var periodMetrics: [StatementMetric] {
+        // Only reconciled statements may participate in balances, trends or
+        // fallbacks. Invalid/pending records remain in `statements` solely so
+        // the audit UI can explain why the dashboard is blocked.
         statements
+            .filter { $0.reconciliation?.status == .valid }
             .map { calculateMetric(for: $0) }
             .sorted { left, right in
                 let leftDate = statementEndDate(for: left.id)
@@ -703,7 +859,13 @@ final class FinanceStore {
         // Drop malformed legacy rows before any aggregate can see them. This
         // is especially important for builds that previously stored PDF
         // headings or running balances as if they were transactions.
-        movements = movements.filter(isValidStoredMovement)
+        movements = movements.filter { movement in
+            guard isValidStoredMovement(movement) else { return false }
+            // PDF rows are canonical only after their parent statement has
+            // reconciled. Manual rows (statementId == nil) remain available.
+            guard let statementId = movement.statementId else { return true }
+            return statements.first(where: { $0.id == statementId })?.reconciliation?.status == .valid
+        }
         var seen: [String: (statementId: UUID?, movementId: UUID)] = [:]
         var canonical: [Movement] = []
         for movement in movements {
@@ -967,6 +1129,13 @@ final class FinanceStore {
     func updateStatementSummary(for statement: StatementRecord, summary: StatementSummaryRecord) {
         guard let index = statements.firstIndex(where: { $0.id == statement.id }) else { return }
         statements[index].summary = summary
+        let linked = movements.filter { $0.statementId == statement.id }
+        statements[index].reconciliation = reconcileStatement(
+            kind: statementKind(statements[index]),
+            summary: summary,
+            movements: linked
+        )
+        statements[index].requiresReview = statements[index].reconciliation?.status != .valid
         persist()
     }
 
@@ -978,6 +1147,14 @@ final class FinanceStore {
         statements[index].source = cleaned
         if let kind {
             statements[index].kind = kind
+        }
+        if previousSource != cleaned || kind != nil {
+            statements[index].reconciliation = StatementReconciliationRecord(
+                status: .pending,
+                tolerance: Decimal(string: "0.05", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(0.05),
+                reason: "El origen o tipo del estado cambió; vuelve a conciliar sus filas."
+            )
+            statements[index].requiresReview = true
         }
         for movementIndex in movements.indices where movements[movementIndex].statementId == statement.id {
             if movements[movementIndex].account == previousSource || movements[movementIndex].account == "Importado" {
@@ -1022,6 +1199,8 @@ final class FinanceStore {
         defaults.removeObject(forKey: importKey)
         defaults.removeObject(forKey: categoryRulesKey)
         defaults.removeObject(forKey: numericRepairKey)
+        defaults.removeObject(forKey: canonicalRebuildKey)
+        defaults.removeObject(forKey: canonicalRebuildExpectedCountKey)
         try? FileManager.default.removeItem(at: statementFilesDirectoryURL)
     }
 
@@ -1033,6 +1212,119 @@ final class FinanceStore {
         let safeFileName = URL(fileURLWithPath: localFileName).lastPathComponent
         let url = statementFilesDirectoryURL.appendingPathComponent(safeFileName, isDirectory: false)
         return FileManager.default.fileExists(atPath: url.path) ? url : nil
+    }
+
+    private var storedPDFURLs: [URL] {
+        var urls: [URL] = []
+        if let directoryContents = try? FileManager.default.contentsOfDirectory(
+            at: statementFilesDirectoryURL,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            urls.append(contentsOf: directoryContents.filter { $0.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame })
+        }
+        urls.append(contentsOf: statements.compactMap { statementFileURL(for: $0) })
+        return Set(urls.map(\.path))
+            .map { URL(fileURLWithPath: $0) }
+            .sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    var hasCanonicalRebuildPending: Bool {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: canonicalRebuildKey) else { return false }
+        return !statements.isEmpty || !storedPDFURLs.isEmpty
+    }
+
+    private func pdfFingerprint(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Destructively replaces every PDF-derived row with a fresh canonical
+    /// import. Manual rows (those without statementId) are intentionally kept.
+    /// Invalid/pending statements remain as metadata for diagnostics, but
+    /// their rows are quarantined and never reach an aggregate.
+    @discardableResult
+    func rebuildCanonicalLedgerIfNeeded(
+        progress: ((Int, Int, String) -> Void)? = nil
+    ) -> CanonicalRebuildResult {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: canonicalRebuildKey), !repairInProgress else {
+            return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
+        }
+        repairInProgress = true
+        defer { repairInProgress = false }
+
+        // Capture files before clearing statement metadata. Several older
+        // builds used UUID filenames, so the directory itself is the source
+        // of truth and the statement records are only an additional index.
+        var seenFingerprints = Set<String>()
+        let candidates: [URL] = storedPDFURLs.compactMap { url in
+            guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+            let fingerprint = pdfFingerprint(data)
+            guard seenFingerprints.insert(fingerprint).inserted else { return nil }
+            return url
+        }
+        defaults.set(candidates.count, forKey: canonicalRebuildExpectedCountKey)
+
+        movements = movements.filter { $0.statementId == nil }
+        statements = []
+        normalizeStoredLedger()
+        persist()
+
+        guard !candidates.isEmpty else {
+            defaults.set(true, forKey: canonicalRebuildKey)
+            defaults.set(true, forKey: numericRepairKey)
+            DiagnosticsRecorder.record(stage: "rebuild.done", message: "No había PDFs locales para reconstruir; el libro quedó limpio.")
+            return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
+        }
+
+        DiagnosticsRecorder.record(
+            stage: "rebuild.start",
+            message: "Reconstrucción canónica iniciada con \(candidates.count) PDF(s) únicos."
+        )
+        var importedCount = 0
+        var invalidCount = 0
+        for (index, url) in candidates.enumerated() {
+            progress?(index, candidates.count, url.lastPathComponent)
+            do {
+                let result = try importPDF(
+                    from: url,
+                    allowOCR: true,
+                    preserveExistingOnEmpty: false,
+                    requireValidReconciliation: true
+                )
+                if result.reconciliation?.status == .valid {
+                    importedCount += 1
+                    DiagnosticsRecorder.record(
+                        stage: "rebuild.statement",
+                        message: "Estado válido: \(result.source) · \(result.period) · \(result.imported) movimiento(s)."
+                    )
+                } else {
+                    invalidCount += 1
+                    DiagnosticsRecorder.record(
+                        level: "error",
+                        stage: "rebuild.invalid",
+                        message: "Estado fuera del libro canónico: \(result.fileName) · \(result.reconciliation?.reason ?? "sin conciliación")."
+                    )
+                }
+            } catch {
+                invalidCount += 1
+                DiagnosticsRecorder.record(
+                    level: "error",
+                    stage: "rebuild.error",
+                    message: "No se pudo reconstruir \(url.lastPathComponent): \(error.localizedDescription)"
+                )
+            }
+            progress?(index + 1, candidates.count, url.lastPathComponent)
+        }
+        defaults.set(true, forKey: canonicalRebuildKey)
+        defaults.set(true, forKey: numericRepairKey)
+        persist()
+        DiagnosticsRecorder.record(
+            stage: "rebuild.done",
+            message: "Reconstrucción terminada: \(importedCount) válido(s), \(invalidCount) bloqueado(s), \(movements.count) movimiento(s) canónicos."
+        )
+        return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount)
     }
 
     /// Older TestFlight builds persisted rows produced by the former parser.
@@ -1120,10 +1412,115 @@ final class FinanceStore {
         return repaired
     }
 
+    /// Compares the rows reconstructed from one PDF with the totals printed
+    /// by its issuer. A pending result is deliberately conservative: the
+    /// statement remains visible for diagnosis but cannot feed a KPI until a
+    /// user reimports/corrects it.
+    private func reconcileStatement(
+        kind: StatementKind,
+        summary: StatementSummaryRecord?,
+        movements fresh: [Movement]
+    ) -> StatementReconciliationRecord {
+        let tolerance = Decimal(string: "0.05", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(0.05)
+        let validRows = fresh.filter(isValidStoredMovement)
+        let deposits = validRows.filter { $0.amount > 0 }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let withdrawals = validRows.filter { $0.amount < 0 }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let charges = validRows.filter(isSpend).reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let payments = validRows.filter { movementKind($0) == .cardPayment }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let movementCount = validRows.count
+
+        guard let summary else {
+            return StatementReconciliationRecord(
+                status: .pending,
+                tolerance: tolerance,
+                extractedDepositTotal: kind == .bank ? deposits : nil,
+                extractedWithdrawalTotal: kind == .bank ? withdrawals : nil,
+                extractedChargeTotal: kind == .card ? charges : nil,
+                extractedPaymentTotal: kind == .card ? payments : nil,
+                extractedMovementCount: movementCount,
+                reason: "El PDF no expone un resumen financiero verificable."
+            )
+        }
+
+        var mismatches: [String] = []
+        func compare(_ label: String, extracted: Decimal, expected: Decimal?) {
+            guard let expected else { return }
+            if absolute(extracted - absolute(expected)) > tolerance {
+                mismatches.append("\(label): extraído \(extracted) vs declarado \(absolute(expected))")
+            }
+        }
+
+        if kind == .bank {
+            compare("depósitos", extracted: deposits, expected: summary.depositTotal)
+            compare("retiros", extracted: withdrawals, expected: summary.withdrawalTotal)
+            if summary.depositTotal == nil && summary.withdrawalTotal == nil {
+                return StatementReconciliationRecord(
+                    status: .pending,
+                    tolerance: tolerance,
+                    extractedDepositTotal: deposits,
+                    extractedWithdrawalTotal: withdrawals,
+                    extractedMovementCount: movementCount,
+                    reason: "No se encontraron totales de depósitos/retiros en el resumen bancario."
+                )
+            }
+            if deposits == 0 && withdrawals == 0 && (summary.depositTotal ?? 0) + (summary.withdrawalTotal ?? 0) > tolerance {
+                mismatches.append("no se reconstruyeron filas de movimientos")
+            }
+        } else if kind == .card {
+            let declaredChargeCandidates = [summary.newTransactions, summary.newCharges].compactMap { $0 }.map(absolute)
+            if declaredChargeCandidates.isEmpty {
+                return StatementReconciliationRecord(
+                    status: .pending,
+                    tolerance: tolerance,
+                    extractedChargeTotal: charges,
+                    extractedPaymentTotal: payments,
+                    extractedMovementCount: movementCount,
+                    reason: "No se encontró total de cargos/transacciones en el resumen de tarjeta."
+                )
+            }
+            // Amex prints both "nuevas transacciones" and "nuevos cargos"
+            // (the latter also includes MSI/fees). Accept either authoritative
+            // total because the parser may expose one or both table sections.
+            let chargeMatches = declaredChargeCandidates.contains { absolute(charges - $0) <= tolerance }
+            if !chargeMatches {
+                let declaredText = declaredChargeCandidates
+                    .map { NSDecimalNumber(decimal: $0).stringValue }
+                    .joined(separator: " o ")
+                mismatches.append("cargos: extraído \(charges) vs declarado \(declaredText)")
+            }
+            if charges == 0 && declaredChargeCandidates.contains(where: { $0 > tolerance }) {
+                mismatches.append("no se reconstruyeron filas de compras")
+            }
+        } else {
+            return StatementReconciliationRecord(
+                status: .pending,
+                tolerance: tolerance,
+                extractedDepositTotal: deposits,
+                extractedWithdrawalTotal: withdrawals,
+                extractedChargeTotal: charges,
+                extractedPaymentTotal: payments,
+                extractedMovementCount: movementCount,
+                reason: "No se pudo determinar si el estado es bancario o de tarjeta."
+            )
+        }
+
+        return StatementReconciliationRecord(
+            status: mismatches.isEmpty ? .valid : .invalid,
+            tolerance: tolerance,
+            extractedDepositTotal: kind == .bank ? deposits : nil,
+            extractedWithdrawalTotal: kind == .bank ? withdrawals : nil,
+            extractedChargeTotal: kind == .card ? charges : nil,
+            extractedPaymentTotal: kind == .card ? payments : nil,
+            extractedMovementCount: movementCount,
+            reason: mismatches.isEmpty ? nil : mismatches.joined(separator: "; ")
+        )
+    }
+
     func importPDF(
         from url: URL,
         allowOCR: Bool = true,
-        preserveExistingOnEmpty: Bool = false
+        preserveExistingOnEmpty: Bool = false,
+        requireValidReconciliation: Bool = false
     ) throws -> ImportSummary {
         let didStartAccessing = url.startAccessingSecurityScopedResource()
         defer {
@@ -1200,14 +1597,27 @@ final class FinanceStore {
         if preserveExistingOnEmpty, fresh.isEmpty, existingStatement != nil {
             throw FinanceImportError.emptyDocument
         }
+        let reconciliation = reconcileStatement(kind: detectedKind, summary: summary, movements: fresh)
+        if requireValidReconciliation, reconciliation.status != .valid {
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "import.reconciliation",
+                message: "\(url.lastPathComponent): \(reconciliation.reason ?? "estado pendiente")"
+            )
+        }
         let needsReview = fresh.isEmpty
-            || usedOCR
             || summary == nil
             || detectedKind == .unknown
+            || reconciliation.status != .valid
             || fresh.contains { $0.category == "Por revisar" }
 
+        // Invalid/pending rows are quarantined by omission: the statement and
+        // its reconciliation evidence remain visible in diagnostics, while
+        // no questionable amount can leak into any KPI or chart.
+        let canonicalFresh = reconciliation.status == .valid ? fresh : []
+
         movements.removeAll { $0.statementId == statementId }
-        movements.insert(contentsOf: fresh.reversed(), at: 0)
+        movements.insert(contentsOf: canonicalFresh.reversed(), at: 0)
         let storedFileName = persistStatementFile(documentData, statementId: statementId)
             ?? existingStatement?.localFileName
         let statement = StatementRecord(
@@ -1220,7 +1630,8 @@ final class FinanceStore {
             transactionCount: fresh.count,
             requiresReview: needsReview,
             kind: detectedKind,
-            summary: summary
+            summary: summary,
+            reconciliation: reconciliation
         )
         if let index = statements.firstIndex(where: { $0.id == statementId }) {
             statements[index] = statement
@@ -1236,13 +1647,14 @@ final class FinanceStore {
             source: source,
             period: period,
             fileName: url.lastPathComponent,
-            imported: fresh.count,
+            imported: canonicalFresh.count,
             // Rows are scoped to their statement; identical purchases from a
             // different import are legitimate and are never treated as repeats.
             skipped: 0,
             requiresReview: needsReview,
             summary: summary,
-            usedOCR: usedOCR
+            usedOCR: usedOCR,
+            reconciliation: reconciliation
         )
     }
 
@@ -2430,6 +2842,33 @@ final class FinanceStore {
             return parseAmount(String(normalized[valueRange]))
         }
 
+        // Bank summaries commonly print a row count before the monetary
+        // total (for example, "Depósitos 9 $36,187.42"). The generic helper
+        // above intentionally takes the first token for card labels, so use
+        // the last monetary token for bank totals to avoid recording `9` as
+        // the declared amount.
+        func lastAmountOnLabel(_ labels: [String]) -> Decimal? {
+            let amountPattern = #"[-+]?\s*\$?\s*(?:\d{1,3}(?:[,.]\d{3})+|\d+)(?:[,.]\d{1,2})?"#
+            guard let amountRegex = try? NSRegularExpression(pattern: amountPattern) else { return nil }
+            for line in normalized.components(separatedBy: .newlines) {
+                guard labels.contains(where: { line.contains($0) }) else { continue }
+                // A transaction description can itself contain "depósito" or
+                // "retiro". Summary rows do not carry a date, so ignore
+                // date-anchored lines before taking their monetary token.
+                if line.range(of: #"(?<!\d)\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}(?!\d)"#, options: .regularExpression) != nil {
+                    continue
+                }
+                let lineRange = NSRange(line.startIndex..<line.endIndex, in: line)
+                let matches = amountRegex.matches(in: line, range: lineRange)
+                if let match = matches.last,
+                   let valueRange = Range(match.range, in: line),
+                   let value = parseAmount(String(line[valueRange])) {
+                    return value
+                }
+            }
+            return nil
+        }
+
         var summary = StatementSummaryRecord()
         var hasValue = false
         func assign(_ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>, _ value: Decimal?) {
@@ -2451,6 +2890,8 @@ final class FinanceStore {
         assign(\.paymentForNoInterest, amount(after: ["pago para no generar intereses", "pago para no generar interes"]))
         assign(\.msiPending, amount(after: ["msi pendientes", "saldo msi", "principal diferido"]))
         assign(\.revolvingBalance, amount(after: ["saldo revolvente", "saldo revolvente al corte"]))
+        assign(\.depositTotal, lastAmountOnLabel(["depositos", "depositos / abonos", "total importe abonos", "total de abonos", "abonos del periodo"]))
+        assign(\.withdrawalTotal, lastAmountOnLabel(["retiros", "retiros / cargos", "total importe cargos", "total de cargos", "cargos del periodo"]))
         if source.localizedCaseInsensitiveContains("Amex") {
             summary.debtBalance = summary.statementBalance
         } else {

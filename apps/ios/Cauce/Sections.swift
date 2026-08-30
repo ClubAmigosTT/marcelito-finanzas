@@ -416,7 +416,12 @@ struct ExpensesView: View {
     @ViewBuilder
     private var expenseRows: some View {
         List {
-            if groups.isEmpty {
+            if store.dashboardIsBlocked {
+                Section {
+                    LedgerQualityBanner(store: store)
+                    HistoricalDashboardBlockedCard(store: store)
+                }
+            } else if groups.isEmpty {
                 ContentUnavailableView("Sin gastos", systemImage: "chart.pie", description: Text("Importa un estado de cuenta para construir tus categorías reales."))
             } else {
                 identifiedExpensesSection
@@ -718,6 +723,7 @@ private struct AccountSummaryRow: View {
     }
 
     private var balanceText: String {
+        if store.dashboardIsBlocked { return "Bloqueado" }
         guard let balance = kind == .card ? metric?.debtBalance : metric?.cashBalance else {
             return "Pendiente"
         }
@@ -768,6 +774,9 @@ struct AccountsView: View {
         NavigationStack {
             List {
                 Section("Cuentas") {
+                    if store.dashboardIsBlocked {
+                        LedgerQualityBanner(store: store)
+                    }
                     ForEach(displayedSources, id: \.self) { source in
                         AccountSummaryRow(source: source)
                     }
@@ -897,7 +906,9 @@ private struct AccountDetailView: View {
 
     @ViewBuilder
     private var trendSection: some View {
-        if trend.isEmpty {
+        if store.dashboardIsBlocked {
+            HistoricalDashboardBlockedCard(store: store)
+        } else if trend.isEmpty {
             Text("Aún no hay suficientes cortes para mostrar una tendencia.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
@@ -1146,6 +1157,8 @@ private struct StatementSummaryEditor: View {
             } else {
                 Section("Banco") {
                     decimalField("Efectivo disponible", \.cashBalance)
+                    decimalField("Depósitos / abonos", \.depositTotal)
+                    decimalField("Retiros / cargos", \.withdrawalTotal)
                 }
             }
             Section {
@@ -1170,12 +1183,19 @@ struct NetWorthView: View {
     @State private var selectedMetric: DashboardMetric?
 
     private var patrimonyText: String {
+        if store.dashboardIsBlocked { return "Bloqueado" }
         store.liquidPatrimony?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "—"
     }
 
     var body: some View {
         NavigationStack {
             List {
+                if store.dashboardIsBlocked {
+                    Section {
+                        LedgerQualityBanner(store: store)
+                        HistoricalDashboardBlockedCard(store: store)
+                    }
+                }
                 Section {
                     Button {
                         selectedMetric = .patrimony
@@ -1195,9 +1215,9 @@ struct NetWorthView: View {
                     .padding(.vertical, 10)
                 }
                 Section("Saldos calculados") {
-                    LabeledContent("Efectivo disponible", value: store.cashAvailable?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
-                    LabeledContent("Deuda total", value: store.debtTotal?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
-                    LabeledContent("Utilización de crédito", value: store.creditUtilizationRate.map { "\(Int((NSDecimalNumber(decimal: $0).doubleValue * 100).rounded()))%" } ?? "Pendiente")
+                    LabeledContent("Efectivo disponible", value: store.dashboardIsBlocked ? "Bloqueado" : (store.cashAvailable?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"))
+                    LabeledContent("Deuda total", value: store.dashboardIsBlocked ? "Bloqueado" : (store.debtTotal?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"))
+                    LabeledContent("Utilización de crédito", value: store.dashboardIsBlocked ? "Bloqueado" : (store.creditUtilizationRate.map { "\(Int((NSDecimalNumber(decimal: $0).doubleValue * 100).rounded()))%" } ?? "Pendiente"))
                 }
             }
             .navigationTitle("Patrimonio")

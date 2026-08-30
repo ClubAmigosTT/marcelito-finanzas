@@ -99,6 +99,7 @@ enum DiagnosticsRecorder {
 }
 
 struct DiagnosticsView: View {
+    @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
     @State private var events = DiagnosticsRecorder.events
@@ -126,6 +127,42 @@ struct DiagnosticsView: View {
                         .foregroundStyle(.secondary)
                 } header: {
                     Text("Estado de la sesión")
+                }
+
+                Section("Libro canónico") {
+                    LabeledContent("Estados", value: "\(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount) conciliados")
+                    LabeledContent("Movimientos canónicos", value: "\(store.ledgerQuality.movementCount)")
+                    LabeledContent("Importes fuera de rango", value: "\(store.ledgerQuality.absurdMovementCount)")
+                    if let message = store.ledgerQuality.message {
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(Color.marcelitoDanger)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    ForEach(store.statements) { statement in
+                        VStack(alignment: .leading, spacing: 3) {
+                            HStack {
+                                Text("\(statement.source) · \(conciseStatementPeriod(statement))")
+                                    .font(.subheadline.weight(.semibold))
+                                Spacer()
+                                Text(reconciliationLabel(statement))
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(reconciliationColor(statement))
+                            }
+                            if let reason = statement.reconciliation?.reason {
+                                Text(reason)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                    ForEach(store.consistencyChecks) { check in
+                        let mark = check.passed ? "✓" : "!"
+                        Text("\(mark) \(check.label)")
+                            .font(.caption)
+                            .foregroundStyle(check.passed ? Color.marcelitoSuccess : Color.marcelitoDanger)
+                    }
                 }
 
                 Section("Eventos recientes") {
@@ -182,6 +219,22 @@ struct DiagnosticsView: View {
             } message: {
                 Text("Puedes pegarlo en el reporte de TestFlight sin adjuntar tus estados de cuenta.")
             }
+        }
+    }
+
+    private func reconciliationLabel(_ statement: StatementRecord) -> String {
+        switch statement.reconciliation?.status {
+        case .valid: return "Conciliado"
+        case .invalid: return "Inválido"
+        case .pending, .none: return "Pendiente"
+        }
+    }
+
+    private func reconciliationColor(_ statement: StatementRecord) -> Color {
+        switch statement.reconciliation?.status {
+        case .valid: return Color.marcelitoSuccess
+        case .invalid: return Color.marcelitoDanger
+        case .pending, .none: return Color.marcelitoAmber
         }
     }
 }

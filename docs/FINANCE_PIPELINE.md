@@ -17,4 +17,15 @@ este orden, antes de que cualquier cifra llegue al dashboard:
 
 El bloque de auditoría del Inicio expone los conteos y montos de cada periodo. También muestra las identidades contables y marca los KPI como provisionales cuando hay filas rechazadas, movimientos relevantes por revisar o una conciliación fuera de tolerancia.
 
+## Reconstrucción canónica en iOS
+
+La siguiente actualización de la app ejecuta una migración única (canonicalRebuild.v1):
+
+1. Captura los PDFs locales y elimina todos los movimientos ligados a estados anteriores; conserva únicamente movimientos manuales.
+2. Deduplica archivos por huella SHA-256 y reimporta cada estado con extracción, OCR y controles de totales.
+3. Guarda el estado y su evidencia de conciliación. Las filas de estados inválidos o pendientes quedan fuera del libro canónico, aunque el documento permanece visible en Diagnóstico.
+4. Solo estados con status valid alimentan saldos, gasto, flujo, patrimonio y gráficas. Si falta alguno de los diez estados validados o aparece una inconsistencia, los KPI e históricos se muestran como bloqueados.
+
+En iOS, Resumen, Gastos, Cuentas, Patrimonio y sus tendencias leen el mismo arreglo persistido de movimientos canónicos. El menú Diagnóstico muestra el porcentaje conciliado, cada estado, los motivos de bloqueo y las identidades contables.
+
 Las pruebas reproducibles se ejecutan con `node --experimental-strip-types --test tests/reconciliation.test.ts` y cubren encabezados numéricos, compras idénticas, traslados propios, pagos de Amex y estados traslapados.

@@ -58,6 +58,15 @@ test("el pipeline rechaza fechas imposibles aunque tengan importe y descripción
   assert.equal(result.audit.invalidCount, 1);
 });
 
+test("el pipeline rechaza importes absurdos de encabezados o identificadores", () => {
+  const statements = [bank("bbva", "BBVA", "agosto 2026")];
+  const result = runTransactionPipeline([
+    movement({ id: "header-number", date: "10 ago 2026", description: "COMPRA", account: "BBVA", amount: -12345678.9, flow: "expense", statementId: "bbva" }),
+  ], statements);
+  assert.equal(result.transactions.length, 0);
+  assert.equal(result.audit.invalidCount, 1);
+});
+
 test("la llave dedup conserva compras idénticas del mismo estado y elimina el solapamiento", () => {
   const statements = [bank("bbva-jul", "BBVA", "julio 2026"), bank("bbva-ago", "BBVA", "agosto 2026")];
   const first = movement({ id: "a", date: "10 ago 2026", description: "SUPERMERCADO", account: "BBVA", amount: -100, flow: "expense", statementId: "bbva-jul" });
@@ -272,6 +281,20 @@ test("los totales bancarios declarados bloquean una importación que no concilia
   assert.equal(reconciliation.status, "invalid");
 });
 
+test("un estado marcado como inválido bloquea el gasto aunque existan filas heredadas", () => {
+  const statements: Statement[] = [{
+    ...bank("bbva-ago", "BBVA", "agosto 2026"),
+    reconciliationStatus: "invalid",
+    reconciliation: { status: "invalid", tolerance: 0.05, reason: "totales no concilian" },
+  }];
+  const transactions = [movement({ id: "legacy", date: "10 ago 2026", description: "SUPERMERCADO", account: "BBVA", amount: -2500, flow: "expense", statementId: "bbva-ago" })];
+  const pipeline = runTransactionPipeline(transactions, statements);
+  const metrics = buildFinanceMetrics(transactions, statements, pipeline);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.isProvisional, true);
+  assert.equal(metrics.dataQuality.critical, true);
+});
+
 test("el último corte se elige por fecha de cierre y no por orden de importación", () => {
   const statements: Statement[] = [
     { ...bank("santander-may", "Santander", "16/05/2026 AL 15/06/2026"), summary: { cashBalance: 24621.48 } },
@@ -293,4 +316,16 @@ test("una cuenta bancaria y una tarjeta del mismo emisor conservan sus saldos", 
   assert.equal(metrics.cashAvailable, 27654.24);
   assert.equal(metrics.debtTotal, 5000);
   assert.equal(metrics.liquidPatrimony, 22654.24);
+});
+
+test("los tres saldos de prueba producen efectivo y patrimonio auditables", () => {
+  const statements: Statement[] = [
+    { ...bank("santander-ago", "Santander", "15/08/2026"), summary: { cashBalance: 27654.24 } },
+    { ...bank("bbva-ago", "BBVA", "31/08/2026"), summary: { cashBalance: 1030.94 } },
+    { ...card("amex-ago", "Amex", "27/08/2026", 50367.21), summary: { debtBalance: 50367.21, creditLimit: 150000, creditAvailable: 99632.79 } },
+  ];
+  const metrics = buildFinanceMetrics([], statements);
+  assert.equal(metrics.cashAvailable, 28685.18);
+  assert.ok(Math.abs((metrics.debtTotal ?? 0) - 50367.21) < 0.001);
+  assert.ok(Math.abs((metrics.liquidPatrimony ?? 0) - (-21682.03)) < 0.001);
 });

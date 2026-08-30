@@ -39,8 +39,13 @@ struct HomeView: View {
         LazyVStack(alignment: .leading, spacing: 18) {
             if hasData {
                 NetWorthSummary(store: store)
+                LedgerQualityBanner(store: store)
                 MetricsStrip()
-                CashFlowChart(store: store)
+                if store.dashboardIsBlocked {
+                    HistoricalDashboardBlockedCard(store: store)
+                } else {
+                    CashFlowChart(store: store)
+                }
             } else {
                 EmptyDataCard { isImporterPresented = true }
             }
@@ -195,16 +200,22 @@ struct HomeView: View {
                 Text("Se borrarán tu usuario, movimientos y estados importados de este dispositivo. Esta acción no se puede deshacer.")
             }
             .task {
-                guard store.hasStoredImportsNeedingRepair else { return }
+                guard store.hasCanonicalRebuildPending else { return }
                 isImporting = true
                 importProgress = 0
-                importStatus = "Actualizando cifras y conciliación…"
+                importStatus = "Reconstruyendo el libro canónico…"
                 await Task.yield()
-                let repaired = store.repairStoredImportsIfNeeded()
+                let result = store.rebuildCanonicalLedgerIfNeeded { completed, total, fileName in
+                    let denominator = max(total, 1)
+                    importProgress = Int((Double(completed) / Double(denominator) * 100).rounded())
+                    importStatus = "Validando \(fileName)…"
+                }
                 importProgress = 100
-                importStatus = repaired == 1
-                    ? "1 estado recalculado"
-                    : "\(repaired) estados recalculados"
+                if result.invalidCount > 0 {
+                    importStatus = "\(result.importedCount) estados listos · \(result.invalidCount) requieren revisión"
+                } else {
+                    importStatus = "\(result.importedCount) estados reconstruidos"
+                }
                 await Task.yield()
                 isImporting = false
             }
@@ -488,6 +499,63 @@ private struct EmptyDataCard: View {
     }
 }
 
+struct LedgerQualityBanner: View {
+    let store: FinanceStore
+
+    private var percentText: String {
+        "\(Int(store.ledgerQuality.reconciledPercent.rounded()))% conciliado"
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: store.dashboardIsBlocked ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
+                .foregroundStyle(store.dashboardIsBlocked ? Color.marcelitoAmber : Color.marcelitoSuccess)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Calidad de datos / conciliación")
+                    .font(.caption.weight(.semibold))
+                Text(percentText)
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                if let message = store.ledgerQuality.message {
+                    Text(message)
+                        .font(.caption2)
+                        .foregroundStyle(store.dashboardIsBlocked ? Color.marcelitoAmber : .secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .foregroundStyle(Color.marcelitoNavy)
+        .padding(12)
+        .background(
+            (store.dashboardIsBlocked ? Color.marcelitoAmber : Color.marcelitoSuccess).opacity(0.10),
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Calidad de datos \(percentText)")
+    }
+}
+
+struct HistoricalDashboardBlockedCard: View {
+    let store: FinanceStore
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Histórico bloqueado", systemImage: "lock.fill")
+                .font(.subheadline.weight(.semibold))
+            Text(store.ledgerQuality.message ?? "Valida los estados de cuenta antes de usar tendencias históricas.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text("Los movimientos cuestionables se conservaron fuera del libro canónico.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .foregroundStyle(Color.marcelitoNavy)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 18)
+    }
+}
+
 private struct ImportProgressOverlay: View {
     let progress: Int
     let status: String
@@ -585,11 +653,13 @@ private struct NetWorthSummary: View {
     @State private var selectedMetric: DashboardMetric?
 
     private var displayValue: String {
+        if store.dashboardIsBlocked { return "Bloqueado" }
         guard let value = store.liquidPatrimony else { return "—" }
         return value.formatted(.currency(code: "MXN").precision(.fractionLength(0)))
     }
 
     private var trendText: String {
+        if store.dashboardIsBlocked { return "Conciliación requerida antes de mostrar el patrimonio" }
         guard let trend = store.liquidPatrimonyChangePercent else { return "Compara con tu siguiente corte" }
         let percent = Int((NSDecimalNumber(decimal: trend).doubleValue * 100).rounded())
         return "\(percent >= 0 ? "+" : "−")\(abs(percent))% vs mes anterior"
@@ -633,6 +703,7 @@ private struct DecisionMetricsView: View {
     @Environment(FinanceStore.self) private var store
 
     private func money(_ value: Decimal?) -> String {
+        if store.dashboardIsBlocked { return "Bloqueado" }
         value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
     }
 
@@ -702,6 +773,7 @@ private struct MetricsStrip: View {
     @State private var selectedMetric: DashboardMetric?
 
     private func money(_ value: Decimal?) -> String {
+        if store.dashboardIsBlocked { return "Bloqueado" }
         value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
     }
 
@@ -831,7 +903,7 @@ struct MetricDetailSheet: View {
                         Label(metric.title, systemImage: metric.symbol)
                             .font(.headline)
                             .foregroundStyle(metric.color)
-                        Text(value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
+                        Text(store.dashboardIsBlocked ? "Bloqueado" : (value?.formatted(.currency(code: "MXN").precision(.fractionLength(0)) ?? "Pendiente"))
                             .font(.system(.largeTitle, design: .rounded).weight(.bold))
                             .monospacedDigit()
                             .foregroundStyle(Color.marcelitoNavy)
@@ -840,7 +912,9 @@ struct MetricDetailSheet: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    if trend.isEmpty {
+                    if store.dashboardIsBlocked {
+                        HistoricalDashboardBlockedCard(store: store)
+                    } else if trend.isEmpty {
                         Text("Aún no hay suficientes periodos para mostrar una tendencia.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
