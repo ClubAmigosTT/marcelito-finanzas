@@ -903,7 +903,7 @@ struct MetricDetailSheet: View {
                         Label(metric.title, systemImage: metric.symbol)
                             .font(.headline)
                             .foregroundStyle(metric.color)
-                        Text(store.dashboardIsBlocked ? "Bloqueado" : (value?.formatted(.currency(code: "MXN").precision(.fractionLength(0)) ?? "Pendiente"))
+                        Text(store.dashboardIsBlocked ? "Bloqueado" : (value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"))
                             .font(.system(.largeTitle, design: .rounded).weight(.bold))
                             .monospacedDigit()
                             .foregroundStyle(Color.marcelitoNavy)
