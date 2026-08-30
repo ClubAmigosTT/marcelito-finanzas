@@ -224,7 +224,7 @@ function AuthGate({ onEnter }: { onEnter: (name: string) => void }) {
   return (
     <main className="auth-shell">
       <section className="auth-story" aria-label="Presentación de Marcelito">
-        <div className="brand brand-large"><span className="brand-mark">M</span><span>Marcelito</span></div>
+        <div className="brand brand-large"><img className="brand-mark" src="/icons/icon-192.png" alt="" /><span>Marcelito</span></div>
         <div className="auth-message">
           <p className="auth-kicker">Tus cuentas, una sola historia</p>
           <h1>Entiende el camino completo de tu dinero.</h1>
@@ -236,7 +236,7 @@ function AuthGate({ onEnter }: { onEnter: (name: string) => void }) {
       </section>
       <section className="auth-panel">
         <form onSubmit={submit} className="auth-form">
-          <div className="mobile-brand brand"><span className="brand-mark">M</span><span>Marcelito</span></div>
+          <div className="mobile-brand brand"><img className="brand-mark" src="/icons/icon-192.png" alt="" /><span>Marcelito</span></div>
           <div>
             <h2>{mode === "create" ? "Crea tu acceso" : "Bienvenido de nuevo"}</h2>
             <p>{mode === "create" ? "Tus datos se guardan localmente en este dispositivo." : "Entra a tu panorama financiero personal."}</p>
@@ -350,7 +350,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   return (
     <div className="app-shell">
       <aside className="sidebar">
-        <div className="brand"><span className="brand-mark">M</span><span>Marcelito</span></div>
+        <div className="brand"><img className="brand-mark" src="/icons/icon-192.png" alt="" /><span>Marcelito</span></div>
         <nav aria-label="Navegación principal">
           {navItems.map(({ label, icon: Icon }) => (
             <button key={label} className={section === label ? "nav-item active" : "nav-item"} onClick={() => setSection(label)} aria-current={section === label ? "page" : undefined}>
