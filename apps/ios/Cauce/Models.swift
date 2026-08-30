@@ -1264,7 +1264,18 @@ final class FinanceStore {
             guard seenFingerprints.insert(fingerprint).inserted else { return nil }
             return url
         }
-        defaults.set(candidates.count, forKey: canonicalRebuildExpectedCountKey)
+        // Keep a conservative count when an older build indexed more
+        // statements than it could physically retain. In particular, the
+        // legacy importer could point several records at one overwritten PDF;
+        // using only `candidates.count` would make a one-file rebuild look
+        // complete and silently lose the rest of the user's history. Distinct
+        // source/kind/period keys avoid penalizing a repeated upload of the
+        // same statement while still requiring every known cutoff to be
+        // revalidated.
+        let statementKeys = Set(statements.map { statement in
+            "\(normalizedConcept(statement.source))|\(statementKind(statement).rawValue)|\(normalizedConcept(statement.period))"
+        })
+        defaults.set(max(candidates.count, statementKeys.count), forKey: canonicalRebuildExpectedCountKey)
 
         movements = movements.filter { $0.statementId == nil }
         statements = []
