@@ -1285,6 +1285,8 @@ final class FinanceStore {
     func clearLocalData() {
         movements = []
         statements = []
+        ledgerVersion = UUID()
+        lastAuditRun = nil
         lastImportedFile = nil
         persist()
         let defaults = UserDefaults.standard

@@ -345,3 +345,16 @@ test("la auditoría es determinista respecto al orden de importación", () => {
   assert.equal(firstAudit.ledgerFingerprint, secondAudit.ledgerFingerprint);
   assert.equal(firstAudit.canonicalMovementCount, secondAudit.canonicalMovementCount);
 });
+
+test("la auditoría bloquea un estado pendiente aunque no queden filas canónicas", () => {
+  const statements: Statement[] = [{
+    ...bank("bbva-ago", "BBVA", "agosto 2026"),
+    reconciliationStatus: "pending",
+    reconciliation: { status: "pending", tolerance: 0.05, reason: "falta el total del estado" },
+  }];
+  const pipeline = runTransactionPipeline([], statements);
+  const audit = createAuditRun(pipeline, statements, pipeline.transactions, "startup");
+  assert.equal(audit.status, "blocked");
+  assert.equal(audit.reconciledStatementCount, 0);
+  assert.match(audit.message ?? "", /pendientes/);
+});
