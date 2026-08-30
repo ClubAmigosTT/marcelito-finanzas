@@ -599,15 +599,10 @@ struct AccountsView: View {
                     ForEach(displayedSources, id: \.self) { source in
                         let sourceStatements = store.statements.filter { $0.source == source }
                         let latest = sourceStatements.first
-                        // Keep each lookup as a separate expression.  The nested
-                        // optional/collection closures here are otherwise too
-                        // complex for Swift's type checker in Release builds.
                         let latestID = latest?.id
                         let metric: StatementMetric?
                         if let statementID = latestID {
-                            metric = store.periodMetrics.first { candidate in
-                                candidate.id == statementID
-                            }
+                            metric = store.metric(for: statementID)
                         } else {
                             metric = nil
                         }

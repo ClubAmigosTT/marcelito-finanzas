@@ -249,6 +249,17 @@ final class FinanceStore {
     var periodMetrics: [StatementMetric] { statements.map { calculateMetric(for: $0) }.sorted { periodKey($0.period) > periodKey($1.period) } }
     var cardPeriodMetrics: [StatementMetric] { periodMetrics.filter { $0.kind == .card } }
     var cardPeriodCount: Int { Set(cardPeriodMetrics.map { periodKey($0.period) }).count }
+
+    /// Resolves a statement metric outside of a SwiftUI view builder. Keeping
+    /// the lookup here avoids making the compiler type-check the entire
+    /// calculated-metrics expression while it is building a `ForEach` row.
+    func metric(for statementID: UUID) -> StatementMetric? {
+        for candidate in periodMetrics where candidate.id == statementID {
+            return candidate
+        }
+        return nil
+    }
+
     var totalNewTransactions: Decimal {
         movements.filter { isCardMovement($0) && movementKind($0) == .purchase }.reduce(0) { $0 + absolute($1.amount) }
     }
