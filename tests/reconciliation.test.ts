@@ -235,6 +235,35 @@ test("el parser acepta fechas OCR y BBVA usa el primer importe, no el saldo corr
   assert.equal(periodKeyFromLabel("DEL 15/07/2026 AL 14/08/2026"), "2026-08");
 });
 
+test("el estado BBVA completo reconstruye sus 11 filas y concilia los totales", () => {
+  const text = [
+    "Periodo DEL 15/07/2026 AL 14/08/2026",
+    "Saldo Anterior 3,589.63",
+    "Depósitos / Abonos (+) 2 19,500.00",
+    "Retiros / Cargos (-) 9 22,058.69",
+    "Saldo Final 1,030.94",
+    "Detalle de Movimientos Realizados",
+    "23/JUL 22/JUL FACEBK *XR4NKVVF52 120.00 3,469.63 3,469.63",
+    "27/JUL 27/JUL SPEI RECIBIDONVIO 15,000.00 18,469.63 18,469.63",
+    "29/JUL 29/JUL SPEI ENVIADO STP 13,000.00 5,469.63 5,369.63",
+    "30/JUL 30/JUL SPEI ENVIADO STP 500.00",
+    "30/JUL 29/JUL TELEF MOVIS MC INSURGE 100.00 4,869.63 4,869.63",
+    "03/AGO 04/AGO PAGO CUENTA DE TERCERO 3,253.00 1,616.63 4,869.63",
+    "05/AGO 05/AGO SPEI RECIBIDOSANTANDER 4,500.00 6,116.63 6,116.63",
+    "06/AGO 06/AGO RETIRO CAJERO AUTOMATICO 4,515.83 1,600.80 1,530.94",
+    "07/AGO 06/AGO COMISION CAJERO RED 60.23",
+    "07/AGO 06/AGO IVA REP TARJ TIT 9.63 1,530.94 1,530.94",
+    "10/AGO 10/AGO SPEI ENVIADO STP 500.00 1,030.94 1,030.94",
+  ].join("\n");
+  const rows = extractTransactions(text, "BBVA", "BBVA agosto.pdf", "bank");
+  const summary = parseStatementSummary(text, "bank");
+  assert.equal(rows.length, 11);
+  assert.equal(rows.filter((row) => row.amount > 0).length, 2);
+  assert.equal(rows.filter((row) => row.amount < 0).length, 9);
+  assert.equal(rows.find((row) => row.description.includes("RECIBIDOSANTANDER"))?.amount, 4500);
+  assert.equal(reconcileStatementImport("bank", summary, rows).status, "valid");
+});
+
 test("BBVA no se convierte en Santander por una contraparte dentro de movimientos", () => {
   const text = [
     "Estado de Cuenta",
