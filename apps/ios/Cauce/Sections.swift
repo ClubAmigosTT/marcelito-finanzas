@@ -717,76 +717,53 @@ private struct AccountDetailView: View {
         }
     }
 
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(source, systemImage: kind == .card ? "creditcard.fill" : "building.columns.fill")
+                .font(.headline)
+                .foregroundStyle(Color.marcelitoNavyMid)
+            Text(balance?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
+                .font(.system(.largeTitle, design: .rounded).weight(.bold))
+                .monospacedDigit()
+                .foregroundStyle(Color.marcelitoNavy)
+            Text(kind == .card ? "Deuda registrada al último corte." : "Efectivo disponible al último corte.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var paymentSummary: some View {
+        if let latest, kind == .card {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Próxima decisión")
+                    .font(.subheadline.weight(.semibold))
+                LabeledContent("Pago para no generar intereses", value: latest.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
+                LabeledContent("Pago mínimo", value: latest.minimumPayment?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
+            }
+            .foregroundStyle(Color.marcelitoNavy)
+            .padding(16)
+            .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        }
+    }
+
+    @ViewBuilder
+    private var trendSection: some View {
+        if trend.isEmpty {
+            Text("Aún no hay suficientes cortes para mostrar una tendencia.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        } else {
+            AccountEvolutionChart(points: trend, source: source, kind: kind)
+        }
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                VStack(alignment: .leading, spacing: 6) {
-                    Label(source, systemImage: kind == .card ? "creditcard.fill" : "building.columns.fill")
-                        .font(.headline)
-                        .foregroundStyle(Color.marcelitoNavyMid)
-                    Text(balance?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
-                        .font(.system(.largeTitle, design: .rounded).weight(.bold))
-                        .monospacedDigit()
-                        .foregroundStyle(Color.marcelitoNavy)
-                    Text(kind == .card ? "Deuda registrada al último corte." : "Efectivo disponible al último corte.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                if let latest, kind == .card {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Próxima decisión")
-                            .font(.subheadline.weight(.semibold))
-                        LabeledContent("Pago para no generar intereses", value: latest.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
-                        LabeledContent("Pago mínimo", value: latest.minimumPayment?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
-                    }
-                    .foregroundStyle(Color.marcelitoNavy)
-                    .padding(16)
-                    .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                }
-
-                if trend.isEmpty {
-                    Text("Aún no hay suficientes cortes para mostrar una tendencia.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                } else {
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Evolución por corte")
-                            .font(.subheadline.weight(.semibold))
-                        Chart {
-                            ForEach(trend) { point in
-                                LineMark(
-                                    x: .value("Periodo", point.label),
-                                    y: .value("Monto", point.value),
-                                    series: .value("Serie", source)
-                                )
-                                .foregroundStyle(kind == .card ? Color.marcelitoNavy : Color.marcelitoNavyMid)
-                                .lineStyle(StrokeStyle(lineWidth: 2.5))
-                                PointMark(
-                                    x: .value("Periodo", point.label),
-                                    y: .value("Monto", point.value)
-                                )
-                                .foregroundStyle(kind == .card ? Color.marcelitoNavy : Color.marcelitoNavyMid)
-                            }
-                        }
-                        .chartXAxis {
-                            AxisMarks(values: .automatic(desiredCount: 4)) { _ in
-                                AxisGridLine()
-                                AxisTick()
-                                AxisValueLabel()
-                            }
-                        }
-                        .chartYAxis {
-                            AxisMarks(position: .leading) { _ in
-                                AxisGridLine()
-                                AxisTick()
-                                AxisValueLabel()
-                            }
-                        }
-                        .frame(height: 180)
-                    }
-                    .foregroundStyle(Color.marcelitoNavy)
-                }
+                header
+                paymentSummary
+                trendSection
             }
             .padding(20)
         }
@@ -794,6 +771,55 @@ private struct AccountDetailView: View {
         .background(Color.marcelitoCream.ignoresSafeArea())
         .navigationTitle("Detalle de cuenta")
         .navigationBarTitleDisplayMode(.inline)
+        .foregroundStyle(Color.marcelitoNavy)
+    }
+}
+
+private struct AccountEvolutionChart: View {
+    let points: [AccountTrendPoint]
+    let source: String
+    let kind: StatementKind
+
+    private var lineColor: Color {
+        kind == .card ? Color.marcelitoNavy : Color.marcelitoNavyMid
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Evolución por corte")
+                .font(.subheadline.weight(.semibold))
+            Chart {
+                ForEach(points) { point in
+                    LineMark(
+                        x: .value("Periodo", point.label),
+                        y: .value("Monto", point.value),
+                        series: .value("Serie", source)
+                    )
+                    .foregroundStyle(lineColor)
+                    .lineStyle(StrokeStyle(lineWidth: 2.5))
+                    PointMark(
+                        x: .value("Periodo", point.label),
+                        y: .value("Monto", point.value)
+                    )
+                    .foregroundStyle(lineColor)
+                }
+            }
+            .chartXAxis {
+                AxisMarks(values: .automatic(desiredCount: 4)) { _ in
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel()
+                }
+            }
+            .chartYAxis {
+                AxisMarks(position: .leading) { _ in
+                    AxisGridLine()
+                    AxisTick()
+                    AxisValueLabel()
+                }
+            }
+            .frame(height: 180)
+        }
         .foregroundStyle(Color.marcelitoNavy)
     }
 }
