@@ -843,86 +843,7 @@ private struct CashFlowChart: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(.vertical, 16)
             } else {
-                Chart {
-                    ForEach(points) { point in
-                        LineMark(
-                            x: .value("Fecha", point.date),
-                            y: .value("Monto", point.income),
-                            series: .value("Serie", "Ingresos")
-                        )
-                        .foregroundStyle(by: .value("Serie", "Ingresos"))
-                        .lineStyle(StrokeStyle(lineWidth: 2.5))
-                        .symbol(Circle())
-
-                        LineMark(
-                            x: .value("Fecha", point.date),
-                            y: .value("Monto", point.expense),
-                            series: .value("Serie", "Gastos")
-                        )
-                        .foregroundStyle(by: .value("Serie", "Gastos"))
-                        .lineStyle(StrokeStyle(lineWidth: 2.5))
-                        .symbol(Circle())
-
-                        LineMark(
-                            x: .value("Fecha", point.date),
-                            y: .value("Monto", point.balance),
-                            series: .value("Serie", "Balance acumulado")
-                        )
-                        .foregroundStyle(by: .value("Serie", "Balance acumulado"))
-                        .lineStyle(StrokeStyle(lineWidth: 2, dash: [6, 4]))
-                        .symbol(Circle())
-                    }
-                    if let selectedPoint {
-                        RuleMark(x: .value("Fecha seleccionada", selectedPoint.date))
-                            .foregroundStyle(Color.marcelitoNavy.opacity(0.35))
-                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                    }
-                }
-                .chartForegroundStyleScale([
-                    "Ingresos": Color.marcelitoSuccess,
-                    "Gastos": Color.marcelitoAmber,
-                    "Balance acumulado": Color.marcelitoNavy
-                ])
-                .chartYScale(domain: yDomain)
-                .chartXAxis {
-                    AxisMarks(values: .automatic(desiredCount: 5)) { _ in
-                        AxisGridLine()
-                        AxisTick()
-                        AxisValueLabel()
-                    }
-                }
-                .chartYAxis {
-                    AxisMarks(position: .leading) { _ in
-                        AxisGridLine()
-                        AxisTick()
-                        AxisValueLabel()
-                    }
-                }
-                .chartLegend(position: .bottom, alignment: .leading, spacing: 12)
-                .chartOverlay { proxy in
-                    GeometryReader { geometry in
-                        Rectangle()
-                            .fill(.clear)
-                            .contentShape(Rectangle())
-                            .gesture(
-                                SpatialTapGesture()
-                                    .onEnded { event in
-                                        let plotFrame = geometry[proxy.plotFrame]
-                                        let x = event.location.x - plotFrame.origin.x
-                                        guard x >= 0, x <= plotFrame.size.width,
-                                              let date = proxy.value(atX: x, as: Date.self),
-                                              let closest = points.min(by: {
-                                                  abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
-                                              }) else { return }
-                                        selectedPoint = closest
-                                    }
-                            )
-                    }
-                }
-                .frame(height: 250)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Gráfica de líneas de ingresos, gastos y balance acumulado por fecha")
-                .accessibilityHint("Toca una fecha para ver sus importes y comportamiento reciente")
+                CashFlowLineChart(points: points, yDomain: yDomain, selectedPoint: $selectedPoint)
 
                 Text("Transferencias internas y pagos de tarjeta no se muestran para no inflar el gasto.")
                     .font(.caption2)
@@ -934,6 +855,95 @@ private struct CashFlowChart: View {
         .sheet(item: $selectedPoint) { point in
             CashFlowPointDetail(point: point, points: points)
         }
+    }
+}
+
+private struct CashFlowLineChart: View {
+    let points: [CashFlowPoint]
+    let yDomain: ClosedRange<Double>
+    @Binding var selectedPoint: CashFlowPoint?
+
+    var body: some View {
+        Chart {
+            ForEach(points) { point in
+                LineMark(
+                    x: .value("Fecha", point.date),
+                    y: .value("Monto", point.income),
+                    series: .value("Serie", "Ingresos")
+                )
+                .foregroundStyle(by: .value("Serie", "Ingresos"))
+                .lineStyle(StrokeStyle(lineWidth: 2.5))
+                .symbol(Circle())
+
+                LineMark(
+                    x: .value("Fecha", point.date),
+                    y: .value("Monto", point.expense),
+                    series: .value("Serie", "Gastos")
+                )
+                .foregroundStyle(by: .value("Serie", "Gastos"))
+                .lineStyle(StrokeStyle(lineWidth: 2.5))
+                .symbol(Circle())
+
+                LineMark(
+                    x: .value("Fecha", point.date),
+                    y: .value("Monto", point.balance),
+                    series: .value("Serie", "Balance acumulado")
+                )
+                .foregroundStyle(by: .value("Serie", "Balance acumulado"))
+                .lineStyle(StrokeStyle(lineWidth: 2, dash: [6, 4]))
+                .symbol(Circle())
+            }
+            if let selectedPoint {
+                RuleMark(x: .value("Fecha seleccionada", selectedPoint.date))
+                    .foregroundStyle(Color.marcelitoNavy.opacity(0.35))
+                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
+            }
+        }
+        .chartForegroundStyleScale([
+            "Ingresos": Color.marcelitoSuccess,
+            "Gastos": Color.marcelitoAmber,
+            "Balance acumulado": Color.marcelitoNavy
+        ])
+        .chartYScale(domain: yDomain)
+        .chartXAxis {
+            AxisMarks(values: .automatic(desiredCount: 5)) { _ in
+                AxisGridLine()
+                AxisTick()
+                AxisValueLabel()
+            }
+        }
+        .chartYAxis {
+            AxisMarks(position: .leading) { _ in
+                AxisGridLine()
+                AxisTick()
+                AxisValueLabel()
+            }
+        }
+        .chartLegend(position: .bottom, alignment: .leading, spacing: 12)
+        .chartOverlay { proxy in
+            GeometryReader { geometry in
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .gesture(
+                        SpatialTapGesture()
+                            .onEnded { event in
+                                let plotFrame = geometry[proxy.plotFrame]
+                                let x = event.location.x - plotFrame.origin.x
+                                guard x >= 0, x <= plotFrame.size.width,
+                                      let date = proxy.value(atX: x, as: Date.self),
+                                      let closest = points.min(by: {
+                                          abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date))
+                                      }) else { return }
+                                selectedPoint = closest
+                            }
+                    )
+            }
+        }
+        .frame(height: 250)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Gráfica de líneas de ingresos, gastos y balance acumulado por fecha")
+        .accessibilityHint("Toca una fecha para ver sus importes y comportamiento reciente")
     }
 }
 
