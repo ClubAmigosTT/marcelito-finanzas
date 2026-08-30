@@ -418,6 +418,28 @@ body { background: var(--bg); color: var(--ink); }
 .trend-values small { color: var(--muted); font-size: 10px; white-space: nowrap; }
 .trend-values .trend-up { color: var(--navy-mid); }
 .trend-values .trend-down { color: var(--expense); }
+.cash-flow-trend-card { margin-top: 14px; }
+.cash-flow-chart-wrap { display: grid; gap: 10px; }
+.cash-flow-chart { width: 100%; height: 280px; overflow: visible; }
+.cash-flow-grid { stroke: var(--line); stroke-width: 1; }
+.cash-flow-zero { stroke: var(--navy-soft); stroke-width: 1.5; stroke-dasharray: 3 4; opacity: .75; }
+.cash-flow-axis-label { fill: var(--muted); font-size: 10px; font-family: ui-sans-serif, system-ui, sans-serif; }
+.cash-flow-line { fill: none; stroke-width: 2.75; stroke-linecap: round; stroke-linejoin: round; }
+.cash-flow-income { stroke: var(--income); }
+.cash-flow-expense { stroke: var(--expense); }
+.cash-flow-balance { stroke: var(--navy); stroke-dasharray: 7 5; }
+.cash-flow-point { stroke-width: 1.5; }
+.cash-flow-income-point { fill: var(--surface); stroke: var(--income); }
+.cash-flow-expense-point { fill: var(--surface); stroke: var(--expense); }
+.cash-flow-balance-point { fill: var(--surface); stroke: var(--navy); }
+.cash-flow-legend { display: flex; flex-wrap: wrap; gap: 15px; color: var(--muted); font-size: 11px; font-weight: 650; }
+.cash-flow-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.cash-flow-legend span::before { content: ""; width: 18px; height: 3px; border-radius: 999px; background: currentColor; }
+.cash-flow-legend-income { color: var(--income); }
+.cash-flow-legend-expense { color: var(--expense); }
+.cash-flow-legend-balance { color: var(--navy); }
+.cash-flow-legend-balance::before { background: repeating-linear-gradient(to right, currentColor 0 7px, transparent 7px 11px) !important; }
+.cash-flow-note { color: var(--muted); font-size: 10px; line-height: 1.45; }
 .spending-split { margin-top: 14px; }
 .split-values { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
 .split-values > div { display: grid; gap: 4px; }

@@ -29,7 +29,7 @@ import {
 } from "@phosphor-icons/react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { categories } from "./data";
-import { buildFinanceMetrics, defaultStatementKind, type AnalyticsPeriod, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
+import { buildFinanceMetrics, defaultStatementKind, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
 import { inspectPdf } from "./pdfImport";
 import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
 import type { FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementSource, StatementSummary, Transaction } from "./types";
@@ -370,6 +370,7 @@ function Home({ transactions, statements, metrics, goals, setGoals, onImport }: 
       </section>
       <ExecutiveSummary metrics={metrics} />
       <SpendTrendChart periods={metrics.analyticsPeriods} />
+      <CashFlowTrendChart points={metrics.cashFlowHistory} />
       <SpendingSplit period={metrics.analyticsPeriods[0]} />
       <ProjectionPanel projection={metrics.projection} />
       <ScenarioSimulator metrics={metrics} />
@@ -543,6 +544,55 @@ function SpendTrendChart({ periods }: { periods: AnalyticsPeriod[] }) {
         {points.map(({ period, x, y }) => <circle key={period.key} cx={x} cy={y} r="5" className="trend-point"><title>{`${period.label}: ${displayMoney(period.spend)}`}</title></circle>)}
       </svg>
       <div className="trend-values">{chartPeriods.map((period) => <div key={period.key}><span>{period.label}</span><strong>{displayMoney(period.spend)}</strong><small className={period.variationPercent !== null && period.variationPercent < 0 ? "trend-down" : "trend-up"}>{comparisonPercent(period.variationPercent)}</small></div>)}</div>
+    </div>
+  </section>;
+}
+
+function CashFlowTrendChart({ points }: { points: CashFlowPoint[] }) {
+  const chartPoints = points.slice(-180);
+  if (!chartPoints.length) return null;
+
+  const width = 720;
+  const height = 280;
+  const padding = { top: 18, right: 18, bottom: 34, left: 78 };
+  const values = chartPoints.flatMap((point) => [point.income, point.expense, point.balance]);
+  const minimum = Math.min(0, ...values);
+  const maximum = Math.max(0, ...values);
+  const range = Math.max(maximum - minimum, 1);
+  const chartRangePadding = Math.max(range * 0.12, 1);
+  const domainMin = minimum - chartRangePadding;
+  const domainMax = maximum + chartRangePadding;
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const xFor = (index: number) => padding.left + (chartPoints.length === 1 ? plotWidth / 2 : (index / (chartPoints.length - 1)) * plotWidth);
+  const yFor = (value: number) => height - padding.bottom - ((value - domainMin) / (domainMax - domainMin)) * plotHeight;
+  const linePoints = (key: "income" | "expense" | "balance") => chartPoints.map((point, index) => `${xFor(index)},${yFor(point[key])}`).join(" ");
+  const labelIndexes = Array.from(new Set([0, Math.floor((chartPoints.length - 1) / 2), chartPoints.length - 1]));
+  const yTicks = [0, 0.5, 1].map((ratio) => domainMin + (domainMax - domainMin) * ratio);
+  const formatAxisMoney = (value: number) => new Intl.NumberFormat("es-MX", { notation: "compact", maximumFractionDigits: 1 }).format(value);
+
+  return <section className="executive-card cash-flow-trend-card" aria-labelledby="cash-flow-trend-title">
+    <div className="section-heading"><div><h2 id="cash-flow-trend-title">Ingresos, gastos y balance</h2><p>Comparación por fecha · balance acumulado = ingresos − gastos.</p></div><span className="summary-period-chip">{chartPoints.length > 1 ? `Últimas ${chartPoints.length} fechas` : "1 fecha"}</span></div>
+    <div className="cash-flow-chart-wrap">
+      <svg className="cash-flow-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Gráfica de líneas de ingresos, gastos y balance acumulado por fecha">
+        {yTicks.map((tick) => <g key={tick}><line x1={padding.left} x2={width - padding.right} y1={yFor(tick)} y2={yFor(tick)} className="cash-flow-grid" /><text x={padding.left - 10} y={yFor(tick) + 4} textAnchor="end" className="cash-flow-axis-label">{formatAxisMoney(tick)}</text></g>)}
+        <line x1={padding.left} x2={width - padding.right} y1={yFor(0)} y2={yFor(0)} className="cash-flow-zero" />
+        <polyline points={linePoints("income")} className="cash-flow-line cash-flow-income" />
+        <polyline points={linePoints("expense")} className="cash-flow-line cash-flow-expense" />
+        <polyline points={linePoints("balance")} className="cash-flow-line cash-flow-balance" />
+        {chartPoints.map((point, index) => <g key={point.key}>
+          <circle cx={xFor(index)} cy={yFor(point.income)} r="3.5" className="cash-flow-point cash-flow-income-point"><title>{`${point.date} · Ingresos: ${displayMoney(point.income)}`}</title></circle>
+          <circle cx={xFor(index)} cy={yFor(point.expense)} r="3.5" className="cash-flow-point cash-flow-expense-point"><title>{`${point.date} · Gastos: ${displayMoney(point.expense)}`}</title></circle>
+          <circle cx={xFor(index)} cy={yFor(point.balance)} r="3.5" className="cash-flow-point cash-flow-balance-point"><title>{`${point.date} · Balance acumulado: ${displayMoney(point.balance)}`}</title></circle>
+        </g>)}
+        {labelIndexes.map((index) => <text key={chartPoints[index].key} x={xFor(index)} y={height - 10} textAnchor={index === 0 ? "start" : index === chartPoints.length - 1 ? "end" : "middle"} className="cash-flow-axis-label">{chartPoints[index].date}</text>)}
+      </svg>
+      <div className="cash-flow-legend" aria-label="Series de la gráfica">
+        <span className="cash-flow-legend-income">Ingresos</span>
+        <span className="cash-flow-legend-expense">Gastos</span>
+        <span className="cash-flow-legend-balance">Balance acumulado</span>
+      </div>
+      <p className="cash-flow-note">Transferencias internas y pagos de tarjeta no se muestran para no inflar el gasto.</p>
     </div>
   </section>;
 }

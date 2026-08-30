@@ -60,6 +60,14 @@ export type AnalyticsPeriod = {
   patrimonyVariationPercent: number | null;
 };
 
+export type CashFlowPoint = {
+  key: string;
+  date: string;
+  income: number;
+  expense: number;
+  balance: number;
+};
+
 export type ProjectionMonth = {
   key: string;
   label: string;
@@ -180,6 +188,7 @@ export type FinanceMetrics = {
   currentMonthSpend: number;
   currentMonthNetFlow: number;
   analyticsPeriods: AnalyticsPeriod[];
+  cashFlowHistory: CashFlowPoint[];
   categoryDistribution: CategorySpend[];
   topMerchants: MerchantSpend[];
   topMovements: MovementSpend[];
@@ -252,6 +261,14 @@ export function inferTransactionKind(transaction: Transaction): TransactionKind 
 
 export function isCardStatement(statement: Statement) {
   return (statement.kind ?? defaultStatementKind(statement.source)) === "card";
+}
+
+function isRealIncomeTransaction(transaction: Transaction, statements: Statement[]) {
+  if (transaction.flow !== "income") return false;
+  const kind = inferTransactionKind(transaction);
+  if (kind === "credit" || kind === "refund") return false;
+  const statement = transaction.statementId ? statements.find((item) => item.id === transaction.statementId) : undefined;
+  return !statement || !isCardStatement(statement);
 }
 
 export function isSpendTransaction(transaction: Transaction) {
@@ -573,7 +590,7 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
     return kind === "bank";
   }).map((transaction) => absolute(transaction.amount)));
   const consolidatedRealSpend = Math.max(0, cardSpend + directBankSpend + manualSpend - refunds);
-  const realIncome = sum(transactions.filter((transaction) => transaction.flow === "income" && !["credit", "refund"].includes(inferTransactionKind(transaction))).map((transaction) => absolute(transaction.amount)));
+  const realIncome = sum(transactions.filter((transaction) => isRealIncomeTransaction(transaction, statements)).map((transaction) => absolute(transaction.amount)));
   const netFlow = realIncome - consolidatedRealSpend;
   const latestBankPeriods = latestBySource(periods.filter((period) => period.kind === "bank"));
   const latestCardPeriods = latestBySource(cardPeriods);
@@ -598,7 +615,7 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
   const currentMonthTransactions = currentPeriods.length
     ? transactions.filter((transaction) => transaction.statementId === undefined || currentStatementIds.has(transaction.statementId))
     : transactions;
-  const currentMonthIncome = sum(currentMonthTransactions.filter((transaction) => transaction.flow === "income" && !["credit", "refund"].includes(inferTransactionKind(transaction))).map((transaction) => absolute(transaction.amount)));
+  const currentMonthIncome = sum(currentMonthTransactions.filter((transaction) => isRealIncomeTransaction(transaction, statements)).map((transaction) => absolute(transaction.amount)));
   const periodGroups = new Map<string, PeriodMetrics[]>();
   periods.forEach((period) => periodGroups.set(period.key, [...(periodGroups.get(period.key) ?? []), period]));
   const periodKeys = Array.from(periodGroups.keys());
@@ -618,7 +635,7 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
     const manualForPeriod = key === currentPeriodKey ? manualSpend : 0;
     const refundsForPeriod = sum(group.map((period) => period.refunds)) + (key === currentPeriodKey ? manualRefunds : 0);
     const spend = Math.max(0, sum(group.map((period) => period.newCharges)) + manualForPeriod - refundsForPeriod);
-    const income = sum(periodTransactions.filter((transaction) => transaction.flow === "income" && !["credit", "refund"].includes(inferTransactionKind(transaction))).map((transaction) => absolute(transaction.amount)));
+    const income = sum(periodTransactions.filter((transaction) => isRealIncomeTransaction(transaction, statements)).map((transaction) => absolute(transaction.amount)));
     const extraordinarySpend = Math.min(spend, sum(linkedSpend.filter(isExtraordinaryTransaction).map((transaction) => absolute(transaction.amount))));
     const travelSpendForPeriod = Math.min(spend, sum(linkedSpend.filter(isTravelTransaction).map((transaction) => absolute(transaction.amount))));
     const bankPeriods = latestBySource(group.filter((period) => period.kind === "bank"));
@@ -790,6 +807,31 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
     currentMonthIncome - currentMonthSpend,
   );
 
+  const cashFlowByDay = new Map<string, { timestamp: number; income: number; expense: number }>();
+  transactions.forEach((transaction) => {
+    const timestamp = dateValue(transaction.date);
+    if (timestamp === undefined) return;
+    const date = new Date(timestamp);
+    const key = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    const current = cashFlowByDay.get(key) ?? { timestamp, income: 0, expense: 0 };
+    if (isRealIncomeTransaction(transaction, statements)) current.income += absolute(transaction.amount);
+    else if (isSpendTransaction(transaction)) current.expense += absolute(transaction.amount);
+    cashFlowByDay.set(key, current);
+  });
+  let runningBalance = 0;
+  const cashFlowHistory = Array.from(cashFlowByDay.entries())
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([key, point]) => {
+      runningBalance += point.income - point.expense;
+      return {
+        key,
+        date: new Intl.DateTimeFormat("es-MX", { day: "2-digit", month: "short", year: "numeric" }).format(new Date(point.timestamp)).replace(".", ""),
+        income: point.income,
+        expense: point.expense,
+        balance: runningBalance,
+      } satisfies CashFlowPoint;
+    });
+
   return {
     periods,
     cardPeriods,
@@ -830,6 +872,7 @@ export function buildFinanceMetrics(transactions: Transaction[], statements: Sta
     currentMonthSpend,
     currentMonthNetFlow: currentMonthIncome - currentMonthSpend,
     analyticsPeriods,
+    cashFlowHistory,
     categoryDistribution,
     topMerchants,
     topMovements,
