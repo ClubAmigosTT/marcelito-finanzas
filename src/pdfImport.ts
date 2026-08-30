@@ -49,11 +49,39 @@ function normalizeText(value: string) {
     .toLowerCase();
 }
 
-function detectSource(text: string, fileName: string): StatementSource {
-  const haystack = normalizeText(`${text} ${fileName}`);
-  if (/santander/.test(haystack)) return "Santander";
-  if (/bbva|bancomer/.test(haystack)) return "BBVA";
-  if (/american express|amex/.test(haystack)) return "Amex";
+/**
+ * Returns the issuer from institutional evidence only. A bank name inside a
+ * transaction description (for example "SPEI RECIBIDO SANTANDER" on a BBVA
+ * statement) is a counterparty, not the issuer of the document.
+ */
+export function detectSource(text: string, fileName: string): StatementSource {
+  const normalizedFileName = normalizeText(fileName);
+  if (/\bbbva\b|bancomer/.test(normalizedFileName)) return "BBVA";
+  if (/american express|\bamex\b/.test(normalizedFileName)) return "Amex";
+  if (/\bsantander\b/.test(normalizedFileName)) return "Santander";
+
+  const normalizedLines = normalizeText(text)
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const institutionalLines: string[] = [];
+  for (const line of normalizedLines.slice(0, 120)) {
+    // The movement table is deliberately excluded from issuer detection.
+    if (/detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripcion|fecha\s+y\s+detalle/.test(line)) break;
+    institutionalLines.push(line);
+  }
+  const institutional = institutionalLines.join(" ");
+
+  // Prefer issuer legal names, domains, and other stable header markers over
+  // short brand mentions that can legitimately occur in a transfer row.
+  if (/bbva\s+m(?:e|é)xico|grupo\s+financiero\s+bbva|bbva\.mx|bba830831lj2/.test(institutional)) return "BBVA";
+  if (/american\s+express|the\s+platinum\s+credit\s+card|amex/.test(institutional)) return "Amex";
+  if (/banco\s+santander|santander\s+m(?:e|é)xico|grupo\s+financiero\s+santander|santander\.com/.test(institutional)) return "Santander";
+
+  // A standalone brand in the institutional zone is acceptable when the PDF
+  // omits its legal name, but never search the complete transaction body.
+  if (/\bbbva\b|bancomer/.test(institutional)) return "BBVA";
+  if (/\bsantander\b/.test(institutional)) return "Santander";
   const otherBanks: Array<[string, RegExp]> = [
     ["Banorte", /\bbanorte\b/],
     ["HSBC", /\bhsbc\b/],
@@ -70,7 +98,7 @@ function detectSource(text: string, fileName: string): StatementSource {
     ["Rappi", /\brappi\b/],
     ["Ualá", /\buala\b/],
   ];
-  const detected = otherBanks.find(([, marker]) => marker.test(haystack))?.[0];
+  const detected = otherBanks.find(([, marker]) => marker.test(institutional))?.[0];
   if (detected) return detected;
   return "Desconocido";
 }

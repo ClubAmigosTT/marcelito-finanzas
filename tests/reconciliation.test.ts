@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractTransactions, parseStatementSummary, reconcileStatementImport } from "../src/pdfImport.ts";
+import { detectSource, extractTransactions, parseStatementSummary, reconcileStatementImport } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
 import { buildFinanceMetrics } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
@@ -233,6 +233,30 @@ test("el parser acepta fechas OCR y BBVA usa el primer importe, no el saldo corr
   assert.equal(parseDate("16-JUL-2026"), new Date(2026, 6, 16).getTime());
   assert.equal(parseDate("23/JUL", "DEL 15/07/2026 AL 14/08/2026"), new Date(2026, 6, 23).getTime());
   assert.equal(periodKeyFromLabel("DEL 15/07/2026 AL 14/08/2026"), "2026-08");
+});
+
+test("BBVA no se convierte en Santander por una contraparte dentro de movimientos", () => {
+  const text = [
+    "Estado de Cuenta",
+    "BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE, GRUPO FINANCIERO BBVA MEXICO",
+    "www.bbva.mx",
+    "Periodo DEL 15/07/2026 AL 14/08/2026",
+    "Detalle de Movimientos Realizados",
+    "05/AGO SPEI RECIBIDO SANTANDER 4,500.00 6,116.63",
+  ].join("\n");
+
+  assert.equal(detectSource(text, "estado-7A3F.pdf"), "BBVA");
+  assert.equal(detectSource(text, "BBVA agosto.pdf"), "BBVA");
+});
+
+test("una mención de Santander solo en el cuerpo no basta para identificar el emisor", () => {
+  const text = [
+    "Estado de Cuenta",
+    "Detalle de Movimientos Realizados",
+    "05/AGO SPEI RECIBIDO SANTANDER 4,500.00 6,116.63",
+  ].join("\n");
+
+  assert.equal(detectSource(text, "estado-7A3F.pdf"), "Desconocido");
 });
 
 test("un prefijo numérico del comercio no se convierte en año", () => {

@@ -1968,6 +1968,9 @@ final class FinanceStore {
         let dateRegex = try? NSRegularExpression(
             pattern: #"(?<!\d)(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?!\d)"#
         )
+        let shortMonthDateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
+        )
         let isoDateRegex = try? NSRegularExpression(
             pattern: #"(?<!\d)(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})(?!\d)"#
         )
@@ -1977,6 +1980,15 @@ final class FinanceStore {
         let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?\s*(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)(?:[.,]\d{1,2})?(?![A-Za-z0-9])"#
         )
+        let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#)
+        func inferredYear(in value: String) -> Int? {
+            guard let yearRegex,
+                  let match = firstMatch(in: value, regex: yearRegex) else { return nil }
+            return Int(match.text)
+        }
+        let defaultYear = inferredYear(in: fileName)
+            ?? inferredYear(in: text)
+            ?? Calendar.current.component(.year, from: .now)
         let filenameAccount = accountName(from: fileName)
         let documentNormalized = text.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
@@ -2008,6 +2020,7 @@ final class FinanceStore {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             guard line.count > 1 else { continue }
             let hasDate = (dateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
+                || (shortMonthDateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
                 || (isoDateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
                 || (textDateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
             if hasDate {
@@ -2030,13 +2043,22 @@ final class FinanceStore {
             guard !ignoredPhrases.contains(where: { normalized.contains($0) }) else { return nil }
 
             let dateMatch = dateRegex.flatMap { firstMatch(in: original, regex: $0) }
+                ?? shortMonthDateRegex.flatMap { firstMatch(in: original, regex: $0) }
                 ?? isoDateRegex.flatMap { firstMatch(in: original, regex: $0) }
                 ?? textDateRegex.flatMap { firstMatch(in: original, regex: $0) }
             guard let dateMatch,
-                  let parsedDate = parseDate(dateMatch.text) else { return nil }
+                  let parsedDate = parseDate(dateMatch.text, defaultYear: defaultYear) else { return nil }
             var working = original
             var date = parsedDate
             working = working.replacingCharacters(in: Range(dateMatch.range, in: working)!, with: " ")
+            // BBVA places operation and settlement dates before the merchant
+            // (for example `23/JUL 22/JUL FACEBK`). The first date anchors the
+            // row; remove the second one before building the description.
+            working = working.replacingOccurrences(
+                of: #"^\s*\d{1,2}\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?\s+"#,
+                with: " ",
+                options: .regularExpression
+            )
 
             guard let amountRegex else { return nil }
             let allAmountMatches = allMatches(in: working, regex: amountRegex)
@@ -2048,11 +2070,15 @@ final class FinanceStore {
             let bankLikeRow = documentKind == .bank
                 || ["deposito", "retiro", "saldo", "cuenta de cheques", "cuenta de ahorro", "abono"]
                     .contains { normalized.contains($0) }
-            let amountMatch = foreignCurrency
-                ? usableAmountMatches.first
-                : bankLikeRow && usableAmountMatches.count > 1
-                    ? usableAmountMatches[usableAmountMatches.count - 2]
-                    : usableAmountMatches.last
+            let amountMatch: TextMatch? = {
+                guard !usableAmountMatches.isEmpty else { return nil }
+                if foreignCurrency { return usableAmountMatches.first }
+                if bankLikeRow, account == "BBVA" { return usableAmountMatches.first }
+                if bankLikeRow, usableAmountMatches.count > 1 {
+                    return usableAmountMatches[usableAmountMatches.count - 2]
+                }
+                return usableAmountMatches.last
+            }()
             guard let amountMatch,
                   let parsedAmount = parseAmount(amountMatch.text),
                   parsedAmount != 0,
@@ -2089,6 +2115,7 @@ final class FinanceStore {
                 || titleNormalized.contains("deposito")
                 || titleNormalized.contains("abono")
                 || titleNormalized.contains("ingreso")
+                || titleNormalized.contains("recibido")
                 || titleNormalized.contains("transferencia recibida")
             let isTransfer = titleNormalized.contains("transfer")
                 || titleNormalized.contains("traspaso")
@@ -2935,7 +2962,7 @@ final class FinanceStore {
         }
     }
 
-    private static func parseDate(_ value: String) -> Date? {
+    private static func parseDate(_ value: String, defaultYear: Int? = nil) -> Date? {
         let normalized = value.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: .current
@@ -2962,6 +2989,7 @@ final class FinanceStore {
             year = parts.dropFirst()
                 .compactMap { Int($0) }
                 .last(where: { $0 >= 100 })
+                ?? defaultYear
                 ?? Calendar.current.component(.year, from: .now)
         }
         let resolvedYear = year < 100 ? year + 2_000 : year
@@ -3130,30 +3158,43 @@ final class FinanceStore {
         return .unknown
     }
 
+    /// Keep only the institutional header when identifying an issuer. Names
+    /// occurring in the movement table are counterparties and must not be
+    /// allowed to change the account (for example Santander appearing in a
+    /// BBVA SPEI description).
+    private static func institutionalHeader(from value: String) -> String {
+        let normalized = value.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: .current
+        )
+        var header: [String] = []
+        for line in normalized.components(separatedBy: .newlines).prefix(120) {
+            let compact = line.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if compact.range(of: #"detalle\s+(?:de\s+)?movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripcion|fecha\s+y\s+detalle"#, options: .regularExpression) != nil {
+                break
+            }
+            if !compact.isEmpty { header.append(compact) }
+        }
+        return header.joined(separator: " ")
+    }
+
     private static func accountName(from fileName: String) -> String {
         let normalized = fileName.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: .current
         )
+        let header = institutionalHeader(from: normalized)
 
-        // Scanned Santander statements can contain generic card terminology
-        // in OCR noise. Give the bank's own visual/table markers priority so a
-        // Santander PDF is never routed through the Amex parser.
-        let santanderMarkers = [
-            "santander", "banco santander", "estado de cuenta nomina",
-            "detalle de movimientos cuenta", "super nomina", "cuenta de cheques",
-            "saldo final del periodo anterior", "fecha folio descripcion",
-            "deposito retiro saldo", "cuenta clabe"
-        ]
-        let santanderScore = santanderMarkers.reduce(into: 0) { score, marker in
-            if normalized.contains(marker) { score += 1 }
-        }
-        if normalized.contains("santander")
-            || normalized.contains("estado de cuenta nomina")
-            || normalized.contains("detalle de movimientos cuenta")
-            || normalized.contains("super nomina")
-            || santanderScore >= 2 {
-            return "Santander"
+        // Prefer official issuer names, domains, and stable document markers.
+        // Do not use a bare bank name from the complete PDF body: it can be a
+        // legitimate recipient or originator in a transfer description.
+        if header.contains("bbva mexico")
+            || header.contains("grupo financiero bbva")
+            || header.contains("bbva.mx")
+            || header.contains("bba830831lj2")
+            || header.range(of: #"\bbbva\b|bancomer"#, options: .regularExpression) != nil {
+            return "BBVA"
         }
 
         let amexMarkers = [
@@ -3162,16 +3203,19 @@ final class FinanceStore {
             "paga desde los canales de amex", "the platinum credit card",
             "total de las transacciones en moneda extranjera"
         ]
-        let amexScore = amexMarkers.reduce(into: 0) { score, marker in
-            if normalized.contains(marker) { score += 1 }
-        }
-        if amexScore >= 1 {
+        if amexMarkers.contains(where: { header.contains($0) }) {
             return "Amex"
         }
 
-        if normalized.contains("bbva") {
-            return "BBVA"
+        let santanderMarkers = [
+            "banco santander", "santander mexico", "grupo financiero santander",
+            "santander.com", "estado de cuenta nomina", "super nomina"
+        ]
+        if santanderMarkers.contains(where: { header.contains($0) })
+            || header.range(of: #"\bsantander\b"#, options: .regularExpression) != nil {
+            return "Santander"
         }
+
         let otherBankNames: [(String, [String])] = [
             ("Banorte", ["banorte"]),
             ("HSBC", ["hsbc"]),
@@ -3188,7 +3232,7 @@ final class FinanceStore {
             ("Rappi", ["rappi"]),
             ("Ualá", ["uala"])
         ]
-        if let detected = otherBankNames.first(where: { _, markers in markers.contains(where: { normalized.contains($0) }) })?.0 {
+        if let detected = otherBankNames.first(where: { _, markers in markers.contains(where: { header.contains($0) }) })?.0 {
             return detected
         }
         return "Importado"
