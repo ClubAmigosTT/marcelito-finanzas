@@ -684,7 +684,7 @@ struct MetricDetailSheet: View {
             guard !values.isEmpty else { return nil }
             let total = values.reduce(Decimal(0), +)
             return MetricTrendPoint(
-                id: "(kind.rawValue)-(metric.period)",
+                id: "\(kind.rawValue)-\(metric.period)",
                 label: metric.period,
                 value: NSDecimalNumber(decimal: total).doubleValue
             )
@@ -702,7 +702,7 @@ struct MetricDetailSheet: View {
             guard group.contains(where: { $0.kind == .bank && $0.cashBalance != nil }),
                   group.contains(where: { $0.kind == .card && $0.debtBalance != nil }) else { return nil }
             return MetricTrendPoint(
-                id: "patrimony-(metric.period)",
+                id: "patrimony-\(metric.period)",
                 label: metric.period,
                 value: NSDecimalNumber(decimal: cash - debt).doubleValue
             )
@@ -907,7 +907,7 @@ private struct CashFlowChart: View {
                             .gesture(
                                 SpatialTapGesture()
                                     .onEnded { event in
-                                        let plotFrame = geometry[proxy.plotAreaFrame]
+                                        let plotFrame = geometry[proxy.plotFrame]
                                         let x = event.location.x - plotFrame.origin.x
                                         guard x >= 0, x <= plotFrame.size.width,
                                               let date = proxy.value(atX: x, as: Date.self),
