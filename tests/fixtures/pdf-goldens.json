@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Valores de control para los estados validados; no contiene PDFs ni datos personales.",
+  "automaticAcceptanceTarget": 0.99,
+  "statements": [
+    {
+      "id": "santander-2026-08-15",
+      "issuer": "Santander",
+      "kind": "bank",
+      "cutoff": "2026-08-15",
+      "expected": {
+        "cashBalance": 27654.24,
+        "depositTotal": 36187.42,
+        "withdrawalTotal": 64161.11
+      }
+    },
+    {
+      "id": "bbva-2026-08",
+      "issuer": "BBVA",
+      "kind": "bank",
+      "cutoff": "2026-08-31",
+      "expected": {
+        "cashBalance": 1030.94,
+        "depositTotal": 19500.00,
+        "withdrawalTotal": 22058.69,
+        "depositCount": 2,
+        "withdrawalCount": 9
+      }
+    },
+    {
+      "id": "amex-2026-08-27",
+      "issuer": "Amex",
+      "kind": "card",
+      "cutoff": "2026-08-27",
+      "expected": {
+        "debtBalance": 50367.21,
+        "creditLimit": 150000.00,
+        "creditAvailable": 99632.79,
+        "paymentForNoInterest": 39966.15,
+        "minimumPlusMsi": 19579.69
+      }
+    }
+  ]
+}
