@@ -9,6 +9,7 @@ type ExpectedFile = {
   source?: StatementSource;
   kind?: StatementKind;
   status?: "valid" | "invalid" | "pending";
+  rows?: number;
   summary?: Record<string, number>;
 };
 
@@ -73,6 +74,10 @@ async function evaluate(file: string) {
       status: reconciliation.status,
       reason: reconciliation.reason,
       extractedMovementCount: reconciliation.extractedMovementCount,
+      expectedMovementCount: reconciliation.expectedMovementCount,
+      rowCoverage: reconciliation.expectedMovementCount && reconciliation.expectedMovementCount > 0
+        ? Number((reconciliation.extractedMovementCount / reconciliation.expectedMovementCount).toFixed(4))
+        : undefined,
       extractedDepositTotal: reconciliation.extractedDepositTotal,
       extractedWithdrawalTotal: reconciliation.extractedWithdrawalTotal,
       extractedChargeTotal: reconciliation.extractedChargeTotal,
@@ -103,6 +108,7 @@ if (!directory) {
     if (expected?.source && expected.source !== result.source) mismatches.push(`emisor esperado ${expected.source}, obtenido ${result.source}`);
     if (expected?.kind && expected.kind !== result.kind) mismatches.push(`tipo esperado ${expected.kind}, obtenido ${result.kind}`);
     if (expected?.status && expected.status !== result.reconciliation.status) mismatches.push(`estado esperado ${expected.status}, obtenido ${result.reconciliation.status}`);
+    if (expected?.rows !== undefined && expected.rows !== result.rows) mismatches.push(`filas esperadas ${expected.rows}, obtenidas ${result.rows}`);
     for (const [key, value] of Object.entries(expected?.summary ?? {})) {
       const actual = result.reconciliation[key as keyof typeof result.reconciliation];
       if (!closeEnough(actual, value, tolerance)) mismatches.push(`${key}: esperado ${value}, obtenido ${String(actual)}`);
