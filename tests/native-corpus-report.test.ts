@@ -76,3 +76,13 @@ test("el reporte nativo rechaza números completos o archivos repetidos", () => 
   assert.ok(result.errors.some((error) => error.includes("formato emisor:últimos4")));
   assert.ok(result.errors.some((error) => error.includes("archivos duplicados")));
 });
+
+test("el reporte nativo rechaza filas inválidas o sin nombre de PDF", () => {
+  const result = verifyNativeCorpusReport([
+    null,
+    { accountKey: "bbva:4922", expectedAccountKey: "bbva:4922" },
+  ], 2);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("filas inválidas")));
+  assert.ok(result.errors.some((error) => error.includes("sin nombre de archivo")));
+});

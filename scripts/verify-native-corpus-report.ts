@@ -88,17 +88,22 @@ export function verifyNativeCorpusSummary(summary: NativeCorpusSummary, expected
  */
 export function verifyNativeCorpusReport(report: unknown, expectedFiles?: number): ReportVerification {
   const errors: string[] = [];
-  const rows = Array.isArray(report) ? report as NativeCorpusReportRow[] : [];
+  const rawRows = Array.isArray(report) ? report : [];
+  const rows = rawRows.filter((row): row is NativeCorpusReportRow => Boolean(row) && typeof row === "object");
   if (!Array.isArray(report)) errors.push("NATIVE_CORPUS_REPORT no contiene una lista");
+  if (Array.isArray(report) && rows.length !== rawRows.length) {
+    errors.push("NATIVE_CORPUS_REPORT contiene filas inválidas");
+  }
   if (expectedFiles !== undefined && rows.length !== expectedFiles) {
     errors.push(`el reporte contiene ${rows.length} fila(s), esperado ${expectedFiles}`);
   }
-  const files = rows.map((row) => row.file ?? "").filter(Boolean);
+  const files = rows.map((row) => typeof row.file === "string" ? row.file.trim() : "");
+  if (files.some((file) => !file)) errors.push("el reporte contiene una fila sin nombre de archivo");
   if (new Set(files).size !== files.length) errors.push("el reporte contiene archivos duplicados");
   rows.forEach((row, index) => {
-    const label = row.file || `fila ${index + 1}`;
-    const actual = row.accountKey ?? "";
-    const expected = row.expectedAccountKey ?? "";
+    const label = files[index] || `fila ${index + 1}`;
+    const actual = typeof row.accountKey === "string" ? row.accountKey.trim() : "";
+    const expected = typeof row.expectedAccountKey === "string" ? row.expectedAccountKey.trim() : "";
     if (!actual || !/^[a-z0-9]+:\d{4}$/i.test(actual)) {
       errors.push(`${label}: accountKey no está en formato emisor:últimos4`);
     }
