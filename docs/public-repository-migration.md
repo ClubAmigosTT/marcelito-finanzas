@@ -41,8 +41,10 @@ de cambiar la visibilidad.
 - [x] Ignorar documentos financieros y material de firma en `.gitignore`.
 - [x] Añadir `SECURITY.md`, `CONTRIBUTING.md`, `CODEOWNERS` y README público.
 - [x] Crear una historia limpia de un solo commit (`public-clean-history`).
-- [ ] Confirmar que la rama pública no contiene marcadores sensibles con una
-  búsqueda automatizada antes de forzar `main`.
+- [x] Confirmar que los 7 commits de `public-clean-history` no contienen
+  marcadores sensibles ni extensiones financieras o de firma (auditoría local).
+- [ ] Repetir la auditoría después de eliminar las referencias remotas antiguas
+  y antes de forzar `main`.
 
 ## Fase 4 — CI seguro
 
