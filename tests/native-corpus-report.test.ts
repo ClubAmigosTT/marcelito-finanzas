@@ -124,7 +124,7 @@ test("el reporte nativo exige una identidad enmascarada por PDF", () => {
       kind: "bank",
       status: "valid",
       sourceStatus: "verified",
-      sourceConfidence: "0.9990",
+      sourceConfidence: "0,9990",
       requiresReview: "false",
       rows: "11",
       accountKey: "bbva:4922",

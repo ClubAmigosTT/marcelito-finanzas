@@ -50,8 +50,16 @@ type ExpectedReportEntry = {
 };
 
 function numberField(summary: NativeCorpusSummary, key: keyof NativeCorpusSummary) {
-  const value = Number(summary[key]);
+  const value = numericValue(summary[key]);
   return Number.isFinite(value) ? value : undefined;
+}
+
+function numericValue(value: unknown) {
+  if (typeof value === "string") {
+    const normalized = value.trim().replace(/^(\d+),(\d+)$/, "$1.$2");
+    return Number(normalized);
+  }
+  return Number(value);
 }
 
 function countField(summary: NativeCorpusSummary, key: keyof NativeCorpusSummary) {
@@ -162,7 +170,7 @@ export function verifyNativeCorpusReport(
     if (sourceStatus !== "verified") {
       errors.push(`${label}: sourceStatus no es verified`);
     }
-    const sourceConfidence = Number(row.sourceConfidence);
+    const sourceConfidence = numericValue(row.sourceConfidence);
     if (!Number.isFinite(sourceConfidence) || sourceConfidence < 0 || sourceConfidence > 1) {
       errors.push(`${label}: sourceConfidence fuera de rango 0..1`);
     }
