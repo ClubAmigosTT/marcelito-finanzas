@@ -99,6 +99,9 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
 - Asociar las huellas SHA-256 de los PDFs a cada corrida de auditoría para
   reproducir un KPI desde su fuente exacta, incluso cuando se reutiliza el
   nombre del archivo.
+- Permitir descargar un diagnóstico JSON local con versiones, huellas,
+  conciliaciones, motivos de bloqueo y consistencias, sin incluir
+  descripciones ni importes individuales.
 - Probar explícitamente el umbral que decide entre texto y Vision para evitar
   que capas ocultas administrativas desactiven OCR o que estados de texto
   válidos se procesen visualmente sin necesidad.
