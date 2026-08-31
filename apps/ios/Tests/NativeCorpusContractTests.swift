@@ -13,6 +13,8 @@ final class NativeCorpusContractTests: XCTestCase {
         let kind: StatementKind
         let status: StatementReconciliationStatus
         let rows: Int
+        let previousBalance: Decimal?
+        let cashBalance: Decimal?
         let depositTotal: Decimal?
         let withdrawalTotal: Decimal?
         let chargeTotal: Decimal?
@@ -23,6 +25,8 @@ final class NativeCorpusContractTests: XCTestCase {
             kind: StatementKind,
             status: StatementReconciliationStatus,
             rows: Int,
+            previousBalance: Decimal? = nil,
+            cashBalance: Decimal? = nil,
             depositTotal: Decimal? = nil,
             withdrawalTotal: Decimal? = nil,
             chargeTotal: Decimal? = nil,
@@ -32,6 +36,8 @@ final class NativeCorpusContractTests: XCTestCase {
             self.kind = kind
             self.status = status
             self.rows = rows
+            self.previousBalance = previousBalance
+            self.cashBalance = cashBalance
             self.depositTotal = depositTotal
             self.withdrawalTotal = withdrawalTotal
             self.chargeTotal = chargeTotal
@@ -42,11 +48,11 @@ final class NativeCorpusContractTests: XCTestCase {
     private let expectations: [String: Expectation] = [
         "1-28_may_2026_-_27_jun_2026.pdf": Expectation(source: "Amex", kind: .card, status: .valid, rows: 92, chargeTotal: 28_034.19),
         "2-28_jun_2026_-_27_jul_2026.pdf": Expectation(source: "Amex", kind: .card, status: .valid, rows: 145, chargeTotal: 46_711.63, paymentTotal: 34_405.21),
-        "3-Estado-de-cuenta-mayo-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0, depositTotal: 49_222.45, withdrawalTotal: 61_676.00),
-        "4-Estado-de-cuenta-julio-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0, depositTotal: 40_833.38, withdrawalTotal: 73_007.21),
-        "5-Estado-de-cuenta-agosto-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0, depositTotal: 36_187.42, withdrawalTotal: 64_161.11),
+        "3-Estado-de-cuenta-mayo-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0, previousBalance: 37_075.03, cashBalance: 24_621.48, depositTotal: 49_222.45, withdrawalTotal: 61_676.00),
+        "4-Estado-de-cuenta-julio-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0, previousBalance: 87_801.76, cashBalance: 55_627.93, depositTotal: 40_833.38, withdrawalTotal: 73_007.21),
+        "5-Estado-de-cuenta-agosto-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0, previousBalance: 55_627.93, cashBalance: 27_654.24, depositTotal: 36_187.42, withdrawalTotal: 64_161.11),
         "6-28_jul_2026_-_27_ago_2026.pdf": Expectation(source: "Amex", kind: .card, status: .valid, rows: 105, chargeTotal: 33_177.48, paymentTotal: 23_150.88),
-        "7-Estado-de-cuenta-junio-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0, depositTotal: 98_629.30, withdrawalTotal: 35_449.02),
+        "7-Estado-de-cuenta-junio-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0, previousBalance: 24_621.48, cashBalance: 87_801.76, depositTotal: 98_629.30, withdrawalTotal: 35_449.02),
         "8-BBVA-agosto-.pdf": Expectation(source: "BBVA", kind: .bank, status: .valid, rows: 11, depositTotal: 19_500.00, withdrawalTotal: 22_058.69),
     ]
 
@@ -110,6 +116,12 @@ final class NativeCorpusContractTests: XCTestCase {
             // even while a scan remains pending so a plausible-looking OCR
             // header cannot silently move the golden forward with wrong
             // deposits/withdrawals. Row totals remain conditional below.
+            if let previousBalance = expected.previousBalance {
+                assertClose(result.summary?.previousBalance, previousBalance, file: file.lastPathComponent, field: "saldo inicial del resumen")
+            }
+            if let cashBalance = expected.cashBalance {
+                assertClose(result.summary?.cashBalance, cashBalance, file: file.lastPathComponent, field: "saldo final del resumen")
+            }
             if let depositTotal = expected.depositTotal {
                 assertClose(result.summary?.depositTotal, depositTotal, file: file.lastPathComponent, field: "depósitos del resumen")
                 if result.reconciliation?.status == .valid {
@@ -180,6 +192,10 @@ final class NativeCorpusContractTests: XCTestCase {
                 "requiresReview": String(result.requiresReview),
                 "ocrConfidence": percentText(result.ocrConfidence),
                 "weakestOCRPage": percentText(result.ocrPageConfidences?.min()),
+                "expectedPreviousBalance": decimalText(expected.previousBalance),
+                "extractedPreviousBalance": decimalText(result.summary?.previousBalance),
+                "expectedCashBalance": decimalText(expected.cashBalance),
+                "extractedCashBalance": decimalText(result.summary?.cashBalance),
                 "expectedDeposits": decimalText(expected.depositTotal),
                 "extractedDeposits": decimalText(result.reconciliation?.extractedDepositTotal),
                 "expectedWithdrawals": decimalText(expected.withdrawalTotal),

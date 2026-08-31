@@ -36,9 +36,9 @@ MARCELITO_PDF_CORPUS_DIR="/ruta/a/estados-validados" \
   ./scripts/run-native-corpus.sh
 ```
 
-El reporte incluye controles esperados y extraídos de depósitos, retiros,
-cargos y pagos, además de confianza del emisor, confianza OCR media y página
-OCR más débil. Todos los archivos deben identificar el emisor con estado
+El reporte incluye controles esperados y extraídos de saldo inicial, saldo
+final, depósitos, retiros, cargos y pagos, además de confianza del emisor,
+confianza OCR media y página OCR más débil. Todos los archivos deben identificar el emisor con estado
 `verified`; los cuatro estados de texto validan también filas y totales como
 aserciones duras. Los escaneos Santander se reportan para calibración mientras
 permanezcan en `pending`.
