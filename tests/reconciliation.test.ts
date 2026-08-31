@@ -1332,6 +1332,25 @@ test("un estado con filas PDF sin trazabilidad queda fuera aunque concilie", () 
   assert.match(metrics.audit.criticalIssues.join(" "), /evidencia de origen incompleta/);
 });
 
+test("la compuerta de trazabilidad también protege un pipeline preconstruido", () => {
+  const statement = bank("bbva-pipeline-evidence", "BBVA", "agosto 2026");
+  const transaction = movement({
+    id: "pipeline-missing-evidence-row",
+    date: "10 ago 2026",
+    description: "FILA INYECTADA",
+    account: "BBVA",
+    amount: -250,
+    flow: "expense",
+    statementId: statement.id,
+    extractionEvidence: { method: "pdf-text", confidence: 1, sourceText: "FILA INYECTADA" },
+  });
+  const pipeline = runTransactionPipeline([transaction], [statement]);
+  const metrics = buildFinanceMetrics([], [statement], pipeline);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.isProvisional, true);
+  assert.match(metrics.audit.criticalIssues.join(" "), /evidencia de origen incompleta/);
+});
+
 test("la migración devuelve a revisión un OCR débil aunque conserve la versión actual", () => {
   const statement: Statement = {
     ...bank("bbva-weak-ocr", "BBVA", "agosto 2026"),

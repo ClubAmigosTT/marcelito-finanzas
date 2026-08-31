@@ -682,6 +682,10 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   // invalid rows, overlapping statements, own transfers and card payments
   // are removed or linked before any KPI is calculated.
   const pipeline = providedPipeline ?? runTransactionPipeline(inputTransactions, statements);
+  // A caller may provide a precomputed pipeline whose canonical rows differ
+  // from the raw input array. Inspect both collections so that injecting a
+  // malformed row through that escape hatch cannot bypass provenance checks.
+  const candidateTransactions = [...inputTransactions, ...pipeline.transactions];
   const blockedForReconciliation = statements
     .filter((statement) => statement.reconciliationStatus !== "valid" || statement.reconciliation?.status !== "valid")
     .map((statement) => statement.id);
@@ -703,7 +707,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   // the whole statement out of every KPI so a malformed direct pipeline cannot
   // bypass the evidence gate. Manual rows (without statementId) are exempt.
   const blockedForExtractionEvidence = Array.from(new Set(
-    inputTransactions
+    candidateTransactions
       .filter((transaction) => Boolean(transaction.statementId) && !hasTraceableEvidence(transaction))
       .map((transaction) => transaction.statementId as string),
   ));
