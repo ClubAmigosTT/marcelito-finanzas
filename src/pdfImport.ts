@@ -902,12 +902,52 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       if (!context) throw new Error("No se pudo preparar el lienzo para OCR");
 
       await page.render({ canvas: null, canvasContext: context, viewport }).promise;
-      const result = await worker.recognize(canvas);
-      const confidence = Number(result.data.confidence);
+      const baseResult = await worker.recognize(canvas);
+      let bestText = baseResult.data.text;
+      let confidence = Number(baseResult.data.confidence);
+
+      // Low-confidence scans often have a gray background or faint table
+      // rules. Retry only those pages with a contrast-enhanced copy. The
+      // second pass is bounded to the same canvas dimensions and is discarded
+      // immediately, so it improves recall without multiplying peak memory
+      // for a whole document.
+      if (Number.isFinite(confidence) && confidence < 88) {
+        const enhancedCanvas = window.document.createElement("canvas");
+        enhancedCanvas.width = canvas.width;
+        enhancedCanvas.height = canvas.height;
+        try {
+          const enhancedContext = enhancedCanvas.getContext("2d", { willReadFrequently: true });
+          if (enhancedContext) {
+            enhancedContext.drawImage(canvas, 0, 0);
+            const image = enhancedContext.getImageData(0, 0, enhancedCanvas.width, enhancedCanvas.height);
+            for (let pixel = 0; pixel < image.data.length; pixel += 4) {
+              const gray = image.data[pixel] * 0.299 + image.data[pixel + 1] * 0.587 + image.data[pixel + 2] * 0.114;
+              const contrasted = Math.max(0, Math.min(255, (gray - 128) * 1.45 + 128));
+              image.data[pixel] = contrasted;
+              image.data[pixel + 1] = contrasted;
+              image.data[pixel + 2] = contrasted;
+            }
+            enhancedContext.putImageData(image, 0, 0);
+            const enhancedResult = await worker.recognize(enhancedCanvas);
+            const enhancedConfidence = Number(enhancedResult.data.confidence);
+            if (Number.isFinite(enhancedConfidence) && enhancedConfidence > confidence) {
+              confidence = enhancedConfidence;
+              bestText = enhancedResult.data.text;
+            }
+          }
+        } catch {
+          // If the browser cannot allocate/read the temporary image, retain
+          // the first OCR result and let the normal quality gate decide.
+        } finally {
+          enhancedCanvas.width = 0;
+          enhancedCanvas.height = 0;
+        }
+      }
+
       pageConfidences.push(Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence / 100)) : 0);
       // Keep explicit page sentinels so row reconstruction cannot cross page
       // boundaries or blend a movement with the following page's summary.
-      pages.push(`__PDF_PAGE_${pageNumber}__\n${result.data.text}`);
+      pages.push(`__PDF_PAGE_${pageNumber}__\n${bestText}`);
       onProgress(88 + Math.round((pageNumber / document.numPages) * 10), `Reconociendo página ${pageNumber} de ${document.numPages}`);
       canvas.width = 0;
       canvas.height = 0;
