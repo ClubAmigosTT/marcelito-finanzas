@@ -84,7 +84,10 @@ gasto real sin separar esas secciones.
   última solo es verdadera cuando el manifiesto está completo, no quedan PDFs
   `ocr-required`, no hay discrepancias y la precisión supera el objetivo; por
   tanto una corrida que solo procesa los PDFs de texto no puede presentarse como
-  certificación total.
+  certificación total. También reporta `goldenCoverage`: la proporción de
+  goldens marcados como válidos que fueron aceptados automáticamente. La
+  certificación exige cobertura 1.0 además de precisión ≥99%, evitando que un
+  lector alcance el objetivo simplemente bloqueando documentos válidos.
 - El OCR web conserva confianza media y por página, limita la resolución de cada lienzo para evitar crashes por memoria y rechaza archivos de más de 50 MB con un mensaje recuperable. También guarda tamaño y número de páginas del PDF junto a su huella para reproducir la ingesta.
 - iOS aplica los mismos límites de 50 MB y 80 páginas antes de crear
   imágenes OCR; excederlos produce un error recuperable y no deja datos

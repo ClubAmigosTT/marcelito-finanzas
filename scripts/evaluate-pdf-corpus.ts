@@ -381,6 +381,14 @@ if (!directory) {
   const automaticAcceptancePrecision = goldenAutoAccepted + goldenFalseAccepted > 0
     ? Number((goldenAutoAccepted / (goldenAutoAccepted + goldenFalseAccepted)).toFixed(4))
     : null;
+  const expectedValidFiles = expectedFiles.filter((expected) => expected.status === "valid").length;
+  const goldenCoverage = expectedValidFiles > 0
+    ? Number((goldenAutoAccepted / expectedValidFiles).toFixed(4))
+    : 0;
+  const goldenCoverageFailure = Boolean(requireManifest && (
+    expectedValidFiles === 0 || goldenCoverage < 1
+  ));
+  if (goldenCoverageFailure) failures += 1;
   const precisionFailure = Boolean(requireManifest && (automaticAcceptancePrecision === null || automaticAcceptancePrecision < targetPrecision));
   if (precisionFailure) failures += 1;
   const nativeOCRPending = results.filter((result) => result.mode === "ocr-required").length;
@@ -410,6 +418,7 @@ if (!directory) {
     ...(manifestReaderVersionMismatch ? ["la versión del manifiesto no coincide con el lector"] : []),
     ...(parseErrors > 0 ? [`${parseErrors} PDF(s) no se pudieron leer`] : []),
     ...(precisionFailure ? ["la precisión automática está por debajo del objetivo"] : []),
+    ...(goldenCoverageFailure ? [`la cobertura de goldens válidos es ${goldenCoverage}; se requiere 1.0`] : []),
     ...(failures > 0 && !parseErrors && !manifestReaderVersionMismatch && !precisionFailure ? ["hay discrepancias con el manifiesto"] : []),
   ];
   const output = {
@@ -439,8 +448,11 @@ if (!directory) {
     nativeVisionRequired,
     certificationBlockers,
     goldenExpectedFiles: expectedFiles.length,
+    goldenExpectedValidFiles: expectedValidFiles,
     goldenAutoAccepted,
     goldenFalseAccepted,
+    goldenCoverage,
+    goldenCoverageFailure,
     diagnosticOcrAccepted,
     automaticAcceptancePrecision,
     results,
