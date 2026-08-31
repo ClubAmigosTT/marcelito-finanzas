@@ -131,11 +131,11 @@ test("matching excluye traspaso propio y pago de Amex del gasto e ingreso", () =
   assert.equal(metrics.netFlow, 8200);
 });
 
-test("matching usa cuenta, fecha e importe aunque el banco no etiquete el traspaso", () => {
+test("matching exige evidencia de cuenta propia además de cuenta, fecha e importe", () => {
   const statements = [bank("santander", "Santander", "agosto 2026"), bank("bbva", "BBVA", "agosto 2026"), card("amex", "Amex", "agosto 2026", 3000)];
   const transactions = [
-    movement({ id: "bank-out", date: "20 ago 2026", description: "OPERACION", account: "Santander", amount: -700, flow: "expense", statementId: "santander" }),
-    movement({ id: "bank-in", date: "21 ago 2026", description: "ABONO", account: "BBVA", amount: 700, flow: "income", statementId: "bbva" }),
+    movement({ id: "bank-out", date: "20 ago 2026", description: "OPERACION A BBVA", account: "Santander", amount: -700, flow: "expense", statementId: "santander" }),
+    movement({ id: "bank-in", date: "21 ago 2026", description: "ABONO SANTANDER", account: "BBVA", amount: 700, flow: "income", statementId: "bbva" }),
     movement({ id: "card-in", date: "22 ago 2026", description: "PAGO RECIBIDO", account: "Amex", amount: 1200, flow: "income", statementId: "amex" }),
     movement({ id: "bank-card-out", date: "22 ago 2026", description: "OPERACION", account: "Santander", amount: -1200, flow: "expense", statementId: "santander" }),
     movement({ id: "real", date: "23 ago 2026", description: "SUPERMERCADO", account: "Amex", amount: -250, flow: "expense", statementId: "amex", category: "Alimentos" }),
@@ -146,6 +146,18 @@ test("matching usa cuenta, fecha e importe aunque el banco no etiquete el traspa
   const metrics = buildFinanceMetrics(transactions, statements, result);
   assert.equal(metrics.consolidatedRealSpend, 250);
   assert.equal(metrics.realIncome, 0);
+});
+
+test("una coincidencia externa de importe y fecha no se oculta como transferencia propia", () => {
+  const statements = [bank("santander", "Santander", "agosto 2026"), bank("bbva", "BBVA", "agosto 2026")];
+  const transactions = [
+    movement({ id: "purchase", date: "20 ago 2026", description: "PAGO A PROVEEDOR", account: "Santander", amount: -700, flow: "expense", statementId: "santander" }),
+    movement({ id: "external", date: "21 ago 2026", description: "DEPOSITO CLIENTE", account: "BBVA", amount: 700, flow: "income", statementId: "bbva" }),
+  ];
+  const result = runTransactionPipeline(transactions, statements);
+  assert.equal(result.audit.internalTransferCount, 0);
+  assert.equal(buildFinanceMetrics(transactions, statements, result).consolidatedRealSpend, 700);
+  assert.equal(buildFinanceMetrics(transactions, statements, result).realIncome, 700);
 });
 
 test("matching no convierte un crédito de tarjeta en pago sin evidencia", () => {

@@ -1130,6 +1130,28 @@ final class FinanceStore {
         return ["transfer", "traspaso", "spei", "entre cuentas", "cuenta propia", "clabe"].contains { value.contains($0) }
     }
 
+    /// Same amount/date and different bank accounts narrow a transfer
+    /// candidate, but do not prove it is an own-account movement.  Require an
+    /// explicit own-account phrase or the known counterpart bank name before
+    /// excluding the rows from income and spend aggregates.
+    private func hasOwnAccountTransferEvidence(_ outflow: Movement, _ inflow: Movement) -> Bool {
+        let combined = normalizedConcept("\(outflow.title) \(inflow.title)")
+        if ["entre cuentas", "cuenta propia", "mismo titular", "traspaso interno", "autotransferencia"].contains(where: { combined.contains($0) }) {
+            return true
+        }
+        let outAccount = normalizedConcept(outflow.account)
+        let inAccount = normalizedConcept(inflow.account)
+        guard !outAccount.isEmpty, !inAccount.isEmpty, outAccount != inAccount else { return false }
+        let knownBankLabels = Set(statements
+            .filter { statementKind($0) == .bank }
+            .map { normalizedConcept($0.source) }
+            .filter { $0.count >= 3 })
+        let outText = normalizedConcept(outflow.title)
+        let inText = normalizedConcept(inflow.title)
+        return (knownBankLabels.contains(outAccount) && inAccount.count >= 3 && outText.contains(inAccount))
+            || (knownBankLabels.contains(inAccount) && outAccount.count >= 3 && inText.contains(outAccount))
+    }
+
     private func hasCardPaymentHint(_ movement: Movement) -> Bool {
         let value = normalizedConcept(movement.title)
         return value.contains("pago de tarjeta") || value.contains("pago amex") || value.contains("gracias por su pago") || value.contains("pago credito")
@@ -1248,7 +1270,7 @@ final class FinanceStore {
             if let ownIndex = movements.indices.first(where: { candidateIndex in
                 let incoming = movements[candidateIndex]
                 guard !consumed.contains(incoming.id), candidateIndex != index, isBankMovement(incoming), isInflow(incoming), incoming.account != bank.account, amountsMatch(bank.amount, incoming.amount), abs(bank.date.timeIntervalSince(incoming.date)) <= twoDays else { return false }
-                return true
+                return hasOwnAccountTransferEvidence(bank, incoming)
             }) {
                 movements[index].flow = .transfer
                 movements[index].kind = .bankTransfer

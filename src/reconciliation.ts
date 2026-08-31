@@ -156,6 +156,38 @@ function hasTransferHint(transaction: Transaction) {
   return /transfer|traspaso|spei|entre cuentas|cuenta propia|clabe/.test(normalizeConcept(transaction.description));
 }
 
+/**
+ * A same-amount/date pair is not enough to prove an own-account transfer:
+ * an external deposit can coincidentally mirror a purchase.  Require a
+ * positive signal in the row text (explicit own-account language or the
+ * known counterpart account/issuer name) before removing both rows from the
+ * income and spend KPIs.
+ */
+function hasOwnAccountTransferEvidence(outflow: Transaction, inflow: Transaction, statements: Statement[]) {
+  const combined = normalizeConcept(`${outflow.description} ${inflow.description}`);
+  if (/entre cuentas|cuenta propia|mismo titular|traspaso interno|autotransferencia/.test(combined)) return true;
+  const outAccount = normalizeConcept(outflow.account);
+  const inAccount = normalizeConcept(inflow.account);
+  if (!outAccount || !inAccount || outAccount === inAccount) return false;
+  const counterpartMentioned = (movement: Transaction, counterpart: string) => {
+    const text = normalizeConcept(movement.description);
+    return counterpart.length >= 3 && text.includes(counterpart);
+  };
+  // Prefer the account labels already identified from institutional evidence;
+  // this prevents a counterparty mentioned in a SPEI description from being
+  // mistaken for the issuer or for an own account.
+  const knownAccountLabels = new Set(
+    statements
+      .filter((statement) => statementKind(statement) === "bank")
+      .map((statement) => normalizeConcept(statement.source))
+      .filter((source) => source.length >= 3),
+  );
+  const outLabelKnown = knownAccountLabels.has(outAccount);
+  const inLabelKnown = knownAccountLabels.has(inAccount);
+  return (outLabelKnown && counterpartMentioned(outflow, inAccount))
+    || (inLabelKnown && counterpartMentioned(inflow, outAccount));
+}
+
 function hasCardPaymentHint(transaction: Transaction) {
   return /pago.*(?:tarjeta|amex|credito|recibido)|tarjeta.*pago|gracias por su pago|abono.*(?:tarjeta|credito|recibido)|american express/.test(normalizeConcept(transaction.description));
 }
@@ -543,9 +575,9 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
   });
 
   // Match own-account transfers by account, direction, amount and date. The
-  // account pair is stronger evidence than the issuer's free-text label (many
-  // statements say only “abono” or “depósito”), and the ±2-day/amount gate
-  // prevents broad historical netting.
+  // amount/date gate narrows candidates, but an explicit own-account signal
+  // is also mandatory: account identity alone cannot distinguish a transfer
+  // from an unrelated external deposit of the same amount.
   candidates.forEach((outflow) => {
     if (consumed.has(outflow.id) || !isBankTransaction(outflow, statements) || !isOutflow(outflow)) return;
     const partner = candidates
@@ -555,7 +587,8 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
         && isInflow(inflow)
         && normalizeConcept(inflow.account) !== normalizeConcept(outflow.account)
         && sameAmount(outflow, inflow)
-        && withinTwoDays(outflow, inflow, statements))
+        && withinTwoDays(outflow, inflow, statements)
+        && hasOwnAccountTransferEvidence(outflow, inflow, statements))
       .sort((left, right) => absolute((parseDate(left.date) ?? 0) - (parseDate(outflow.date) ?? 0)) - absolute((parseDate(right.date) ?? 0) - (parseDate(outflow.date) ?? 0)))[0];
     if (partner) replacePair(outflow, partner, "internalTransfer");
   });
