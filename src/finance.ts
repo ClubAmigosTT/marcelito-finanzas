@@ -17,7 +17,10 @@ const OCR_MIN_PAGE_CONFIDENCE = 0.78;
  * older build, so every KPI boundary must re-check the same thresholds.
  */
 export function hasSufficientOcrQuality(statement: Statement) {
-  if (statement.mode !== "ocr") return true;
+  // Treat malformed/legacy runtime data as unsafe instead of assuming that a
+  // missing mode means a trustworthy text-layer extraction.
+  if (statement.mode === "text") return true;
+  if (statement.mode !== "ocr") return false;
   const average = statement.ocrConfidence;
   const pages = statement.ocrPageConfidences;
   if (average === undefined || !Number.isFinite(average) || average < OCR_MIN_AVERAGE_CONFIDENCE) return false;

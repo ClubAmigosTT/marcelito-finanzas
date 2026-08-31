@@ -1033,6 +1033,29 @@ test("la confianza OCR baja bloquea estados persistidos aunque status diga listo
   assert.match(metrics.audit.criticalIssues.join(" "), /calidad OCR insuficiente/);
 });
 
+test("un modo de lectura desconocido nunca se considera texto confiable", () => {
+  const statement = {
+    ...bank("unknown-mode", "BBVA", "agosto 2026"),
+    mode: "legacy" as unknown as Statement["mode"],
+    status: "ready" as const,
+    reconciliationStatus: "valid" as const,
+    reconciliation: { status: "valid" as const, tolerance: 0.05 },
+    sourceDetection: { source: "BBVA" as const, confidence: 1, status: "verified" as const, evidence: ["BBVA"], ignoredBodyMentions: [] },
+  };
+  const metrics = buildFinanceMetrics([movement({
+    id: "legacy-mode-row",
+    date: "10 ago 2026",
+    description: "COMPRA",
+    account: "BBVA",
+    amount: -100,
+    flow: "expense",
+    category: "Compras",
+    statementId: "unknown-mode",
+  })], [statement]);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.dataQuality.critical, true);
+});
+
 test("el último corte se elige por fecha de cierre y no por orden de importación", () => {
   const statements: Statement[] = [
     { ...bank("santander-may", "Santander", "16/05/2026 AL 15/06/2026"), summary: { cashBalance: 24621.48 } },
