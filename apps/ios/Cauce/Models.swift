@@ -2013,6 +2013,10 @@ final class FinanceStore {
         let page: Int
         let text: String
         let boundingBox: CGRect
+        /// Confidence returned by Vision for this observation (0–1). It is
+        /// propagated to every movement instead of using a fixed optimistic
+        /// value, so a visually weak row cannot pass the automatic gate.
+        let confidence: Double
 
         var centerX: CGFloat { boundingBox.midX }
         var centerY: CGFloat { boundingBox.midY }
@@ -2046,11 +2050,17 @@ final class FinanceStore {
             }
 
             let pageObservations = (request.results ?? []).compactMap { result -> OCRObservation? in
-                guard let text = result.topCandidates(1).first?.string,
+                guard let candidate = result.topCandidates(1).first,
+                      let text = candidate.string,
                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     return nil
                 }
-                return OCRObservation(page: pageIndex, text: text, boundingBox: result.boundingBox)
+                return OCRObservation(
+                    page: pageIndex,
+                    text: text,
+                    boundingBox: result.boundingBox,
+                    confidence: Double(candidate.confidence)
+                )
             }
             .sorted {
                 if abs($0.centerY - $1.centerY) > 0.008 {
@@ -2097,7 +2107,8 @@ final class FinanceStore {
                     OCRObservation(
                         page: page,
                         text: group.sorted { $0.centerX < $1.centerX }.map(\.text).joined(separator: " "),
-                        boundingBox: box
+                        boundingBox: box,
+                        confidence: group.map(\.confidence).min() ?? 0
                     )
                 )
             }
@@ -2631,7 +2642,7 @@ final class FinanceStore {
             extractionEvidence: MovementExtractionEvidence(
                 method: "vision-ocr",
                 page: row.first.map { $0.page + 1 },
-                confidence: 0.90
+                confidence: row.map(\.confidence).min() ?? 0
             )
         )
     }
@@ -2850,7 +2861,7 @@ final class FinanceStore {
             extractionEvidence: MovementExtractionEvidence(
                 method: "vision-ocr",
                 page: row.first.map { $0.page + 1 },
-                confidence: 0.90
+                confidence: row.map(\.confidence).min() ?? 0
             )
         )
     }
@@ -3081,7 +3092,7 @@ final class FinanceStore {
             extractionEvidence: MovementExtractionEvidence(
                 method: "vision-ocr",
                 page: row.first.map { $0.page + 1 },
-                confidence: 0.90
+                confidence: row.map(\.confidence).min() ?? 0
             )
         )
     }

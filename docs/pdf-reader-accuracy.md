@@ -24,7 +24,8 @@ gasto real sin separar esas secciones.
 - Estado bancario válido solo si depósitos, retiros y conteos concilian dentro de ±$0.05.
 - Estado de tarjeta válido solo si cargos y pagos reconocidos concilian con el resumen disponible.
 - Cualquier encabezado, referencia, cuenta, RFC, certificado, saldo o total se descarta como movimiento.
-- OCR web sin coordenadas queda provisional. Vision con coordenadas conserva página y método en cada fila.
+- OCR web sin coordenadas queda provisional. Vision con coordenadas conserva
+  página, método y la confianza real de cada observación en cada fila.
 - El OCR web conserva confianza media y por página, limita la resolución de cada lienzo para evitar crashes por memoria y rechaza archivos de más de 50 MB con un mensaje recuperable.
 - Aunque los totales coincidan, el OCR web queda provisional si la confianza
   media baja de 88% o alguna página baja de 78%; una coincidencia accidental no
