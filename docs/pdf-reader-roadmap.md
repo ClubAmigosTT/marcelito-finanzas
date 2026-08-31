@@ -224,6 +224,9 @@ más MSI y principal MSI pendiente; estos controles son independientes de las
 filas para evitar que una deuda mal extraída pase por una conciliación parcial.
 La ejecución está encapsulada en `apps/ios/scripts/run-native-corpus.sh`, que
 conserva el `.xcresult` y el log para que cada calibración sea reproducible.
+El runner puede ejecutar el verificador automáticamente con
+`MARCELITO_PDF_CORPUS_VERIFY=1` y hacer que la corrida falle si no está
+certificada con `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`.
 En Santander, si Vision no identifica los tres anclajes de columna, el lector
 puede reconstruir filas para diagnóstico con el layout conservador, pero la
 importación queda provisional y no puede autoalimentar los KPI. La calibración

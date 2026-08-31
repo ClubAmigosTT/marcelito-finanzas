@@ -27,11 +27,14 @@ fi
 result_dir="$(mktemp -d "${TMPDIR:-/tmp}/marcelito-native-corpus.XXXXXX")"
 result_bundle="$result_dir/MarcelitoCorpus.xcresult"
 log_file="$result_dir/xcodebuild.log"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 
 echo "Corpus: $corpus_dir"
 echo "Destino: $destination"
 echo "Resultados: $result_dir"
 
+set +e
 MARCELITO_PDF_CORPUS_DIR="$corpus_dir" \
   xcodebuild \
     -project Marcelito.xcodeproj \
@@ -43,6 +46,45 @@ MARCELITO_PDF_CORPUS_DIR="$corpus_dir" \
     CODE_SIGNING_ALLOWED=NO \
     CODE_SIGNING_REQUIRED=NO \
     test 2>&1 | tee "$log_file"
+xcode_status="${PIPESTATUS[0]}"
+set -e
+
+verify_status=0
+if [[ "${MARCELITO_PDF_CORPUS_VERIFY:-}" =~ ^(1|true|yes)$ ]]; then
+  if ! command -v node >/dev/null 2>&1; then
+    echo "No se encontró Node.js; no se pudo validar NATIVE_CORPUS_REPORT." >&2
+    verify_status=2
+  else
+    reader_version="$(sed -n 's/.*static let readerVersion = "\([^"]*\)".*/\1/p' "$repo_root/apps/ios/Cauce/Models.swift" | head -n 1)"
+    manifest_path="${MARCELITO_PDF_CORPUS_MANIFEST:-$repo_root/tests/fixtures/pdf-corpus-attachments.json}"
+    verify_args=(
+      "$repo_root/scripts/verify-native-corpus-report.ts"
+      --log "$log_file"
+      --manifest "$manifest_path"
+    )
+    if [[ -n "$reader_version" ]]; then
+      verify_args+=(--reader-version "$reader_version")
+    fi
+    if [[ "${MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED:-}" =~ ^(1|true|yes)$ ]]; then
+      verify_args+=(--require-certified)
+    fi
+    echo "Validando informe nativo contra $manifest_path"
+    set +e
+    node --experimental-strip-types "${verify_args[@]}"
+    verify_status="$?"
+    set -e
+  fi
+fi
 
 echo "NATIVE_CORPUS_RESULT_BUNDLE=$result_bundle"
 echo "NATIVE_CORPUS_LOG=$log_file"
+if [[ "$xcode_status" -ne 0 ]]; then
+  echo "xcodebuild terminó con código $xcode_status." >&2
+fi
+if [[ "$verify_status" -ne 0 ]]; then
+  echo "La verificación nativa terminó con código $verify_status." >&2
+fi
+if [[ "$xcode_status" -ne 0 ]]; then
+  exit "$xcode_status"
+fi
+exit "$verify_status"

@@ -36,6 +36,18 @@ MARCELITO_PDF_CORPUS_DIR="/ruta/a/estados-validados" \
   ./scripts/run-native-corpus.sh
 ```
 
+Para validar automáticamente el log contra el manifiesto al terminar la
+corrida, añade `MARCELITO_PDF_CORPUS_VERIFY=1`. Si además defines
+`MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`, el runner devuelve error mientras
+el corpus no cumpla el 99%:
+
+```bash
+MARCELITO_PDF_CORPUS_VERIFY=1 \
+MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1 \
+MARCELITO_PDF_CORPUS_DIR="/ruta/a/estados-validados" \
+  ./scripts/run-native-corpus.sh
+```
+
 Después de una corrida certificable, valida el resumen de XCTest antes de
 registrar la versión en GitHub Actions. El verificador lee únicamente la línea
 `NATIVE_CORPUS_SUMMARY` del log y falla si falta un golden, queda OCR pendiente,
