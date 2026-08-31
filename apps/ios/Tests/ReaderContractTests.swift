@@ -65,4 +65,26 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(snapshot.movements.first?.title.localizedCaseInsensitiveContains("OXXO") == true)
         XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("certificado") })
     }
+
+    func testBankShortMonthDatesKeepTheOperationYear() {
+        let text = """
+        Grupo Financiero BBVA
+        BBVA México, Institución de Banca Múltiple
+        Detalle de Movimientos Realizados
+        FECHA OPER LIQ DESCRIPCION CARGOS ABONOS SALDO
+        23/JUL 22/JUL FACEBK *XR4NKVVF52 120.00 3,469.63
+        27/JUL 27/JUL SPEI RECIBIDO INFLUENCER MARKETING 15,000.00 18,469.63
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "bbva-agosto-2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "BBVA")
+        XCTAssertEqual(snapshot.movements.count, 2)
+        XCTAssertTrue(snapshot.movements.allSatisfy { Calendar.current.component(.year, from: $0.date) == 2026 })
+        XCTAssertEqual(snapshot.movements.first?.amount, -120)
+        XCTAssertEqual(snapshot.movements.last?.amount, 15_000)
+    }
 }

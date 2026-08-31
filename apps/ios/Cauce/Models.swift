@@ -2383,6 +2383,8 @@ final class FinanceStore {
             pattern: #"(?<!\d)(\d{1,2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{2,4})(?!\d)"#
         ), let isoDateRegex = try? NSRegularExpression(
             pattern: #"(?<!\d)(\d{4})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{1,2})(?!\d)"#
+        ), let shortMonthDateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
         ), let textDateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(\d{1,2})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         ), let amountRegex = try? NSRegularExpression(
@@ -2440,6 +2442,7 @@ final class FinanceStore {
 
                 let dateMatch = firstMatch(in: line.text, regex: dayFirstDateRegex)
                     ?? firstMatch(in: line.text, regex: isoDateRegex)
+                    ?? firstMatch(in: line.text, regex: shortMonthDateRegex)
                     ?? firstMatch(in: line.text, regex: textDateRegex)
                 let isTransactionDate = dateMatch != nil
                     // The date column is usually left aligned, but some banks
@@ -2468,6 +2471,7 @@ final class FinanceStore {
                 $0,
                 dayFirstDateRegex: dayFirstDateRegex,
                 isoDateRegex: isoDateRegex,
+                shortMonthDateRegex: shortMonthDateRegex,
                 textDateRegex: textDateRegex,
                 amountRegex: amountRegex,
                 source: source,
@@ -2481,6 +2485,7 @@ final class FinanceStore {
         _ row: [OCRObservation],
         dayFirstDateRegex: NSRegularExpression,
         isoDateRegex: NSRegularExpression,
+        shortMonthDateRegex: NSRegularExpression,
         textDateRegex: NSRegularExpression,
         amountRegex: NSRegularExpression,
         source: String,
@@ -2490,6 +2495,7 @@ final class FinanceStore {
         let fullText = row.map(\.text).joined(separator: " ")
         let dateMatch = firstMatch(in: fullText, regex: dayFirstDateRegex)
             ?? firstMatch(in: fullText, regex: isoDateRegex)
+            ?? firstMatch(in: fullText, regex: shortMonthDateRegex)
             ?? firstMatch(in: fullText, regex: textDateRegex)
         guard let dateMatch, let date = parseDate(dateMatch.text, defaultYear: defaultYear) else { return nil }
 
@@ -2894,6 +2900,8 @@ final class FinanceStore {
     ) -> [Movement] {
         guard let dateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-.]\s*(\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*(\d{2,4})(?!\d)"#
+        ), let shortMonthDateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
         ), let textDateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(\d{1,2})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         ), let amountRegex = try? NSRegularExpression(
@@ -2964,6 +2972,7 @@ final class FinanceStore {
                     continue
                 }
                 let hasDate = firstMatch(in: line.text, regex: dateRegex) != nil
+                    || firstMatch(in: line.text, regex: shortMonthDateRegex) != nil
                     || firstMatch(in: line.text, regex: textDateRegex) != nil
                 let isTransactionDate = hasDate
                     && line.boundingBox.minX < 0.30
@@ -2979,18 +2988,29 @@ final class FinanceStore {
             if !pendingRow.isEmpty { rows.append(pendingRow) }
         }
 
-        return rows.compactMap { parseAmexRow($0, dateRegex: dateRegex, textDateRegex: textDateRegex, amountRegex: amountRegex, defaultYear: defaultYear) }
+        return rows.compactMap {
+            parseAmexRow(
+                $0,
+                dateRegex: dateRegex,
+                shortMonthDateRegex: shortMonthDateRegex,
+                textDateRegex: textDateRegex,
+                amountRegex: amountRegex,
+                defaultYear: defaultYear
+            )
+        }
     }
 
     private static func parseAmexRow(
         _ row: [OCRObservation],
         dateRegex: NSRegularExpression,
+        shortMonthDateRegex: NSRegularExpression,
         textDateRegex: NSRegularExpression,
         amountRegex: NSRegularExpression,
         defaultYear: Int
     ) -> Movement? {
         let fullText = row.map(\.text).joined(separator: " ")
         let dateMatch = firstMatch(in: fullText, regex: dateRegex)
+            ?? firstMatch(in: fullText, regex: shortMonthDateRegex)
             ?? firstMatch(in: fullText, regex: textDateRegex)
         guard let dateMatch, let date = parseDate(dateMatch.text, defaultYear: defaultYear) else { return nil }
 
@@ -3027,6 +3047,11 @@ final class FinanceStore {
         var title = fullText
             .replacingOccurrences(
                 of: #"(?i)(?<!\d)\d{1,2}\s*[\/\-.]\s*(?:\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*\d{2,4}(?!\d)"#,
+                with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?i)(?<!\d)\d{1,2}\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#,
                 with: " ",
                 options: .regularExpression
             )
