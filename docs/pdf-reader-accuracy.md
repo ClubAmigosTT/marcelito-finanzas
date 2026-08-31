@@ -112,6 +112,9 @@ gasto real sin separar esas secciones.
   el usuario puede confirmarlo de forma explícita. Esa liberación se guarda
   como `issuerConfirmedByUser` y no se cuenta como aceptación automática del
   corpus del 99%.
+- Reimportar los mismos bytes no borra esa confirmación humana: se conserva
+  únicamente cuando coinciden la huella SHA-256, el emisor y el tipo de estado;
+  si cualquiera cambia, el documento vuelve a revisión.
 
 ## Corpus dorado
 

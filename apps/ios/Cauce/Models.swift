@@ -2397,6 +2397,18 @@ final class FinanceStore {
             || ocrConfidenceNeedsReview
             || fresh.contains { $0.category == "Por revisar" }
 
+        // Re-importing the exact same bytes must not silently erase a prior
+        // human issuer confirmation. The confirmation is scoped to the
+        // immutable document fingerprint, source and statement kind; any
+        // change to those inputs intentionally starts a fresh review.
+        let preservedIssuerConfirmation: Bool? = {
+            guard let existingStatement,
+                  existingStatement.sourceFingerprint == sourceFingerprint,
+                  existingStatement.source == source,
+                  statementKind(existingStatement) == detectedKind else { return nil }
+            return existingStatement.issuerConfirmedByUser
+        }()
+
         // Invalid/pending rows are quarantined by omission: the statement and
         // its reconciliation evidence remain visible in diagnostics, while
         // no questionable amount can leak into any KPI or chart.
@@ -2419,6 +2431,7 @@ final class FinanceStore {
             summary: summary,
             reconciliation: reconciliation,
             sourceDetection: sourceDetection,
+            issuerConfirmedByUser: preservedIssuerConfirmation,
             sourceFingerprint: sourceFingerprint,
             readerVersion: Self.readerVersion,
             ocrConfidence: ocrConfidence,
