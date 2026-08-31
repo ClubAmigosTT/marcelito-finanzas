@@ -55,6 +55,10 @@ confianza OCR media y página OCR más débil. Todos los archivos deben identifi
 aserciones duras. Los escaneos Santander se reportan para calibración mientras
 permanezcan en `pending`.
 
+El verificador también exige el `NATIVE_CORPUS_REPORT` por archivo: comprueba
+que no falte ningún PDF, que no haya archivos repetidos y que cada `accountKey`
+sea únicamente `emisor:últimos4` y coincida con su expectativa dorada.
+
 El contrato nativo también verifica el SHA-256 de cada PDF contra el manifiesto
 privado del corpus. Si se sustituye, altera o renombra un archivo sin actualizar
 su expectativa, la corrida falla antes de considerar sus filas como evidencia.

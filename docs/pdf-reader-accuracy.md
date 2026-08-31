@@ -211,6 +211,9 @@ también cuenta los PDFs procesados por OCR local, porque ese diagnóstico no
 puede sustituir Vision. Cada archivo incluye `qualityGate.statusBefore`,
 `qualityGate.statusAfter` y `qualityGate.applied`, y el nivel superior expone
 `certificationBlockers` para que una corrida parcial no parezca certificada.
+El verificador nativo además revisa el `NATIVE_CORPUS_REPORT` por archivo y
+rechaza reportes truncados, duplicados o con una identidad de cuenta que no
+coincida con el `accountKey` dorado.
 
 Métricas mínimas por versión:
 
