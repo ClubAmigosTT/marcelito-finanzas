@@ -1288,6 +1288,28 @@ test("un estado listo sin emisor verificado queda en cuarentena aunque concilie"
   assert.equal(ledger.transactions.length, 0);
 });
 
+test("un estado sin conciliación explícita no alimenta KPI aunque tenga emisor verificado", () => {
+  const statement = {
+    ...bank("bbva-no-reconciliation", "BBVA", "agosto 2026"),
+    reconciliationStatus: undefined,
+    reconciliation: undefined,
+  };
+  const transaction = movement({
+    id: "no-reconciliation-row",
+    date: "10 ago 2026",
+    description: "COMPRA SIN CONCILIAR",
+    account: "BBVA",
+    amount: -100,
+    flow: "expense",
+    statementId: statement.id,
+  });
+  assert.equal(isStatementEligibleForDashboard(statement), false);
+  const metrics = buildFinanceMetrics([transaction], [statement]);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.isProvisional, true);
+  assert.match(metrics.audit.criticalIssues.join(" "), /conciliación de estado/);
+});
+
 test("la migración devuelve a revisión un OCR débil aunque conserve la versión actual", () => {
   const statement: Statement = {
     ...bank("bbva-weak-ocr", "BBVA", "agosto 2026"),

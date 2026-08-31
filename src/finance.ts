@@ -37,7 +37,10 @@ export function hasSufficientOcrQuality(statement: Statement) {
  * a pending reconciliation, or a weak OCR statement.
  */
 export function isStatementEligibleForDashboard(statement: Statement) {
-  if (statement.reconciliationStatus !== undefined && statement.reconciliationStatus !== "valid") return false;
+  // A missing reconciliation record is not proof that the PDF matched the
+  // issuer totals. Legacy rows are migrated to pending, but this boundary is
+  // intentionally strict for direct callers too.
+  if (statement.reconciliationStatus !== "valid" || statement.reconciliation?.status !== "valid") return false;
   if (statement.status === "review") return false;
   if (!hasSufficientOcrQuality(statement)) return false;
   if (statement.source === "Desconocido") return false;
@@ -680,7 +683,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   // are removed or linked before any KPI is calculated.
   const pipeline = providedPipeline ?? runTransactionPipeline(inputTransactions, statements);
   const blockedForReconciliation = statements
-    .filter((statement) => statement.reconciliationStatus && statement.reconciliationStatus !== "valid")
+    .filter((statement) => statement.reconciliationStatus !== "valid" || statement.reconciliation?.status !== "valid")
     .map((statement) => statement.id);
   const blockedForReview = statements
     .filter((statement) => statement.status === "review")
@@ -716,8 +719,8 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   // A document that failed issuer-total reconciliation can remain visible in
   // the audit screen, but none of its rows or summary values may feed an
   // executive KPI. The UI migrates legacy records without a status to
-  // `pending` before this point; direct callers may still opt into legacy
-  // behavior explicitly by omitting the status.
+  // `pending` before this point; direct callers are protected by the same
+  // strict boundary.
   const transactions = pipeline.transactions.filter((transaction) => !transaction.statementId || !blockedStatementIds.has(transaction.statementId));
   const eligibleStatements = statements.filter((statement) => !blockedStatementIds.has(statement.id));
   const statementsWithoutRows = eligibleStatements.filter((statement) => {
