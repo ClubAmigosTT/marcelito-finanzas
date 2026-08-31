@@ -101,7 +101,7 @@ final class NativeCorpusContractTests: XCTestCase {
 
     private func percentText(_ value: Double?) -> String {
         guard let value, value.isFinite else { return "" }
-        return String(format: "%.4f", value)
+        return String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), value)
     }
 
     func testValidatedCorpusThroughNativeReaderWhenProvided() throws {
@@ -328,7 +328,7 @@ final class NativeCorpusContractTests: XCTestCase {
             "expectedPending": String(expectedPendingCount),
             "goldenAutoAccepted": String(goldenAutoAccepted),
             "goldenFalseAccepted": String(goldenFalseAccepted),
-            "automaticAcceptancePrecision": String(format: "%.4f", automaticAcceptancePrecision),
+            "automaticAcceptancePrecision": String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), automaticAcceptancePrecision),
             "unresolvedOCR": String(unresolvedOCR),
             "requireCertified": String(requireCertified),
             "certified": String(certified)
