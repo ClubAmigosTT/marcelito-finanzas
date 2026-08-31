@@ -530,6 +530,30 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
   return { status: "pending", tolerance, extractedMovementCount: transactions.length, reason: "Tipo de estado no identificado" };
 }
 
+/**
+ * Applies the automatic-acceptance quality gate shared by preview and save.
+ * Keeping it as a pure helper prevents the review dialog from accidentally
+ * recomputing a valid base reconciliation and bypassing the OCR safeguard.
+ */
+export function gateOcrReconciliation(
+  reconciliation: StatementReconciliation,
+  mode: ImportResult["mode"],
+  confidence?: number,
+  pageConfidences?: number[],
+) {
+  if (mode !== "ocr" || reconciliation.status !== "valid") return reconciliation;
+  const weakestPage = pageConfidences?.length ? Math.min(...pageConfidences) : undefined;
+  const weakAverage = (confidence ?? 0) < 0.88;
+  const weakPage = weakestPage !== undefined && weakestPage < 0.78;
+  if (!weakAverage && !weakPage) return reconciliation;
+  const pageLabel = weakestPage === undefined ? "sin medición por página" : `página más débil ${Math.round(weakestPage * 100)}%`;
+  return {
+    ...reconciliation,
+    status: "pending" as const,
+    reason: `OCR provisional: confianza media ${Math.round((confidence ?? 0) * 100)}% y ${pageLabel}; revisa las filas antes de aceptar.`,
+  };
+}
+
 function guessCategory(description: string) {
   const value = normalizeText(description);
   const rules: Array<[string, RegExp]> = [
@@ -928,18 +952,12 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   // a coincidental amount. Keep the statement provisional when the visual
   // signal is weak, and require a human confirmation before it can enter the
   // canonical ledger. Text-layer imports are not affected by this gate.
-  const weakestOcrPage = ocrResult?.pageConfidences.length
-    ? Math.min(...ocrResult.pageConfidences)
-    : 0;
-  const ocrQualityBlocked = mode === "ocr"
-    && ((ocrResult?.confidence ?? 0) < 0.88 || weakestOcrPage < 0.78);
-  const reconciliation = ocrQualityBlocked && baseReconciliation.status === "valid"
-    ? {
-      ...baseReconciliation,
-      status: "pending" as const,
-      reason: `OCR provisional: confianza media ${Math.round((ocrResult?.confidence ?? 0) * 100)}% y página más débil ${Math.round(weakestOcrPage * 100)}%; revisa las filas antes de aceptar.`,
-    }
-    : baseReconciliation;
+  const reconciliation = gateOcrReconciliation(
+    baseReconciliation,
+    mode,
+    ocrResult?.confidence,
+    ocrResult?.pageConfidences,
+  );
   onProgress(100, "Listo para revisar");
 
   return {

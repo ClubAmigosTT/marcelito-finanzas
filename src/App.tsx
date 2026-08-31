@@ -31,7 +31,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { categories } from "./data";
 import { createAuditRun } from "./audit";
 import { buildFinanceMetrics, defaultStatementKind, isSpendTransaction, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
-import { inspectPdf, reconcileStatementImport } from "./pdfImport";
+import { gateOcrReconciliation, inspectPdf, reconcileStatementImport } from "./pdfImport";
 import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
 import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey } from "./reconciliation";
 import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementSource, StatementSummary, Transaction } from "./types";
@@ -1117,7 +1117,14 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
   }
 
   const validItems = items.filter((item) => item.description.trim().length >= 3 && Number.isFinite(item.amount) && item.amount !== 0);
-  const currentReconciliation = result ? reconcileStatementImport(reviewKind, summary, validItems) : undefined;
+  const currentReconciliation = result
+    ? gateOcrReconciliation(
+      reconcileStatementImport(reviewKind, summary, validItems),
+      result.mode,
+      result.ocrConfidence,
+      result.ocrPageConfidences,
+    )
+    : undefined;
   const reconciliationBlocked = Boolean(currentReconciliation && currentReconciliation.status !== "valid");
   const learnedCategories = Object.fromEntries(validItems.flatMap((item) => {
     const previous = initialCategories.current[item.id];

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectSource, detectSourceEvidence, extractTransactions, parseStatementSummary, reconcileStatementImport } from "../src/pdfImport.ts";
+import { detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseStatementSummary, reconcileStatementImport } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
 import { buildFinanceMetrics } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
@@ -48,6 +48,17 @@ test("el parser rechaza encabezados administrativos con importes", () => {
   assert.equal(rows.length, 1);
   assert.equal(rows[0].description, "CARGO SUPERMERCADO");
   assert.equal(rows[0].amount, -1200);
+});
+
+test("la compuerta OCR se conserva al recalcular la vista de revisión", () => {
+  const base = reconcileStatementImport("bank", { depositTotal: 100, withdrawalTotal: 0 }, [
+    movement({ id: "ocr-income", date: "01 ago 2026", description: "NOMINA", account: "BBVA", amount: 100, flow: "income" }),
+  ]);
+  assert.equal(base.status, "valid");
+  const gated = gateOcrReconciliation(base, "ocr", 0.91, [0.91, 0.71]);
+  assert.equal(gated.status, "pending");
+  assert.match(gated.reason ?? "", /OCR provisional/);
+  assert.equal(gateOcrReconciliation(base, "text", 0.1).status, "valid");
 });
 
 test("el pipeline rechaza fechas imposibles aunque tengan importe y descripción", () => {
