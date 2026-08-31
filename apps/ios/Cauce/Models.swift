@@ -4547,10 +4547,11 @@ final class FinanceStore {
         }()
         // OCR may place the legal issuer footer after the movement table. A
         // strong legal/domain marker anywhere in the document is authoritative
-        // evidence; generic names in transaction descriptions are not.
+        // evidence; generic names in transaction descriptions are not. Compute
+        // these once so source, conflict and confidence use identical signals.
+        let santanderLegal = normalizedText.range(of: #"grupo\s+financiero\s+santander|banco\s+santander\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com"#, options: .regularExpression) != nil
+        let bbvaLegal = normalizedText.range(of: #"grupo\s+financiero\s+bbva|bbva\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx"#, options: .regularExpression) != nil
         let sourceFromLegal: String? = {
-            let santanderLegal = normalizedText.range(of: #"grupo\s+financiero\s+santander|banco\s+santander\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com"#, options: .regularExpression) != nil
-            let bbvaLegal = normalizedText.range(of: #"grupo\s+financiero\s+bbva|bbva\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx"#, options: .regularExpression) != nil
             if santanderLegal && !bbvaLegal { return "Santander" }
             if bbvaLegal && !santanderLegal { return "BBVA" }
             if santanderLegal && bbvaLegal { return nil }
@@ -4558,8 +4559,7 @@ final class FinanceStore {
             return nil
         }()
         let hasConflictingLegalMarkers = santanderInstitutional && bbvaInstitutional
-            || (normalizedText.range(of: #"grupo\s+financiero\s+santander|banco\s+santander\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com"#, options: .regularExpression) != nil
-                && normalizedText.range(of: #"grupo\s+financiero\s+bbva|bbva\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx"#, options: .regularExpression) != nil)
+            || (santanderLegal && bbvaLegal)
         let source = hasConflictingLegalMarkers ? "Importado" : (sourceFromHeader ?? sourceFromLegal ?? sourceFromFile ?? "Importado")
         var evidence: [String] = []
         if hasConflictingLegalMarkers { evidence.append("marcadores legales conflictivos") }
