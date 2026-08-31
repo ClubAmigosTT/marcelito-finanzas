@@ -1021,8 +1021,16 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
     ...preferredSources.filter((source) => importedSources.includes(source)),
     ...importedSources.filter((source) => !preferredSources.includes(source)).sort((left, right) => left.localeCompare(right)),
   ];
+  const knownAccounts = knownSources.flatMap((source) => {
+    const kinds = Array.from(new Set(statements
+      .filter((statement) => statement.source === source)
+      .map((statement) => statement.kind ?? defaultStatementKind(source))));
+    return kinds
+      .sort((left, right) => ({ bank: 0, card: 1, unknown: 2 }[left] ?? 3) - ({ bank: 0, card: 1, unknown: 2 }[right] ?? 3))
+      .map((kind) => ({ source, kind }));
+  });
   const tabs = <div className="accounts-tabs" role="tablist" aria-label="Contenido de cuentas">
-    <button role="tab" aria-selected={view === "accounts"} className={view === "accounts" ? "active" : ""} onClick={() => setView("accounts")}>Cuentas <span>{knownSources.length}</span></button>
+    <button role="tab" aria-selected={view === "accounts"} className={view === "accounts" ? "active" : ""} onClick={() => setView("accounts")}>Cuentas <span>{knownAccounts.length}</span></button>
     <button role="tab" aria-selected={view === "movements"} className={view === "movements" ? "active" : ""} onClick={() => setView("movements")}>Movimientos <span>{transactions.length}</span></button>
   </div>;
 
@@ -1035,15 +1043,14 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
     <PageHeading title="Cuentas" body="Tus saldos por cuenta, separados de los documentos que los respaldan." action="Importar estado" onAction={onImport} />
     {tabs}
     <section className="accounts-overview" aria-label="Resumen de cuentas">
-      {knownSources.length ? <div className="account-card-grid">{knownSources.map((source) => {
-        const sourceStatements = statements.filter((item) => item.source === source);
+      {knownAccounts.length ? <div className="account-card-grid">{knownAccounts.map(({ source, kind }) => {
+        const sourceStatements = statements.filter((item) => item.source === source && (item.kind ?? defaultStatementKind(source)) === kind);
         const latest = latestStatementFor(sourceStatements);
         const period = latest ? metrics.periods.find((item) => item.statementId === latest.id) : undefined;
-        const kind = latest?.kind ?? defaultStatementKind(source);
         const balance = kind === "card" ? period?.debtBalance : kind === "bank" ? period?.cashBalance : undefined;
         const balanceLabel = metrics.isProvisional ? "Bloqueado por conciliación" : balance === undefined ? "Pendiente" : kind === "card" ? `−${money.format(balance)}` : money.format(balance);
         const sourceTransactions = transactions.filter((item) => item.statementId && sourceStatements.some((statement) => statement.id === item.statementId));
-        return <article className="account-card" key={source}>
+        return <article className="account-card" key={`${source}-${kind}`}>
           <div className="account-card-head"><span className={`account-icon ${sourceColor(source)}`}>{kind === "card" ? <CreditCard size={22} /> : <Bank size={22} />}</span><small>{kind === "card" ? "Tarjeta de crédito" : kind === "bank" ? "Cuenta de efectivo" : "Tipo pendiente"}</small></div>
           <h3>{source}</h3>
           <strong className={kind === "card" ? "account-card-balance debt" : "account-card-balance"}>{balanceLabel}</strong>
