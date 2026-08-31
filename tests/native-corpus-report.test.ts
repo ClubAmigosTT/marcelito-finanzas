@@ -203,3 +203,24 @@ test("el reporte nativo debe coincidir con el conjunto del manifiesto", () => {
   assert.ok(result.errors.some((error) => error.includes("falta amex.pdf")));
   assert.ok(result.errors.some((error) => error.includes("sustituido.pdf no está")));
 });
+
+test("el reporte nativo compara huella, emisor y tipo contra el manifiesto", () => {
+  const result = verifyNativeCorpusReport([
+    {
+      file: "bbva.pdf",
+      sourceFingerprint: "b".repeat(64),
+      source: "Santander",
+      kind: "card",
+      status: "valid",
+      rows: 11,
+      accountKey: "bbva:4922",
+      expectedAccountKey: "bbva:4922",
+    },
+  ], 1, [
+    { file: "bbva.pdf", accountKey: "bbva:4922", sourceFingerprint: "a".repeat(64), source: "BBVA", kind: "bank" },
+  ]);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("sourceFingerprint no coincide")));
+  assert.ok(result.errors.some((error) => error.includes("source Santander")));
+  assert.ok(result.errors.some((error) => error.includes("kind card")));
+});
