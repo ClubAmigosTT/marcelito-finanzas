@@ -224,7 +224,9 @@ depósitos y retiros del resumen incluso cuando una lectura escaneada permanece
 reconstruye movimientos válidos.
 El verificador del reporte nativo exige además huella SHA-256, emisor, tipo,
 estado y conteo de filas por PDF, comparados con el manifiesto; un resumen
-agregado sin trazabilidad completa no puede certificar la corrida.
+agregado sin trazabilidad completa no puede certificar la corrida. También
+comprueba que la fuente esté `verified`, que su confianza esté entre 0 y 1 y
+que `requiresReview` sea un booleano explícito.
 El evaluador web también contrasta en los estados Amex de texto el límite,
 crédito disponible, deuda comprometida, pago para no generar intereses, mínimo
 más MSI y principal MSI pendiente; estos controles son independientes de las
