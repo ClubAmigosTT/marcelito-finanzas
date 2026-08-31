@@ -43,6 +43,10 @@ gasto real sin separar esas secciones.
   un desvío menor o igual a $2, o una magnitud claramente mal escalada que
   siga dentro del rango del saldo; si no existe saldo anterior/final confiable
   conserva el importe visual y deja que la conciliación bloquee el estado.
+- La lectura Vision de Santander calibra `DEPÓSITO`, `RETIRO` y `SALDO` con la
+  geometría de los encabezados cuando están presentes. Si el recorte no trae
+  encabezado, usa los límites de la plantilla conocida; en ambos casos el
+  saldo corrido queda fuera de la columna de movimientos.
 - Ningún movimiento individual puede superar el total declarado de depósitos
   o retiros de su estado; esa fila bloquea la conciliación aunque el resto de
   las sumas parezca correcto.
