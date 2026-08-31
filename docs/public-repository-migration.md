@@ -19,6 +19,11 @@ expone código, historial, ejecuciones, logs, artefactos, issues y forks.
 - [ ] Revisar los logs y artefactos de Actions; eliminar todas las ejecuciones
   antiguas antes de publicar.
 
+Inventario remoto al 2026-08-31: `main` y la rama automática de Dependabot
+todavía apuntan a la historia privada, hay 23 tags `ios-v*` históricos y la
+pestaña Actions muestra 100 ejecuciones. Esas referencias deben limpiarse o
+eliminarse antes de cambiar la visibilidad.
+
 ## Fase 2 — Rotación
 
 - [ ] Revocar la clave de Zen compartida fuera de GitHub y crear una nueva.
