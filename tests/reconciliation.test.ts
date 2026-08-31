@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
+import { detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
 import { buildFinanceMetrics } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
@@ -386,6 +386,20 @@ test("el estado BBVA completo reconstruye sus 11 filas y concilia los totales", 
   assert.equal(rows.filter((row) => row.amount < 0).length, 9);
   assert.equal(rows.find((row) => row.description.includes("RECIBIDOSANTANDER"))?.amount, 4500);
   assert.equal(reconcileStatementImport("bank", summary, rows).status, "valid");
+  assert.equal(rows.every((row) => row.extractionEvidence?.method === "pdf-text"), true);
+});
+
+test("la relectura con tipo corregido reconstruye filas y conserva evidencia", () => {
+  const text = [
+    "Detalle de Movimientos",
+    "05/AGO COMPRA DE PRUEBA 125.00 1,030.94",
+    "07/AGO NOMINA EMPRESA 1,000.00 2,030.94",
+  ].join("\n");
+  const rows = parseImportedTransactions(text, "BBVA", "estado-corregido.pdf", "bank", "text");
+  assert.deepEqual(rows.map((row) => [row.date, row.amount, row.description]), [
+    ["05 ago 2026", -125, "COMPRA DE PRUEBA"],
+    ["07 ago 2026", 1000, "NOMINA EMPRESA"],
+  ]);
   assert.equal(rows.every((row) => row.extractionEvidence?.method === "pdf-text"), true);
 });
 

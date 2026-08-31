@@ -166,6 +166,12 @@ export type ImportResult = {
   ocrConfidence?: number;
   /** Per-page OCR confidence, retained for diagnostics and review UX. */
   ocrPageConfidences?: number[];
+  /**
+   * Transient text/OCR stream kept only while the import dialog is open. It is
+   * intentionally not part of ImportCommit/Statement so raw PDF text is not
+   * persisted; it lets a reviewer re-read rows after correcting issuer/kind.
+   */
+  extractedText?: string;
 };
 
 export type Statement = {

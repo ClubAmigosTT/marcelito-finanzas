@@ -1062,6 +1062,40 @@ export function extractTransactions(text: string, source: StatementSource, fileN
   return results;
 }
 
+/**
+ * Rebuilds the transient import rows with the same evidence annotation used
+ * by inspectPdf. This is used only when the reviewer corrects the issuer or
+ * statement kind; it never bypasses reconciliation or writes raw text to the
+ * ledger.
+ */
+export function parseImportedTransactions(
+  text: string,
+  source: StatementSource,
+  fileName: string,
+  kind: StatementKind,
+  mode: ImportResult["mode"],
+  ocrPageConfidences?: number[],
+): Transaction[] {
+  return extractTransactions(text, source, fileName, kind).map((transaction) => {
+    const page = transaction.extractionEvidence?.page;
+    const pageConfidence = mode === "ocr" && page !== undefined
+      ? ocrPageConfidences?.[page - 1]
+      : undefined;
+    const rowConfidence = pageConfidence === undefined
+      ? transaction.confidence ?? 0.75
+      : Math.min(transaction.confidence ?? pageConfidence, pageConfidence);
+    return {
+      ...transaction,
+      confidence: rowConfidence,
+      extractionEvidence: {
+        ...(transaction.extractionEvidence ?? { confidence: rowConfidence }),
+        method: mode === "ocr" ? "ocr" as const : "pdf-text" as const,
+        confidence: rowConfidence,
+      },
+    };
+  });
+}
+
 async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: number, label: string) => void) {
   onProgress(82, "Preparando reconocimiento visual");
   const { createWorker } = await import("tesseract.js");
@@ -1218,26 +1252,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   const kind = detectStatementKind(text, source);
   onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
-  const parsed = extractTransactions(text, source, file.name, kind).map((transaction) => {
-    // The parser is shared by text and OCR input. Preserve the actual method
-    // selected by inspectPdf so diagnostics never call an OCR row "text".
-    const page = transaction.extractionEvidence?.page;
-    const pageConfidence = mode === "ocr" && page !== undefined
-      ? ocrResult?.pageConfidences?.[page - 1]
-      : undefined;
-    const rowConfidence = pageConfidence === undefined
-      ? transaction.confidence ?? 0.75
-      : Math.min(transaction.confidence ?? pageConfidence, pageConfidence);
-    return {
-      ...transaction,
-      confidence: rowConfidence,
-      extractionEvidence: {
-        ...(transaction.extractionEvidence ?? { confidence: rowConfidence }),
-        method: mode === "ocr" ? "ocr" as const : "pdf-text" as const,
-        confidence: rowConfidence,
-      },
-    };
-  });
+  const parsed = parseImportedTransactions(text, source, file.name, kind, mode, ocrResult?.pageConfidences);
   const summary = parseStatementSummary(text, kind);
   const baseReconciliation = reconcileStatementImport(kind, summary, parsed);
   // A matching total is necessary but not sufficient for automatic OCR
@@ -1267,6 +1282,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
       reconciliation,
       ocrConfidence: ocrResult?.confidence,
       ocrPageConfidences: ocrResult?.pageConfidences,
+      extractedText: text,
     };
     await document.destroy();
     return result;
