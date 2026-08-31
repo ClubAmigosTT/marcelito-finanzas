@@ -33,14 +33,14 @@ export function clearWebErrorDiagnostics() {
   }
 }
 
-function recordWebError(error: Error, errorInfo: ErrorInfo) {
+function recordWebError(error: Error, componentStack = "") {
   const eventId = `web-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const entry = {
     eventId,
     recordedAt: new Date().toISOString(),
     message: error.message.slice(0, 500),
     stack: (error.stack ?? "").slice(0, 2000),
-    componentStack: (errorInfo.componentStack ?? "").slice(0, 2000),
+    componentStack: componentStack.slice(0, 2000),
     path: window.location.pathname,
     userAgent: navigator.userAgent.slice(0, 240),
   };
@@ -61,12 +61,36 @@ function recordWebError(error: Error, errorInfo: ErrorInfo) {
 export default class WebErrorBoundary extends Component<WebErrorBoundaryProps, WebErrorBoundaryState> {
   state: WebErrorBoundaryState = { error: null };
 
+  private readonly handleWindowError = (event: ErrorEvent) => {
+    const error = event.error instanceof Error
+      ? event.error
+      : new Error(event.message || "Error de ejecución no controlado");
+    recordWebError(error);
+  };
+
+  private readonly handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+    const error = event.reason instanceof Error
+      ? event.reason
+      : new Error(typeof event.reason === "string" ? event.reason : "Promesa rechazada sin detalle");
+    recordWebError(error);
+  };
+
+  componentDidMount() {
+    window.addEventListener("error", this.handleWindowError);
+    window.addEventListener("unhandledrejection", this.handleUnhandledRejection);
+  }
+
+  componentWillUnmount() {
+    window.removeEventListener("error", this.handleWindowError);
+    window.removeEventListener("unhandledrejection", this.handleUnhandledRejection);
+  }
+
   static getDerivedStateFromError(error: Error): WebErrorBoundaryState {
     return { error };
   }
 
   componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    const eventId = recordWebError(error, errorInfo);
+    const eventId = recordWebError(error, errorInfo.componentStack ?? "");
     this.setState({ eventId });
     console.error(`[Marcelito ${eventId}] Error de interfaz`, error);
   }
