@@ -32,21 +32,39 @@
       "sourceFingerprint": "f6940102b000539c733632727909dafbd8d97bca313d8c959ac5798d0611d6e4",
       "source": "Santander",
       "kind": "bank",
-      "status": "pending"
+      "status": "pending",
+      "summary": {
+        "previousBalance": 37075.03,
+        "cashBalance": 24621.48,
+        "depositTotal": 49222.45,
+        "withdrawalTotal": 61676.00
+      }
     },
     {
       "file": "4-Estado-de-cuenta-julio-2026.pdf",
       "sourceFingerprint": "747aba6d4453c0b7173c450a5a125d94cfb38a0940cb1776dd059f0d0e6e78a9",
       "source": "Santander",
       "kind": "bank",
-      "status": "pending"
+      "status": "pending",
+      "summary": {
+        "previousBalance": 87801.76,
+        "cashBalance": 55627.93,
+        "depositTotal": 40833.38,
+        "withdrawalTotal": 73007.21
+      }
     },
     {
       "file": "5-Estado-de-cuenta-agosto-2026.pdf",
       "sourceFingerprint": "30ccfc7fc31a128bbfd9f1d6c7c84e6840dbdc20c9cad9d90cac0807a845b8c0",
       "source": "Santander",
       "kind": "bank",
-      "status": "pending"
+      "status": "pending",
+      "summary": {
+        "previousBalance": 55627.93,
+        "cashBalance": 27654.24,
+        "depositTotal": 36187.42,
+        "withdrawalTotal": 64161.11
+      }
     },
     {
       "file": "6-28_jul_2026_-_27_ago_2026.pdf",
@@ -65,7 +83,13 @@
       "sourceFingerprint": "72b13daa0b9009017ce3d5d9c4951070a70da5f2888e8bbcb83ef4f1231455fb",
       "source": "Santander",
       "kind": "bank",
-      "status": "pending"
+      "status": "pending",
+      "summary": {
+        "previousBalance": 24621.48,
+        "cashBalance": 87801.76,
+        "depositTotal": 98629.30,
+        "withdrawalTotal": 35449.02
+      }
     },
     {
       "file": "8-BBVA-agosto-.pdf",

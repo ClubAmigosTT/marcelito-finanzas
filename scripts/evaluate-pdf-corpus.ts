@@ -62,7 +62,15 @@ async function evaluate(file: string) {
   const sourceDetection = detectSourceEvidence(text, fileName);
   const kind = kindFor(sourceDetection.source);
   const transactions = kind === "unknown" ? [] : extractTransactions(text, sourceDetection.source, fileName, kind);
-  const summary = kind === "unknown" ? {} : parseStatementSummary(text, kind);
+  const summary = kind === "unknown" ? undefined : parseStatementSummary(text, kind);
+  const statementControls = summary ? {
+    previousBalance: summary.previousBalance,
+    cashBalance: summary.cashBalance,
+    depositTotal: summary.depositTotal,
+    withdrawalTotal: summary.withdrawalTotal,
+    depositCount: summary.depositCount,
+    withdrawalCount: summary.withdrawalCount,
+  } : {};
   const reconciliation = kind === "unknown"
     ? { status: "pending" as const, tolerance: 0.05, extractedMovementCount: 0, reason: "Emisor no identificado" }
     : reconcileStatementImport(kind, summary, transactions);
@@ -94,6 +102,10 @@ async function evaluate(file: string) {
     ignoredBodyMentions: sourceDetection.ignoredBodyMentions,
     kind,
     rows: transactions.length,
+    // Keep the issuer's balance controls separate from row reconciliation so
+    // OCR runs can compare Santander scans even before their movement table is
+    // accepted. Undefined fields are omitted from JSON automatically.
+    statementControls,
     suspiciousRows: suspiciousRows.length,
     missingEvidenceRows: missingEvidenceRows.length,
     evidenceCoverage,
@@ -172,6 +184,7 @@ if (!directory) {
         ignoredBodyMentions: [],
         kind: "unknown",
         rows: 0,
+        statementControls: {},
         suspiciousRows: 0,
         missingEvidenceRows: 0,
         evidenceCoverage: 0,
@@ -191,7 +204,8 @@ if (!directory) {
     if (expected?.status && expected.status !== result.reconciliation.status) mismatches.push(`estado esperado ${expected.status}, obtenido ${result.reconciliation.status}`);
     if (expected?.rows !== undefined && expected.rows !== result.rows) mismatches.push(`filas esperadas ${expected.rows}, obtenidas ${result.rows}`);
     for (const [key, value] of Object.entries(expected?.summary ?? {})) {
-      const actual = result.reconciliation[key as keyof typeof result.reconciliation];
+      const actual = result.reconciliation[key as keyof typeof result.reconciliation]
+        ?? result.statementControls[key as keyof typeof result.statementControls];
       if (!closeEnough(actual, value, tolerance)) mismatches.push(`${key}: esperado ${value}, obtenido ${String(actual)}`);
     }
     const checked = expected ? mismatches.length === 0 : undefined;

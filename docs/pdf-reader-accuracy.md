@@ -88,7 +88,10 @@ El manifiesto `tests/fixtures/pdf-corpus-attachments.json` fija los ocho
 adjuntos de prueba disponibles mediante SHA-256. No incluye los PDFs: deben
 montarse desde la carpeta local de adjuntos al ejecutar la certificación. Los
 cuatro escaneos Santander permanecen intencionalmente como `pending` hasta
-que Vision confirme emisor, filas y totales.
+que Vision confirme emisor, filas y totales. Para esos cuatro cortes el
+manifiesto también conserva los controles de saldo anterior, saldo final,
+depósitos y retiros; el evaluador los expone como `statementControls` para
+comparar una corrida OCR aunque todavía no se acepten sus filas.
 
 Métricas mínimas por versión:
 
