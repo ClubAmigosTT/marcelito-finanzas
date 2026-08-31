@@ -1919,6 +1919,14 @@ final class FinanceStore {
             compare("retiros", extracted: withdrawals, expected: summary.withdrawalTotal)
             compareCount("cantidad de depósitos", extracted: validRows.filter { $0.amount > 0 }.count, expected: summary.depositCount)
             compareCount("cantidad de retiros", extracted: validRows.filter { $0.amount < 0 }.count, expected: summary.withdrawalCount)
+            let overDeclaredRows = validRows.filter { movement in
+                let declared = movement.amount > 0 ? summary.depositTotal : summary.withdrawalTotal
+                guard let declared else { return false }
+                return absolute(movement.amount) > absolute(declared) + tolerance
+            }
+            if !overDeclaredRows.isEmpty {
+                mismatches.append("(overDeclaredRows.count) importe(s) individual(es) superan el total declarado")
+            }
             if let opening = summary.previousBalance,
                let closing = summary.cashBalance {
                 let reconstructedClosing = opening + deposits - withdrawals

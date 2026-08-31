@@ -41,6 +41,8 @@ gasto real sin separar esas secciones.
 - Ningún movimiento individual puede superar el total declarado de depósitos
   o retiros de su estado; esa fila bloquea la conciliación aunque el resto de
   las sumas parezca correcto.
+- El lector nativo aplica la misma compuerta durante la conciliación iOS y
+  deja el número de filas que la activó en el motivo del estado inválido.
 - OCR web sin coordenadas queda provisional. Vision con coordenadas conserva
   página, método y la confianza real de cada observación en cada fila.
 - Cada fila también conserva un fragmento de origen acotado y, cuando existe
