@@ -189,10 +189,12 @@ para ejecutar una medición local reproducible con `pdftoppm` y Tesseract.js.
 Esta ruta sirve para detectar errores de emisor, filas y conciliación en los
 escaneos privados y guarda confianza media y por página en el reporte JSON;
 deliberadamente no puede cambiar `certified` a `true` ni sustituye la prueba
-Vision nativa. En la corrida de los ocho adjuntos disponibles, los cuatro
-Santander fueron identificados y conciliaron sus controles, pero quedaron
-provisionales por confianza OCR media de 86–87%, lo que confirma que el umbral
-de publicación está actuando como compuerta y no como una cifra decorativa.
+Vision nativa. En la corrida de los ocho adjuntos disponibles a 220 DPI, los
+cuatro Santander fueron identificados y conciliaron sus controles, con
+confianza OCR media de 88–90% y mínima por página de 78%; aun así permanecen
+provisionales hasta repetir el mismo corpus con Vision nativa. Esto confirma
+que el umbral de publicación está actuando como compuerta y no como una cifra
+decorativa.
 
 La última revisión nativa añade una reparación conservadora para Santander:
 cuando Vision conserva el saldo corrido de dos filas consecutivas, un importe
