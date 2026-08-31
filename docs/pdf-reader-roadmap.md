@@ -185,3 +185,6 @@ que recibe `MARCELITO_PDF_CORPUS_DIR`, procesa los ocho PDFs con
 `PDFDocument + Vision`, verifica los estados de texto y emite un informe
 `NATIVE_CORPUS_REPORT`; falta ejecutarlo contra los cuatro escaneos en
 macOS/Xcode para cerrar la certificación.
+El runner nativo ya contrasta los controles de depósitos y retiros del resumen
+incluso cuando una lectura escaneada permanece `pending`; solo difiere la
+aserción de sumas de filas hasta que Vision reconstruye movimientos válidos.
