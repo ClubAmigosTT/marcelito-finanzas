@@ -28,6 +28,23 @@ export function hasSufficientOcrQuality(statement: Statement) {
   return true;
 }
 
+/**
+ * Single eligibility boundary for dashboard data.
+ *
+ * The web shell normally migrates legacy statements before this function is
+ * reached, but keeping the checks here too prevents a direct metrics caller
+ * (or a future screen) from accidentally aggregating an unverified issuer,
+ * a pending reconciliation, or a weak OCR statement.
+ */
+export function isStatementEligibleForDashboard(statement: Statement) {
+  if (statement.reconciliationStatus !== undefined && statement.reconciliationStatus !== "valid") return false;
+  if (statement.status === "review") return false;
+  if (!hasSufficientOcrQuality(statement)) return false;
+  const sourceEvidence = statement.sourceDetection;
+  if (sourceEvidence && sourceEvidence.status !== "verified" && statement.issuerConfirmedByUser !== true) return false;
+  return true;
+}
+
 export type PeriodMetrics = {
   key: string;
   label: string;
@@ -667,7 +684,18 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   const blockedForOcrQuality = statements
     .filter((statement) => !hasSufficientOcrQuality(statement))
     .map((statement) => statement.id);
-  const blockedStatementIds = new Set([...blockedForReconciliation, ...blockedForReview, ...blockedForOcrQuality]);
+  const blockedForSourceEvidence = statements
+    .filter((statement) => {
+      const sourceEvidence = statement.sourceDetection;
+      return Boolean(sourceEvidence && sourceEvidence.status !== "verified" && statement.issuerConfirmedByUser !== true);
+    })
+    .map((statement) => statement.id);
+  const blockedStatementIds = new Set([
+    ...blockedForReconciliation,
+    ...blockedForReview,
+    ...blockedForOcrQuality,
+    ...blockedForSourceEvidence,
+  ]);
   if (blockedForReconciliation.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("conciliación de estado"))) {
     pipeline.audit.criticalIssues.push(`${blockedForReconciliation.length} estado(s) quedaron fuera de los KPI por conciliación de estado`);
   }
@@ -676,6 +704,9 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   }
   if (blockedForOcrQuality.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("calidad OCR"))) {
     pipeline.audit.criticalIssues.push(`${blockedForOcrQuality.length} estado(s) quedaron fuera de los KPI por calidad OCR insuficiente`);
+  }
+  if (blockedForSourceEvidence.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("emisor"))) {
+    pipeline.audit.criticalIssues.push(`${blockedForSourceEvidence.length} estado(s) quedaron fuera de los KPI por emisor no verificado`);
   }
   // A document that failed issuer-total reconciliation can remain visible in
   // the audit screen, but none of its rows or summary values may feed an

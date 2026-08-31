@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
-import { buildFinanceMetrics } from "../src/finance.ts";
+import { buildFinanceMetrics, isStatementEligibleForDashboard } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
 import { prepareStoredLedger, prepareStoredStatements } from "../src/statementMigration.ts";
 import type { Statement, Transaction } from "../src/types.ts";
@@ -1032,6 +1032,39 @@ test("la confianza OCR baja bloquea estados persistidos aunque status diga listo
   assert.equal(metrics.dataQuality.reconciledPercent, 0);
   assert.match(metrics.audit.criticalIssues.join(" "), /calidad OCR insuficiente/);
   const audit = createAuditRun(runTransactionPipeline(transactions, statements), statements, [], "startup");
+  assert.equal(audit.reconciledStatementCount, 0);
+  assert.equal(audit.status, "blocked");
+});
+
+test("un estado con emisor no verificado no puede alimentar KPI ni auditoría", () => {
+  const statement: Statement = {
+    ...bank("bbva-unverified", "BBVA", "agosto 2026"),
+    reconciliationStatus: "valid",
+    reconciliation: { status: "valid", tolerance: 0.05 },
+    sourceDetection: {
+      source: "Santander",
+      confidence: 0.51,
+      status: "review",
+      evidence: ["nombre de archivo ambiguo"],
+      ignoredBodyMentions: ["BBVA"],
+    },
+  };
+  const transaction = movement({
+    id: "unverified-spend",
+    date: "10 ago 2026",
+    description: "COMPRA NO VERIFICADA",
+    account: "BBVA",
+    amount: -900,
+    flow: "expense",
+    statementId: statement.id,
+  });
+  assert.equal(isStatementEligibleForDashboard(statement), false);
+  const pipeline = runTransactionPipeline([transaction], [statement]);
+  const metrics = buildFinanceMetrics([transaction], [statement], pipeline);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.dataQuality.critical, true);
+  assert.match(metrics.audit.criticalIssues.join(" "), /emisor no verificado/);
+  const audit = createAuditRun(pipeline, [statement], [], "startup");
   assert.equal(audit.reconciledStatementCount, 0);
   assert.equal(audit.status, "blocked");
 });

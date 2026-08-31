@@ -1,5 +1,5 @@
 import { buildDeduplicationKey, type PipelineResult } from "./reconciliation.ts";
-import { hasSufficientOcrQuality } from "./finance.ts";
+import { isStatementEligibleForDashboard } from "./finance.ts";
 import { PDF_READER_VERSION } from "./pdfImport.ts";
 import type { AuditRunRecord, AuditRunStatus, Statement, Transaction } from "./types.ts";
 
@@ -36,11 +36,7 @@ export function createAuditRun(
   // A conciliación válida todavía requiere confirmación cuando el usuario
   // debe revisar filas OCR, categorías o una detección ambigua. Esos estados
   // tampoco pueden aparecer como "Verificado" en la autoauditoría.
-  const pendingStatements = statements.filter((statement) =>
-    statement.reconciliationStatus !== "valid"
-      || statement.status === "review"
-      || !hasSufficientOcrQuality(statement)
-  ).length;
+  const pendingStatements = statements.filter((statement) => !isStatementEligibleForDashboard(statement)).length;
   const issueCount = pendingStatements
     + pipeline.audit.invalidCount
     + pipeline.audit.duplicateCount
