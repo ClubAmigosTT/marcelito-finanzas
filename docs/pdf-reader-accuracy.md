@@ -263,7 +263,10 @@ npm run pdf:corpus -- --dir "./estados-validados" --manifest ./corpus.json \
 El manifiesto opcional fija la versión exacta del lector (`readerVersion`),
 huella SHA-256, emisor, tipo, estado de conciliación, número de filas y
 totales esperados por archivo. Si la versión del manifiesto no coincide con la
-del lector, la certificación falla y obliga a volver a medir el corpus. Si falta un archivo declarado o aparece
+del lector, la certificación falla y obliga a volver a medir el corpus. Cuando
+se usa `--require-manifest`, cada entrada también debe tener hash, cuenta
+enmascarada, emisor, tipo y estado; un golden válido debe declarar sus filas.
+Si falta un archivo declarado o aparece
 duplicado en el manifiesto, la corrida falla. El resultado incluye método
 (`pdf-text` u `ocr-required`), confianza del emisor, filas sospechosas,
 filas sin evidencia, cobertura de evidencia, cobertura de filas y motivo de

@@ -250,6 +250,32 @@ if (!directory) {
   let diagnosticOcrAccepted = 0;
   const expectedFiles = manifest.files ?? [];
   const expectedNames = expectedFiles.map((item) => item.file);
+  const manifestSchemaFailures: string[] = [];
+  if (requireManifest) {
+    expectedFiles.forEach((entry, index) => {
+      const label = entry.file?.trim() || `entrada ${index + 1}`;
+      if (!entry.file?.trim()) manifestSchemaFailures.push(`${label}: falta file`);
+      if (!entry.sourceFingerprint || !/^[a-f0-9]{64}$/i.test(entry.sourceFingerprint.trim())) {
+        manifestSchemaFailures.push(`${label}: falta sourceFingerprint SHA-256`);
+      }
+      if (!entry.accountKey || !/^[a-z0-9]+:\d{4}$/i.test(entry.accountKey.trim())) {
+        manifestSchemaFailures.push(`${label}: falta accountKey emisor:últimos4`);
+      }
+      if (!entry.source || entry.source === "Desconocido") {
+        manifestSchemaFailures.push(`${label}: falta source identificado`);
+      }
+      if (!entry.kind || !["bank", "card", "unknown"].includes(entry.kind)) {
+        manifestSchemaFailures.push(`${label}: falta kind válido`);
+      }
+      if (!entry.status || !["valid", "pending", "invalid"].includes(entry.status)) {
+        manifestSchemaFailures.push(`${label}: falta status valid/pending/invalid`);
+      }
+      if (entry.status === "valid" && (!Number.isInteger(entry.rows) || (entry.rows ?? -1) < 0)) {
+        manifestSchemaFailures.push(`${label}: un golden valid necesita rows entero no negativo`);
+      }
+    });
+    if (manifestSchemaFailures.length) failures += manifestSchemaFailures.length;
+  }
   const duplicateManifestFiles = [...new Set(expectedNames.filter((name, index) => expectedNames.indexOf(name) !== index))].sort();
   const missingManifestFiles = expectedNames.filter((name) => !names.includes(name)).sort();
   const unlistedCorpusFiles = manifestPath ? names.filter((name) => !expectedNames.includes(name)).sort() : [];
@@ -400,6 +426,7 @@ if (!directory) {
     manifestReaderVersion: manifest.readerVersion,
     manifestReaderVersionMismatch,
     manifestFailures: failures,
+    manifestSchemaFailures,
     manifestMissingFiles: missingManifestFiles,
     manifestDuplicateFiles: duplicateManifestFiles,
     manifestUnlistedFiles: unlistedCorpusFiles,
