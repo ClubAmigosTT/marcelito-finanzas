@@ -13,6 +13,11 @@ El 99% se mide como **precisión de aceptación automática**: de cada 100 filas
 7. Conciliar: comparar filas contra totales y conteos declarados por el emisor.
 8. Calcular: alimentar todos los módulos exclusivamente desde el libro canónico conciliado.
 
+En tarjetas Amex, cuando están disponibles, la conciliación usa además los
+subtotales impresos de transacciones nacionales y moneda extranjera. El total
+de nuevos cargos puede incluir cuotas MSI o conversiones y no se trata como
+gasto real sin separar esas secciones.
+
 ## Reglas de aceptación
 
 - Emisor verificado por evidencia institucional del encabezado; nombres dentro de movimientos son contrapartes.

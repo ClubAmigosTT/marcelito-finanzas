@@ -76,6 +76,8 @@ struct StatementSummaryRecord: Codable {
     var revolvingBalance: Decimal? = nil
     var msiInstallments: Int? = nil
     var msiMonthlyLoad: Decimal? = nil
+    var domesticTransactionTotal: Decimal? = nil
+    var foreignTransactionTotal: Decimal? = nil
     /// Totals declared by bank statements. They are used as a hard control
     /// against the rows reconstructed from the PDF table.
     var depositTotal: Decimal? = nil
@@ -116,6 +118,8 @@ struct StatementReconciliationRecord: Codable {
     var extractedDepositTotal: Decimal? = nil
     var extractedWithdrawalTotal: Decimal? = nil
     var extractedChargeTotal: Decimal? = nil
+    var extractedDomesticChargeTotal: Decimal? = nil
+    var extractedForeignChargeTotal: Decimal? = nil
     var extractedPaymentTotal: Decimal? = nil
     var extractedMovementCount: Int? = nil
     var reason: String? = nil
@@ -141,6 +145,7 @@ struct Movement: Identifiable, Codable {
     var statementId: UUID?
     var kind: MovementKind?
     var travelRelated: Bool
+    var foreignCurrency: Bool
     var extractionEvidence: MovementExtractionEvidence?
 
     init(
@@ -154,6 +159,7 @@ struct Movement: Identifiable, Codable {
         statementId: UUID? = nil,
         kind: MovementKind? = nil,
         travelRelated: Bool = false,
+        foreignCurrency: Bool = false,
         extractionEvidence: MovementExtractionEvidence? = nil
     ) {
         self.id = id
@@ -166,11 +172,12 @@ struct Movement: Identifiable, Codable {
         self.statementId = statementId
         self.kind = kind
         self.travelRelated = travelRelated
+        self.foreignCurrency = foreignCurrency
         self.extractionEvidence = extractionEvidence
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, date, title, account, category, amount, flow, statementId, kind, travelRelated, extractionEvidence
+        case id, date, title, account, category, amount, flow, statementId, kind, travelRelated, foreignCurrency, extractionEvidence
     }
 
     init(from decoder: Decoder) throws {
@@ -185,6 +192,7 @@ struct Movement: Identifiable, Codable {
         statementId = try container.decodeIfPresent(UUID.self, forKey: .statementId)
         kind = try container.decodeIfPresent(MovementKind.self, forKey: .kind)
         travelRelated = try container.decodeIfPresent(Bool.self, forKey: .travelRelated) ?? false
+        foreignCurrency = try container.decodeIfPresent(Bool.self, forKey: .foreignCurrency) ?? false
         extractionEvidence = try container.decodeIfPresent(MovementExtractionEvidence.self, forKey: .extractionEvidence)
     }
 
@@ -200,6 +208,7 @@ struct Movement: Identifiable, Codable {
         try container.encodeIfPresent(statementId, forKey: .statementId)
         try container.encodeIfPresent(kind, forKey: .kind)
         try container.encode(travelRelated, forKey: .travelRelated)
+        try container.encode(foreignCurrency, forKey: .foreignCurrency)
         try container.encodeIfPresent(extractionEvidence, forKey: .extractionEvidence)
     }
 }
@@ -1621,6 +1630,8 @@ final class FinanceStore {
         let deposits = validRows.filter { $0.amount > 0 }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let withdrawals = validRows.filter { $0.amount < 0 }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let charges = validRows.filter(isSpend).reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let domesticCharges = validRows.filter { isSpend($0) && !$0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let foreignCharges = validRows.filter { isSpend($0) && $0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let payments = validRows.filter { movementKind($0) == .cardPayment }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let movementCount = validRows.count
 
@@ -1631,6 +1642,8 @@ final class FinanceStore {
                 extractedDepositTotal: kind == .bank ? deposits : nil,
                 extractedWithdrawalTotal: kind == .bank ? withdrawals : nil,
                 extractedChargeTotal: kind == .card ? charges : nil,
+                extractedDomesticChargeTotal: kind == .card ? domesticCharges : nil,
+                extractedForeignChargeTotal: kind == .card ? foreignCharges : nil,
                 extractedPaymentTotal: kind == .card ? payments : nil,
                 extractedMovementCount: movementCount,
                 reason: "El PDF no expone un resumen financiero verificable."
@@ -1669,26 +1682,37 @@ final class FinanceStore {
                 mismatches.append("no se reconstruyeron filas de movimientos")
             }
         } else if kind == .card {
-            let declaredChargeCandidates = [summary.newTransactions, summary.newCharges].compactMap { $0 }.map(absolute)
+            let sectionDeclaredCharge = summary.domesticTransactionTotal.flatMap { domestic in
+                summary.foreignTransactionTotal.map { domestic + $0 }
+            }
+            let declaredChargeCandidates = sectionDeclaredCharge.map { [$0] }
+                ?? [summary.newTransactions, summary.newCharges].compactMap { $0 }.map(absolute)
             if declaredChargeCandidates.isEmpty {
                 return StatementReconciliationRecord(
                     status: .pending,
                     tolerance: tolerance,
                     extractedChargeTotal: charges,
+                    extractedDomesticChargeTotal: domesticCharges,
+                    extractedForeignChargeTotal: foreignCharges,
                     extractedPaymentTotal: payments,
                     extractedMovementCount: movementCount,
                     reason: "No se encontró total de cargos/transacciones en el resumen de tarjeta."
                 )
             }
-            // Amex prints both "nuevas transacciones" and "nuevos cargos"
-            // (the latter also includes MSI/fees). Accept either authoritative
-            // total because the parser may expose one or both table sections.
+            // If the issuer has no section subtotals, fall back to its
+            // “nuevas transacciones” value and only then to “nuevos cargos”.
             let chargeMatches = declaredChargeCandidates.contains { absolute(charges - $0) <= tolerance }
             if !chargeMatches {
                 let declaredText = declaredChargeCandidates
                     .map { NSDecimalNumber(decimal: $0).stringValue }
                     .joined(separator: " o ")
                 mismatches.append("cargos: extraído \(charges) vs declarado \(declaredText)")
+            }
+            if let expectedDomestic = summary.domesticTransactionTotal, absolute(domesticCharges - expectedDomestic) > tolerance {
+                mismatches.append("nacionales: extraído \(domesticCharges) vs declarado \(absolute(expectedDomestic))")
+            }
+            if let expectedForeign = summary.foreignTransactionTotal, absolute(foreignCharges - expectedForeign) > tolerance {
+                mismatches.append("moneda extranjera: extraído \(foreignCharges) vs declarado \(absolute(expectedForeign))")
             }
             if charges == 0 && declaredChargeCandidates.contains(where: { $0 > tolerance }) {
                 mismatches.append("no se reconstruyeron filas de compras")
@@ -1700,6 +1724,8 @@ final class FinanceStore {
                 extractedDepositTotal: deposits,
                 extractedWithdrawalTotal: withdrawals,
                 extractedChargeTotal: charges,
+                extractedDomesticChargeTotal: domesticCharges,
+                extractedForeignChargeTotal: foreignCharges,
                 extractedPaymentTotal: payments,
                 extractedMovementCount: movementCount,
                 reason: "No se pudo determinar si el estado es bancario o de tarjeta."
@@ -1712,6 +1738,8 @@ final class FinanceStore {
             extractedDepositTotal: kind == .bank ? deposits : nil,
             extractedWithdrawalTotal: kind == .bank ? withdrawals : nil,
             extractedChargeTotal: kind == .card ? charges : nil,
+            extractedDomesticChargeTotal: kind == .card ? domesticCharges : nil,
+            extractedForeignChargeTotal: kind == .card ? foreignCharges : nil,
             extractedPaymentTotal: kind == .card ? payments : nil,
             extractedMovementCount: movementCount,
             reason: mismatches.isEmpty ? nil : mismatches.joined(separator: "; ")
@@ -2256,6 +2284,7 @@ final class FinanceStore {
                 flow: flow,
                 kind: kind,
                 travelRelated: travelRelated,
+                foreignCurrency: foreignCurrency,
                 extractionEvidence: MovementExtractionEvidence(
                     method: "pdf-text",
                     confidence: 0.93
@@ -2542,6 +2571,7 @@ final class FinanceStore {
             flow: flow,
             kind: movementKind,
             travelRelated: travelRelated,
+            foreignCurrency: hasForeignCurrency,
             extractionEvidence: MovementExtractionEvidence(
                 method: "vision-ocr",
                 page: row.first.map { $0.page + 1 },
@@ -2760,6 +2790,7 @@ final class FinanceStore {
             flow: flow,
             kind: kind,
             travelRelated: travelRelated,
+            foreignCurrency: hasForeignCurrency(in: normalizedFullText),
             extractionEvidence: MovementExtractionEvidence(
                 method: "vision-ocr",
                 page: row.first.map { $0.page + 1 },
@@ -3148,11 +3179,13 @@ final class FinanceStore {
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
         func amount(after labels: [String]) -> Decimal? {
             let joined = labels.joined(separator: "|")
-            let pattern = "(?:\(joined))[^0-9$-]{0,90}([-+]?\\s*\\$?\\s*(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{1,2})?)"
+            let pattern = "(?:\(joined))[^0-9$-]{0,90}((?<![A-Za-z])[-+]?\\s*\\$?\\s*(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{1,2})?)"
             guard let regex = try? NSRegularExpression(pattern: pattern),
                   let match = regex.firstMatch(in: normalized, range: range),
                   let valueRange = Range(match.range(at: 1), in: normalized) else { return nil }
-            return parseAmount(String(normalized[valueRange]))
+            let raw = String(normalized[valueRange])
+            if raw.range(of: #"^\s*\d{7,}\s*$"#, options: .regularExpression) != nil { return nil }
+            return parseAmount(raw)
         }
 
         // Bank summaries commonly print a row count before the monetary
@@ -3222,6 +3255,26 @@ final class FinanceStore {
         assign(\.paymentForNoInterest, amount(after: ["pago para no generar intereses", "pago para no generar interes"]))
         assign(\.msiPending, amount(after: ["msi pendientes", "saldo msi", "principal diferido"]))
         assign(\.revolvingBalance, amount(after: ["saldo revolvente", "saldo revolvente al corte"]))
+        // Amex prints the authoritative balance as an arithmetic equation.
+        // OCR may place vertical bars between columns and may expose an
+        // account identifier after “Saldo Actual”; use the equation instead
+        // of trusting that identifier.
+        if source.localizedCaseInsensitiveContains("Amex"),
+           let equationRegex = try? NSRegularExpression(
+            pattern: #"(?m)((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})\s*\|?\s*-\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})\s*\|?\s*\+\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})\s*\|?\s*=\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})\s+((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})"#
+           ),
+           let equationMatch = equationRegex.firstMatch(in: normalized, range: range) {
+            func equationValue(_ index: Int) -> Decimal? {
+                guard let valueRange = Range(equationMatch.range(at: index), in: normalized) else { return nil }
+                return parseAmount(String(normalized[valueRange]))
+            }
+            summary.previousBalance = equationValue(1)
+            summary.newCharges = equationValue(3)
+            summary.statementBalance = equationValue(4)
+            summary.paymentForNoInterest = equationValue(4)
+            summary.minimumPayment = equationValue(5)
+            hasValue = true
+        }
         // Prefer the issuer's explicit total rows, which may appear after
         // the movement table. Generic “depósitos/retiros” labels also occur
         // in charts and can contain OCR fragments or percentages.
@@ -3231,6 +3284,8 @@ final class FinanceStore {
             ?? lastAmountOnLabel(["retiros", "retiros / cargos"])
         assign(\.depositTotal, declaredDeposits)
         assign(\.withdrawalTotal, declaredWithdrawals)
+        assign(\.domesticTransactionTotal, lastAmountOnLabel(["total de las transacciones en"]))
+        assign(\.foreignTransactionTotal, lastAmountOnLabel(["total de transacciones en moneda extranjera"]))
         summary.depositCount = countOnLabel(["total movimientos abonos", "total de abonos"])
             ?? countOnLabel(["depositos", "depositos / abonos"])
         summary.withdrawalCount = countOnLabel(["total movimientos cargos", "total de cargos"])

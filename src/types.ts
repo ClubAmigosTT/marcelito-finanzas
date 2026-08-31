@@ -60,6 +60,8 @@ export type StatementReconciliation = {
   extractedDepositTotal?: number;
   extractedWithdrawalTotal?: number;
   extractedChargeTotal?: number;
+  extractedDomesticChargeTotal?: number;
+  extractedForeignChargeTotal?: number;
   extractedPaymentTotal?: number;
   extractedMovementCount?: number;
   reason?: string;
@@ -75,6 +77,8 @@ export type Transaction = {
   flow: FlowType;
   kind?: TransactionKind;
   travelRelated?: boolean;
+  /** Marks rows reconstructed from an issuer's foreign-currency section. */
+  foreignCurrency?: boolean;
   confidence?: number;
   extractionEvidence?: TransactionExtractionEvidence;
   statementId?: string;
@@ -115,6 +119,9 @@ export type StatementSummary = {
   revolvingBalance?: number;
   msiInstallments?: number;
   msiMonthlyLoad?: number;
+  /** Subtotals that issuers print for domestic/foreign transaction sections. */
+  domesticTransactionTotal?: number;
+  foreignTransactionTotal?: number;
   /** Totales declarados en estados de cuenta bancarios. */
   depositTotal?: number;
   withdrawalTotal?: number;

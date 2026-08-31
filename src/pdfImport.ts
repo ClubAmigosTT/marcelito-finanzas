@@ -399,6 +399,14 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
       const monthlyTotal = normalized.match(new RegExp(`total\\s+de\\s+meses\\s+sin\\s+intereses[^\\d$-]{0,40}(${decimalMoneyToken})`, "i"));
       if (monthlyTotal) summary.msiMonthlyLoad = parseToken(monthlyTotal[1]);
     }
+
+    // Amex also prints the totals for the domestic and foreign sections. Keep
+    // them as independent controls; the global “Nuevos cargos” can include
+    // MSI installments and is not an equivalent to the movement table.
+    const domesticSectionTotal = normalized.match(new RegExp(`total\\s+de\\s+las\\s+transacciones\\s+en\\s+\\$[^\\d]{0,100}(${decimalMoneyToken})`, "i"));
+    const foreignSectionTotal = normalized.match(new RegExp(`total\\s+de\\s+transacciones\\s+en\\s+moneda\\s+extranjera[^\\d]{0,100}(${decimalMoneyToken})`, "i"));
+    if (domesticSectionTotal) summary.domesticTransactionTotal = parseToken(domesticSectionTotal[1]);
+    if (foreignSectionTotal) summary.foreignTransactionTotal = parseToken(foreignSectionTotal[1]);
   }
   return summary;
 }
@@ -461,24 +469,43 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
     const payments = transactions.filter((transaction) => transactionKindForReconciliation(transaction) === "cardPayment");
     const extractedChargeTotal = sumAbsolute(charges.map((transaction) => transaction.amount));
     const extractedPaymentTotal = sumAbsolute(payments.map((transaction) => transaction.amount));
-    // “Nuevos cargos” may include MSI installments/foreign conversions in
-    // addition to the real transaction table. Prefer the issuer's explicit
-    // “Nuevas transacciones” total when present; use newCharges only as a
-    // fallback for card formats that omit the former.
-    const declaredCharges = summary.newTransactions ?? summary.newCharges;
-    if (declaredCharges === undefined) return { status: "pending", tolerance, extractedChargeTotal, extractedPaymentTotal, extractedMovementCount: transactions.length, reason: "El estado no contiene total de cargos" };
+    const domesticCharges = charges.filter((transaction) => !transaction.foreignCurrency);
+    const foreignCharges = charges.filter((transaction) => transaction.foreignCurrency);
+    const extractedDomesticChargeTotal = sumAbsolute(domesticCharges.map((transaction) => transaction.amount));
+    const extractedForeignChargeTotal = sumAbsolute(foreignCharges.map((transaction) => transaction.amount));
+    // “Nuevos cargos”/“Nuevas transacciones” may include deferred credits or
+    // MSI installments. When the issuer exposes domestic + foreign subtotals,
+    // those are the authoritative real-spend control; otherwise prefer
+    // “Nuevas transacciones” and use newCharges only as a fallback.
+    const sectionDeclaredCharges = summary.domesticTransactionTotal !== undefined && summary.foreignTransactionTotal !== undefined
+      ? summary.domesticTransactionTotal + summary.foreignTransactionTotal
+      : undefined;
+    const declaredCharges = sectionDeclaredCharges ?? summary.newTransactions ?? summary.newCharges;
+    if (declaredCharges === undefined) return { status: "pending", tolerance, extractedChargeTotal, extractedDomesticChargeTotal, extractedForeignChargeTotal, extractedPaymentTotal, extractedMovementCount: transactions.length, reason: "El estado no contiene total de cargos" };
     const chargeDifference = extractedChargeTotal - declaredCharges;
     const paymentDifference = summary.payments !== undefined ? extractedPaymentTotal - summary.payments : 0;
+    const sectionDifferences: string[] = [];
+    if (summary.domesticTransactionTotal !== undefined) {
+      const difference = extractedDomesticChargeTotal - summary.domesticTransactionTotal;
+      if (Math.abs(difference) > tolerance) sectionDifferences.push(`nacionales ${difference.toFixed(2)}`);
+    }
+    if (summary.foreignTransactionTotal !== undefined) {
+      const difference = extractedForeignChargeTotal - summary.foreignTransactionTotal;
+      if (Math.abs(difference) > tolerance) sectionDifferences.push(`moneda extranjera ${difference.toFixed(2)}`);
+    }
     const invalid = transactions.length === 0 && declaredCharges > tolerance
       || Math.abs(chargeDifference) > tolerance
-      || (summary.payments !== undefined && Math.abs(paymentDifference) > tolerance);
+      || (summary.payments !== undefined && Math.abs(paymentDifference) > tolerance)
+      || sectionDifferences.length > 0;
     return {
       status: invalid ? "invalid" : "valid",
       tolerance,
       extractedChargeTotal,
+      extractedDomesticChargeTotal,
+      extractedForeignChargeTotal,
       extractedPaymentTotal,
       extractedMovementCount: transactions.length,
-      reason: invalid ? `Las filas no concilian con cargos/pagos del estado (cargos ${chargeDifference.toFixed(2)}, pagos ${paymentDifference.toFixed(2)})` : undefined,
+      reason: invalid ? `Las filas no concilian con cargos/pagos del estado (cargos ${chargeDifference.toFixed(2)}, pagos ${paymentDifference.toFixed(2)}${sectionDifferences.length ? `, secciones ${sectionDifferences.join("; ")}` : ""})` : undefined,
     };
   }
   return { status: "pending", tolerance, extractedMovementCount: transactions.length, reason: "Tipo de estado no identificado" };
@@ -728,6 +755,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       flow,
       kind: importedKind,
       travelRelated,
+      foreignCurrency: kind === "card" ? foreignCurrency : undefined,
       confidence: category === "Sin categoría" ? 0.62 : 0.92,
       extractionEvidence: {
         method: "pdf-text",
