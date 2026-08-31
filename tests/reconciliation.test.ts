@@ -388,6 +388,24 @@ test("una fila bancaria sin saldo no usa referencias posteriores como importe", 
   assert.deepEqual(rows.map((row) => [row.description, row.amount]), [["SPEI ENVIADO STP", -500]]);
 });
 
+test("OCR no convierte la terminación de una tarjeta en un cargo", () => {
+  const rows = extractTransactions(
+    "17-ABR-2026 (0000100 CONSUMO LOCAL AJENO TERMINACION 8934 174BR26 21600 2983603",
+    "Santander",
+    "Santander mayo 2026.pdf",
+    "bank",
+  );
+  assert.deepEqual(rows.map((row) => [row.description, row.amount]), [["(0000100 CONSUMO LOCAL AJENO TERMINACION 8934 174BR26", -21600]]);
+});
+
+test("OCR corrige 21600 a 216.00 cuando el saldo confirma el separador perdido", () => {
+  const rows = extractTransactions([
+    "Saldo inicial 30,052.03",
+    "17-ABR-2026 CONSUMO LOCAL TERMINACION 8934 21600 29,836.03",
+  ].join("\n"), "Santander", "Santander mayo 2026.pdf", "bank");
+  assert.equal(rows[0]?.amount, -216);
+});
+
 test("cada fila conserva página y fragmento de evidencia cuando el PDF trae sentinelas", () => {
   const rows = extractTransactions([
     "__PDF_PAGE_2__",

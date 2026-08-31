@@ -187,6 +187,11 @@ el bloqueo es intencional: la siguiente calibración debe ejecutarse con Vision
 en macOS y contrastarse contra los totales del estado, no relajarse por una
 coincidencia parcial.
 
+En la calibración más reciente también se comprobó que una fila OCR sin saldo
+corrido ya no arrastra folios o referencias posteriores como importes. Cuando
+los separadores se pierden, el parser solo intenta recuperarlos con el delta
+del saldo; si las filas no concilian, el documento permanece bloqueado.
+
 ## Contrato de lectura en iOS
 
 El proyecto nativo incluye `apps/ios/Tests/ReaderContractTests.swift`. Estas

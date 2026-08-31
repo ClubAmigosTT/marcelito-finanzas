@@ -831,6 +831,12 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       const raw = candidate.raw.replace(/\s/g, "");
       return !/[.,$]/.test(raw) && (raw.length >= 6 || /^0\d+/.test(raw));
     };
+    const isContextualIdentifier = (candidate: typeof normalizedAllCandidates[number]) => {
+      const prefix = tail.slice(Math.max(0, candidate.index - 32), candidate.index);
+      // Only the token immediately following the label is the identifier;
+      // later monetary tokens in the row must remain eligible.
+      return /(?:terminacion|folio|referencia|rfc|cuenta|clabe|serie|codigo|cliente)\s*$/i.test(prefix);
+    };
     const adjacentCandidate = (candidate: typeof normalizedAllCandidates[number]) => {
       const next = normalizedAllCandidates.find((item) => item.index > candidate.index);
       if (!next || next.index - candidate.index > 44 || hasIdentifierMarker(candidate.index, next.index)) return undefined;
@@ -862,7 +868,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
         // as the movement and only pair the next token when it is truly
         // adjacent. This recovers `1,633,480 30,320.83` without treating a
         // trailing 7–12 digit reference as a balance.
-        const first = normalizedAllCandidates.find((candidate) => !isLikelyBareIdentifier(candidate))
+        const first = normalizedAllCandidates.find((candidate) => !isLikelyBareIdentifier(candidate) && !isContextualIdentifier(candidate))
           ?? normalizedAllCandidates[0];
         if (!first) return;
         const second = adjacentCandidate(first);
@@ -902,6 +908,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     if (bankLike && bankCandidates.length > 1
       && !/[.,]\d{1,2}$/.test(bankCandidates[0].raw)
       && /[.,]\d{1,2}$/.test(bankCandidates[1].raw)
+      && (isLikelyBareIdentifier(bankCandidates[0]) || isContextualIdentifier(bankCandidates[0]))
       && previousRunningBalance !== undefined) {
       const delta = bankCandidates[1].value - previousRunningBalance;
       const balanceScale = Math.max(Math.abs(bankCandidates[1].value), Math.abs(previousRunningBalance), 1);
@@ -924,6 +931,10 @@ export function extractTransactions(text: string, source: StatementSource, fileN
         const hasDecimalCents = /[.,]\d{1,2}$/.test(amount.raw);
         const malformedMagnitude = Math.abs(amountValue) > balanceScale * 2
           || (!hasDecimalCents && Math.abs(amountValue) > balanceScale);
+        const fusedSeparator = !hasDecimalCents
+          && amountValue >= 1_000
+          && deltaMagnitude > 0
+          && Math.abs(amountValue - deltaMagnitude * 100) <= Math.max(2, deltaMagnitude * 0.02);
         if (Number.isFinite(delta) && Math.abs(delta) > 0 && Math.abs(delta) < 100_000_000
           // A running-balance delta can repair a one- or two-cent OCR typo.
           // It can also recover a token whose separators were merged into a
@@ -933,7 +944,8 @@ export function extractTransactions(text: string, source: StatementSource, fileN
           // OCR balance (common on scanned BBVA statements).
           && Math.abs(Math.abs(delta) - Math.abs(amountValue)) > 0.05
           && (Math.abs(Math.abs(delta) - Math.abs(amountValue)) <= 2
-            || (malformedMagnitude && deltaMagnitude <= balanceScale * 1.25 + 0.05))) {
+            || (malformedMagnitude && deltaMagnitude <= balanceScale * 1.25 + 0.05)
+            || (fusedSeparator && deltaMagnitude <= balanceScale * 1.25 + 0.05))) {
           amountValue = Math.abs(delta);
         }
         previousRunningBalance = runningBalance.value;
