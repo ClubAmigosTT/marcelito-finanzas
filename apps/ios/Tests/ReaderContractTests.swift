@@ -133,4 +133,23 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(FinanceStore.matchingAmountsForTesting(-1_000.005, 1_000))
         XCTAssertFalse(FinanceStore.matchingAmountsForTesting(-1_000, 1_001))
     }
+
+    func testTextRowsRetainPageAndSourceFragment() {
+        let text = """
+        __PDF_PAGE_2__
+        Grupo Financiero BBVA
+        BBVA México, Institución de Banca Múltiple
+        Detalle de Movimientos Realizados
+        01/08/2026 SUPERMERCADO 120.00 880.00
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "bbva-agosto-2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 1)
+        XCTAssertEqual(snapshot.movements.first?.extractionEvidence?.page, 2)
+        XCTAssertFalse(snapshot.movements.first?.extractionEvidence?.sourceText?.isEmpty ?? true)
+    }
 }
