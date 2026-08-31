@@ -68,6 +68,9 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
 - Unificar comercios y conceptos con diccionario determinista y alias
   versionados; conservar descripción original.
 - Aplicar deduplicación idempotente y matching entre cuentas propias y tarjetas.
+- Si el revisor corrige el emisor o tipo de estado, ofrecer una relectura explícita
+  de las filas y del resumen con esa estructura; la corrección no altera la
+  compuerta de conciliación ni persiste el texto bruto del PDF.
 - Salida: reimportar el mismo archivo no cambia el libro; dos compras idénticas
   legítimas permanecen como dos filas.
 
