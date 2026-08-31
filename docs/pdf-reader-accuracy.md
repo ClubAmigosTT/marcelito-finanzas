@@ -107,6 +107,10 @@ aceptaciones correctas divididas entre todas las aceptaciones automáticas
 doradas, incluyendo cualquier aceptación falsa. Un archivo no descrito en el
 manifiesto se reporta, pero no se cuenta como una aceptación certificada; así
 se evita confundir cobertura con precisión.
+Si un archivo está dañado, protegido o no puede abrirse, aparece como
+`parse-error` y la corrida continúa con los demás archivos; la certificación
+falla explícitamente y no puede ocultar ese archivo por una interrupción del
+script.
 
 ## Última corrida del corpus visual
 

@@ -124,6 +124,7 @@ if (!directory) {
   const names = (await readdir(root)).filter((name) => name.toLowerCase().endsWith(".pdf")).sort();
   const results = [];
   let failures = 0;
+  let parseErrors = 0;
   let goldenAutoAccepted = 0;
   let goldenFalseAccepted = 0;
   const expectedFiles = manifest.files ?? [];
@@ -136,7 +137,34 @@ if (!directory) {
   if (requireManifest && unlistedCorpusFiles.length) failures += unlistedCorpusFiles.length;
 
   for (const name of names) {
-    const result = await evaluate(resolve(root, name));
+    let result: Awaited<ReturnType<typeof evaluate>>;
+    try {
+      result = await evaluate(resolve(root, name));
+    } catch (error) {
+      // A damaged/encrypted PDF must not abort the whole corpus run. Keep a
+      // deterministic per-file failure so every file is accounted for and a
+      // certification can never pass by silently skipping an unreadable PDF.
+      parseErrors += 1;
+      failures += 1;
+      result = {
+        file: name,
+        mode: "parse-error",
+        source: "Desconocido",
+        sourceStatus: "unknown",
+        sourceConfidence: 0,
+        kind: "unknown",
+        rows: 0,
+        suspiciousRows: 0,
+        missingEvidenceRows: 0,
+        evidenceCoverage: 0,
+        parseError: error instanceof Error ? error.message : String(error),
+        reconciliation: {
+          status: "pending",
+          reason: "No se pudo abrir o extraer el PDF",
+          extractedMovementCount: 0,
+        },
+      };
+    }
     const expected = manifest.files?.find((item) => item.file === name);
     const mismatches: string[] = [];
     if (expected?.source && expected.source !== result.source) mismatches.push(`emisor esperado ${expected.source}, obtenido ${result.source}`);
@@ -181,6 +209,7 @@ if (!directory) {
     manifestMissingFiles: missingManifestFiles,
     manifestDuplicateFiles: duplicateManifestFiles,
     manifestUnlistedFiles: unlistedCorpusFiles,
+    parseErrors,
     targetPrecision,
     precisionFailure,
     goldenExpectedFiles: expectedFiles.length,
