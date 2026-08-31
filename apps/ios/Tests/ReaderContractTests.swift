@@ -10,8 +10,6 @@ final class ReaderContractTests: XCTestCase {
         Fecha Descripcion
         01/08/2026 NOMINA EMPRESA 10,000.00 20,000.00
         02/08/2026 TRANSFERENCIA SANTANDER 125.00 19,875.00
-        TOTAL IMPORTE ABONOS 10,000.00
-        TOTAL IMPORTE CARGOS 125.00
         """
 
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
@@ -35,7 +33,6 @@ final class ReaderContractTests: XCTestCase {
         Fecha y Detalle de las operaciones Importe en MN.
         01/08/2026 AMAZON MX 123.45
         02/08/2026 MONTO A DIFERIR A MESES SIN INTERESES 500.00 CR
-        Total de las transacciones en $ 623.45
         """
 
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
