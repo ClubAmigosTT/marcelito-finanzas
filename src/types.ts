@@ -166,6 +166,8 @@ export type Statement = {
   reconciliation?: StatementReconciliation;
   sourceDetection?: SourceDetection;
   ocrConfidence?: number;
+  /** Per-page OCR confidence retained for audit and reproducible review. */
+  ocrPageConfidences?: number[];
 };
 
 export type ImportCommit = {
@@ -179,6 +181,7 @@ export type ImportCommit = {
   reconciliation?: StatementReconciliation;
   sourceDetection?: SourceDetection;
   ocrConfidence?: number;
+  ocrPageConfidences?: number[];
   /** User corrections learned from this review, keyed by normalized merchant. */
   categoryRules?: Record<string, string>;
 };
