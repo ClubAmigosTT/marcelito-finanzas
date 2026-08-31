@@ -3340,8 +3340,8 @@ final class FinanceStore {
             return nil
         }()
         let sourceFromHeader: String? = {
-            if header.contains("banco santander") || header.contains("santander mexico") || header.contains("grupo financiero santander") || header.contains("santander.com") || header.range(of: #"\bsantander\b"#, options: .regularExpression) != nil { return "Santander" }
-            if header.contains("bbva mexico") || header.contains("grupo financiero bbva") || header.contains("bbva.mx") || header.contains("bba830831lj2") || header.range(of: #"\bbbva\b|bancomer"#, options: .regularExpression) != nil { return "BBVA" }
+            if header.contains("grupo financiero santander") || header.contains("santander.com") || header.range(of: #"\bsantander\b"#, options: .regularExpression) != nil { return "Santander" }
+            if header.contains("grupo financiero bbva") || header.contains("bbva.mx") || header.contains("bba830831lj2") || header.range(of: #"\bbbva\b|bancomer"#, options: .regularExpression) != nil { return "BBVA" }
             if header.contains("american express") || header.contains("the platinum credit card") || header.range(of: #"\bamex\b"#, options: .regularExpression) != nil { return "Amex" }
             return nil
         }()
@@ -3351,7 +3351,7 @@ final class FinanceStore {
         let sourceFromLegal: String? = {
             if normalizedText.range(of: #"grupo\s+financiero\s+bbva|bbva\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx"#, options: .regularExpression) != nil { return "BBVA" }
             if normalizedText.range(of: #"americanexpress\.com\.mx|american\s+express[^\n]{0,90}(?:company|the\s+platinum\s+credit\s+card)"#, options: .regularExpression) != nil { return "Amex" }
-            if normalizedText.contains("banco santander mexico") || normalizedText.contains("grupo financiero santander") || normalizedText.contains("santander.com") { return "Santander" }
+            if normalizedText.range(of: #"grupo\s+financiero\s+santander|banco\s+santander\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com"#, options: .regularExpression) != nil { return "Santander" }
             return nil
         }()
         let source = sourceFromHeader ?? sourceFromLegal ?? sourceFromFile ?? "Importado"

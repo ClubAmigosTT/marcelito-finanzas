@@ -98,11 +98,11 @@ export function detectSourceEvidence(text: string, fileName: string): SourceDete
 
   // Prefer issuer legal names, domains, and other stable header markers over
   // short brand mentions that can legitimately occur in a transfer row.
-  if (/banco\s+santander|santander\s+m(?:e|é)xico|grupo\s+financiero\s+santander|santander\.com/.test(institutional)
-    || /banco\s+santander|santander\s+m(?:e|é)xico|grupo\s+financiero\s+santander|santander\.com/.test(fullNormalized)) {
+  if (/grupo\s+financiero\s+santander|santander\.com/.test(institutional)
+    || /grupo\s+financiero\s+santander|banco\s+santander\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com/.test(fullNormalized)) {
     return result("Santander", filenameSource === "Santander" ? 0.999 : 0.998, ["encabezado institucional Santander", ...(filenameSource === "Santander" ? ["nombre de archivo Santander"] : [])]);
   }
-  if (/bbva\s+m(?:e|é)xico|grupo\s+financiero\s+bbva|bbva\.mx|bba830831lj2/.test(institutional)
+  if (/grupo\s+financiero\s+bbva|bbva\.mx|bba830831lj2/.test(institutional)
     || /grupo\s+financiero\s+bbva|bbva\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx/.test(fullNormalized)) {
     return result("BBVA", filenameSource === "BBVA" ? 0.999 : 0.998, ["encabezado institucional BBVA", ...(filenameSource === "BBVA" ? ["nombre de archivo BBVA"] : [])]);
   }
