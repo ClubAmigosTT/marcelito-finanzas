@@ -98,18 +98,32 @@ export function detectSourceEvidence(text: string, fileName: string): SourceDete
   });
 
   // Prefer issuer legal names, domains, and other stable header markers over
-  // short brand mentions that can legitimately occur in a transfer row.
-  if (/grupo\s+financiero\s+santander|santander\.com/.test(institutional)
-    || /grupo\s+financiero\s+santander|banco\s+santander\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com/.test(fullNormalized)) {
+  // short brand mentions that can legitimately occur in a transfer row. If a
+  // pre-table line mentions both issuers, only an unambiguous institutional
+  // marker can win; otherwise leave the document for manual review.
+  const santanderInstitutional = /grupo\s+financiero\s+santander|banco\s+santander\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com/.test(institutional);
+  const bbvaInstitutional = /grupo\s+financiero\s+bbva|bbva\.mx|bba830831lj2|bbva\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple/.test(institutional);
+  if (santanderInstitutional && !bbvaInstitutional) {
     return result("Santander", filenameSource === "Santander" ? 0.999 : 0.998, ["encabezado institucional Santander", ...(filenameSource === "Santander" ? ["nombre de archivo Santander"] : [])]);
   }
-  if (/grupo\s+financiero\s+bbva|bbva\.mx|bba830831lj2/.test(institutional)
-    || /grupo\s+financiero\s+bbva|bbva\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx/.test(fullNormalized)) {
+  if (bbvaInstitutional && !santanderInstitutional) {
     return result("BBVA", filenameSource === "BBVA" ? 0.999 : 0.998, ["encabezado institucional BBVA", ...(filenameSource === "BBVA" ? ["nombre de archivo BBVA"] : [])]);
   }
   if (/american\s+express|the\s+platinum\s+credit\s+card/.test(institutional)
     || /americanexpress\.com\.mx|american\s+express[^\n]{0,90}(?:company|the\s+platinum\s+credit\s+card)/.test(fullNormalized)) {
     return result("Amex", filenameSource === "Amex" ? 0.999 : 0.998, ["encabezado institucional Amex", ...(filenameSource === "Amex" ? ["nombre de archivo Amex"] : [])]);
+  }
+
+  // The issuer's legal footer can appear after the movement table. Apply the
+  // same ambiguity guard there; regex order must not choose Santander merely
+  // because a BBVA document mentions it as a counterparty.
+  const santanderLegal = /grupo\s+financiero\s+santander|banco\s+santander\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com/.test(fullNormalized);
+  const bbvaLegal = /grupo\s+financiero\s+bbva|bbva\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx/.test(fullNormalized);
+  if (santanderLegal && !bbvaLegal) {
+    return result("Santander", filenameSource === "Santander" ? 0.999 : 0.998, ["razón social/dominio del emisor Santander", ...(filenameSource === "Santander" ? ["nombre de archivo Santander"] : [])]);
+  }
+  if (bbvaLegal && !santanderLegal) {
+    return result("BBVA", filenameSource === "BBVA" ? 0.999 : 0.998, ["razón social/dominio del emisor BBVA", ...(filenameSource === "BBVA" ? ["nombre de archivo BBVA"] : [])]);
   }
 
   // A standalone brand in the institutional zone is acceptable when the PDF

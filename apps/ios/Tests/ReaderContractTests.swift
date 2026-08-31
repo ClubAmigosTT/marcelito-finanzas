@@ -26,6 +26,24 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("total importe") })
     }
 
+    func testBBVAInstitutionalEvidenceWinsBeforeMovementTable() {
+        let text = """
+        BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
+        Transferencia recibida de Santander
+        Estado de cuenta
+        Detalle de Movimientos Realizados
+        05/AGO SPEI RECIBIDO SANTANDER 4,500.00 6,116.63
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "estado-renombrado.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "BBVA")
+        XCTAssertEqual(snapshot.sourceDetection.status, .verified)
+    }
+
     func testAmexCreditRowIsNotSilentlyConvertedToPurchase() {
         let text = """
         American Express

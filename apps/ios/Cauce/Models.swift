@@ -3674,9 +3674,22 @@ final class FinanceStore {
             if normalizedFileName.range(of: #"\bsantander\b"#, options: .regularExpression) != nil { return "Santander" }
             return nil
         }()
+        let santanderInstitutional = header.contains("grupo financiero santander")
+            || header.contains("santander.com")
+            || header.range(of: #"banco\s+santander\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple"#, options: .regularExpression) != nil
+        let bbvaInstitutional = header.contains("grupo financiero bbva")
+            || header.contains("bbva.mx")
+            || header.contains("bba830831lj2")
+            || header.range(of: #"bbva\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple"#, options: .regularExpression) != nil
         let sourceFromHeader: String? = {
-            if header.contains("grupo financiero santander") || header.contains("santander.com") || header.range(of: #"\bsantander\b"#, options: .regularExpression) != nil { return "Santander" }
-            if header.contains("grupo financiero bbva") || header.contains("bbva.mx") || header.contains("bba830831lj2") || header.range(of: #"\bbbva\b|bancomer"#, options: .regularExpression) != nil { return "BBVA" }
+            // A legal issuer marker beats a bare counterparty mention. If two
+            // legal markers genuinely conflict, return nil and keep the
+            // statement in review instead of guessing by regex order.
+            if santanderInstitutional && !bbvaInstitutional { return "Santander" }
+            if bbvaInstitutional && !santanderInstitutional { return "BBVA" }
+            if santanderInstitutional && bbvaInstitutional { return nil }
+            if header.range(of: #"\bsantander\b"#, options: .regularExpression) != nil { return "Santander" }
+            if header.range(of: #"\bbbva\b|bancomer"#, options: .regularExpression) != nil { return "BBVA" }
             if header.contains("american express") || header.contains("the platinum credit card") || header.range(of: #"\bamex\b"#, options: .regularExpression) != nil { return "Amex" }
             return nil
         }()
@@ -3684,9 +3697,12 @@ final class FinanceStore {
         // strong legal/domain marker anywhere in the document is authoritative
         // evidence; generic names in transaction descriptions are not.
         let sourceFromLegal: String? = {
-            if normalizedText.range(of: #"grupo\s+financiero\s+bbva|bbva\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx"#, options: .regularExpression) != nil { return "BBVA" }
+            let santanderLegal = normalizedText.range(of: #"grupo\s+financiero\s+santander|banco\s+santander\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com"#, options: .regularExpression) != nil
+            let bbvaLegal = normalizedText.range(of: #"grupo\s+financiero\s+bbva|bbva\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx"#, options: .regularExpression) != nil
+            if santanderLegal && !bbvaLegal { return "Santander" }
+            if bbvaLegal && !santanderLegal { return "BBVA" }
+            if santanderLegal && bbvaLegal { return nil }
             if normalizedText.range(of: #"americanexpress\.com\.mx|american\s+express[^\n]{0,90}(?:company|the\s+platinum\s+credit\s+card)"#, options: .regularExpression) != nil { return "Amex" }
-            if normalizedText.range(of: #"grupo\s+financiero\s+santander|banco\s+santander\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com"#, options: .regularExpression) != nil { return "Santander" }
             return nil
         }()
         let source = sourceFromHeader ?? sourceFromLegal ?? sourceFromFile ?? "Importado"
