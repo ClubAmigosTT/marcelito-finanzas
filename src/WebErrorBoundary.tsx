@@ -6,6 +6,32 @@ const maxStoredErrors = 20;
 
 type WebErrorBoundaryProps = { children: ReactNode };
 type WebErrorBoundaryState = { error: Error | null; eventId?: string };
+export type WebErrorDiagnostic = {
+  eventId: string;
+  recordedAt: string;
+  message: string;
+  stack: string;
+  componentStack: string;
+  path: string;
+  userAgent: string;
+};
+
+export function readWebErrorDiagnostics(): WebErrorDiagnostic[] {
+  try {
+    const value = JSON.parse(localStorage.getItem(diagnosticsKey) ?? "[]");
+    return Array.isArray(value) ? value as WebErrorDiagnostic[] : [];
+  } catch {
+    return [];
+  }
+}
+
+export function clearWebErrorDiagnostics() {
+  try {
+    localStorage.removeItem(diagnosticsKey);
+  } catch {
+    // Storage errors should never prevent the audit screen from rendering.
+  }
+}
 
 function recordWebError(error: Error, errorInfo: ErrorInfo) {
   const eventId = `web-${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
