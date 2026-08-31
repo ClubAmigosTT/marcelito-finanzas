@@ -583,6 +583,7 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
   // is also mandatory: account identity alone cannot distinguish a transfer
   // from an unrelated external deposit of the same amount.
   const ambiguousTransferReviewIds = new Set<string>();
+  const ambiguousTransferReviewCountIds = new Set<string>();
   candidates.forEach((outflow) => {
     if (consumed.has(outflow.id) || !isBankTransaction(outflow, statements) || !isOutflow(outflow)) return;
     const possiblePartners = candidates
@@ -600,8 +601,12 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
       // Keep a coincident external pair visible as a review item rather than
       // silently deciding that it is internal. Relevant pairs will block the
       // executive KPIs through the normal data-quality gate.
-      ambiguousTransferReviewIds.add(outflow.id);
-      ambiguousTransferReviewIds.add(possiblePartners[0].id);
+      [outflow, possiblePartners[0]].forEach((row) => {
+        ambiguousTransferReviewIds.add(row.id);
+        // Validation may already have placed a row in review; only add the
+        // newly introduced review status to its period diagnostic once.
+        if (row.validationStatus !== "review") ambiguousTransferReviewCountIds.add(row.id);
+      });
     }
   });
 
@@ -655,6 +660,17 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
       normalizedDescription: text,
       validationStatus: ambiguousTransferReviewIds.has(reconciled.id) ? "review" : reconciled.validationStatus ?? "valid",
     };
+  });
+
+  // Keep period-level diagnostics in sync with review statuses introduced by
+  // the conservative transfer matcher (normalization counters were filled
+  // before matching ran).
+  ambiguousTransferReviewCountIds.forEach((id) => {
+    const transaction = classified.find((row) => row.id === id);
+    if (!transaction) return;
+    const auditPeriod = ensurePeriod(transaction);
+    auditPeriod.reviewCount += 1;
+    auditPeriod.reviewAmount += absolute(transaction.amount);
   });
 
   const totals = {
