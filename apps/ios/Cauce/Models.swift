@@ -1645,9 +1645,16 @@ final class FinanceStore {
             }
         }
 
+        func compareCount(_ label: String, extracted: Int, expected: Int?) {
+            guard let expected, extracted != expected else { return }
+            mismatches.append("\(label): extraído \(extracted) vs declarado \(expected)")
+        }
+
         if kind == .bank {
             compare("depósitos", extracted: deposits, expected: summary.depositTotal)
             compare("retiros", extracted: withdrawals, expected: summary.withdrawalTotal)
+            compareCount("cantidad de depósitos", extracted: validRows.filter { $0.amount > 0 }.count, expected: summary.depositCount)
+            compareCount("cantidad de retiros", extracted: validRows.filter { $0.amount < 0 }.count, expected: summary.withdrawalCount)
             if summary.depositTotal == nil && summary.withdrawalTotal == nil {
                 return StatementReconciliationRecord(
                     status: .pending,
@@ -3173,6 +3180,25 @@ final class FinanceStore {
             return nil
         }
 
+        func countOnLabel(_ labels: [String]) -> Int? {
+            let amountToken = #"(?:\$?\s*)?(?:\d{1,3}(?:[,.]\d{3})+|\d+)[.,]\d{2}\b"#
+            let pattern = "(?:\(labels.joined(separator: "|")))\\D{0,24}(\\d{1,4})\\s+(?=\(amountToken))"
+            guard let countRegex = try? NSRegularExpression(pattern: pattern) else { return nil }
+            for line in normalized.components(separatedBy: .newlines) {
+                guard labels.contains(where: { line.contains($0) }) else { continue }
+                if line.range(of: #"(?<!\d)\d{1,2}[\/\-.]\d{1,2}[\/\-.]\d{2,4}(?!\d)"#, options: .regularExpression) != nil {
+                    continue
+                }
+                let lineRange = NSRange(line.startIndex..<line.endIndex, in: line)
+                if let match = countRegex.firstMatch(in: line, range: lineRange),
+                   let valueRange = Range(match.range(at: 1), in: line),
+                   let value = Int(line[valueRange]) {
+                    return value
+                }
+            }
+            return nil
+        }
+
         var summary = StatementSummaryRecord()
         var hasValue = false
         func assign(_ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>, _ value: Decimal?) {
@@ -3196,6 +3222,8 @@ final class FinanceStore {
         assign(\.revolvingBalance, amount(after: ["saldo revolvente", "saldo revolvente al corte"]))
         assign(\.depositTotal, lastAmountOnLabel(["depositos", "depositos / abonos", "total importe abonos", "total de abonos", "abonos del periodo"]))
         assign(\.withdrawalTotal, lastAmountOnLabel(["retiros", "retiros / cargos", "total importe cargos", "total de cargos", "cargos del periodo"]))
+        summary.depositCount = countOnLabel(["depositos", "depositos / abonos", "total movimientos abonos", "total de abonos"])
+        summary.withdrawalCount = countOnLabel(["retiros", "retiros / cargos", "total movimientos cargos", "total de cargos"])
         if source.localizedCaseInsensitiveContains("Amex") {
             summary.debtBalance = summary.statementBalance
         } else {

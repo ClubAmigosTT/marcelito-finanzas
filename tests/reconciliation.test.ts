@@ -385,6 +385,19 @@ test("los totales bancarios declarados bloquean una importación que no concilia
   assert.equal(reconciliation.status, "invalid");
 });
 
+test("los conteos declarados bloquean una importación que perdió filas aunque los importes cuadren", () => {
+  const summary = parseStatementSummary([
+    "Depósitos / Abonos (+) 2 500.00",
+    "Retiros / Cargos (-) 1 100.00",
+  ].join("\n"), "bank");
+  const rows = extractTransactions([
+    "01/08/2026 DEPÓSITO 500.00 1,500.00",
+    "02/08/2026 CARGO 100.00 1,400.00",
+  ].join("\n"), "BBVA", "BBVA agosto 2026.pdf", "bank");
+  const reconciliation = reconcileStatementImport("bank", summary, rows);
+  assert.equal(reconciliation.status, "invalid");
+});
+
 test("un estado marcado como inválido bloquea el gasto aunque existan filas heredadas", () => {
   const statements: Statement[] = [{
     ...bank("bbva-ago", "BBVA", "agosto 2026"),
