@@ -335,6 +335,24 @@ test("Santander selecciona el cargo o abono y no el saldo corrido", () => {
   ]);
 });
 
+test("Santander elige el saldo inicial que cuadra cuando el OCR duplica el gráfico", () => {
+  const text = [
+    "Banco Santander México, S.A., Institución de Banca Múltiple, Grupo Financiero Santander México",
+    "Saldo promedio 50,129.64 — Saldoinicial 55,627.93",
+    "+ Depósitos 36,187.42",
+    "− Retiros 64,161.11",
+    "= Saldo final 27,654.24",
+    "Gráfico cuenta de cheques",
+    "Otros cargos $64,161.11 Saldo inicial $5,627.93",
+    "Detalle de movimientos",
+    "16-JUL-2026 PAGO TRANSFERENCIA SPEI 64,161.11 55,597.93",
+    "17-JUL-2026 NOMINA 36,187.42 27,654.24",
+  ].join("\n");
+  const summary = parseStatementSummary(text, "bank");
+  assert.equal(summary.previousBalance, 55_627.93);
+  assert.equal(reconcileStatementImport("bank", summary, extractTransactions(text, "Santander", "Santander agosto 2026.pdf", "bank")).status, "valid");
+});
+
 test("Amex separa compras y pagos sin convertir el pago en gasto", () => {
   const text = [
     "American Express",

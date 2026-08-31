@@ -203,15 +203,21 @@ function detectPeriod(text: string, fileName: string) {
 }
 
 function findSummaryAmount(text: string, labels: string[]) {
+  return findSummaryAmounts(text, labels)[0];
+}
+
+function findSummaryAmounts(text: string, labels: string[]) {
   const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  const label = labels.join("|");
-  const match = normalized.match(new RegExp(`(?:${label})[^\\d$-]{0,90}((?<![A-Za-z])-?\\s*\\$?(?:(?:\\d{1,3}(?:[ ,.\\u00a0]\\d{3})+|\\d+)(?:[.,]\\d{1,2})?))`, "i"));
-  const raw = match?.[1];
-  // Long bare integers immediately after a label are usually account,
-  // certificate or reference numbers (e.g. “Saldo Actual / AEC810901298”),
-  // never monetary values. Require separators/currency or a short integer.
-  if (!raw || (/^\s*\d{7,}\s*$/.test(raw) && !/[.,$]/.test(raw))) return undefined;
-  return normalizeAmount(raw);
+  // OCR can collapse the space in labels such as “Saldo inicial”. Treat
+  // whitespace in the label as optional while keeping the amount boundary
+  // strict, so “Saldoinicial” remains evidence for the same field.
+  const label = labels.map((item) => item.replace(/\s+/g, "\\s*")).join("|");
+  const money = `((?<![A-Za-z])-?\\s*\\$?(?:(?:\\d{1,3}(?:[ ,.\\u00a0]\\d{3})+|\\d+)(?:[.,]\\d{1,2})?))`;
+  const matches = Array.from(normalized.matchAll(new RegExp(`(?:${label})[^\\d$-]{0,90}${money}`, "gi")));
+  return matches
+    .map((match) => match[1])
+    .filter((raw) => raw && !(/^\s*\d{7,}\s*$/.test(raw) && !/[.,$]/.test(raw)))
+    .map((raw) => normalizeAmount(raw));
 }
 
 function findLastSummaryAmount(text: string, labels: string[]) {
@@ -335,6 +341,21 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
     const explicitWithdrawalCount = bankNormalized.match(/total\s+movimientos\s+cargos?[^\d]{0,20}(\d{1,4})\b/i)?.[1];
     if (explicitDepositCount) summary.depositCount = Number(explicitDepositCount);
     if (explicitWithdrawalCount) summary.withdrawalCount = Number(explicitWithdrawalCount);
+
+    // Scanned Santander pages sometimes repeat “Saldo inicial” in a chart
+    // and OCR drops a leading digit (55,627.93 becomes 5,627.93). When the
+    // statement exposes all three controls, choose the opening-balance
+    // candidate that satisfies the bank's own identity instead of trusting
+    // the first textual occurrence.
+    if (summary.cashBalance !== undefined
+      && summary.depositTotal !== undefined
+      && summary.withdrawalTotal !== undefined) {
+      const openingCandidates = findSummaryAmounts(text, ["saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"]);
+      const reconciledOpening = openingCandidates.find((opening) =>
+        Math.abs(opening + summary.depositTotal! - summary.withdrawalTotal! - summary.cashBalance!) <= 0.05,
+      );
+      if (reconciledOpening !== undefined) summary.previousBalance = reconciledOpening;
+    }
   }
 
   const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
