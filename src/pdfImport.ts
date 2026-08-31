@@ -922,7 +922,24 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
     },
   }));
   const summary = parseStatementSummary(text, kind);
-  const reconciliation = reconcileStatementImport(kind, summary, parsed);
+  const baseReconciliation = reconcileStatementImport(kind, summary, parsed);
+  // A matching total is necessary but not sufficient for automatic OCR
+  // acceptance: a scan can lose one row and still happen to reconcile after
+  // a coincidental amount. Keep the statement provisional when the visual
+  // signal is weak, and require a human confirmation before it can enter the
+  // canonical ledger. Text-layer imports are not affected by this gate.
+  const weakestOcrPage = ocrResult?.pageConfidences.length
+    ? Math.min(...ocrResult.pageConfidences)
+    : 0;
+  const ocrQualityBlocked = mode === "ocr"
+    && ((ocrResult?.confidence ?? 0) < 0.88 || weakestOcrPage < 0.78);
+  const reconciliation = ocrQualityBlocked && baseReconciliation.status === "valid"
+    ? {
+      ...baseReconciliation,
+      status: "pending" as const,
+      reason: `OCR provisional: confianza media ${Math.round((ocrResult?.confidence ?? 0) * 100)}% y página más débil ${Math.round(weakestOcrPage * 100)}%; revisa las filas antes de aceptar.`,
+    }
+    : baseReconciliation;
   onProgress(100, "Listo para revisar");
 
   return {
