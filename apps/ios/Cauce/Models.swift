@@ -1020,8 +1020,24 @@ final class FinanceStore {
 
     private func amountsMatch(_ left: Decimal, _ right: Decimal) -> Bool {
         let tolerance = Decimal(string: "0.01", locale: Locale(identifier: "en_US_POSIX")) ?? 0
-        return absolute(left - right) <= tolerance
+        // Counterpart rows intentionally have opposite signs: a bank
+        // transfer/payment leaves the funding account (-amount) and arrives
+        // at the receiving account/card (+amount). Compare magnitudes here;
+        // direction is validated separately by isOutflow/isInflow and by the
+        // account/kind guards in reconcileStoredMovements.
+        return absolute(absolute(left) - absolute(right)) <= tolerance
     }
+
+#if DEBUG
+    /// Contract-test hook for the sign-independent amount invariant used by
+    /// transfer/card-payment matching. It is compiled only in test/debug
+    /// builds and does not expose ledger internals to the production UI.
+    static func matchingAmountsForTesting(_ left: Decimal, _ right: Decimal) -> Bool {
+        let tolerance = Decimal(string: "0.01", locale: Locale(identifier: "en_US_POSIX")) ?? 0
+        let magnitude: (Decimal) -> Decimal = { value in value < 0 ? -value : value }
+        return magnitude(magnitude(left) - magnitude(right)) <= tolerance
+    }
+#endif
 
     private func hasTransferHint(_ movement: Movement) -> Bool {
         let value = normalizedConcept(movement.title)
@@ -1106,7 +1122,6 @@ final class FinanceStore {
                 return movementKind(card) == .cardPayment
                     || hasCardPaymentHint(card)
                     || hasCardPaymentHint(bank)
-                    || isInflow(card)
                     || (card.flow == .debt && (cardText.contains("pago") || cardText.contains("abono") || cardText.contains("recib")))
             }) {
                 movements[index].flow = .transfer

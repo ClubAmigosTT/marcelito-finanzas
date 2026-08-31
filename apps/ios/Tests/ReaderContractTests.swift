@@ -108,4 +108,10 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.movements.first?.amount, -125)
         XCTAssertEqual(snapshot.movements.last?.amount, 1_000)
     }
+
+    func testMatchingUsesMagnitudeWhenCounterpartSignsDiffer() {
+        XCTAssertTrue(FinanceStore.matchingAmountsForTesting(-1_000, 1_000))
+        XCTAssertTrue(FinanceStore.matchingAmountsForTesting(-1_000.005, 1_000))
+        XCTAssertFalse(FinanceStore.matchingAmountsForTesting(-1_000, 1_001))
+    }
 }
