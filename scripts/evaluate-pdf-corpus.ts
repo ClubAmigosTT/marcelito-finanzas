@@ -233,6 +233,22 @@ if (!directory) {
     : null;
   const precisionFailure = Boolean(requireManifest && (automaticAcceptancePrecision === null || automaticAcceptancePrecision < targetPrecision));
   if (precisionFailure) failures += 1;
+  const nativeOCRPending = results.filter((result) => result.mode === "ocr-required").length;
+  // Precision answers “of the rows we accepted, how many were correct?”;
+  // certification also requires every manifest file to have been evaluated
+  // by the appropriate reader. A text-only run must never look certified
+  // while scanned PDFs are waiting for Vision on macOS/iOS.
+  const acceptanceRate = results.length
+    ? Number((accepted / results.length).toFixed(4))
+    : 0;
+  const certified = Boolean(
+    requireManifest
+      && failures === 0
+      && nativeOCRPending === 0
+      && expectedFiles.length === results.length
+      && automaticAcceptancePrecision !== null
+      && automaticAcceptancePrecision >= targetPrecision,
+  );
   const output = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -251,6 +267,9 @@ if (!directory) {
     parseErrors,
     targetPrecision,
     precisionFailure,
+    certified,
+    acceptanceRate,
+    nativeOCRPending,
     goldenExpectedFiles: expectedFiles.length,
     goldenAutoAccepted,
     goldenFalseAccepted,

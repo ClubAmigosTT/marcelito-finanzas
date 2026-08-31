@@ -52,6 +52,12 @@ gasto real sin separar esas secciones.
   finita y fragmento de origen no vacío. Si falta uno de estos campos, la fila
   puede permanecer visible para revisión, pero el estado no cuenta como
   aceptación automática ni como evidencia del 99%.
+- El evaluador distingue entre `automaticAcceptancePrecision` (precisión de los
+  estados que sí fueron aceptados) y `certified` (certificación completa). Esta
+  última solo es verdadera cuando el manifiesto está completo, no quedan PDFs
+  `ocr-required`, no hay discrepancias y la precisión supera el objetivo; por
+  tanto una corrida que solo procesa los PDFs de texto no puede presentarse como
+  certificación total.
 - El OCR web conserva confianza media y por página, limita la resolución de cada lienzo para evitar crashes por memoria y rechaza archivos de más de 50 MB con un mensaje recuperable.
 - iOS aplica los mismos límites de 50 MB y 80 páginas antes de crear
   imágenes OCR; excederlos produce un error recuperable y no deja datos
