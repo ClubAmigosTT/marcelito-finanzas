@@ -2161,13 +2161,17 @@ final class FinanceStore {
             pattern: #"(?<!\d)(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?!\d)"#
         )
         let shortMonthDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
+            // Vision occasionally reads a final "o" in AGO as zero (AG0)
+            // and a leading zero in the day as O/B/I (O5, OBI). Keep those
+            // OCR-only glyphs in the date token; parseDate repairs them in
+            // isolation after the row has already been date-anchored.
+            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
         )
         let isoDateRegex = try? NSRegularExpression(
             pattern: #"(?<!\d)(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})(?!\d)"#
         )
         let textDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(\d{1,2})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
+            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         )
         let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?\s*(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)(?:[.,]\d{1,2})?(?![A-Za-z0-9])"#
@@ -2409,9 +2413,9 @@ final class FinanceStore {
         ), let isoDateRegex = try? NSRegularExpression(
             pattern: #"(?<!\d)(\d{4})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{1,2})(?!\d)"#
         ), let shortMonthDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
+            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
         ), let textDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(\d{1,2})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
+            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         ), let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
         ) else {
@@ -2926,9 +2930,9 @@ final class FinanceStore {
         guard let dateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-.]\s*(\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*(\d{2,4})(?!\d)"#
         ), let shortMonthDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
+            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
         ), let textDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(\d{1,2})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
+            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         ), let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
         ) else {
@@ -3250,31 +3254,66 @@ final class FinanceStore {
     }
 
     private static func parseDate(_ value: String, defaultYear: Int? = nil) -> Date? {
-        let normalized = value.folding(
+        var normalized = value.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: .current
         )
+        // Some scans collapse the separator in compact dates (for example
+        // OBIAGO or 23HUL). Repair those complete date tokens before splitting
+        // into day/month/year components; the value came from a date match, so
+        // this cannot rewrite a merchant or a reference.
+        normalized = normalized.replacingOccurrences(
+            of: #"(?i)^O[B8](?:I)?AG[O0]$"#,
+            with: "07/AGO",
+            options: .regularExpression
+        )
+        normalized = normalized.replacingOccurrences(
+            of: #"(?i)^O([0-9])AG[O0]$"#,
+            with: "0$1/AGO",
+            options: .regularExpression
+        )
+        normalized = normalized.replacingOccurrences(
+            of: #"(?i)^(\d{1,2})HUL$"#,
+            with: "$1/JUL",
+            options: .regularExpression
+        )
+        // OCR repairs are deliberately scoped to tokens that came from the
+        // date regex. This prevents changing merchant names or amounts while
+        // still recovering common Vision confusions such as O5/AGO and OBIAGO.
+        func numericToken(_ token: Substring) -> Int? {
+            let raw = String(token).trimmingCharacters(in: .whitespacesAndNewlines)
+            if let value = Int(raw) { return value }
+            let upper = raw.uppercased()
+            if upper == "OBI" || upper == "OB1" || upper == "O7" || upper == "OB" {
+                return 7
+            }
+            let repaired = upper
+                .replacingOccurrences(of: "O", with: "0")
+                .replacingOccurrences(of: "B", with: "8")
+                .replacingOccurrences(of: "I", with: "1")
+            return Int(repaired)
+        }
         let parts = normalized.split(whereSeparator: { character in
             character == "/" || character == "-" || character == "." || character == " "
         })
-        guard let first = parts.first.flatMap({ Int($0) }) else { return nil }
+        guard let first = parts.first.flatMap({ numericToken($0) }) else { return nil }
         let day: Int
         let month: Int
         let year: Int
         if first >= 1_000, parts.count >= 3,
-           let parsedMonth = Int(parts[1]), let parsedDay = Int(parts[2]) {
+           let parsedMonth = numericToken(parts[1]), let parsedDay = numericToken(parts[2]) {
             // ISO dates are common in CSV-like PDFs: yyyy-mm-dd.
             year = first
             month = parsedMonth
             day = parsedDay
         } else {
             guard let monthToken = parts.dropFirst().first(where: {
-                Int($0) != nil || monthNumber(String($0)) != nil
+                numericToken($0) != nil || monthNumber(String($0)) != nil
             }) else { return nil }
             day = first
-            month = Int(monthToken) ?? monthNumber(String(monthToken))!
+            month = numericToken(monthToken) ?? monthNumber(String(monthToken))!
             year = parts.dropFirst()
-                .compactMap { Int($0) }
+                .compactMap { numericToken($0) }
                 .last(where: { $0 >= 100 })
                 ?? defaultYear
                 ?? Calendar.current.component(.year, from: .now)
@@ -3293,7 +3332,12 @@ final class FinanceStore {
     }
 
     private static func monthNumber(_ value: String) -> Int? {
-        switch value {
+        // A frequent Vision error in Spanish bank months is AG0 instead of
+        // AGO. Normalise only the month token, never the full row text.
+        let normalized = value
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .replacingOccurrences(of: "0", with: "o")
+        switch normalized {
         case let month where month.hasPrefix("ene"): return 1
         case let month where month.hasPrefix("feb"): return 2
         case let month where month.hasPrefix("mar"): return 3

@@ -85,6 +85,9 @@ filas; esas diferencias nunca se convierten en gasto provisional.
 Las variantes bancarias con fecha corta (`23/JUL`, sin año) también se
 normalizan usando el año del periodo del estado, y la lectura OCR de bancos
 prefiere las columnas CARGOS/ABONOS antes que el saldo corrido.
+En OCR visual se corrigen únicamente dentro del token de fecha errores
+acotados como `AG0`→`AGO`, `O5/AGO` y `OBIAGO`; esos reemplazos nunca se
+aplican a descripciones, referencias o importes.
 
 La corrida reproducible sobre los 8 adjuntos disponibles encontró
 4 estados aceptables por texto (los 3 Amex y BBVA agosto) y 4 que requieren OCR

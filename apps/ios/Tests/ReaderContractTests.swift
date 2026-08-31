@@ -87,4 +87,25 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.movements.first?.amount, -120)
         XCTAssertEqual(snapshot.movements.last?.amount, 15_000)
     }
+
+    func testOcrMonthAndDayRepairsStayInsideDateToken() {
+        let text = """
+        Grupo Financiero BBVA
+        BBVA México, Institución de Banca Múltiple
+        Detalle de Movimientos Realizados
+        FECHA OPER LIQ DESCRIPCION CARGOS ABONOS SALDO
+        O5/AG0 TIENDA DE PRUEBA 125.00 1,030.94
+        OBIAGO NOMINA EMPRESA 1,000.00 2,030.94
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "bbva-agosto-2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 2)
+        XCTAssertTrue(snapshot.movements.allSatisfy { Calendar.current.component(.month, from: $0.date) == 8 })
+        XCTAssertEqual(snapshot.movements.first?.amount, -125)
+        XCTAssertEqual(snapshot.movements.last?.amount, 1_000)
+    }
 }
