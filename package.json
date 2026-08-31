@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "test": "node --experimental-strip-types --test tests/reconciliation.test.ts",
     "pdf:corpus": "node --experimental-strip-types scripts/evaluate-pdf-corpus.ts",
+    "pdf:certify": "node --experimental-strip-types scripts/evaluate-pdf-corpus.ts --require-manifest --target-precision 0.99",
     "preview": "vite preview"
   },
   "dependencies": {

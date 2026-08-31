@@ -58,6 +58,15 @@ PDFs a la aplicación:
 npm run pdf:corpus -- --dir "./estados-validados" --manifest ./corpus.json > corpus-result.json
 ```
 
+Para una corrida de certificación, el comando debe exigir expectativas
+doradas y umbral explícito; falla si falta el manifiesto, hay PDFs sin
+describir o la precisión automática queda por debajo de 99%:
+
+```bash
+npm run pdf:corpus -- --dir "./estados-validados" --manifest ./corpus.json \
+  --require-manifest --target-precision 0.99 > corpus-certification.json
+```
+
 El manifiesto opcional fija emisor, tipo, estado de conciliación, número de
 filas y totales esperados por archivo. Si falta un archivo declarado o aparece
 duplicado en el manifiesto, la corrida falla. El resultado incluye método

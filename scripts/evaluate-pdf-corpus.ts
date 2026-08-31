@@ -87,12 +87,21 @@ async function evaluate(file: string) {
 }
 
 const directory = argument("--dir");
+const manifestPath = argument("--manifest");
+const requireManifest = process.argv.includes("--require-manifest");
+const targetPrecisionRaw = argument("--target-precision");
+const targetPrecision = targetPrecisionRaw === undefined ? 0.99 : Number(targetPrecisionRaw);
 if (!directory) {
-  console.error("Uso: npm run pdf:corpus -- --dir <carpeta> [--manifest <archivo.json>]");
+  console.error("Uso: npm run pdf:corpus -- --dir <carpeta> [--manifest <archivo.json>] [--require-manifest] [--target-precision 0.99]");
+  process.exitCode = 2;
+} else if (requireManifest && !manifestPath) {
+  console.error("La certificación requiere --manifest con expectativas doradas para cada PDF.");
+  process.exitCode = 2;
+} else if (!Number.isFinite(targetPrecision) || targetPrecision < 0 || targetPrecision > 1) {
+  console.error("--target-precision debe ser un número entre 0 y 1.");
   process.exitCode = 2;
 } else {
   const root = resolve(directory);
-  const manifestPath = argument("--manifest");
   const manifest: CorpusManifest = manifestPath ? JSON.parse(await readFile(resolve(manifestPath), "utf8")) : {};
   const tolerance = manifest.tolerance ?? 0.05;
   const names = (await readdir(root)).filter((name) => name.toLowerCase().endsWith(".pdf")).sort();
@@ -104,8 +113,10 @@ if (!directory) {
   const expectedNames = expectedFiles.map((item) => item.file);
   const duplicateManifestFiles = [...new Set(expectedNames.filter((name, index) => expectedNames.indexOf(name) !== index))].sort();
   const missingManifestFiles = expectedNames.filter((name) => !names.includes(name)).sort();
+  const unlistedCorpusFiles = manifestPath ? names.filter((name) => !expectedNames.includes(name)).sort() : [];
   if (duplicateManifestFiles.length) failures += duplicateManifestFiles.length;
   if (missingManifestFiles.length) failures += missingManifestFiles.length;
+  if (requireManifest && unlistedCorpusFiles.length) failures += unlistedCorpusFiles.length;
 
   for (const name of names) {
     const result = await evaluate(resolve(root, name));
@@ -132,6 +143,11 @@ if (!directory) {
   }
 
   const accepted = results.filter((result) => result.reconciliation.status === "valid" && result.sourceStatus === "verified" && result.suspiciousRows === 0).length;
+  const automaticAcceptancePrecision = goldenAutoAccepted + goldenFalseAccepted > 0
+    ? Number((goldenAutoAccepted / (goldenAutoAccepted + goldenFalseAccepted)).toFixed(4))
+    : null;
+  const precisionFailure = Boolean(requireManifest && (automaticAcceptancePrecision === null || automaticAcceptancePrecision < targetPrecision));
+  if (precisionFailure) failures += 1;
   const output = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -143,12 +159,13 @@ if (!directory) {
     manifestFailures: failures,
     manifestMissingFiles: missingManifestFiles,
     manifestDuplicateFiles: duplicateManifestFiles,
+    manifestUnlistedFiles: unlistedCorpusFiles,
+    targetPrecision,
+    precisionFailure,
     goldenExpectedFiles: expectedFiles.length,
     goldenAutoAccepted,
     goldenFalseAccepted,
-    automaticAcceptancePrecision: goldenAutoAccepted + goldenFalseAccepted > 0
-      ? Number((goldenAutoAccepted / (goldenAutoAccepted + goldenFalseAccepted)).toFixed(4))
-      : null,
+    automaticAcceptancePrecision,
     results,
   };
   console.log(JSON.stringify(output, null, 2));
