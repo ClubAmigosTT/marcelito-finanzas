@@ -475,6 +475,22 @@ test("la conciliación Amex descuenta créditos del subtotal doméstico y rechaz
   assert.equal(reconciliation.extractedCreditTotal, 9593.73);
 });
 
+test("la conciliación Amex respeta un subtotal doméstico marcado como CR", () => {
+  const summary = parseStatementSummary([
+    "Nuevas transacciones: 28,034.19",
+    "Total Nuevos Cargos: 37,213.42",
+    "Total de las transacciones en $ de CLIENTE 27,041.19 CR",
+    "Total de Transacciones en Moneda Extranjera de CLIENTE 27,537.69",
+  ].join("\n"), "card");
+  assert.equal(summary.domesticTransactionTotalIsCredit, true);
+  const rows = extractTransactions([
+    "01/06/2026 COMPRA NACIONAL 496.50",
+    "27/06/2026 MONTO A DIFERIR MESES EN AUTOMÁTICO 27,537.69 CR",
+    "02/06/2026 COMPRA EXTRANJERA Dólar 27,537.69",
+  ].join("\n"), "Amex", "Amex junio 2026.pdf", "card");
+  assert.equal(reconcileStatementImport("card", summary, rows).status, "valid");
+});
+
 test("la frontera de secciones Amex conserva como extranjeras las filas posteriores al subtotal", () => {
   const rows = extractTransactions([
     "01/08/2026 COMPRA NACIONAL 100.00",

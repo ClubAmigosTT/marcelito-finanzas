@@ -403,9 +403,12 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
     // Amex also prints the totals for the domestic and foreign sections. Keep
     // them as independent controls; the global “Nuevos cargos” can include
     // MSI installments and is not an equivalent to the movement table.
-    const domesticSectionTotal = normalized.match(new RegExp(`total\\s+de\\s+las\\s+transacciones\\s+en\\s+\\$[^\\d]{0,100}(${decimalMoneyToken})`, "i"));
+    const domesticSectionTotal = normalized.match(new RegExp(`total\\s+de\\s+las\\s+transacciones\\s+en\\s+\\$[^\\d]{0,100}(${decimalMoneyToken})(?:\\s*(cr))?`, "i"));
     const foreignSectionTotal = normalized.match(new RegExp(`total\\s+de\\s+transacciones\\s+en\\s+moneda\\s+extranjera[^\\d]{0,100}(${decimalMoneyToken})`, "i"));
-    if (domesticSectionTotal) summary.domesticTransactionTotal = parseToken(domesticSectionTotal[1]);
+    if (domesticSectionTotal) {
+      summary.domesticTransactionTotal = parseToken(domesticSectionTotal[1]);
+      summary.domesticTransactionTotalIsCredit = Boolean(domesticSectionTotal[2]);
+    }
     if (foreignSectionTotal) summary.foreignTransactionTotal = parseToken(foreignSectionTotal[1]);
   }
   return summary;
@@ -491,13 +494,16 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       : undefined;
     const declaredCharges = sectionDeclaredCharges ?? summary.newTransactions ?? summary.newCharges;
     if (declaredCharges === undefined) return { status: "pending", tolerance, extractedChargeTotal, extractedDomesticChargeTotal, extractedForeignChargeTotal, extractedCreditTotal, extractedPaymentTotal, extractedMovementCount: transactions.length, reason: "El estado no contiene total de cargos" };
-    const chargeDifference = sectionDeclaredCharges !== undefined
-      ? netDomesticChargeTotal + netForeignChargeTotal - declaredCharges
-      : extractedChargeTotal - declaredCharges;
+    // When both Amex subtotals exist, each section (including its sign) is
+    // authoritative. Their arithmetic sum is not a charge total when one
+    // section is printed as a net credit (CR), so do not compare that sum to
+    // “Nuevas transacciones”.
+    const chargeDifference = sectionDeclaredCharges !== undefined ? 0 : extractedChargeTotal - declaredCharges;
     const paymentDifference = summary.payments !== undefined ? extractedPaymentTotal - summary.payments : 0;
     const sectionDifferences: string[] = [];
     if (summary.domesticTransactionTotal !== undefined) {
-      const difference = netDomesticChargeTotal - summary.domesticTransactionTotal;
+      const declaredDomestic = summary.domesticTransactionTotal * (summary.domesticTransactionTotalIsCredit ? -1 : 1);
+      const difference = netDomesticChargeTotal - declaredDomestic;
       if (Math.abs(difference) > tolerance) sectionDifferences.push(`nacionales ${difference.toFixed(2)}`);
     }
     if (summary.foreignTransactionTotal !== undefined) {

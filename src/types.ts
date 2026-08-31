@@ -123,6 +123,8 @@ export type StatementSummary = {
   msiMonthlyLoad?: number;
   /** Subtotals that issuers print for domestic/foreign transaction sections. */
   domesticTransactionTotal?: number;
+  /** Some Amex statements print the domestic subtotal as a credit (CR). */
+  domesticTransactionTotalIsCredit?: boolean;
   foreignTransactionTotal?: number;
   /** Totales declarados en estados de cuenta bancarios. */
   depositTotal?: number;
