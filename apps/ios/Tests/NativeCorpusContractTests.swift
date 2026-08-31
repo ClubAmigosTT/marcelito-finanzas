@@ -63,6 +63,11 @@ final class NativeCorpusContractTests: XCTestCase {
         value.map { NSDecimalNumber(decimal: $0).stringValue } ?? ""
     }
 
+    private func percentText(_ value: Double?) -> String {
+        guard let value, value.isFinite else { return "" }
+        return String(format: "%.4f", value)
+    }
+
     func testValidatedCorpusThroughNativeReaderWhenProvided() throws {
         guard let rawDirectory = ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_DIR"],
               !rawDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -133,9 +138,13 @@ final class NativeCorpusContractTests: XCTestCase {
                 "source": result.source,
                 "kind": result.kind.rawValue,
                 "mode": result.usedOCR ? "vision-ocr" : "pdf-text",
+                "sourceStatus": result.sourceDetection.status.rawValue,
+                "sourceConfidence": percentText(result.sourceDetection.confidence),
                 "status": result.reconciliation?.status.rawValue ?? "pending",
                 "rows": String(result.imported),
                 "requiresReview": String(result.requiresReview),
+                "ocrConfidence": percentText(result.ocrConfidence),
+                "weakestOCRPage": percentText(result.ocrPageConfidences?.min()),
                 "expectedDeposits": decimalText(expected.depositTotal),
                 "extractedDeposits": decimalText(result.reconciliation?.extractedDepositTotal),
                 "expectedWithdrawals": decimalText(expected.withdrawalTotal),
