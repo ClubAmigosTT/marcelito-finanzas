@@ -814,6 +814,32 @@ final class FinanceStore {
         return run
     }
 
+    /// Aggregate, privacy-conscious audit export used by the diagnostics
+    /// screen. It deliberately omits merchant descriptions and individual
+    /// rows; the period controls and quality gates are enough to reproduce why
+    /// a dashboard was accepted or blocked without sharing a user's PDF.
+    func diagnosticExportText() -> String {
+        let quality = ledgerQuality
+        var lines = [
+            "Libro canónico",
+            "Estados: \(quality.validatedStatementCount)/\(quality.statementCount) conciliados",
+            "Movimientos canónicos: \(quality.movementCount)",
+            "Calidad de evidencia: \(Int(quality.evidencePercent.rounded()))%",
+            "Estado del dashboard: \(quality.isBlocking ? "bloqueado" : "disponible")",
+            ""
+        ]
+        lines.append("Resumen por estado")
+        lines.append(contentsOf: statementAudits.map { audit in
+            let duplicateText = audit.duplicateRows.map { " · duplicados \($0)" } ?? ""
+            return "(audit.source) · (audit.period) · (audit.statusLabel) · filas (audit.validRows)/(audit.importedRows) · canónicas (audit.canonicalRows)(duplicateText) · ingresos (diagnosticMoney(audit.incomeTotal)) · gasto (diagnosticMoney(audit.expenseTotal)) · transferencias (diagnosticMoney(audit.transferTotal)) · pagos tarjeta (diagnosticMoney(audit.cardPaymentTotal)) · reembolsos (diagnosticMoney(audit.refundTotal))"
+        })
+        return lines.joined(separator: "\n")
+    }
+
+    private func diagnosticMoney(_ value: Decimal) -> String {
+        value.formatted(.currency(code: "MXN").precision(.fractionLength(2)))
+    }
+
     var consistencyChecks: [LedgerConsistencyCheck] {
         let tolerance = Decimal(string: "0.05", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(0.05)
         func check(_ id: String, _ label: String, expected: Decimal?, actual: Decimal?) -> LedgerConsistencyCheck {

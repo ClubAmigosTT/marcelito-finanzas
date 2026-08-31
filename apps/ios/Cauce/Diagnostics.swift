@@ -336,6 +336,8 @@ struct DiagnosticsView: View {
                     Menu {
                         Button {
                             UIPasteboard.general.string = DiagnosticsRecorder.exportText()
+                                + "\n\n"
+                                + store.diagnosticExportText()
                             copied = true
                         } label: {
                             Label("Copiar registro", systemImage: "doc.on.doc")

@@ -720,5 +720,10 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(audit.incomeTotal, 100)
         XCTAssertEqual(audit.expenseTotal, 40)
         XCTAssertEqual(audit.statusLabel, "Conciliado")
+
+        let exported = store.diagnosticExportText()
+        XCTAssertTrue(exported.contains("BBVA · agosto 2026"))
+        XCTAssertTrue(exported.contains("ingresos"))
+        XCTAssertFalse(exported.contains("Supermercado"), "La exportación agregada no debe incluir descripciones individuales")
     }
 }
