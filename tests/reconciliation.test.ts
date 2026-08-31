@@ -724,7 +724,7 @@ test("los tres saldos de prueba producen efectivo y patrimonio auditables", () =
 });
 
 test("la auditoría es determinista respecto al orden de importación", () => {
-  const statements = [bank("bbva-ago", "BBVA", "agosto 2026")];
+  const statements = [{ ...bank("bbva-ago", "BBVA", "agosto 2026"), sourceFingerprint: "bbb" }];
   const rows = [
     movement({ id: "salary", date: "01 ago 2026", description: "NOMINA", account: "BBVA", amount: 10000, flow: "income", statementId: "bbva-ago", category: "Ingresos" }),
     movement({ id: "food", date: "02 ago 2026", description: "SUPERMERCADO", account: "BBVA", amount: -1200, flow: "expense", statementId: "bbva-ago", category: "Alimentos" }),
@@ -736,6 +736,7 @@ test("la auditoría es determinista respecto al orden de importación", () => {
   const secondAudit = createAuditRun(reversed, statements, reversed.transactions, "startup");
   assert.equal(firstAudit.ledgerFingerprint, secondAudit.ledgerFingerprint);
   assert.equal(firstAudit.canonicalMovementCount, secondAudit.canonicalMovementCount);
+  assert.deepEqual(firstAudit.sourceFingerprints, ["bbb"]);
 });
 
 test("la auditoría bloquea un estado pendiente aunque no queden filas canónicas", () => {
