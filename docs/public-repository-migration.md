@@ -46,6 +46,9 @@ expone código, historial, ejecuciones, logs, artefactos, issues y forks.
 - [x] Reducir la retención de artefactos de diagnóstico.
 - [x] Activar dependency graph, alertas y actualizaciones de seguridad de
   Dependabot en la configuración del repositorio.
+- [x] Actualizar `pdfjs-dist` a una versión con el parche de seguridad y
+  liberar el `PDFDocumentLoadingTask` en todas las rutas; el importador no
+  ejecuta scripting/XFA interactivo.
 - [ ] Activar secret scanning y push protection al quedar el repositorio
   público, y revisar sus primeros resultados.
 - [ ] Configurar protección de `main` (pull request, checks obligatorios y sin

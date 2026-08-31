@@ -1321,8 +1321,17 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   pdfjs.GlobalWorkerOptions.workerSrc = workerModule.default;
   const buffer = await file.arrayBuffer();
   const sourceFingerprint = await fingerprintPdf(buffer);
-  const document = await pdfjs.getDocument({ data: buffer }).promise;
+  // Keep the loading task so PDF.js can terminate both the document transport
+  // and its worker on every exit path. PDFDocumentProxy no longer exposes
+  // `destroy()` in PDF.js 6; destroying the task is the supported API.
+  const loadingTask = pdfjs.getDocument({
+    data: buffer,
+    // This importer only reads text and renders pages; interactive PDF
+    // scripting/XFA is not needed and must never be evaluated.
+    enableXfa: false,
+  });
   try {
+    const document = await loadingTask.promise;
     // A monthly statement normally has fewer than ten pages. Refuse an
     // accidentally selected scan bundle before allocating OCR canvases for
     // hundreds of pages; the import dialog will show a recoverable message.
@@ -1388,10 +1397,8 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
       ocrPageConfidences: ocrResult?.pageConfidences,
       extractedText: text,
     };
-    await document.destroy();
     return result;
-  } catch (error) {
-    await document.destroy();
-    throw error;
+  } finally {
+    await loadingTask.destroy();
   }
 }
