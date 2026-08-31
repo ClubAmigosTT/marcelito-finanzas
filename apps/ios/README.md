@@ -42,6 +42,7 @@ registrar la versión en GitHub Actions. El verificador lee únicamente la líne
 hay falsos positivos o la precisión cae por debajo de 99%:
 
 ```bash
+cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
   --manifest tests/fixtures/pdf-corpus-attachments.json \
