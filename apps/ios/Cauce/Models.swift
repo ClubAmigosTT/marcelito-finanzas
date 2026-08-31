@@ -2279,6 +2279,14 @@ final class FinanceStore {
             return []
         }
 
+        let defaultYear: Int = {
+            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+               let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
+                return year
+            }
+            return Calendar.current.component(.year, from: .now)
+        }()
+
         let linesByPage = Dictionary(grouping: ocrLines(from: observations), by: \.page)
         var rows: [[OCRObservation]] = []
         let ignoredHeaderPhrases = [
@@ -2351,7 +2359,8 @@ final class FinanceStore {
                 textDateRegex: textDateRegex,
                 amountRegex: amountRegex,
                 source: source,
-                kind: kind
+                kind: kind,
+                defaultYear: defaultYear
             )
         }
     }
@@ -2363,13 +2372,14 @@ final class FinanceStore {
         textDateRegex: NSRegularExpression,
         amountRegex: NSRegularExpression,
         source: String,
-        kind: StatementKind
+        kind: StatementKind,
+        defaultYear: Int
     ) -> Movement? {
         let fullText = row.map(\.text).joined(separator: " ")
         let dateMatch = firstMatch(in: fullText, regex: dayFirstDateRegex)
             ?? firstMatch(in: fullText, regex: isoDateRegex)
             ?? firstMatch(in: fullText, regex: textDateRegex)
-        guard let dateMatch, let date = parseDate(dateMatch.text) else { return nil }
+        guard let dateMatch, let date = parseDate(dateMatch.text, defaultYear: defaultYear) else { return nil }
 
         let normalizedFullText = fullText.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
@@ -2768,6 +2778,14 @@ final class FinanceStore {
             return []
         }
 
+        let defaultYear: Int = {
+            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+               let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
+                return year
+            }
+            return Calendar.current.component(.year, from: .now)
+        }()
+
         let linesByPage = Dictionary(grouping: lines, by: \.page)
         var rows: [[OCRObservation]] = []
         let ignoredHeaderPhrases = [
@@ -2835,19 +2853,20 @@ final class FinanceStore {
             if !pendingRow.isEmpty { rows.append(pendingRow) }
         }
 
-        return rows.compactMap { parseAmexRow($0, dateRegex: dateRegex, textDateRegex: textDateRegex, amountRegex: amountRegex) }
+        return rows.compactMap { parseAmexRow($0, dateRegex: dateRegex, textDateRegex: textDateRegex, amountRegex: amountRegex, defaultYear: defaultYear) }
     }
 
     private static func parseAmexRow(
         _ row: [OCRObservation],
         dateRegex: NSRegularExpression,
         textDateRegex: NSRegularExpression,
-        amountRegex: NSRegularExpression
+        amountRegex: NSRegularExpression,
+        defaultYear: Int
     ) -> Movement? {
         let fullText = row.map(\.text).joined(separator: " ")
         let dateMatch = firstMatch(in: fullText, regex: dateRegex)
             ?? firstMatch(in: fullText, regex: textDateRegex)
-        guard let dateMatch, let date = parseDate(dateMatch.text) else { return nil }
+        guard let dateMatch, let date = parseDate(dateMatch.text, defaultYear: defaultYear) else { return nil }
 
         let normalizedFullText = fullText.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
