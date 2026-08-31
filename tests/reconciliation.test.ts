@@ -160,6 +160,18 @@ test("una coincidencia externa de importe y fecha no se oculta como transferenci
   assert.equal(buildFinanceMetrics(transactions, statements, result).realIncome, 700);
 });
 
+test("una coincidencia ambigua relevante queda en revisión y vuelve provisionales los KPI", () => {
+  const statements = [bank("santander", "Santander", "agosto 2026"), bank("bbva", "BBVA", "agosto 2026")];
+  const transactions = [
+    movement({ id: "large-out", date: "20 ago 2026", description: "PAGO A PROVEEDOR", account: "Santander", amount: -2500, flow: "expense", statementId: "santander" }),
+    movement({ id: "large-in", date: "21 ago 2026", description: "DEPOSITO CLIENTE", account: "BBVA", amount: 2500, flow: "income", statementId: "bbva" }),
+  ];
+  const result = runTransactionPipeline(transactions, statements);
+  assert.equal(result.audit.relevantReviewCount, 2);
+  assert.equal(result.transactions.every((row) => row.validationStatus === "review"), true);
+  assert.equal(buildFinanceMetrics(transactions, statements, result).isProvisional, true);
+});
+
 test("matching no convierte un crédito de tarjeta en pago sin evidencia", () => {
   const statements = [
     bank("bbva", "BBVA", "agosto 2026"),

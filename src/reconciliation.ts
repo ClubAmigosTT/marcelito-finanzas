@@ -582,19 +582,27 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
   // amount/date gate narrows candidates, but an explicit own-account signal
   // is also mandatory: account identity alone cannot distinguish a transfer
   // from an unrelated external deposit of the same amount.
+  const ambiguousTransferReviewIds = new Set<string>();
   candidates.forEach((outflow) => {
     if (consumed.has(outflow.id) || !isBankTransaction(outflow, statements) || !isOutflow(outflow)) return;
-    const partner = candidates
+    const possiblePartners = candidates
       .filter((inflow) => !consumed.has(inflow.id)
         && inflow.id !== outflow.id
         && isBankTransaction(inflow, statements)
         && isInflow(inflow)
         && normalizeConcept(inflow.account) !== normalizeConcept(outflow.account)
         && sameAmount(outflow, inflow)
-        && withinTwoDays(outflow, inflow, statements)
-        && hasOwnAccountTransferEvidence(outflow, inflow, statements))
-      .sort((left, right) => absolute((parseDate(left.date) ?? 0) - (parseDate(outflow.date) ?? 0)) - absolute((parseDate(right.date) ?? 0) - (parseDate(outflow.date) ?? 0)))[0];
+        && withinTwoDays(outflow, inflow, statements))
+      .sort((left, right) => absolute((parseDate(left.date) ?? 0) - (parseDate(outflow.date) ?? 0)) - absolute((parseDate(right.date) ?? 0) - (parseDate(outflow.date) ?? 0)));
+    const partner = possiblePartners.find((inflow) => hasOwnAccountTransferEvidence(outflow, inflow, statements));
     if (partner) replacePair(outflow, partner, "internalTransfer");
+    else if (possiblePartners[0]) {
+      // Keep a coincident external pair visible as a review item rather than
+      // silently deciding that it is internal. Relevant pairs will block the
+      // executive KPIs through the normal data-quality gate.
+      ambiguousTransferReviewIds.add(outflow.id);
+      ambiguousTransferReviewIds.add(possiblePartners[0].id);
+    }
   });
 
   const classified = canonical.map((transaction) => {
@@ -640,7 +648,13 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
       kind = kind === "other" ? "credit" : kind;
       flow = "income";
     }
-    return { ...reconciled, kind, flow, normalizedDescription: text, validationStatus: reconciled.validationStatus ?? "valid" };
+    return {
+      ...reconciled,
+      kind,
+      flow,
+      normalizedDescription: text,
+      validationStatus: ambiguousTransferReviewIds.has(reconciled.id) ? "review" : reconciled.validationStatus ?? "valid",
+    };
   });
 
   const totals = {
