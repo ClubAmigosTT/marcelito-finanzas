@@ -142,7 +142,7 @@ struct DiagnosticsView: View {
                         if let readerVersion = audit.readerVersion {
                             LabeledContent("Versión del lector", value: readerVersion)
                         }
-                        Text("Ejecutada \(audit.completedAt, style: .relative) · \(audit.id.uuidString.prefix(8))")
+                        Text("Ejecutada \(audit.completedAt, style: .relative) · \(String(audit.id.uuidString.prefix(8)))")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }

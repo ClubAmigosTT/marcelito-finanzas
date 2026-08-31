@@ -111,74 +111,7 @@ struct HomeView: View {
                 allowedContentTypes: [.pdf],
                 allowsMultipleSelection: true
             ) { result in
-                switch result {
-                case .success(let urls):
-                    guard !urls.isEmpty else {
-                        importReport = ImportReport(
-                            fileCount: 0,
-                            items: [],
-                            selectionError: "No elegiste ningún PDF. Selecciona un estado de cuenta para revisar sus movimientos."
-                        )
-                        return
-                    }
-                    isImporting = true
-                    importProgress = 0
-                    importStatus = urls.count == 1 ? "Preparando el estado…" : "Preparando \(urls.count) estados…"
-                    DiagnosticsRecorder.record(
-                        stage: "import.start",
-                        message: "Importación iniciada: \(urls.count) PDF(s)."
-                    )
-                    Task { @MainActor in
-                        var items: [ImportReportItem] = []
-                        for (index, url) in urls.enumerated() {
-                            importStatus = "Leyendo \(url.lastPathComponent)…"
-                            let completedCount = Double(index)
-                            let totalCount = max(Double(urls.count), 1)
-                            let completedPercent = (completedCount / totalCount) * 100
-                            importProgress = Int(completedPercent.rounded())
-                            // Give SwiftUI one frame to present the loading
-                            // overlay before PDFKit/Vision starts its work.
-                            await Task.yield()
-                            do {
-                                let summary = try await store.importPDFAsync(from: url)
-                                items.append(ImportReportItem(summary: summary))
-                                DiagnosticsRecorder.record(
-                                    stage: "import.file",
-                                    message: "\(summary.source) · \(summary.period): \(summary.imported) movimiento(s)\(summary.usedOCR ? " · OCR" : "")."
-                                )
-                            } catch {
-                                DiagnosticsRecorder.record(
-                                    level: "error",
-                                    stage: "import.error",
-                                    message: "\(url.lastPathComponent): \(error.localizedDescription)"
-                                )
-                                items.append(ImportReportItem(
-                                    fileName: url.lastPathComponent,
-                                    errorMessage: error.localizedDescription
-                                ))
-                            }
-                            let finishedCount = Double(index + 1)
-                            let finishedPercent = (finishedCount / totalCount) * 100
-                            importProgress = Int(finishedPercent.rounded())
-                            await Task.yield()
-                        }
-                        importStatus = "Listo"
-                        isImporting = false
-                        importReport = ImportReport(fileCount: urls.count, items: items)
-                        DiagnosticsRecorder.record(
-                            stage: "import.done",
-                            message: "Importación terminada: \(items.filter { $0.errorMessage == nil }.count)/\(urls.count) archivo(s) procesado(s)."
-                        )
-                    }
-                case .failure(let error):
-                    isImporting = false
-                    DiagnosticsRecorder.record(level: "error", stage: "import.selection", message: error.localizedDescription)
-                    importReport = ImportReport(
-                        fileCount: 0,
-                        items: [],
-                        selectionError: error.localizedDescription
-                    )
-                }
+                handleImportResult(result)
             }
             .sheet(item: $importReport) { report in
                 ImportReportSheet(report: report)
@@ -200,27 +133,99 @@ struct HomeView: View {
                 Text("Se borrarán tu usuario, movimientos y estados importados de este dispositivo. Esta acción no se puede deshacer.")
             }
             .task {
-                guard store.hasCanonicalRebuildPending else { return }
-                isImporting = true
-                importProgress = 0
-                importStatus = "Reconstruyendo el libro canónico…"
-                await Task.yield()
-                let result = await store.rebuildCanonicalLedgerIfNeededAsync { completed, total, fileName in
-                    let denominator = max(total, 1)
-                    importProgress = Int((Double(completed) / Double(denominator) * 100).rounded())
-                    importStatus = "Validando \(fileName)…"
-                }
-                importProgress = 100
-                if result.invalidCount > 0 {
-                    importStatus = "\(result.importedCount) estados listos · \(result.invalidCount) requieren revisión"
-                } else {
-                    importStatus = "\(result.importedCount) estados reconstruidos"
-                }
-                await Task.yield()
-                isImporting = false
-                store.runAutomaticAudit(trigger: "launch")
+                await rebuildPendingLedgerIfNeeded()
             }
         }
+    }
+
+    @MainActor
+    private func handleImportResult(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard !urls.isEmpty else {
+                importReport = ImportReport(
+                    fileCount: 0,
+                    items: [],
+                    selectionError: "No elegiste ningún PDF. Selecciona un estado de cuenta para revisar sus movimientos."
+                )
+                return
+            }
+            isImporting = true
+            importProgress = 0
+            importStatus = urls.count == 1 ? "Preparando el estado…" : "Preparando \(urls.count) estados…"
+            DiagnosticsRecorder.record(
+                stage: "import.start",
+                message: "Importación iniciada: \(urls.count) PDF(s)."
+            )
+            Task { @MainActor in
+                var items: [ImportReportItem] = []
+                for (index, url) in urls.enumerated() {
+                    importStatus = "Leyendo \(url.lastPathComponent)…"
+                    let completedCount = Double(index)
+                    let totalCount = max(Double(urls.count), 1)
+                    importProgress = Int(((completedCount / totalCount) * 100).rounded())
+                    await Task.yield()
+                    do {
+                        let summary = try await store.importPDFAsync(from: url)
+                        items.append(ImportReportItem(summary: summary))
+                        DiagnosticsRecorder.record(
+                            stage: "import.file",
+                            message: "\(summary.source) · \(summary.period): \(summary.imported) movimiento(s)\(summary.usedOCR ? " · OCR" : "")."
+                        )
+                    } catch {
+                        DiagnosticsRecorder.record(
+                            level: "error",
+                            stage: "import.error",
+                            message: "\(url.lastPathComponent): \(error.localizedDescription)"
+                        )
+                        items.append(ImportReportItem(
+                            fileName: url.lastPathComponent,
+                            errorMessage: error.localizedDescription
+                        ))
+                    }
+                    importProgress = Int((Double(index + 1) / totalCount * 100).rounded())
+                    await Task.yield()
+                }
+                importStatus = "Listo"
+                isImporting = false
+                importReport = ImportReport(fileCount: urls.count, items: items)
+                DiagnosticsRecorder.record(
+                    stage: "import.done",
+                    message: "Importación terminada: \(items.filter { $0.errorMessage == nil }.count)/\(urls.count) archivo(s) procesado(s)."
+                )
+            }
+        case .failure(let error):
+            isImporting = false
+            DiagnosticsRecorder.record(level: "error", stage: "import.selection", message: error.localizedDescription)
+            importReport = ImportReport(
+                fileCount: 0,
+                items: [],
+                selectionError: error.localizedDescription
+            )
+        }
+    }
+
+    @MainActor
+    private func rebuildPendingLedgerIfNeeded() async {
+        guard store.hasCanonicalRebuildPending else { return }
+        isImporting = true
+        importProgress = 0
+        importStatus = "Reconstruyendo el libro canónico…"
+        await Task.yield()
+        let result = await store.rebuildCanonicalLedgerIfNeededAsync { completed, total, fileName in
+            let denominator = max(total, 1)
+            importProgress = Int((Double(completed) / Double(denominator) * 100).rounded())
+            importStatus = "Validando \(fileName)…"
+        }
+        importProgress = 100
+        if result.invalidCount > 0 {
+            importStatus = "\(result.importedCount) estados listos · \(result.invalidCount) requieren revisión"
+        } else {
+            importStatus = "\(result.importedCount) estados reconstruidos"
+        }
+        await Task.yield()
+        isImporting = false
+        store.runAutomaticAudit(trigger: "launch")
     }
 }
 

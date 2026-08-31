@@ -785,7 +785,7 @@ private struct AccountSummaryRow: View {
                 HStack(spacing: 12) {
                     Image(systemName: kind == .card ? "creditcard.fill" : "building.columns.fill")
                         .foregroundStyle(Color.marcelitoNavyMid)
-                    Text(source + (accountKey.flatMap { $0.split(separator: ":").last }.map { " · ••••\($0)" } ?? ""))
+                    Text(source + (accountKey.flatMap { $0.split(separator: ":").last }.map { " · ••••\(String($0))" } ?? ""))
                         .font(.headline)
                     Spacer()
                     Text(balanceText)
