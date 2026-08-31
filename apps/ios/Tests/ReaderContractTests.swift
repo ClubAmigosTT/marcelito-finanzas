@@ -421,6 +421,18 @@ final class ReaderContractTests: XCTestCase {
             splitLabelTokens,
             fileName: "Santander agosto 2026.pdf"
         ))
+
+        let glyphSubstitutions = [
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPC10N", x: 0.23, y: 0.90, width: 0.12),
+            OCRObservationFixture(text: "DEPOS1T0", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RET1R0", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALD0", x: 0.79, y: 0.90, width: 0.08),
+        ]
+        XCTAssertTrue(FinanceStore.santanderOCRColumnsCalibratedForTesting(
+            glyphSubstitutions,
+            fileName: "Santander agosto 2026.pdf"
+        ))
     }
 
     func testSantanderOCRIgnoresMultilineFolioTraceAndRunningBalance() {

@@ -3398,10 +3398,16 @@ final class FinanceStore {
         // anchors on one visual line; otherwise the fallback layout remains
         // provisional and cannot feed the dashboard automatically.
         let normalizedLabel: (OCRObservation) -> String = { observation in
+            // Vision occasionally substitutes digits for glyphs in small
+            // column labels (SALD0, DEPOS1T0, RET1R0).  Restrict this repair
+            // to the short header token before matching known labels; it must
+            // never rewrite transaction descriptions or amounts.
             observation.text
                 .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: "0", with: "o")
+                .replacingOccurrences(of: "1", with: "i")
         }
         let grouped = Dictionary(grouping: observations, by: \.page)
         let headerYTolerance: CGFloat = 0.05
