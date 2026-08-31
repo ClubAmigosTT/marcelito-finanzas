@@ -288,7 +288,10 @@ detalle `NATIVE_CORPUS_REPORT` se emite `NATIVE_CORPUS_SUMMARY`. Esa salida
 resume aceptaciones automáticas, bloqueos, falsos positivos, precisión,
 documentos OCR aún pendientes y la bandera `certified`; esta última permanece
 en `false` mientras existan goldens pendientes o cualquier estado OCR sin
-resolver.
+resolver. El workflow de CI ejecuta el contrato nativo sintético, pero no puede
+montar los PDFs privados; por eso la corrida con
+`MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1` debe hacerse manualmente en un
+macOS que tenga el corpus local.
 
 El contrato cubre tres regresiones de alto riesgo: evidencia institucional que
 vence a una contraparte (BBVA no se convierte en Santander), créditos Amex que

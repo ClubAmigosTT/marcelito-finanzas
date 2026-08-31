@@ -59,7 +59,9 @@ también conteo exacto de filas en la siguiente corrida.
 Las pruebas verifican que el emisor se identifica por el encabezado
 institucional, que las filas administrativas se descartan y que un crédito de
 Amex no termina como gasto. El workflow de GitHub las ejecuta automáticamente
-en macOS.
+en macOS. El corpus real no se incluye en CI porque contiene estados privados:
+la certificación completa debe ejecutarse manualmente con
+`MARCELITO_PDF_CORPUS_DIR` y `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`.
 
 La autenticación usa Keychain y Face ID. La aplicación inicia sin movimientos de muestra: importa tus PDFs desde Archivos, revisa banco, periodo y movimientos, y los guarda solo en ese dispositivo. Los estados escaneados pueden quedar pendientes de revisión sin inventar filas.
 
