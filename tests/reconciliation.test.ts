@@ -769,6 +769,19 @@ test("el resumen descarta identificadores administrativos usados como importes",
   assert.equal(summary.newTransactions, 100);
 });
 
+test("el resumen bancario descarta identificadores largos como saldo inicial", () => {
+  const summary = parseStatementSummary([
+    "Saldo Anterior 12345678901234567890",
+    "Depósitos / Abonos (+) 19,500.00",
+    "Retiros / Cargos (-) 22,058.69",
+    "Saldo Final 1,030.94",
+  ].join("\n"), "bank");
+  assert.equal(summary.previousBalance, undefined);
+  assert.equal(summary.depositTotal, 19_500);
+  assert.equal(summary.withdrawalTotal, 22_058.69);
+  assert.equal(summary.cashBalance, 1_030.94);
+});
+
 test("los totales bancarios declarados bloquean una importación que no concilia", () => {
   const summary = parseStatementSummary([
     "Saldo Anterior 100.00",
