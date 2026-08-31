@@ -185,9 +185,10 @@ que recibe `MARCELITO_PDF_CORPUS_DIR`, procesa los ocho PDFs con
 `PDFDocument + Vision`, verifica los estados de texto y emite un informe
 `NATIVE_CORPUS_REPORT`; falta ejecutarlo contra los cuatro escaneos en
 macOS/Xcode para cerrar la certificación.
-El runner nativo ya contrasta los controles de depósitos y retiros del resumen
-incluso cuando una lectura escaneada permanece `pending`; solo difiere la
-aserción de sumas de filas hasta que Vision reconstruye movimientos válidos.
+El runner nativo ya contrasta los controles de saldo inicial, saldo final,
+depósitos y retiros del resumen incluso cuando una lectura escaneada permanece
+`pending`; solo difiere la aserción de sumas de filas hasta que Vision
+reconstruye movimientos válidos.
 La ejecución está encapsulada en `apps/ios/scripts/run-native-corpus.sh`, que
 conserva el `.xcresult` y el log para que cada calibración sea reproducible.
 En Santander, si Vision no identifica los tres anclajes de columna, el lector
