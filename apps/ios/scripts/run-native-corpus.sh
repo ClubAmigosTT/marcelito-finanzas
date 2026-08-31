@@ -6,6 +6,11 @@ if [[ -z "$corpus_dir" || ! -d "$corpus_dir" ]]; then
   echo "Uso: MARCELITO_PDF_CORPUS_DIR=/ruta/a/estados ./scripts/run-native-corpus.sh" >&2
   exit 2
 fi
+corpus_dir="$(cd "$corpus_dir" && pwd)"
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
+cd "$script_dir"
 
 if ! command -v xcodegen >/dev/null 2>&1; then
   echo "Falta xcodegen. Instálalo con: brew install xcodegen" >&2
@@ -27,8 +32,6 @@ fi
 result_dir="$(mktemp -d "${TMPDIR:-/tmp}/marcelito-native-corpus.XXXXXX")"
 result_bundle="$result_dir/MarcelitoCorpus.xcresult"
 log_file="$result_dir/xcodebuild.log"
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/../.." && pwd)"
 
 echo "Corpus: $corpus_dir"
 echo "Destino: $destination"

@@ -28,7 +28,8 @@ xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
   -destination "platform=iOS Simulator,name=iPhone 16" test
 ```
 
-También puedes usar el runner reproducible desde esta carpeta; conserva el
+También puedes usar el runner reproducible desde esta carpeta o desde la raíz
+del repositorio; conserva el
 `.xcresult` y el log en un directorio temporal para adjuntarlos a la auditoría:
 
 ```bash
