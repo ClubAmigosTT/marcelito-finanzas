@@ -4,7 +4,7 @@ import { detectSource, detectSourceEvidence, extractTransactions, gateOcrReconci
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
 import { buildFinanceMetrics } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
-import { prepareStoredStatements } from "../src/statementMigration.ts";
+import { prepareStoredLedger, prepareStoredStatements } from "../src/statementMigration.ts";
 import type { Statement, Transaction } from "../src/types.ts";
 
 const bank = (id: string, source: string, period: string): Statement => ({
@@ -1039,4 +1039,38 @@ test("la cuarentena de versión también bloquea las cifras del estado antiguo",
   assert.equal(metrics.consolidatedRealSpend, 0);
   assert.equal(metrics.cashAvailable, undefined);
   assert.equal(metrics.isProvisional, true);
+});
+
+test("la migración elimina filas PDF obsoletas y conserva movimientos manuales", () => {
+  const legacyStatement = {
+    ...bank("bbva-legacy", "BBVA", "agosto 2026"),
+    readerVersion: "web-reader-legacy",
+    status: "ready" as const,
+    reconciliationStatus: "valid" as const,
+    reconciliation: { status: "valid" as const, tolerance: 0.05 },
+  };
+  const legacyRow = movement({
+    id: "legacy-pdf-row",
+    date: "10 ago 2026",
+    description: "IMPORTE HEREDADO",
+    account: "BBVA",
+    amount: -88_833,
+    flow: "expense",
+    statementId: legacyStatement.id,
+  });
+  const manualRow = movement({
+    id: "manual-row",
+    date: "11 ago 2026",
+    description: "Ajuste manual",
+    account: "Efectivo",
+    amount: -50,
+    flow: "expense",
+  });
+
+  const prepared = prepareStoredLedger([legacyStatement], [legacyRow, manualRow], "web-reader-current");
+  assert.equal(prepared.quarantinedMovementCount, 1);
+  assert.deepEqual(prepared.transactions.map((row) => row.id), ["manual-row"]);
+  assert.deepEqual(prepared.quarantinedStatementIds, [legacyStatement.id]);
+  assert.equal(prepared.statements[0]?.status, "review");
+  assert.equal(prepared.statements[0]?.reconciliationStatus, "pending");
 });

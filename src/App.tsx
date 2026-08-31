@@ -35,7 +35,7 @@ import { buildFinanceMetrics, defaultStatementKind, isSpendTransaction, type Ana
 import { gateOcrReconciliation, inspectPdf, parseImportedTransactions, PDF_READER_VERSION, reconcileStatementImport, parseStatementSummary } from "./pdfImport";
 import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
 import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey } from "./reconciliation";
-import { prepareStoredStatements } from "./statementMigration";
+import { prepareStoredLedger } from "./statementMigration";
 import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
@@ -107,6 +107,12 @@ function createId(prefix: string) {
 
 function displayMoney(value: number | undefined | null) {
   return value === undefined || value === null || !Number.isFinite(value) ? "Pendiente" : money.format(value);
+}
+
+function readStoredLedgerState() {
+  const storedStatements = readStored<Statement[]>(statementStorageKey, []);
+  const storedTransactions = readStored<Transaction[]>(transactionStorageKey, []);
+  return prepareStoredLedger(storedStatements, storedTransactions);
 }
 
 function dashboardMoney(blocked: boolean, value: number | undefined | null) {
@@ -297,8 +303,9 @@ function AuthGate({ onEnter }: { onEnter: (name: string) => void }) {
 
 function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOut: () => void; onDeleteAccount: () => void }) {
   const [section, setSection] = useState<Section>("Resumen");
-  const [transactions, setTransactions] = useState<Transaction[]>(() => readStored(transactionStorageKey, []));
-  const [statements, setStatements] = useState<Statement[]>(() => prepareStoredStatements(readStored<Statement[]>(statementStorageKey, [])));
+  const [initialLedger] = useState(readStoredLedgerState);
+  const [transactions, setTransactions] = useState<Transaction[]>(() => initialLedger.transactions);
+  const [statements, setStatements] = useState<Statement[]>(() => initialLedger.statements);
   const [categoryRules, setCategoryRules] = useState<CategoryRules>(() => readStored(categoryRulesStorageKey, {}));
   const [goals, setGoals] = useState<FinancialGoal[]>(() => readStored(goalsStorageKey, []));
   const [lastAuditRun, setLastAuditRun] = useState<AuditRunRecord | null>(() => readStored<AuditRunRecord | null>(auditStorageKey, null));
