@@ -37,6 +37,7 @@ import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRu
 import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey } from "./reconciliation";
 import { prepareStoredLedger } from "./statementMigration";
 import { clearWebErrorDiagnostics, readWebErrorDiagnostics, type WebErrorDiagnostic } from "./WebErrorBoundary";
+import { clearImportedPdfs, openImportedPdf, saveImportedPdf } from "./documentStore";
 import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
@@ -86,6 +87,7 @@ function deleteLocalAccount() {
   localStorage.removeItem(statementStorageKey);
   localStorage.removeItem(categoryRulesStorageKey);
   localStorage.removeItem(goalsStorageKey);
+  void clearImportedPdfs();
 }
 
 function clearLocalSession() {
@@ -192,16 +194,6 @@ function compactMerchantName(description: string) {
     .replace(/\b(?:aut\.?|ref\.?|folio|no\.?|num\.?)\s*[:#-]?\s*[a-z0-9-]+/gi, "")
     .trim()
     .slice(0, 46) || "Sin descripción";
-}
-
-function statementDate(statement: Statement) {
-  return new Intl.DateTimeFormat("es-MX", { dateStyle: "medium" }).format(new Date(statement.importedAt));
-}
-
-function statementOcrPageLabel(statement: Statement) {
-  const pages = statement.ocrPageConfidences;
-  if (!pages?.length) return "";
-  return ` · página mínima ${Math.round(Math.min(...pages) * 100)}%`;
 }
 
 function reconciliationCountLabel(reconciliation?: StatementReconciliation) {
@@ -487,7 +479,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
             {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => setImportOpen(true)} />}
             {section === "Gastos" && <Expenses transactions={ledgerTransactions} statements={statements} metrics={metrics} onImport={() => setImportOpen(true)} />}
-            {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
+            {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onOpenStatement={(statement) => openImportedPdf(statement.sourceFingerprint)} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
             {section === "Patrimonio" && <NetWorth metrics={metrics} />}
           </motion.div>
         </AnimatePresence>
@@ -1045,10 +1037,12 @@ function TravelTrips({ trips, period }: { trips: TravelTrip[]; period?: Analytic
   return <section className="detail-card travel-trips" aria-labelledby="travel-trips-title"><div className="section-heading"><div><h2 id="travel-trips-title">Viajes</h2><p>{periodLabel(period)} · {period?.spend ? `${Math.round(total / period.spend * 100)}% del gasto` : "sin porcentaje disponible"}.</p></div><strong className="detail-total">{displayMoney(total)}</strong></div>{trips.length ? <div className="travel-list">{trips.map((trip) => <article className="travel-trip" key={trip.id}><div className="travel-trip-head"><div><h3>{trip.name}</h3><small>{trip.startDate}{trip.endDate !== trip.startDate ? ` → ${trip.endDate}` : ""}</small></div><strong>{displayMoney(trip.total)}</strong></div><div className="travel-breakdown">{trip.movements.map((movement) => <div key={movement.id}><span>{movement.description}</span><small>{movement.date}</small><strong>{signedMoney(-Math.abs(movement.amount))}</strong></div>)}</div></article>)}</div> : <EmptyState title="Sin viajes identificados" body="Los movimientos de viaje aparecerán aquí agrupados por fechas." />}</section>;
 }
 
-function Accounts({ transactions, statements, metrics, setTransactions, onImport, onMarkReviewed, onLearnCategory }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>>; onImport: () => void; onMarkReviewed: (statementId: string) => void; onLearnCategory: (description: string, category: string) => void }) {
+function Accounts({ transactions, statements, metrics, setTransactions, onImport, onMarkReviewed, onOpenStatement, onLearnCategory }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>>; onImport: () => void; onMarkReviewed: (statementId: string) => void; onOpenStatement: (statement: Statement) => Promise<boolean>; onLearnCategory: (description: string, category: string) => void }) {
   const [sourceFilter, setSourceFilter] = useState<StatementSource | "Todos">("Todos");
   const [periodFilter, setPeriodFilter] = useState("Todos");
   const [view, setView] = useState<"accounts" | "movements">("accounts");
+  const [openingStatementId, setOpeningStatementId] = useState<string | null>(null);
+  const [documentError, setDocumentError] = useState("");
   const periods = Array.from(new Set(statements.map((item) => item.period)));
   const filteredStatements = statements.filter((item) => (sourceFilter === "Todos" || item.source === sourceFilter) && (periodFilter === "Todos" || item.period === periodFilter));
   const importedSources = Array.from(new Set<StatementSource>(statements.map((item) => item.source)));
@@ -1065,6 +1059,15 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
       .sort((left, right) => ({ bank: 0, card: 1, unknown: 2 }[left] ?? 3) - ({ bank: 0, card: 1, unknown: 2 }[right] ?? 3))
       .map((kind) => ({ source, kind }));
   });
+  async function openStatement(statement: Statement) {
+    setDocumentError("");
+    setOpeningStatementId(statement.id);
+    const opened = await onOpenStatement(statement);
+    setOpeningStatementId(null);
+    if (!opened) setDocumentError(statement.sourceFingerprint
+      ? "No encontramos el PDF original en este dispositivo. Vuelve a importarlo para poder abrirlo."
+      : "Este documento pertenece a una importación antigua y no conserva el archivo original.");
+  }
   const tabs = <div className="accounts-tabs" role="tablist" aria-label="Contenido de cuentas">
     <button role="tab" aria-selected={view === "accounts"} className={view === "accounts" ? "active" : ""} onClick={() => setView("accounts")}>Cuentas <span>{knownAccounts.length}</span></button>
     <button role="tab" aria-selected={view === "movements"} className={view === "movements" ? "active" : ""} onClick={() => setView("movements")}>Movimientos <span>{transactions.length}</span></button>
@@ -1100,7 +1103,7 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
     <details className="documents-panel">
       <summary><div><h2>Documentos importados</h2><span>{statements.length ? `${statements.length} archivos guardados localmente.` : "Aquí aparecerán tus PDFs revisados."}</span></div><strong>{statements.length}</strong></summary>
       <div className="documents-content">
-        {statements.length ? <><div className="statement-filters"><select aria-label="Filtrar por banco" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as StatementSource | "Todos")}><option value="Todos">Todos los bancos</option>{importedSources.map((source) => <option key={source} value={source}>{source}</option>)}</select><select aria-label="Filtrar por periodo" value={periodFilter} onChange={(event) => setPeriodFilter(event.target.value)}><option value="Todos">Todos los periodos</option>{periods.map((period) => <option key={period} value={period}>{period}</option>)}</select></div>{filteredStatements.length ? <div className="statement-list">{filteredStatements.map((statement) => <article className="statement-row" key={statement.id}><span className={`statement-icon ${sourceColor(statement.source)}`}><FilePdf size={20} /></span><div className="statement-main"><strong>{statement.source}</strong><span>{statement.period}</span><small>{statement.fileName} · Importado {statementDate(statement)} · {statement.transactionCount} movimientos{statement.pageCount ? ` · ${statement.pageCount} páginas` : ""}{statement.fileSizeBytes ? ` · ${(statement.fileSizeBytes / (1024 * 1024)).toFixed(1)} MB` : ""} · {statement.mode === "text" ? "lectura directa" : `OCR en el dispositivo${statement.ocrConfidence !== undefined ? ` · ${Math.round(statement.ocrConfidence * 100)}% confianza` : ""}${statementOcrPageLabel(statement)}`}{statement.reconciliationStatus ? ` · ${statement.reconciliationStatus === "valid" ? "conciliado" : "conciliación pendiente"}` : ""}{statement.sourceFingerprint ? ` · SHA ${statement.sourceFingerprint.slice(0, 12)}` : ""}</small>{statement.reconciliation?.status !== "valid" && statement.reconciliation?.reason && <span className="statement-reason">{statement.reconciliation.reason}</span>}{statement.status === "review" && statement.reconciliationStatus === "valid" && statement.sourceDetection?.status !== "verified" && <span className="statement-reason">Confirma el emisor para liberar este estado a los KPI.</span>}</div><span className={`statement-status ${statement.status}`}>{statement.status === "ready" ? "Revisado" : "Pendiente"}</span>{statement.status === "review" && statement.reconciliationStatus === "valid" && statement.sourceDetection?.status === "verified" && <button className="text-button statement-action" onClick={() => onMarkReviewed(statement.id)}>Marcar revisado</button>}</article>)}</div> : <EmptyState title="No coincide ningún documento" body="Prueba otro banco o periodo." />}</> : <EmptyState title="No hay documentos importados" body="Tus estados de cuenta aparecerán aquí después de revisarlos." />}
+        {statements.length ? <><div className="statement-filters"><select aria-label="Filtrar por banco" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as StatementSource | "Todos")}><option value="Todos">Todos los bancos</option>{importedSources.map((source) => <option key={source} value={source}>{source}</option>)}</select><select aria-label="Filtrar por periodo" value={periodFilter} onChange={(event) => setPeriodFilter(event.target.value)}><option value="Todos">Todos los periodos</option>{periods.map((period) => <option key={period} value={period}>{period}</option>)}</select></div>{documentError && <p className="document-open-error" role="status"><Warning size={16} />{documentError}</p>}{filteredStatements.length ? <div className="statement-grid">{filteredStatements.map((statement) => <article className="statement-card" key={statement.id}><button className="statement-card-open" onClick={() => openStatement(statement)} disabled={openingStatementId === statement.id} title={statement.sourceFingerprint ? "Abrir el PDF original" : "PDF original no disponible"}><span className={`statement-icon ${sourceColor(statement.source)}`}><FilePdf size={22} /></span><span className="statement-card-copy"><strong>{statement.source}</strong><span>{statement.period}</span><small>{statement.transactionCount} movimientos{statement.pageCount ? ` · ${statement.pageCount} páginas` : ""}</small></span><ArrowRight size={18} /></button><div className="statement-card-footer"><span className={`statement-status ${statement.status}`}>{statement.status === "ready" ? "Revisado" : "Pendiente"}</span>{statement.reconciliation?.status !== "valid" && statement.reconciliation?.reason && <small className="statement-reason">{statement.reconciliation.reason}</small>}{statement.status === "review" && statement.reconciliationStatus === "valid" && statement.sourceDetection?.status === "verified" && <button className="text-button statement-action" onClick={() => onMarkReviewed(statement.id)}>Marcar revisado</button>}</div><small className="statement-card-file" title={statement.fileName}>{statement.fileName}</small></article>)}</div> : <EmptyState title="No coincide ningún documento" body="Prueba otro banco o periodo." />}</> : <EmptyState title="No hay documentos importados" body="Tus estados de cuenta aparecerán aquí después de revisarlos." />}
       </div>
     </details>
   </section>;
@@ -1173,6 +1176,10 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
     setStage("processing"); setProgress(0); setProgressLabel("Cargando estado de cuenta…"); setError("");
     try {
       const inspected = await inspectPdf(file, (value, label) => { setProgress(value); setProgressLabel(label); });
+      // Keep the original binary locally so the document card can reopen it
+      // after a reload. The parser still receives the File directly and no
+      // PDF bytes leave the browser.
+      void saveImportedPdf(inspected.sourceFingerprint, file);
       const withLearnedCategories = inspected.transactions.map((item) => {
         const learned = categoryFromRules(item.description, categoryRules);
         return learned ? { ...item, category: learned, confidence: 1 } : item;

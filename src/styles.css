@@ -302,6 +302,20 @@ body { background: var(--bg); color: var(--ink); }
 .statement-status.ready { color: var(--navy-mid); }
 .statement-status.review { color: var(--expense); }
 .statement-action { white-space: nowrap; }
+.statement-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; margin-top: 14px; }
+.statement-card { min-width: 0; padding: 15px; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); display: grid; gap: 12px; transition: border-color .16s ease, box-shadow .16s ease, transform .16s ease; }
+.statement-card:hover { border-color: var(--navy-soft); box-shadow: 0 8px 22px oklch(0.22 0.055 255 / .08); transform: translateY(-1px); }
+.statement-card-open { width: 100%; min-width: 0; padding: 0; border: 0; background: transparent; color: inherit; display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 11px; text-align: left; cursor: pointer; }
+.statement-card-open:disabled { opacity: .62; cursor: wait; }
+.statement-card-copy { min-width: 0; display: grid; gap: 4px; }
+.statement-card-copy strong { font-size: 15px; }
+.statement-card-copy span { color: var(--navy-mid); font-size: 12px; font-weight: 650; }
+.statement-card-copy small, .statement-card-file { color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.statement-card-open > svg { color: var(--muted); }
+.statement-card-footer { min-width: 0; min-height: 23px; display: flex; align-items: center; flex-wrap: wrap; gap: 7px; }
+.statement-card-footer .statement-reason { flex: 1 1 100%; }
+.statement-card-file { display: block; border-top: 1px solid var(--line); padding-top: 9px; }
+.document-open-error { display: flex; align-items: center; gap: 7px; margin: 12px 0 0; color: var(--expense); font-size: 12px; }
 .statement-amex { color: var(--navy); }
 .statement-santander { color: var(--navy-mid); }
 .statement-bbva { color: var(--navy-soft); }
@@ -315,8 +329,14 @@ body { background: var(--bg); color: var(--ink); }
   .statement-filters { margin-top: 14px; }
   .statement-filters select { flex: 1; min-width: 145px; }
   .statement-row { grid-template-columns: auto minmax(0, 1fr) auto; padding: 12px 0; }
+  .statement-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  .statement-card { padding: 12px; }
   .statement-status { grid-column: 2; justify-self: start; }
   .statement-action { grid-column: 3; grid-row: 2; }
+}
+
+@media (max-width: 480px) {
+  .statement-grid { grid-template-columns: 1fr; }
 }
 
 /* Stage 1 summary: one decision surface, four essential signals, and a quiet
