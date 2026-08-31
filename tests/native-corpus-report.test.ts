@@ -142,3 +142,16 @@ test("el reporte nativo rechaza filas inválidas o sin nombre de PDF", () => {
   assert.ok(result.errors.some((error) => error.includes("filas inválidas")));
   assert.ok(result.errors.some((error) => error.includes("sin nombre de archivo")));
 });
+
+test("el reporte nativo debe coincidir con el conjunto del manifiesto", () => {
+  const result = verifyNativeCorpusReport([
+    { file: "bbva.pdf", accountKey: "bbva:4922", expectedAccountKey: "bbva:4922" },
+    { file: "sustituido.pdf", accountKey: "amex:1003", expectedAccountKey: "amex:1003" },
+  ], 2, [
+    { file: "bbva.pdf", accountKey: "bbva:4922" },
+    { file: "amex.pdf", accountKey: "amex:1003" },
+  ]);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("falta amex.pdf")));
+  assert.ok(result.errors.some((error) => error.includes("sustituido.pdf no está")));
+});

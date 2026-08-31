@@ -32,6 +32,11 @@ type ReportVerification = {
   rows: NativeCorpusReportRow[];
 };
 
+type ExpectedReportEntry = {
+  file: string;
+  accountKey?: string;
+};
+
 function numberField(summary: NativeCorpusSummary, key: keyof NativeCorpusSummary) {
   const value = Number(summary[key]);
   return Number.isFinite(value) ? value : undefined;
@@ -105,7 +110,11 @@ export function verifyNativeCorpusSummary(summary: NativeCorpusSummary, expected
  * summary could otherwise claim certification without proving every PDF's
  * account identity. Only issuer-scoped last-four keys are allowed.
  */
-export function verifyNativeCorpusReport(report: unknown, expectedFiles?: number): ReportVerification {
+export function verifyNativeCorpusReport(
+  report: unknown,
+  expectedFiles?: number,
+  expectedEntries?: ExpectedReportEntry[],
+): ReportVerification {
   const errors: string[] = [];
   const rawRows = Array.isArray(report) ? report : [];
   const rows = rawRows.filter((row): row is NativeCorpusReportRow => Boolean(row) && typeof row === "object");
@@ -130,6 +139,29 @@ export function verifyNativeCorpusReport(report: unknown, expectedFiles?: number
       errors.push(`${label}: accountKey ${actual || "ausente"} no coincide con ${expected}`);
     }
   });
+  if (expectedEntries) {
+    const expectedNames = expectedEntries.map((entry) => entry.file.trim()).filter(Boolean);
+    if (new Set(expectedNames).size !== expectedNames.length) {
+      errors.push("el manifiesto contiene archivos duplicados");
+    }
+    const actualNames = new Set(files.filter(Boolean));
+    const expectedNameSet = new Set(expectedNames);
+    expectedNames
+      .filter((file) => !actualNames.has(file))
+      .forEach((file) => errors.push(`falta ${file} en NATIVE_CORPUS_REPORT`));
+    files
+      .filter((file) => file && !expectedNameSet.has(file))
+      .forEach((file) => errors.push(`${file} no está en el manifiesto`));
+    expectedEntries.forEach((entry) => {
+      const expectedFile = entry.file.trim();
+      if (!expectedFile || !entry.accountKey) return;
+      const row = rows.find((candidate) => (typeof candidate.file === "string" ? candidate.file.trim() : "") === expectedFile);
+      const actual = typeof row?.accountKey === "string" ? row.accountKey.trim() : "";
+      if (actual !== entry.accountKey) {
+        errors.push(`${expectedFile}: accountKey ${actual || "ausente"} no coincide con el manifiesto (${entry.accountKey})`);
+      }
+    });
+  }
   return { ok: errors.length === 0, errors, rows };
 }
 
@@ -143,7 +175,7 @@ async function main() {
   const expectedReaderVersion = option("--reader-version");
   const requireCertified = process.argv.includes("--require-certified");
   if (!logPath) {
-    console.error("Uso: npm run pdf:native:verify -- --log /ruta/xcodebuild.log --reader-version ios-reader-...");
+    console.error("Uso: npm run pdf:native:verify -- --log /ruta/xcodebuild.log --manifest tests/fixtures/pdf-corpus-attachments.json --reader-version ios-reader-...");
     process.exitCode = 2;
     return;
   }
@@ -165,19 +197,33 @@ async function main() {
   }
 
   const result = verifyNativeCorpusSummary(summary, expectedReaderVersion);
+  const manifestPath = option("--manifest");
+  let expectedEntries: ExpectedReportEntry[] | undefined;
+  const manifestErrors: string[] = [];
+  if (manifestPath) {
+    try {
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { files?: Array<{ file?: string; accountKey?: string }> };
+      expectedEntries = (manifest.files ?? [])
+        .filter((entry): entry is { file: string; accountKey?: string } => typeof entry?.file === "string")
+        .map((entry) => ({ file: entry.file, accountKey: entry.accountKey }));
+      if (!expectedEntries.length) manifestErrors.push("el manifiesto no contiene files");
+    } catch {
+      manifestErrors.push("no se pudo leer el manifiesto del corpus");
+    }
+  }
   const reportMatches = [...raw.matchAll(/^NATIVE_CORPUS_REPORT\s+(\[.*\])\s*$/gm)];
   let reportResult: ReportVerification | undefined;
   if (reportMatches.length) {
     try {
       const report = JSON.parse(reportMatches.at(-1)?.[1] ?? "") as unknown;
-      reportResult = verifyNativeCorpusReport(report, numberField(summary, "files"));
+      reportResult = verifyNativeCorpusReport(report, numberField(summary, "files"), expectedEntries);
     } catch {
       reportResult = { ok: false, errors: ["NATIVE_CORPUS_REPORT no contiene JSON válido"], rows: [] };
     }
   } else {
     reportResult = { ok: false, errors: ["No se encontró NATIVE_CORPUS_REPORT en el log"], rows: [] };
   }
-  const errors = [...result.errors, ...reportResult.errors];
+  const errors = [...result.errors, ...manifestErrors, ...reportResult.errors];
   const verified = result.ok && reportResult.ok;
   console.log(JSON.stringify({ ...summary, verified, errors }, null, 2));
   if (requireCertified && !verified) process.exitCode = 1;

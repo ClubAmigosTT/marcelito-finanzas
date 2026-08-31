@@ -139,7 +139,9 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
   alguno, haya OCR sin resolver o la precisión automática sea menor a 99%.
   El resumen emitido por XCTest se valida además con
   `npm run pdf:native:verify -- --log ... --reader-version ... --require-certified`,
-  para que la variable de publicación no pueda sustituir al informe real.
+  para que la variable de publicación no pueda sustituir al informe real. Si
+  se pasa `--manifest`, el verificador también compara el conjunto exacto de
+  PDFs e identidades enmascaradas contra las expectativas versionadas.
 - El workflow de TestFlight añade una segunda compuerta: exige las variables
   `MARCELITO_NATIVE_CORPUS_CERTIFIED=true` y
   `MARCELITO_NATIVE_CORPUS_READER_VERSION`, que debe coincidir con la revisión
