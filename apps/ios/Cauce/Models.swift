@@ -516,9 +516,9 @@ final class FinanceStore {
     /// historical charts. A statement that has not reconciled is visible in
     /// diagnostics, but cannot silently feed executive figures.
     var ledgerQuality: LedgerQuality {
-        let validated = statements.filter { $0.reconciliation?.status == .valid && !$0.requiresReview }
+        let validated = statements.filter(isEligibleStatement)
         let invalid = statements.filter { $0.reconciliation?.status == .invalid }
-        let pending = statements.filter { $0.reconciliation?.status != .valid || $0.requiresReview }
+        let pending = statements.filter { !isEligibleStatement($0) && $0.reconciliation?.status != .invalid }
         let reviewCount = movements.filter { $0.category == "Por revisar" || $0.category == "Sin categoría" }.count
         let absurdCount = movements.filter { abs($0.amount) >= 10_000_000 || !isValidStoredMovement($0) }.count
         let statementCount = statements.count
@@ -552,10 +552,10 @@ final class FinanceStore {
         if invalid.count > 0 {
             message = "\(invalid.count) estado(s) no concilian contra sus totales originales."
         } else if pending.count > 0 {
-            let reviewOnly = pending.filter { $0.reconciliation?.status == .valid && $0.requiresReview }.count
+            let reviewOnly = pending.filter { $0.reconciliation?.status == .valid && $0.requiresReview && isCurrentReader($0) }.count
             message = reviewOnly > 0
                 ? "\(reviewOnly) estado(s) concilian, pero requieren revisión manual antes de alimentar los KPI."
-                : "\(pending.count) estado(s) aún no tienen conciliación validada."
+                : "\(pending.count) estado(s) aún no tienen conciliación validada o usan una versión anterior del lector."
         } else if absurdCount > 0 {
             message = "Hay \(absurdCount) movimiento(s) con importes fuera de rango."
         } else if missingEvidenceCount > 0 {
@@ -681,7 +681,7 @@ final class FinanceStore {
         // fallbacks. Invalid/pending records remain in `statements` solely so
         // the audit UI can explain why the dashboard is blocked.
         statements
-            .filter { $0.reconciliation?.status == .valid && !$0.requiresReview }
+            .filter(isEligibleStatement)
             .map { calculateMetric(for: $0) }
             .sorted { left, right in
                 let leftDate = statementEndDate(for: left.id)
@@ -898,13 +898,21 @@ final class FinanceStore {
         return statementKind(statement) == .card
     }
 
+    private func isCurrentReader(_ statement: StatementRecord) -> Bool {
+        statement.readerVersion == Self.readerVersion
+    }
+
+    private func isEligibleStatement(_ statement: StatementRecord) -> Bool {
+        isCurrentReader(statement) && statement.reconciliation?.status == .valid && !statement.requiresReview
+    }
+
     /// Only reconciled and confirmed statement rows may feed a financial
     /// metric. Rows from a pending/review statement remain in `movements` so
     /// the user can inspect them, but they are quarantined from every total.
     private func isEligibleMovement(_ movement: Movement) -> Bool {
         guard let statementId = movement.statementId else { return true }
         guard let statement = statements.first(where: { $0.id == statementId }) else { return false }
-        return statement.reconciliation?.status == .valid && !statement.requiresReview
+        return isEligibleStatement(statement)
     }
 
     private var eligibleMovements: [Movement] {
@@ -1632,6 +1640,11 @@ final class FinanceStore {
     var hasCanonicalRebuildPending: Bool {
         let defaults = UserDefaults.standard
         let hasSources = !statements.isEmpty || !storedPDFURLs.isEmpty
+        // A statement imported after the last rebuild can still carry an
+        // older reader revision. Treat that as a rebuild trigger even when
+        // the previous rebuild was marked complete.
+        let hasOutdatedStatement = statements.contains { !isCurrentReader($0) }
+        if hasOutdatedStatement && hasSources { return true }
         return Self.needsCanonicalRebuild(
             completed: defaults.bool(forKey: canonicalRebuildKey),
             completedReaderVersion: defaults.string(forKey: canonicalRebuildReaderVersionKey),
