@@ -4557,9 +4557,13 @@ final class FinanceStore {
             if normalizedText.range(of: #"americanexpress\.com\.mx|american\s+express[^\n]{0,90}(?:company|the\s+platinum\s+credit\s+card)"#, options: .regularExpression) != nil { return "Amex" }
             return nil
         }()
-        let source = sourceFromHeader ?? sourceFromLegal ?? sourceFromFile ?? "Importado"
+        let hasConflictingLegalMarkers = santanderInstitutional && bbvaInstitutional
+            || (normalizedText.range(of: #"grupo\s+financiero\s+santander|banco\s+santander\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com"#, options: .regularExpression) != nil
+                && normalizedText.range(of: #"grupo\s+financiero\s+bbva|bbva\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx"#, options: .regularExpression) != nil)
+        let source = hasConflictingLegalMarkers ? "Importado" : (sourceFromHeader ?? sourceFromLegal ?? sourceFromFile ?? "Importado")
         var evidence: [String] = []
-        if sourceFromHeader != nil { evidence.append("encabezado institucional \(source)") }
+        if hasConflictingLegalMarkers { evidence.append("marcadores legales conflictivos") }
+        else if sourceFromHeader != nil { evidence.append("encabezado institucional \(source)") }
         else if sourceFromLegal != nil { evidence.append("razón social/dominio del emisor \(source)") }
         if sourceFromFile == source { evidence.append("nombre de archivo (source)") }
         if evidence.isEmpty, source != "Importado" { evidence.append("marca parcial; falta encabezado institucional") }
@@ -4576,7 +4580,8 @@ final class FinanceStore {
                 && $0 != source
         }
         let confidence: Double
-        if sourceFromHeader != nil, sourceFromFile == source { confidence = 0.999 }
+        if hasConflictingLegalMarkers { confidence = 0 }
+        else if sourceFromHeader != nil, sourceFromFile == source { confidence = 0.999 }
         else if sourceFromHeader != nil || sourceFromLegal != nil { confidence = sourceFromFile == source ? 0.999 : 0.998 }
         else if sourceFromFile != nil { confidence = 0.90 }
         else { confidence = 0 }

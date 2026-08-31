@@ -130,6 +130,9 @@ export function detectSourceEvidence(text: string, fileName: string): SourceDete
   // because a BBVA document mentions it as a counterparty.
   const santanderLegal = /grupo\s+financiero\s+santander|banco\s+santander\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com/.test(fullNormalized);
   const bbvaLegal = /grupo\s+financiero\s+bbva|bbva\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx/.test(fullNormalized);
+  if (santanderLegal && bbvaLegal) {
+    return result("Desconocido", 0, ["marcadores legales conflictivos"]);
+  }
   if (santanderLegal && !bbvaLegal) {
     return result("Santander", filenameSource === "Santander" ? 0.999 : 0.998, ["razón social/dominio del emisor Santander", ...(filenameSource === "Santander" ? ["nombre de archivo Santander"] : [])]);
   }

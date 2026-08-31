@@ -688,6 +688,19 @@ test("marcadores legales de bancos en conflicto no eligen un emisor por descarte
   assert.match(detection.evidence[0] ?? "", /conflictivos/);
 });
 
+test("marcadores legales conflictivos en el pie tampoco usan el nombre del archivo", () => {
+  const text = [
+    "Detalle de Movimientos Realizados",
+    "01/08/2026 CARGO SUPERMERCADO 100.00",
+    "BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México",
+    "Banco Santander México, Institución de Banca Múltiple, Grupo Financiero Santander",
+  ].join("\n");
+  const detection = detectSourceEvidence(text, "Santander-agosto-2026.pdf");
+  assert.equal(detection.source, "Desconocido");
+  assert.equal(detection.status, "unknown");
+  assert.match(detection.evidence[0] ?? "", /conflictivos/);
+});
+
 test("un prefijo numérico del comercio no se convierte en año", () => {
   const [row] = extractTransactions("20 de Junio 125TH FINEST DELI INC 101.77", "Amex", "amex junio 2026.pdf", "card");
   assert.equal(row.date, "20 jun 2026");
