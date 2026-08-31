@@ -17,6 +17,9 @@ manifest_path=""
 if [[ "${MARCELITO_PDF_CORPUS_VERIFY:-}" =~ ^(1|true|yes)$ ]]; then
   verify_enabled=1
   manifest_path="${MARCELITO_PDF_CORPUS_MANIFEST:-$repo_root/tests/fixtures/pdf-corpus-attachments.json}"
+  if [[ "$manifest_path" != /* ]]; then
+    manifest_path="$repo_root/$manifest_path"
+  fi
   if [[ ! -f "$manifest_path" ]]; then
     echo "No se encontró el manifiesto del corpus: $manifest_path" >&2
     exit 2
