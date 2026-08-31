@@ -20,6 +20,18 @@ type Verification = {
   summary: NativeCorpusSummary;
 };
 
+type NativeCorpusReportRow = {
+  file?: string;
+  accountKey?: string;
+  expectedAccountKey?: string;
+};
+
+type ReportVerification = {
+  ok: boolean;
+  errors: string[];
+  rows: NativeCorpusReportRow[];
+};
+
 function numberField(summary: NativeCorpusSummary, key: keyof NativeCorpusSummary) {
   const value = Number(summary[key]);
   return Number.isFinite(value) ? value : undefined;
@@ -68,6 +80,35 @@ export function verifyNativeCorpusSummary(summary: NativeCorpusSummary, expected
   return { ok: errors.length === 0, errors, summary };
 }
 
+/**
+ * Verifies the per-file portion emitted by NativeCorpusContractTests. The
+ * summary is intentionally insufficient on its own: a forged or truncated
+ * summary could otherwise claim certification without proving every PDF's
+ * account identity. Only issuer-scoped last-four keys are allowed.
+ */
+export function verifyNativeCorpusReport(report: unknown, expectedFiles?: number): ReportVerification {
+  const errors: string[] = [];
+  const rows = Array.isArray(report) ? report as NativeCorpusReportRow[] : [];
+  if (!Array.isArray(report)) errors.push("NATIVE_CORPUS_REPORT no contiene una lista");
+  if (expectedFiles !== undefined && rows.length !== expectedFiles) {
+    errors.push(`el reporte contiene ${rows.length} fila(s), esperado ${expectedFiles}`);
+  }
+  const files = rows.map((row) => row.file ?? "").filter(Boolean);
+  if (new Set(files).size !== files.length) errors.push("el reporte contiene archivos duplicados");
+  rows.forEach((row, index) => {
+    const label = row.file || `fila ${index + 1}`;
+    const actual = row.accountKey ?? "";
+    const expected = row.expectedAccountKey ?? "";
+    if (!actual || !/^[a-z0-9]+:\d{4}$/i.test(actual)) {
+      errors.push(`${label}: accountKey no está en formato emisor:últimos4`);
+    }
+    if (expected && actual !== expected) {
+      errors.push(`${label}: accountKey ${actual || "ausente"} no coincide con ${expected}`);
+    }
+  });
+  return { ok: errors.length === 0, errors, rows };
+}
+
 function option(name: string) {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : undefined;
@@ -100,8 +141,22 @@ async function main() {
   }
 
   const result = verifyNativeCorpusSummary(summary, expectedReaderVersion);
-  console.log(JSON.stringify({ ...summary, verified: result.ok, errors: result.errors }, null, 2));
-  if (requireCertified && !result.ok) process.exitCode = 1;
+  const reportMatches = [...raw.matchAll(/^NATIVE_CORPUS_REPORT\s+(\[.*\])\s*$/gm)];
+  let reportResult: ReportVerification | undefined;
+  if (reportMatches.length) {
+    try {
+      const report = JSON.parse(reportMatches.at(-1)?.[1] ?? "") as unknown;
+      reportResult = verifyNativeCorpusReport(report, numberField(summary, "files"));
+    } catch {
+      reportResult = { ok: false, errors: ["NATIVE_CORPUS_REPORT no contiene JSON válido"], rows: [] };
+    }
+  } else {
+    reportResult = { ok: false, errors: ["No se encontró NATIVE_CORPUS_REPORT en el log"], rows: [] };
+  }
+  const errors = [...result.errors, ...reportResult.errors];
+  const verified = result.ok && reportResult.ok;
+  console.log(JSON.stringify({ ...summary, verified, errors }, null, 2));
+  if (requireCertified && !verified) process.exitCode = 1;
 }
 
 const invokedPath = process.argv[1]?.replaceAll("\\", "/");

@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { verifyNativeCorpusSummary } from "../scripts/verify-native-corpus-report.ts";
+import { verifyNativeCorpusReport, verifyNativeCorpusSummary } from "../scripts/verify-native-corpus-report.ts";
 
 test("el resumen nativo certificado pasa con la revisión esperada", () => {
   const result = verifyNativeCorpusSummary({
@@ -57,4 +57,22 @@ test("el resumen no se acepta si los conteos estructurales no cuadran", () => {
   }, "ios-reader-test");
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((error) => error.includes("accepted + blocked")));
+});
+
+test("el reporte nativo exige una identidad enmascarada por PDF", () => {
+  const result = verifyNativeCorpusReport([
+    { file: "bbva.pdf", accountKey: "bbva:4922", expectedAccountKey: "bbva:4922" },
+    { file: "amex.pdf", accountKey: "amex:1003", expectedAccountKey: "amex:1003" },
+  ], 2);
+  assert.equal(result.ok, true);
+});
+
+test("el reporte nativo rechaza números completos o archivos repetidos", () => {
+  const result = verifyNativeCorpusReport([
+    { file: "bbva.pdf", accountKey: "bbva:1575694922", expectedAccountKey: "bbva:4922" },
+    { file: "bbva.pdf", accountKey: "bbva:4922", expectedAccountKey: "bbva:4922" },
+  ], 2);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("formato emisor:últimos4")));
+  assert.ok(result.errors.some((error) => error.includes("archivos duplicados")));
 });

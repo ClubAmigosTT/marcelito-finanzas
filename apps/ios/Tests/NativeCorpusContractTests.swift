@@ -248,6 +248,7 @@ final class NativeCorpusContractTests: XCTestCase {
                 "pageCount": String(result.pageCount ?? 0),
                 "source": result.source,
                 "accountKey": result.accountKey ?? "",
+                "expectedAccountKey": expected.accountKey,
                 "kind": result.kind.rawValue,
                 "mode": result.usedOCR ? "vision-ocr" : "pdf-text",
                 "sourceStatus": result.sourceDetection.status.rawValue,
