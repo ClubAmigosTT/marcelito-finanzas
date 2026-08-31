@@ -1075,10 +1075,28 @@ final class FinanceStore {
             // all financial aggregates until confirmation.
             return statement.reconciliation?.status == .valid
         }
+        // The base key intentionally omits the statement id so rows repeated
+        // by overlapping PDFs can be recognised. Add an occurrence ordinal
+        // within each statement, however, so two genuinely identical
+        // purchases in one statement (or a second occurrence in the next
+        // statement) are not silently erased.
+        var occurrenceByStatement: [String: Int] = [:]
         var seen: [String: (statementId: UUID?, movementId: UUID)] = [:]
         var canonical: [Movement] = []
         for movement in movements {
-            let key = deduplicationKey(movement)
+            let baseKey = deduplicationKey(movement)
+            let key: String
+            if let statementId = movement.statementId {
+                let scope = "\(statementId.uuidString)|\(baseKey)"
+                let occurrence = occurrenceByStatement[scope] ?? 0
+                occurrenceByStatement[scope] = occurrence + 1
+                key = "\(baseKey)|ocurrencia:\(occurrence)"
+            } else {
+                // Manual rows have no stable statement scope and should never
+                // be collapsed merely because a user entered the same
+                // purchase twice.
+                key = "manual|\(movement.id.uuidString)"
+            }
             if let previous = seen[key], let statementId = movement.statementId,
                let previousStatementId = previous.statementId, statementId != previousStatementId {
                 let currentStatement = statements.first(where: { $0.id == statementId })
