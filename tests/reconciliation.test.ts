@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
+import { adaptiveOcrScale, detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
 import { buildFinanceMetrics, isStatementEligibleForDashboard } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
@@ -101,6 +101,13 @@ test("la compuerta OCR se conserva al recalcular la vista de revisión", () => {
   assert.equal(gated.status, "pending");
   assert.match(gated.reason ?? "", /OCR provisional/);
   assert.equal(gateOcrReconciliation(base, "text", 0.1).status, "valid");
+});
+
+test("la escala OCR adaptativa mejora páginas bancarias sin desbordar memoria", () => {
+  const bankPageScale = adaptiveOcrScale(612, 792);
+  assert.ok(bankPageScale > 2 && bankPageScale <= 3);
+  assert.equal(adaptiveOcrScale(10_000, 10_000), 0.75);
+  assert.equal(adaptiveOcrScale(Number.NaN, Number.POSITIVE_INFINITY), 3);
 });
 
 test("una capa de texto administrativo larga no desactiva el OCR visual", () => {

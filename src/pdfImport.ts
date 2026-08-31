@@ -1187,9 +1187,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       // roughly 200 DPI. This materially improves decimal/date recognition
       // on the Santander scans without weakening the confidence gate.
       const baseViewport = page.getViewport({ scale: 1 });
-      const baseDimension = Math.max(baseViewport.width, baseViewport.height, 1);
-      const baseArea = Math.max(baseViewport.width * baseViewport.height, 1);
-      const scale = Math.max(0.75, Math.min(3, 2800 / baseDimension, Math.sqrt(16_000_000 / baseArea)));
+      const scale = adaptiveOcrScale(baseViewport.width, baseViewport.height);
       const viewport = page.getViewport({ scale });
       const canvas = window.document.createElement("canvas");
       canvas.width = Math.ceil(viewport.width);
@@ -1260,6 +1258,19 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       ? pageConfidences.reduce((sum, value) => sum + value, 0) / pageConfidences.length
       : 0,
   };
+}
+
+/**
+ * Chooses a bounded render scale for browser OCR. Typical letter/A4 bank pages
+ * land near 200 DPI, while unusually large pages are capped by both their
+ * longest edge and pixel area to avoid exhausting the browser process.
+ */
+export function adaptiveOcrScale(width: number, height: number) {
+  const safeWidth = Number.isFinite(width) && width > 0 ? width : 1;
+  const safeHeight = Number.isFinite(height) && height > 0 ? height : 1;
+  const baseDimension = Math.max(safeWidth, safeHeight, 1);
+  const baseArea = Math.max(safeWidth * safeHeight, 1);
+  return Math.max(0.75, Math.min(3, 2800 / baseDimension, Math.sqrt(16_000_000 / baseArea)));
 }
 
 export async function inspectPdf(file: File, onProgress: (value: number, label: string) => void): Promise<ImportResult> {
