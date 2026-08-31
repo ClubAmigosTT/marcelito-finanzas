@@ -65,6 +65,24 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.sourceDetection.status, .verified)
     }
 
+    func testInstitutionalBBVAHeaderBeatsAConflictingSantanderFilename() {
+        let text = """
+        BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
+        Estado de cuenta
+        Detalle de Movimientos Realizados
+        05/AGO SPEI RECIBIDO SANTANDER 4,500.00 6,116.63
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "Santander-agosto-2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "BBVA")
+        XCTAssertEqual(snapshot.sourceDetection.status, .verified)
+        XCTAssertTrue(snapshot.sourceDetection.evidence.contains { $0.contains("encabezado institucional BBVA") })
+    }
+
     func testAmexCreditRowIsNotSilentlyConvertedToPurchase() {
         let text = """
         American Express
