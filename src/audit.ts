@@ -30,7 +30,12 @@ export function createAuditRun(
   transactions: Transaction[],
   trigger: AuditRunRecord["trigger"],
 ): AuditRunRecord {
-  const pendingStatements = statements.filter((statement) => statement.reconciliationStatus !== "valid").length;
+  // A conciliación válida todavía requiere confirmación cuando el usuario
+  // debe revisar filas OCR, categorías o una detección ambigua. Esos estados
+  // tampoco pueden aparecer como "Verificado" en la autoauditoría.
+  const pendingStatements = statements.filter((statement) =>
+    statement.reconciliationStatus !== "valid" || statement.status === "review"
+  ).length;
   const issueCount = pendingStatements
     + pipeline.audit.invalidCount
     + pipeline.audit.duplicateCount
@@ -50,6 +55,6 @@ export function createAuditRun(
     reconciledStatementCount: statements.length - pendingStatements,
     canonicalMovementCount: transactions.length,
     issueCount,
-    message: pipeline.audit.criticalIssues[0] ?? (pendingStatements ? `${pendingStatements} estado(s) pendientes de conciliación.` : undefined),
+    message: pipeline.audit.criticalIssues[0] ?? (pendingStatements ? `${pendingStatements} estado(s) pendientes de conciliación o revisión.` : undefined),
   };
 }

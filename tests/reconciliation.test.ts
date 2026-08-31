@@ -576,6 +576,10 @@ test("un estado conciliado pero pendiente de revisión no alimenta los KPI", () 
   assert.equal(metrics.consolidatedRealSpend, 0);
   assert.equal(metrics.dataQuality.critical, true);
   assert.equal(metrics.isProvisional, true);
+  const pipeline = runTransactionPipeline(transactions, statements);
+  const audit = createAuditRun(pipeline, statements, [], "import");
+  assert.equal(audit.status, "blocked");
+  assert.equal(audit.reconciledStatementCount, 0);
 });
 
 test("el último corte se elige por fecha de cierre y no por orden de importación", () => {
