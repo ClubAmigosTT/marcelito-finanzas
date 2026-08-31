@@ -2038,7 +2038,7 @@ final class FinanceStore {
             pattern: #"(?<!\d)(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})(?!\d)"#
         )
         let textDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(\d{1,2})\s+(?:de\s+)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
+            pattern: #"(?i)(?<!\d)(\d{1,2})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         )
         let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?\s*(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)(?:[.,]\d{1,2})?(?![A-Za-z0-9])"#
@@ -2279,7 +2279,7 @@ final class FinanceStore {
         ), let isoDateRegex = try? NSRegularExpression(
             pattern: #"(?<!\d)(\d{4})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{1,2})(?!\d)"#
         ), let textDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(\d{1,2})\s+(?:de\s+)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
+            pattern: #"(?i)(?<!\d)(\d{1,2})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         ), let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
         ) else {
@@ -2440,7 +2440,7 @@ final class FinanceStore {
                 options: .regularExpression
             )
             .replacingOccurrences(
-                of: #"(?i)(?<!\d)\d{1,2}\s+(?:de\s+)?[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?"#,
+                of: #"(?i)(?<!\d)\d{1,2}\s*(?:de\s*)?[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?"#,
                 with: " ",
                 options: .regularExpression
             )
@@ -2778,7 +2778,7 @@ final class FinanceStore {
         guard let dateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-.]\s*(\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*(\d{2,4})(?!\d)"#
         ), let textDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(\d{1,2})\s+(?:de\s+)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
+            pattern: #"(?i)(?<!\d)(\d{1,2})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         ), let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
         ) else {
@@ -2820,7 +2820,9 @@ final class FinanceStore {
                     options: [.diacriticInsensitive, .caseInsensitive],
                     locale: .current
                 )
-                if normalized.contains("resumen de meses sin intereses")
+                if normalized.contains("transacciones de meses sin intereses")
+                    || normalized.contains("descripcion de compras en meses sin intereses")
+                    || normalized.contains("resumen de meses sin intereses")
                     || normalized.contains("consolidado de compras en meses sin intereses") {
                     if !pendingRow.isEmpty {
                         rows.append(pendingRow)
@@ -2912,7 +2914,7 @@ final class FinanceStore {
                 options: .regularExpression
             )
             .replacingOccurrences(
-                of: #"(?i)(?<!\d)\d{1,2}\s+(?:de\s+)?[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?"#,
+                of: #"(?i)(?<!\d)\d{1,2}\s*(?:de\s*)?[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?"#,
                 with: " ",
                 options: .regularExpression
             )
@@ -3220,10 +3222,19 @@ final class FinanceStore {
         assign(\.paymentForNoInterest, amount(after: ["pago para no generar intereses", "pago para no generar interes"]))
         assign(\.msiPending, amount(after: ["msi pendientes", "saldo msi", "principal diferido"]))
         assign(\.revolvingBalance, amount(after: ["saldo revolvente", "saldo revolvente al corte"]))
-        assign(\.depositTotal, lastAmountOnLabel(["depositos", "depositos / abonos", "total importe abonos", "total de abonos", "abonos del periodo"]))
-        assign(\.withdrawalTotal, lastAmountOnLabel(["retiros", "retiros / cargos", "total importe cargos", "total de cargos", "cargos del periodo"]))
-        summary.depositCount = countOnLabel(["depositos", "depositos / abonos", "total movimientos abonos", "total de abonos"])
-        summary.withdrawalCount = countOnLabel(["retiros", "retiros / cargos", "total movimientos cargos", "total de cargos"])
+        // Prefer the issuer's explicit total rows, which may appear after
+        // the movement table. Generic “depósitos/retiros” labels also occur
+        // in charts and can contain OCR fragments or percentages.
+        let declaredDeposits = lastAmountOnLabel(["total importe abonos", "total de abonos", "abonos del periodo"])
+            ?? lastAmountOnLabel(["depositos", "depositos / abonos"])
+        let declaredWithdrawals = lastAmountOnLabel(["total importe cargos", "total de cargos", "cargos del periodo"])
+            ?? lastAmountOnLabel(["retiros", "retiros / cargos"])
+        assign(\.depositTotal, declaredDeposits)
+        assign(\.withdrawalTotal, declaredWithdrawals)
+        summary.depositCount = countOnLabel(["total movimientos abonos", "total de abonos"])
+            ?? countOnLabel(["depositos", "depositos / abonos"])
+        summary.withdrawalCount = countOnLabel(["total movimientos cargos", "total de cargos"])
+            ?? countOnLabel(["retiros", "retiros / cargos"])
         if source.localizedCaseInsensitiveContains("Amex") {
             summary.debtBalance = summary.statementBalance
         } else {
@@ -3329,14 +3340,24 @@ final class FinanceStore {
             return nil
         }()
         let sourceFromHeader: String? = {
+            if header.contains("banco santander") || header.contains("santander mexico") || header.contains("grupo financiero santander") || header.contains("santander.com") || header.range(of: #"\bsantander\b"#, options: .regularExpression) != nil { return "Santander" }
             if header.contains("bbva mexico") || header.contains("grupo financiero bbva") || header.contains("bbva.mx") || header.contains("bba830831lj2") || header.range(of: #"\bbbva\b|bancomer"#, options: .regularExpression) != nil { return "BBVA" }
             if header.contains("american express") || header.contains("the platinum credit card") || header.range(of: #"\bamex\b"#, options: .regularExpression) != nil { return "Amex" }
-            if header.contains("banco santander") || header.contains("santander mexico") || header.contains("grupo financiero santander") || header.contains("santander.com") || header.range(of: #"\bsantander\b"#, options: .regularExpression) != nil { return "Santander" }
             return nil
         }()
-        let source = sourceFromHeader ?? sourceFromFile ?? "Importado"
+        // OCR may place the legal issuer footer after the movement table. A
+        // strong legal/domain marker anywhere in the document is authoritative
+        // evidence; generic names in transaction descriptions are not.
+        let sourceFromLegal: String? = {
+            if normalizedText.range(of: #"grupo\s+financiero\s+bbva|bbva\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx"#, options: .regularExpression) != nil { return "BBVA" }
+            if normalizedText.range(of: #"americanexpress\.com\.mx|american\s+express[^\n]{0,90}(?:company|the\s+platinum\s+credit\s+card)"#, options: .regularExpression) != nil { return "Amex" }
+            if normalizedText.contains("banco santander mexico") || normalizedText.contains("grupo financiero santander") || normalizedText.contains("santander.com") { return "Santander" }
+            return nil
+        }()
+        let source = sourceFromHeader ?? sourceFromLegal ?? sourceFromFile ?? "Importado"
         var evidence: [String] = []
         if sourceFromHeader != nil { evidence.append("encabezado institucional \(source)") }
+        else if sourceFromLegal != nil { evidence.append("razón social/dominio del emisor \(source)") }
         if sourceFromFile == source { evidence.append("nombre de archivo (source)") }
         if evidence.isEmpty, source != "Importado" { evidence.append("marca parcial; falta encabezado institucional") }
 
@@ -3353,7 +3374,7 @@ final class FinanceStore {
         }
         let confidence: Double
         if sourceFromHeader != nil, sourceFromFile == source { confidence = 0.999 }
-        else if sourceFromHeader != nil { confidence = 0.998 }
+        else if sourceFromHeader != nil || sourceFromLegal != nil { confidence = sourceFromFile == source ? 0.999 : 0.998 }
         else if sourceFromFile != nil { confidence = 0.90 }
         else { confidence = 0 }
         let status: SourceDetectionStatus = confidence >= 0.99 ? .verified : confidence > 0 ? .review : .unknown

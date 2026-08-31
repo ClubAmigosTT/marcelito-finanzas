@@ -338,6 +338,20 @@ test("una mención de Santander solo en el cuerpo no basta para identificar el e
   assert.equal(detectSource(text, "estado-7A3F.pdf"), "Desconocido");
 });
 
+test("la razón social Santander gana a una contraparte BBVA del resumen", () => {
+  const text = [
+    "Banco Santander México, S.A., Grupo Financiero Santander México",
+    "Estado de cuenta nómina",
+    "Retiros 64,161.11",
+    "20-JUL-2026 PAGO TRANSF RAPIDA SANTANDER Transferencia a BBVA MEXICO 500.00",
+    "BBVA MEXICO, S.A. recibe la transferencia",
+  ].join("\n");
+
+  const evidence = detectSourceEvidence(text, "Estado de cuenta agosto 2026.pdf");
+  assert.equal(evidence.source, "Santander");
+  assert.equal(evidence.status, "verified");
+});
+
 test("un prefijo numérico del comercio no se convierte en año", () => {
   const [row] = extractTransactions("20 de Junio 125TH FINEST DELI INC 101.77", "Amex", "amex junio 2026.pdf", "card");
   assert.equal(row.date, "20 jun 2026");
@@ -383,6 +397,50 @@ test("los totales bancarios declarados bloquean una importación que no concilia
   const rows = extractTransactions("01/08/2026 COMPRA 100.00 400.00", "BBVA", "bbva agosto.pdf", "bank");
   const reconciliation = reconcileStatementImport("bank", summary, rows);
   assert.equal(reconciliation.status, "invalid");
+});
+
+test("los totales BBVA explícitos prevalecen sobre datos de gráficas posteriores", () => {
+  const summary = parseStatementSummary([
+    "Depósitos 19,500.00",
+    "Retiros 4,515.83",
+    "Distribución de tus movimientos 20%",
+    "TOTAL IMPORTE CARGOS 22,058.69 TOTAL MOVIMIENTOS CARGOS 9",
+    "TOTAL IMPORTE ABONOS 19,500.00 TOTAL MOVIMIENTOS ABONOS 2",
+  ].join("\n"), "bank");
+  assert.equal(summary.depositTotal, 19500);
+  assert.equal(summary.withdrawalTotal, 22058.69);
+  assert.equal(summary.depositCount, 2);
+  assert.equal(summary.withdrawalCount, 9);
+});
+
+test("la zona de resumen Amex ignora el identificador de cuenta y conserva la ecuación", () => {
+  const summary = parseStatementSummary([
+    "Saldo Actual / AEC810901298",
+    "Pagos y Nuevos Cargos",
+    "Saldo Anterior",
+    "23,150.88|- 32,744.61|+ 49,559.88|= 39,966.15 3,197.29",
+    "Interés Financiero: 0.00",
+    "Fecha y Detalle de las operaciones Importe en MN.",
+    "27 de Agosto COMPRA 1,000.00",
+  ].join("\n"), "card");
+  assert.equal(summary.statementBalance, 39966.15);
+  assert.equal(summary.paymentForNoInterest, 39966.15);
+  assert.equal(summary.minimumPayment, 3197.29);
+  assert.equal(summary.interest, 0);
+});
+
+test("las secciones Amex de MSI no se convierten en compras del periodo", () => {
+  const rows = extractTransactions([
+    "__PDF_PAGE_1__",
+    "Fecha y Detalle de las operaciones Importe en MN.",
+    "01 de Agosto COMPRA REAL 100.00",
+    "Transacciones de Meses sin Intereses",
+    "02 de Agosto CUOTA MSI 2,000.00",
+    "Resumen de Meses sin Intereses",
+    "03 de Agosto SALDO MSI 8,000.00",
+  ].join("\n"), "Amex", "Amex agosto 2026.pdf", "card");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].description, "COMPRA REAL");
 });
 
 test("los conteos declarados bloquean una importación que perdió filas aunque los importes cuadren", () => {

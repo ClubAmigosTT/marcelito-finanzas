@@ -80,6 +80,10 @@ export function detectSourceEvidence(text: string, fileName: string): SourceDete
   }
   const institutional = institutionalLines.join(" ");
   const body = normalizedLines.slice(tableStart).join(" ");
+  // OCR can place the issuer's legal footer after the movement table. It is
+  // still authoritative evidence because these markers identify the bank,
+  // while generic brand mentions in the body remain counterparty text.
+  const fullNormalized = normalizeText(text);
   const knownBodyMentions = ["Santander", "BBVA", "Amex"].filter((name) => {
     const marker = normalizeText(name);
     return body.includes(marker) && filenameSource !== name;
@@ -94,14 +98,17 @@ export function detectSourceEvidence(text: string, fileName: string): SourceDete
 
   // Prefer issuer legal names, domains, and other stable header markers over
   // short brand mentions that can legitimately occur in a transfer row.
-  if (/bbva\s+m(?:e|é)xico|grupo\s+financiero\s+bbva|bbva\.mx|bba830831lj2/.test(institutional)) {
+  if (/banco\s+santander|santander\s+m(?:e|é)xico|grupo\s+financiero\s+santander|santander\.com/.test(institutional)
+    || /banco\s+santander|santander\s+m(?:e|é)xico|grupo\s+financiero\s+santander|santander\.com/.test(fullNormalized)) {
+    return result("Santander", filenameSource === "Santander" ? 0.999 : 0.998, ["encabezado institucional Santander", ...(filenameSource === "Santander" ? ["nombre de archivo Santander"] : [])]);
+  }
+  if (/bbva\s+m(?:e|é)xico|grupo\s+financiero\s+bbva|bbva\.mx|bba830831lj2/.test(institutional)
+    || /grupo\s+financiero\s+bbva|bbva\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|bbva\.mx/.test(fullNormalized)) {
     return result("BBVA", filenameSource === "BBVA" ? 0.999 : 0.998, ["encabezado institucional BBVA", ...(filenameSource === "BBVA" ? ["nombre de archivo BBVA"] : [])]);
   }
-  if (/american\s+express|the\s+platinum\s+credit\s+card|amex/.test(institutional)) {
+  if (/american\s+express|the\s+platinum\s+credit\s+card/.test(institutional)
+    || /americanexpress\.com\.mx|american\s+express[^\n]{0,90}(?:company|the\s+platinum\s+credit\s+card)/.test(fullNormalized)) {
     return result("Amex", filenameSource === "Amex" ? 0.999 : 0.998, ["encabezado institucional Amex", ...(filenameSource === "Amex" ? ["nombre de archivo Amex"] : [])]);
-  }
-  if (/banco\s+santander|santander\s+m(?:e|é)xico|grupo\s+financiero\s+santander|santander\.com/.test(institutional)) {
-    return result("Santander", filenameSource === "Santander" ? 0.999 : 0.998, ["encabezado institucional Santander", ...(filenameSource === "Santander" ? ["nombre de archivo Santander"] : [])]);
   }
 
   // A standalone brand in the institutional zone is acceptable when the PDF
@@ -183,8 +190,13 @@ function detectPeriod(text: string, fileName: string) {
 function findSummaryAmount(text: string, labels: string[]) {
   const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const label = labels.join("|");
-  const match = normalized.match(new RegExp(`(?:${label})[^\\d$-]{0,90}(-?\\s*\\$?(?:(?:\\d{1,3}(?:[ ,.\\u00a0]\\d{3})+|\\d+)(?:[.,]\\d{1,2})?))`, "i"));
-  return match?.[1] ? normalizeAmount(match[1]) : undefined;
+  const match = normalized.match(new RegExp(`(?:${label})[^\\d$-]{0,90}((?<![A-Za-z])-?\\s*\\$?(?:(?:\\d{1,3}(?:[ ,.\\u00a0]\\d{3})+|\\d+)(?:[.,]\\d{1,2})?))`, "i"));
+  const raw = match?.[1];
+  // Long bare integers immediately after a label are usually account,
+  // certificate or reference numbers (e.g. “Saldo Actual / AEC810901298”),
+  // never monetary values. Require separators/currency or a short integer.
+  if (!raw || (/^\s*\d{7,}\s*$/.test(raw) && !/[.,$]/.test(raw))) return undefined;
+  return normalizeAmount(raw);
 }
 
 function findLastSummaryAmount(text: string, labels: string[]) {
@@ -212,27 +224,38 @@ function lineMoneyValues(line: string) {
 
 function parseStatementSummary(text: string, kind: StatementKind): StatementSummary {
   const summary: StatementSummary = {};
+  // Card PDFs repeat labels and account identifiers on every movement page.
+  // The first summary zone (before the movement table) is the only safe
+  // source for balances, credit line and payment amounts; table totals are
+  // handled separately below.
+  const normalizedForScope = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  const firstMovementMarker = normalizedForScope.search(/fecha\s+y\s+detalle|detalle\s+de\s+movimientos|movimientos\s+realizados/i);
+  const cardSummaryText = kind === "card" && firstMovementMarker >= 0
+    ? text.slice(0, firstMovementMarker)
+    : text;
   // Bank statements have different summary vocabulary and often place bare
   // operation counts next to “Abonos/Cargos”. Do not populate card-only
   // fields from those incidental numbers; the bank-specific totals below are
   // the only values that feed cash reconciliation.
   const values: Array<[keyof StatementSummary, number | undefined]> = kind === "card"
     ? [
-      ["previousBalance", findSummaryAmount(text, ["saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"])],
-      ["statementBalance", findSummaryAmount(text, ["saldo nuevo", "saldo al corte", "saldo actual", "saldo deudor"])],
-      ["newTransactions", findSummaryAmount(text, ["nuevas transacciones", "compras nuevas"])],
-      ["payments", findSummaryAmount(text, ["pagos realizados", "pagos efectuados"])],
-      ["credits", findSummaryAmount(text, ["pagos y creditos", "creditos", "abonos"])],
-      ["newCharges", findSummaryAmount(text, ["nuevos cargos", "total de cargos"])],
-      ["interest", findSummaryAmount(text, ["intereses", "interes del periodo"])],
-      ["fees", findSummaryAmount(text, ["comisiones", "comision"])],
-      ["creditLimit", findSummaryAmount(text, ["limite de credito", "linea de credito"])],
-      ["creditAvailable", findSummaryAmount(text, ["credito disponible", "disponible para compras"])],
-      ["minimumPayment", findSummaryAmount(text, ["pago minimo"])],
-      ["minimumPlusMsi", findSummaryAmount(text, ["pago minimo mas meses sin intereses", "pago minimo mas msi"])],
-      ["paymentForNoInterest", findSummaryAmount(text, ["pago para no generar intereses", "pago para no generar interes"])],
-      ["msiPending", findSummaryAmount(text, ["msi pendientes", "saldo msi", "principal diferido"])],
-      ["revolvingBalance", findSummaryAmount(text, ["saldo revolvente", "saldo revolvente al corte"])],
+      ["previousBalance", findSummaryAmount(cardSummaryText, ["saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"])],
+      ["statementBalance", findSummaryAmount(cardSummaryText, ["saldo nuevo", "saldo al corte", "saldo actual", "saldo deudor"])],
+      ["newTransactions", findSummaryAmount(cardSummaryText, ["nuevas transacciones", "compras nuevas"])],
+      ["payments", findSummaryAmount(cardSummaryText, ["pagos realizados", "pagos efectuados"])],
+      ["credits", findSummaryAmount(cardSummaryText, ["pagos y creditos", "creditos", "abonos"])],
+      ["newCharges", findSummaryAmount(cardSummaryText, ["nuevos cargos", "total de cargos"])],
+      // “Pago para no generar intereses” is a header label, not the interest
+      // charge. Parse the issuer's explicit financial-interest row below.
+      ["interest", undefined],
+      ["fees", findSummaryAmount(cardSummaryText, ["comisiones", "comision"])],
+      ["creditLimit", findSummaryAmount(cardSummaryText, ["limite de credito", "linea de credito"])],
+      ["creditAvailable", findSummaryAmount(cardSummaryText, ["credito disponible", "disponible para compras"])],
+      ["minimumPayment", findSummaryAmount(cardSummaryText, ["pago minimo"])],
+      ["minimumPlusMsi", findSummaryAmount(cardSummaryText, ["pago minimo mas meses sin intereses", "pago minimo mas msi"])],
+      ["paymentForNoInterest", findSummaryAmount(cardSummaryText, ["pago para no generar intereses", "pago para no generar interes"])],
+      ["msiPending", findSummaryAmount(cardSummaryText, ["msi pendientes", "saldo msi", "principal diferido"])],
+      ["revolvingBalance", findSummaryAmount(cardSummaryText, ["saldo revolvente", "saldo revolvente al corte"])],
     ]
     : [["previousBalance", findSummaryAmount(text, ["saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"])]];
   values.forEach(([key, value]) => {
@@ -257,6 +280,7 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
       const aggregateLabelIndex = normalizedLine.search(/dep.?sitos?|retiros?|abonos?|cargos?/);
       const percentIndex = normalizedLine.indexOf("%");
       if (/porcentaje|objetados|certificado|vencimiento|inversion|producto/.test(normalizedLine)
+        || /otros\s+cargos|otros\s+abonos/.test(normalizedLine)
         || (percentIndex >= 0 && aggregateLabelIndex >= 0 && percentIndex > aggregateLabelIndex)) return;
       const valuesInLine = lineMoneyValues(line);
       if (!valuesInLine.length) return;
@@ -280,21 +304,38 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
         if (count) summary.withdrawalCount = Number(count);
       }
     });
+    // BBVA prints the authoritative totals after the movement table. Prefer
+    // those explicit labels over chart/summary values (and over OCR fragments
+    // such as a bare `64` from “Retiros 64,161.11”).
+    const bankNormalized = normalizeText(text);
+    const explicitTotal = (label: string) => {
+      const match = bankNormalized.match(new RegExp(`${label}[^\\d$-]{0,80}((?:\\d{1,3}(?:[.,]\\d{3})+|\\d+)[.,]\\d{2})`, "i"));
+      return match?.[1] ? normalizeAmount(match[1]) : undefined;
+    };
+    const explicitDepositTotal = explicitTotal("total\\s+importe\\s+abonos?");
+    const explicitWithdrawalTotal = explicitTotal("total\\s+importe\\s+cargos?");
+    if (explicitDepositTotal !== undefined) summary.depositTotal = explicitDepositTotal;
+    if (explicitWithdrawalTotal !== undefined) summary.withdrawalTotal = explicitWithdrawalTotal;
+    const explicitDepositCount = bankNormalized.match(/total\s+movimientos\s+abonos?[^\d]{0,20}(\d{1,4})\b/i)?.[1];
+    const explicitWithdrawalCount = bankNormalized.match(/total\s+movimientos\s+cargos?[^\d]{0,20}(\d{1,4})\b/i)?.[1];
+    if (explicitDepositCount) summary.depositCount = Number(explicitDepositCount);
+    if (explicitWithdrawalCount) summary.withdrawalCount = Number(explicitWithdrawalCount);
   }
 
   const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const moneyToken = "(?:\\d{1,3}(?:[ ,.\\u00a0]\\d{3})+|\\d+)(?:[.,]\\d{1,2})?";
   const decimalMoneyToken = "(?<!\\d)(?:\\d{1,3}(?:[ ,.\\u00a0]\\d{3})+|\\d+)[.,]\\d{2}(?!\\d)";
   const parseToken = (value: string) => normalizeAmount(value.replace(/[^0-9,.-]/g, ""));
-  const firstLabeledAmount = (label: string) => {
-    const match = normalized.match(new RegExp(`(?:${label})(?![a-z])\\s*:?[^\\d$-]{0,32}(-?\\s*\\$?${moneyToken})`, "i"));
+  const firstLabeledAmount = (label: string, scopedText = normalized) => {
+    const scopedNormalized = scopedText.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+    const match = scopedNormalized.match(new RegExp(`(?:${label})(?![a-z])\\s*:?[^\\d$-]{0,32}(-?\\s*\\$?${moneyToken})`, "i"));
     return match?.[1] ? parseToken(match[1]) : undefined;
   };
 
   if (kind === "card") {
     // Amex prints the core balance as:
     // previous balance - payments/credits + new charges = statement balance minimum.
-    const equation = normalized.match(new RegExp(`(${moneyToken})\\s*-\\s*(${moneyToken})\\s*\\+\\s*(${moneyToken})\\s*=\\s*(${moneyToken})\\s+(${moneyToken})`, "i"));
+    const equation = cardSummaryText.normalize("NFD").replace(/[\u0300-\u036f]/g, "").match(new RegExp(`(${moneyToken})[\\s|]*-[\\s|]*(${moneyToken})[\\s|]*\\+[\\s|]*(${moneyToken})[\\s|]*=[\\s|]*(${moneyToken})\\s+(${moneyToken})`, "i"));
     if (equation) {
       summary.previousBalance = parseToken(equation[1]);
       summary.paymentsCredits = parseToken(equation[2]);
@@ -303,12 +344,30 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
       summary.paymentForNoInterest = parseToken(equation[4]);
       summary.minimumPayment = parseToken(equation[5]);
     }
+    if (!equation) {
+      // OCR may insert vertical bars between the arithmetic columns. Keep a
+      // literal fallback over the raw summary zone so the card balance is not
+      // replaced by an account/reference number elsewhere on the page.
+      const fallback = cardSummaryText.match(/((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})\s*\|?\s*-\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})\s*\|?\s*\+\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})\s*\|?\s*=\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})\s+((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})/);
+      if (fallback) {
+        summary.previousBalance = parseToken(fallback[1]);
+        summary.paymentsCredits = parseToken(fallback[2]);
+        summary.newCharges = parseToken(fallback[3]);
+        summary.statementBalance = parseToken(fallback[4]);
+        summary.paymentForNoInterest = parseToken(fallback[4]);
+        summary.minimumPayment = parseToken(fallback[5]);
+      }
+    }
 
-    const newTransactions = firstLabeledAmount("nuevas transacciones|compras nuevas");
+    const newTransactions = firstLabeledAmount("nuevas transacciones|compras nuevas", cardSummaryText);
     if (newTransactions !== undefined) summary.newTransactions = newTransactions;
-    const interest = firstLabeledAmount("inter[eé]s(?: financiero)?(?: del periodo)?");
+    // Do not match the phrase “pago para no generar intereses” from the
+    // header; the issuer's labeled financial-interest row is authoritative.
+    const interest = cardSummaryText.match(/inter[eé]s\s+financiero[^0-9$-]{0,20}([-+]?\s*\$?(?:\d{1,3}(?:,\d{3})+|\d+)(?:[.,]\d{1,2})?)/i)?.[1]
+      ? parseToken(cardSummaryText.match(/inter[eé]s\s+financiero[^0-9$-]{0,20}([-+]?\s*\$?(?:\d{1,3}(?:,\d{3})+|\d+)(?:[.,]\d{1,2})?)/i)![1])
+      : firstLabeledAmount("inter[eé]s\\s+del\\s+periodo", cardSummaryText);
     if (interest !== undefined) summary.interest = interest;
-    const fees = firstLabeledAmount("comision(?:es)?");
+    const fees = firstLabeledAmount("comision(?:es)?", cardSummaryText);
     if (fees !== undefined) summary.fees = fees;
 
     // The transaction table is the reliable source for real card payments;
@@ -323,7 +382,7 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
       }
     }
 
-    const creditSection = normalized.match(new RegExp(`limite\\s+de\\s+credito[\\s\\S]{0,220}?(${decimalMoneyToken})[\\s\\S]{0,70}?(${decimalMoneyToken})`, "i"));
+    const creditSection = cardSummaryText.normalize("NFD").replace(/[\u0300-\u036f]/g, "").match(new RegExp(`limite\\s+de\\s+credito[\\s\\S]{0,220}?(${decimalMoneyToken})[\\s\\S]{0,70}?(${decimalMoneyToken})`, "i"));
     if (creditSection) {
       summary.creditLimit = parseToken(creditSection[1]);
       summary.creditAvailable = parseToken(creditSection[2]);
@@ -465,7 +524,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
   // layer uses “20 de Junio 2026”. Keep the optional year narrow so a
   // merchant such as “125TH FINEST” cannot be swallowed as year 125.
   const datePattern = new RegExp(
-    `^(?:(\\d{1,2})\\s+(?:de\\s*)?(${monthTokenPattern})(?:\\s*(?:de\\s*)?((?:20\\d{2}|\\d{2})(?!\\d)))?|(?:(\\d{1,2})[-/.](\\d{1,2})[-/.](20\\d{2}|\\d{2}))|(?:(20\\d{2})[-/.](\\d{1,2})[-/.](\\d{1,2}))|(?:(\\d{1,2})[-/](${monthTokenPattern})(?:[-/](20\\d{2}|\\d{2}))?))`,
+    `^(?:(\\d{1,2})\\s*(?:de\\s*)?(${monthTokenPattern})(?:\\s*(?:de\\s*)?((?:20\\d{2}|\\d{2})(?!\\d)))?|(?:(\\d{1,2})[-/.](\\d{1,2})[-/.](20\\d{2}|\\d{2}))|(?:(20\\d{2})[-/.](\\d{1,2})[-/.](\\d{1,2}))|(?:(\\d{1,2})[-/](${monthTokenPattern})(?:[-/](20\\d{2}|\\d{2}))?))`,
     "i",
   );
   const amountPattern = /(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?:\s*CR)?(?![A-Za-z0-9])/gi;
@@ -502,9 +561,32 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     "no de cuenta", "numero de cliente", "no de cliente", "cuenta clabe", "rfc",
     "saldo inicial", "saldo anterior", "saldo final", "saldo disponible", "del al",
   ];
-  lines.forEach((line) => {
-    const startsWithDate = datePattern.test(line);
+  let skipCardSection = false;
+  for (const line of lines) {
     const normalized = normalizeText(line);
+    // OCR recognition is page-oriented. A page boundary must terminate the
+    // previous row; otherwise the first header/summary number on the next
+    // page can be appended to a real transaction.
+    if (/^__pdf_page_\d+__$/.test(normalized)) {
+      if (pending) rows.push(pending);
+      pending = "";
+      continue;
+    }
+    // Amex repeats a date/detail table for regular purchases, then prints
+    // separate MSI tables. MSI installments are future obligations and must
+    // never become new spend rows. Resume only at the next movement header.
+    if (kind === "card" && /transacciones de meses sin intereses|resumen de meses sin intereses|consolidado de compras en meses sin intereses|descripcion de compras en meses sin intereses/.test(normalized)) {
+      if (pending) rows.push(pending);
+      pending = "";
+      skipCardSection = true;
+      continue;
+    }
+    if (skipCardSection && /fecha\s+y\s+detalle|detalle\s+de\s+movimientos|movimientos\s+realizados/.test(normalized)) {
+      skipCardSection = false;
+      continue;
+    }
+    if (skipCardSection) continue;
+    const startsWithDate = datePattern.test(line);
     const breaks = breakPhrases.some((phrase) => normalized.includes(phrase))
       || /^(?:del\s+al|total\b|saldo\b|periodo\b|fecha\s+de\s+corte|rfc\b|clabe\b)/.test(normalized);
     if (startsWithDate) {
@@ -516,7 +598,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       rows.push(pending);
       pending = "";
     }
-  });
+  }
   if (pending) rows.push(pending);
 
   rows.forEach((line, index) => {
@@ -660,7 +742,9 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
 
       await page.render({ canvas: null, canvasContext: context, viewport }).promise;
       const result = await worker.recognize(canvas);
-      pages.push(result.data.text);
+      // Keep explicit page sentinels so row reconstruction cannot cross page
+      // boundaries or blend a movement with the following page's summary.
+      pages.push(`__PDF_PAGE_${pageNumber}__\n${result.data.text}`);
       onProgress(88 + Math.round((pageNumber / document.numPages) * 10), `Reconociendo página ${pageNumber} de ${document.numPages}`);
       canvas.width = 0;
       canvas.height = 0;
