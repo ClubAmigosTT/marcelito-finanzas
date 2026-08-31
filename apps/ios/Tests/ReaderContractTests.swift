@@ -378,7 +378,7 @@ final class ReaderContractTests: XCTestCase {
         )
 
         XCTAssertEqual(snapshot.summary?.previousBalance, 55_627.93)
-        XCTAssertEqual(snapshot.summary?.depositTotal, 36_187.42)
+        XCTAssertEqual(snapshot.summary?.depositTotal, Decimal(string: "36187.42"))
         XCTAssertEqual(snapshot.summary?.withdrawalTotal, 64_161.11)
         XCTAssertEqual(snapshot.summary?.cashBalance, 27_654.24)
     }

@@ -3043,7 +3043,10 @@ final class FinanceStore {
 
         static let fallback = SantanderOCRColumns(
             movementMinX: 0.59,
-            balanceMinX: 0.86,
+            // Scans often place the running-balance column a little left of
+            // the calibrated layout (around x=0.81–0.84). Keep that column
+            // out of the movement candidates even when no header was seen.
+            balanceMinX: 0.80,
             depositMaxX: 0.73,
             calibratedFromHeader: false
         )
@@ -3366,6 +3369,22 @@ final class FinanceStore {
                 || rawAmount.range(of: #"\d{1,3}(?:[ ,]\d{3})+"#, options: .regularExpression) != nil
             if !hasMoneyShape && digitsOnly.count > 6 { return nil }
             working = working.replacingCharacters(in: Range(amountMatch.range, in: working)!, with: " ")
+            if bankLikeRow {
+                // A bank row normally carries both the movement amount and a
+                // running balance. The selected token is the former; remove
+                // any other currency-shaped tokens before building the title
+                // so a balance such as `935.94` cannot become part of the
+                // merchant name.
+                let residualMoneyMatches = allMatches(in: working, regex: amountRegex).filter {
+                    $0.text.contains("$")
+                        || $0.text.range(of: #"[.,]\d{1,2}$"#, options: .regularExpression) != nil
+                }
+                for match in residualMoneyMatches.reversed() {
+                    if let range = Range(match.range, in: working) {
+                        working.replaceSubrange(range, with: " ")
+                    }
+                }
+            }
 
             var title = working
                 .replacingOccurrences(of: #"\bRFC[A-Z0-9]+\b"#, with: "", options: .regularExpression)
@@ -4086,6 +4105,15 @@ final class FinanceStore {
             || titleNormalized.contains("deposito")
             || titleNormalized.contains("abono")
             || titleNormalized.contains("transferencia recibida")
+        let semanticWithdrawal = !semanticDeposit && (
+            titleNormalized.contains("retiro")
+                || titleNormalized.contains("cargo")
+                || titleNormalized.contains("compra")
+                || titleNormalized.contains("pago")
+                || titleNormalized.contains("transfer")
+                || titleNormalized.contains("traspaso")
+                || titleNormalized.contains("spei")
+        )
         let isCardPayment = titleNormalized.contains("pago de tarjeta")
             || (titleNormalized.contains("pago") && (titleNormalized.contains("amex") || titleNormalized.contains("credito")))
         let isTransfer = titleNormalized.contains("transfer")
@@ -4100,7 +4128,11 @@ final class FinanceStore {
             flow = .debt
         } else if explicitOwnTransfer {
             flow = .transfer
-        } else if depositColumn || semanticDeposit {
+        } else if semanticDeposit {
+            flow = .income
+        } else if semanticWithdrawal {
+            flow = .expense
+        } else if depositColumn {
             flow = .income
         } else {
             flow = .expense
@@ -4940,7 +4972,7 @@ final class FinanceStore {
         if sourceFromFile == source { evidence.append("nombre de archivo (source)") }
         if evidence.isEmpty, source != "Importado" { evidence.append("marca parcial; falta encabezado institucional") }
 
-        let tableStartMarkers = ["detalle de movimientos", "movimientos realizados", "fecha folio descripcion", "fecha y detalle"]
+        let tableStartMarkers = ["detalle de movimientos", "movimientos realizados", "fecha folio descripcion", "fecha descripcion", "fecha y detalle"]
         let body: String
         if let marker = tableStartMarkers.compactMap({ normalizedText.range(of: $0) }).min(by: { $0.lowerBound < $1.lowerBound }) {
             body = String(normalizedText[marker.lowerBound...])
