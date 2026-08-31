@@ -110,8 +110,9 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
   conciliaciones, motivos de bloqueo y consistencias, sin incluir
   descripciones ni importes individuales.
 - Probar explícitamente el umbral que decide entre texto y Vision para evitar
-  que capas ocultas administrativas desactiven OCR o que estados de texto
-  válidos se procesen visualmente sin necesidad.
+  que capas ocultas administrativas desactiven OCR. La lectura directa exige
+  fecha, encabezado de tabla y una fila plausible con importe; también probar
+  que estados de texto válidos no se procesen visualmente sin necesidad.
 - Salida: cada cifra del dashboard se puede explicar hasta filas y evidencia.
 
 ### Fase 6 — Certificación y despliegue

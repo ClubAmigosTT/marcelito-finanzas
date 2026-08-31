@@ -72,6 +72,11 @@ test("una tabla estructurada larga conserva la lectura directa", () => {
   assert.equal(shouldUseOCR(table), false);
 });
 
+test("un encabezado de tabla sin filas plausibles fuerza OCR", () => {
+  const administrative = `${"RFC DIRECCION CERTIFICADO SALDO ".repeat(30)}\nDetalle de Movimientos Realizados\nPeriodo 16-JUL-2026 AL 15-AGO-2026\nNo. de Cuenta 1575694922`;
+  assert.equal(shouldUseOCR(administrative), true);
+});
+
 test("el pipeline rechaza fechas imposibles aunque tengan importe y descripción", () => {
   const statements = [bank("bbva", "BBVA", "agosto 2026")];
   const result = runTransactionPipeline([

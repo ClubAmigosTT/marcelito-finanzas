@@ -80,11 +80,13 @@ gasto real sin separar esas secciones.
   imágenes OCR; excederlos produce un error recuperable y no deja datos
   parciales en el libro canónico.
 - iOS no confía solo en la longitud de una capa de texto oculta: exige señal
-  de fecha y de tabla de movimientos antes de omitir Vision. Así un escaneo
-  con metadatos administrativos no se interpreta como un PDF estructurado.
+  de fecha, encabezado de tabla y al menos una fila plausible (fecha + importe)
+  antes de omitir Vision. Así un escaneo con metadatos administrativos no se
+  interpreta como un PDF estructurado.
 - La capa web aplica la misma decisión estructural: solo conserva lectura
-  directa cuando encuentra señal de fechas y encabezado de tabla; una capa
-  larga de texto administrativo vuelve a activar OCR visual.
+  directa cuando encuentra fechas, encabezado de tabla y una fila plausible;
+  una capa larga de texto administrativo o un encabezado sin filas vuelve a
+  activar OCR visual.
 - Al abrir una versión nueva, los estados persistidos con otra versión del
   lector (o sin conciliación registrada) pasan automáticamente a revisión y
   dejan de alimentar el libro canónico hasta reimportar su PDF. Así una

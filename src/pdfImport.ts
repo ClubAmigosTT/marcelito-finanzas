@@ -3,7 +3,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-2026.08.31.1";
+export const PDF_READER_VERSION = "web-reader-2026.08.31.2";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
@@ -230,7 +230,13 @@ export function shouldUseOCR(extractedText: string) {
   if (compactText.length < 500) return true;
   const hasDateSignal = /(?:\b\d{1,2}[-/.]\d{1,2}[-/.](?:20)?\d{2}\b|\b\d{1,2}[-/]\w{3,}(?:[-/](?:20)?\d{2})?\b|\b\d{1,2}\s+(?:de\s+)?(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\b)/i.test(extractedText);
   const hasTableSignal = /detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripci[oó]n|fecha\s+y\s+detalle|fecha\s+oper\s+liq/i.test(extractedText);
-  return !hasDateSignal || !hasTableSignal;
+  // A hidden administrative layer can contain both a period date and the
+  // table title without containing a single reconstructable movement. Require
+  // a date followed on the same visual/text line by a plausible decimal
+  // amount before trusting the selectable layer; otherwise Vision must inspect
+  // the rendered page.
+  const hasMovementRowSignal = /(?:\b\d{1,2}[-/.]\d{1,2}[-/.](?:20)?\d{2}\b|\b\d{1,2}[-/]\w{3,}(?:[-/](?:20)?\d{2})?\b|\b\d{1,2}\s+(?:de\s+)?(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|ago|sep|set|oct|nov|dic)\b)[^\r\n]{0,180}(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?!\d)/i.test(extractedText);
+  return !hasDateSignal || !hasTableSignal || !hasMovementRowSignal;
 }
 
 function normalizeBareBankSummaryAmount(raw: string, parsed: number) {
