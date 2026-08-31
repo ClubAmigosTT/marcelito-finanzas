@@ -27,9 +27,13 @@ type NativeCorpusReportRow = {
   source?: string;
   kind?: string;
   status?: string;
+  mode?: string;
   sourceStatus?: string;
   sourceConfidence?: string | number;
   requiresReview?: string | boolean;
+  ocrConfidence?: string | number;
+  weakestOCRPage?: string | number;
+  ocrColumnsCalibrated?: string | boolean;
   rows?: string | number;
   accountKey?: string;
   expectedAccountKey?: string;
@@ -166,6 +170,10 @@ export function verifyNativeCorpusReport(
     if (!["valid", "pending", "invalid"].includes(status)) {
       errors.push(`${label}: status no es valid/pending/invalid`);
     }
+    const mode = typeof row.mode === "string" ? row.mode.trim() : "";
+    if (!["pdf-text", "vision-ocr"].includes(mode)) {
+      errors.push(`${label}: mode no es pdf-text/vision-ocr`);
+    }
     const sourceStatus = typeof row.sourceStatus === "string" ? row.sourceStatus.trim() : "";
     if (sourceStatus !== "verified") {
       errors.push(`${label}: sourceStatus no es verified`);
@@ -187,6 +195,36 @@ export function verifyNativeCorpusReport(
       || reviewToken === "no";
     if (!reviewValid) {
       errors.push(`${label}: requiresReview no es booleano`);
+    }
+    if (mode === "vision-ocr") {
+      const ocrConfidence = numericValue(row.ocrConfidence);
+      const weakestOCRPage = numericValue(row.weakestOCRPage);
+      if (!Number.isFinite(ocrConfidence) || ocrConfidence < 0 || ocrConfidence > 1) {
+        errors.push(`${label}: ocrConfidence fuera de rango 0..1`);
+      }
+      if (!Number.isFinite(weakestOCRPage) || weakestOCRPage < 0 || weakestOCRPage > 1) {
+        errors.push(`${label}: weakestOCRPage fuera de rango 0..1`);
+      }
+      const columnsToken = typeof row.ocrColumnsCalibrated === "string"
+        ? row.ocrColumnsCalibrated.trim().toLowerCase()
+        : row.ocrColumnsCalibrated;
+      const columnsValid = columnsToken === true
+        || columnsToken === false
+        || columnsToken === "true"
+        || columnsToken === "false"
+        || columnsToken === "1"
+        || columnsToken === "0";
+      if (!columnsValid) {
+        errors.push(`${label}: ocrColumnsCalibrated no es booleano`);
+      }
+      const reviewIsFalse = reviewToken === false || reviewToken === "false" || reviewToken === "0" || reviewToken === "no";
+      if (status === "valid" && reviewIsFalse) {
+        if (ocrConfidence < 0.88) errors.push(`${label}: OCR válido con confianza media menor a 0.88`);
+        if (weakestOCRPage < 0.78) errors.push(`${label}: OCR válido con página menor a 0.78`);
+        if (source === "Santander" && columnsToken !== true && columnsToken !== "true" && columnsToken !== "1") {
+          errors.push(`${label}: Santander válido sin columnas OCR calibradas`);
+        }
+      }
     }
     const rowCount = Number(row.rows);
     if (!Number.isInteger(rowCount) || rowCount < 0) {

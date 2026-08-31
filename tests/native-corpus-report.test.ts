@@ -123,6 +123,7 @@ test("el reporte nativo exige una identidad enmascarada por PDF", () => {
       source: "BBVA",
       kind: "bank",
       status: "valid",
+      mode: "pdf-text",
       sourceStatus: "verified",
       sourceConfidence: "0,9990",
       requiresReview: "false",
@@ -136,6 +137,7 @@ test("el reporte nativo exige una identidad enmascarada por PDF", () => {
       source: "Amex",
       kind: "card",
       status: "valid",
+      mode: "pdf-text",
       sourceStatus: "verified",
       sourceConfidence: 0.998,
       requiresReview: false,
@@ -190,6 +192,7 @@ test("el reporte nativo debe coincidir con el conjunto del manifiesto", () => {
       source: "BBVA",
       kind: "bank",
       status: "valid",
+      mode: "pdf-text",
       sourceStatus: "verified",
       sourceConfidence: 0.999,
       requiresReview: false,
@@ -203,6 +206,7 @@ test("el reporte nativo debe coincidir con el conjunto del manifiesto", () => {
       source: "Amex",
       kind: "card",
       status: "valid",
+      mode: "pdf-text",
       sourceStatus: "verified",
       sourceConfidence: 0.998,
       requiresReview: false,
@@ -227,6 +231,7 @@ test("el reporte nativo compara huella, emisor y tipo contra el manifiesto", () 
       source: "Santander",
       kind: "card",
       status: "valid",
+      mode: "pdf-text",
       sourceStatus: "verified",
       sourceConfidence: 0.998,
       requiresReview: false,
@@ -241,4 +246,51 @@ test("el reporte nativo compara huella, emisor y tipo contra el manifiesto", () 
   assert.ok(result.errors.some((error) => error.includes("sourceFingerprint no coincide")));
   assert.ok(result.errors.some((error) => error.includes("source Santander")));
   assert.ok(result.errors.some((error) => error.includes("kind card")));
+});
+
+test("el reporte nativo aplica umbrales OCR a estados promovidos", () => {
+  const valid = verifyNativeCorpusReport([
+    {
+      file: "santander.pdf",
+      sourceFingerprint: "a".repeat(64),
+      source: "Santander",
+      kind: "bank",
+      status: "valid",
+      mode: "vision-ocr",
+      sourceStatus: "verified",
+      sourceConfidence: 0.998,
+      requiresReview: false,
+      ocrConfidence: 0.9,
+      weakestOCRPage: 0.8,
+      ocrColumnsCalibrated: true,
+      rows: 43,
+      accountKey: "santander:7079",
+      expectedAccountKey: "santander:7079",
+    },
+  ], 1);
+  assert.equal(valid.ok, true);
+
+  const weak = verifyNativeCorpusReport([
+    {
+      file: "santander.pdf",
+      sourceFingerprint: "a".repeat(64),
+      source: "Santander",
+      kind: "bank",
+      status: "valid",
+      mode: "vision-ocr",
+      sourceStatus: "verified",
+      sourceConfidence: 0.998,
+      requiresReview: false,
+      ocrConfidence: 0.87,
+      weakestOCRPage: 0.77,
+      ocrColumnsCalibrated: false,
+      rows: 43,
+      accountKey: "santander:7079",
+      expectedAccountKey: "santander:7079",
+    },
+  ], 1);
+  assert.equal(weak.ok, false);
+  assert.ok(weak.errors.some((error) => error.includes("confianza media menor")));
+  assert.ok(weak.errors.some((error) => error.includes("página menor")));
+  assert.ok(weak.errors.some((error) => error.includes("columnas OCR calibradas")));
 });
