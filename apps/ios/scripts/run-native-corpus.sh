@@ -12,6 +12,17 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 cd "$script_dir"
 
+verify_enabled=0
+manifest_path=""
+if [[ "${MARCELITO_PDF_CORPUS_VERIFY:-}" =~ ^(1|true|yes)$ ]]; then
+  verify_enabled=1
+  manifest_path="${MARCELITO_PDF_CORPUS_MANIFEST:-$repo_root/tests/fixtures/pdf-corpus-attachments.json}"
+  if [[ ! -f "$manifest_path" ]]; then
+    echo "No se encontró el manifiesto del corpus: $manifest_path" >&2
+    exit 2
+  fi
+fi
+
 if ! command -v xcodegen >/dev/null 2>&1; then
   echo "Falta xcodegen. Instálalo con: brew install xcodegen" >&2
   exit 2
@@ -53,13 +64,12 @@ xcode_status="${PIPESTATUS[0]}"
 set -e
 
 verify_status=0
-if [[ "${MARCELITO_PDF_CORPUS_VERIFY:-}" =~ ^(1|true|yes)$ ]]; then
+if [[ "$verify_enabled" -eq 1 ]]; then
   if ! command -v node >/dev/null 2>&1; then
     echo "No se encontró Node.js; no se pudo validar NATIVE_CORPUS_REPORT." >&2
     verify_status=2
   else
     reader_version="$(sed -n 's/.*static let readerVersion = "\([^"]*\)".*/\1/p' "$repo_root/apps/ios/Cauce/Models.swift" | head -n 1)"
-    manifest_path="${MARCELITO_PDF_CORPUS_MANIFEST:-$repo_root/tests/fixtures/pdf-corpus-attachments.json}"
     verify_args=(
       "$repo_root/scripts/verify-native-corpus-report.ts"
       --log "$log_file"
