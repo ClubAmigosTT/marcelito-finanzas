@@ -527,4 +527,59 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(store.dashboardIsBlocked)
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
     }
+
+    func testLegacyStatementJSONDecodesWithoutNewOCRFields() throws {
+        // A user may upgrade with statements persisted by a previous build.
+        // Remove every field introduced by the OCR/source-confirmation work
+        // and verify that the current Codable model still opens the record.
+        let original = StatementRecord(
+            id: UUID(),
+            source: "Santander",
+            period: "agosto 2026",
+            fileName: "estado.pdf",
+            importedAt: Date(timeIntervalSince1970: 1_725_000_000),
+            transactionCount: 2,
+            requiresReview: true,
+            kind: .bank,
+            summary: StatementSummaryRecord(cashBalance: Decimal(string: "27654.24")),
+            reconciliation: StatementReconciliationRecord(
+                status: .pending,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "Santander",
+                confidence: 0.90,
+                status: .review,
+                evidence: ["nombre de archivo"],
+                ignoredBodyMentions: []
+            ),
+            issuerConfirmedByUser: true,
+            ocrConfidence: 0.93,
+            ocrPageConfidences: [0.91, 0.95],
+            ocrColumnsCalibrated: false,
+            sourceFingerprint: "sha256",
+            readerVersion: FinanceStore.readerVersion
+        )
+
+        let encoded = try JSONEncoder().encode(original)
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        for key in [
+            "issuerConfirmedByUser", "ocrConfidence", "ocrPageConfidences",
+            "ocrColumnsCalibrated", "sourceFingerprint", "readerVersion"
+        ] {
+            object.removeValue(forKey: key)
+        }
+
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(StatementRecord.self, from: legacyData)
+
+        XCTAssertEqual(decoded.id, original.id)
+        XCTAssertEqual(decoded.source, "Santander")
+        XCTAssertEqual(decoded.transactionCount, 2)
+        XCTAssertNil(decoded.issuerConfirmedByUser)
+        XCTAssertNil(decoded.ocrColumnsCalibrated)
+        XCTAssertNil(decoded.readerVersion)
+    }
 }
