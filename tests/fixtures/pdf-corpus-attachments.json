@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "readerVersion": "web-reader-2026.08.31",
+  "tolerance": 0.05,
+  "purpose": "Expectativas del corpus de adjuntos validado; los PDFs permanecen fuera del repositorio.",
+  "files": [
+    {
+      "file": "1-28_may_2026_-_27_jun_2026.pdf",
+      "sourceFingerprint": "e1a59460b86cab81f298cfa42e4cc1f738bf932bf5ccdb543cb49d623eb69abc",
+      "source": "Amex",
+      "kind": "card",
+      "status": "valid",
+      "rows": 92,
+      "summary": {
+        "extractedChargeTotal": 28034.19
+      }
+    },
+    {
+      "file": "2-28_jun_2026_-_27_jul_2026.pdf",
+      "sourceFingerprint": "83dc1e0b60c2edd56aa14330c7d001109cdc600af83a66e8e87243fdf86cfcc8",
+      "source": "Amex",
+      "kind": "card",
+      "status": "valid",
+      "rows": 145,
+      "summary": {
+        "extractedChargeTotal": 46711.63,
+        "extractedPaymentTotal": 34405.21
+      }
+    },
+    {
+      "file": "3-Estado-de-cuenta-mayo-2026.pdf",
+      "sourceFingerprint": "f6940102b000539c733632727909dafbd8d97bca313d8c959ac5798d0611d6e4",
+      "source": "Santander",
+      "kind": "bank",
+      "status": "pending"
+    },
+    {
+      "file": "4-Estado-de-cuenta-julio-2026.pdf",
+      "sourceFingerprint": "747aba6d4453c0b7173c450a5a125d94cfb38a0940cb1776dd059f0d0e6e78a9",
+      "source": "Santander",
+      "kind": "bank",
+      "status": "pending"
+    },
+    {
+      "file": "5-Estado-de-cuenta-agosto-2026.pdf",
+      "sourceFingerprint": "30ccfc7fc31a128bbfd9f1d6c7c84e6840dbdc20c9cad9d90cac0807a845b8c0",
+      "source": "Santander",
+      "kind": "bank",
+      "status": "pending"
+    },
+    {
+      "file": "6-28_jul_2026_-_27_ago_2026.pdf",
+      "sourceFingerprint": "f2518086b1f4767c72c9e5d6d02ec27576576b8cfee5014d8b2eb0a635989b06",
+      "source": "Amex",
+      "kind": "card",
+      "status": "valid",
+      "rows": 105,
+      "summary": {
+        "extractedChargeTotal": 33177.48,
+        "extractedPaymentTotal": 23150.88
+      }
+    },
+    {
+      "file": "7-Estado-de-cuenta-junio-2026.pdf",
+      "sourceFingerprint": "72b13daa0b9009017ce3d5d9c4951070a70da5f2888e8bbcb83ef4f1231455fb",
+      "source": "Santander",
+      "kind": "bank",
+      "status": "pending"
+    },
+    {
+      "file": "8-BBVA-agosto-.pdf",
+      "sourceFingerprint": "1c6c6e5a9aa96afa46bdfcd606c0c184f2ef0a964a9e51e4202be17b1ea4e558",
+      "source": "BBVA",
+      "kind": "bank",
+      "status": "valid",
+      "rows": 11,
+      "summary": {
+        "extractedDepositTotal": 19500,
+        "extractedWithdrawalTotal": 22058.69
+      }
+    }
+  ]
+}
