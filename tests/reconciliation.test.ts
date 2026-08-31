@@ -1074,3 +1074,28 @@ test("la migración elimina filas PDF obsoletas y conserva movimientos manuales"
   assert.equal(prepared.statements[0]?.status, "review");
   assert.equal(prepared.statements[0]?.reconciliationStatus, "pending");
 });
+
+test("la migración conserva filas del lector actual que esperan revisión OCR", () => {
+  const currentPending = {
+    ...bank("bbva-ocr", "BBVA", "agosto 2026"),
+    readerVersion: "web-reader-current",
+    status: "review" as const,
+    reconciliationStatus: "pending" as const,
+    reconciliation: { status: "pending" as const, tolerance: 0.05, reason: "OCR provisional" },
+  };
+  const ocrRow = movement({
+    id: "ocr-row",
+    date: "10 ago 2026",
+    description: "COMPRA OCR",
+    account: "BBVA",
+    amount: -120,
+    flow: "expense",
+    statementId: currentPending.id,
+  });
+
+  const prepared = prepareStoredLedger([currentPending], [ocrRow], "web-reader-current");
+  assert.equal(prepared.quarantinedMovementCount, 0);
+  assert.deepEqual(prepared.transactions.map((row) => row.id), ["ocr-row"]);
+  assert.equal(prepared.statements[0]?.reconciliationStatus, "pending");
+  assert.equal(prepared.statements[0]?.reconciliation?.reason, "OCR provisional");
+});
