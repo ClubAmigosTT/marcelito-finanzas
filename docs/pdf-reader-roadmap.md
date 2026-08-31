@@ -188,3 +188,5 @@ macOS/Xcode para cerrar la certificación.
 El runner nativo ya contrasta los controles de depósitos y retiros del resumen
 incluso cuando una lectura escaneada permanece `pending`; solo difiere la
 aserción de sumas de filas hasta que Vision reconstruye movimientos válidos.
+La ejecución está encapsulada en `apps/ios/scripts/run-native-corpus.sh`, que
+conserva el `.xcresult` y el log para que cada calibración sea reproducible.
