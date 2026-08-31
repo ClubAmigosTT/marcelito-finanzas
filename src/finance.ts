@@ -16,7 +16,7 @@ const OCR_MIN_PAGE_CONFIDENCE = 0.78;
  * Persisted data can outlive the import dialog and may have been edited by an
  * older build, so every KPI boundary must re-check the same thresholds.
  */
-function hasSufficientOcrQuality(statement: Statement) {
+export function hasSufficientOcrQuality(statement: Statement) {
   if (statement.mode !== "ocr") return true;
   const average = statement.ocrConfidence;
   const pages = statement.ocrPageConfidences;

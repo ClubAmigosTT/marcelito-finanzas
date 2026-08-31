@@ -31,7 +31,7 @@ import {
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { categories } from "./data";
 import { createAuditRun } from "./audit";
-import { buildFinanceMetrics, defaultStatementKind, isSpendTransaction, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
+import { buildFinanceMetrics, defaultStatementKind, hasSufficientOcrQuality, isSpendTransaction, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
 import { gateOcrReconciliation, inspectPdf, parseImportedTransactions, PDF_READER_VERSION, reconcileStatementImport, parseStatementSummary } from "./pdfImport";
 import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
 import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey } from "./reconciliation";
@@ -445,6 +445,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       && item.reconciliationStatus === "valid"
       && item.source !== "Desconocido"
       && item.kind !== "unknown"
+      && hasSufficientOcrQuality(item)
       ? {
         ...item,
         status: "ready",

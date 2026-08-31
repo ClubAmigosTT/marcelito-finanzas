@@ -1,20 +1,8 @@
 import { PDF_READER_VERSION } from "./pdfImport.ts";
+import { hasSufficientOcrQuality } from "./finance.ts";
 import type { Statement, Transaction } from "./types.ts";
 
 const MIGRATION_TOLERANCE = 0.05;
-const OCR_MIN_AVERAGE_CONFIDENCE = 0.88;
-const OCR_MIN_PAGE_CONFIDENCE = 0.78;
-
-function hasSufficientOcrQuality(statement: Statement) {
-  if (statement.mode !== "ocr") return true;
-  const average = statement.ocrConfidence;
-  const pages = statement.ocrPageConfidences;
-  return average !== undefined
-    && Number.isFinite(average)
-    && average >= OCR_MIN_AVERAGE_CONFIDENCE
-    && Boolean(pages?.length)
-    && pages?.every((page) => Number.isFinite(page) && page >= OCR_MIN_PAGE_CONFIDENCE) === true;
-}
 
 /**
  * Makes persisted statements safe across parser revisions.
