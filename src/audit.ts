@@ -55,6 +55,11 @@ export function createAuditRun(
     reconciledStatementCount: statements.length - pendingStatements,
     canonicalMovementCount: transactions.length,
     issueCount,
+    sourceFingerprints: statements
+      .map((statement) => statement.sourceFingerprint)
+      .filter((fingerprint): fingerprint is string => Boolean(fingerprint))
+      .filter((fingerprint, index, all) => all.indexOf(fingerprint) === index)
+      .sort(),
     message: pipeline.audit.criticalIssues[0] ?? (pendingStatements ? `${pendingStatements} estado(s) pendientes de conciliación o revisión.` : undefined),
   };
 }

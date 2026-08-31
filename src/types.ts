@@ -218,5 +218,7 @@ export type AuditRunRecord = {
   reconciledStatementCount: number;
   canonicalMovementCount: number;
   issueCount: number;
+  /** SHA-256 identities of the source PDFs included in this audit. */
+  sourceFingerprints?: string[];
   message?: string;
 };
