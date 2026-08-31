@@ -100,6 +100,12 @@ if (!directory) {
   let failures = 0;
   let goldenAutoAccepted = 0;
   let goldenFalseAccepted = 0;
+  const expectedFiles = manifest.files ?? [];
+  const expectedNames = expectedFiles.map((item) => item.file);
+  const duplicateManifestFiles = [...new Set(expectedNames.filter((name, index) => expectedNames.indexOf(name) !== index))].sort();
+  const missingManifestFiles = expectedNames.filter((name) => !names.includes(name)).sort();
+  if (duplicateManifestFiles.length) failures += duplicateManifestFiles.length;
+  if (missingManifestFiles.length) failures += missingManifestFiles.length;
 
   for (const name of names) {
     const result = await evaluate(resolve(root, name));
@@ -135,7 +141,9 @@ if (!directory) {
     blocked: results.length - accepted,
     manifestChecked: Boolean(manifestPath),
     manifestFailures: failures,
-    goldenExpectedFiles: manifest.files?.length ?? 0,
+    manifestMissingFiles: missingManifestFiles,
+    manifestDuplicateFiles: duplicateManifestFiles,
+    goldenExpectedFiles: expectedFiles.length,
     goldenAutoAccepted,
     goldenFalseAccepted,
     automaticAcceptancePrecision: goldenAutoAccepted + goldenFalseAccepted > 0
