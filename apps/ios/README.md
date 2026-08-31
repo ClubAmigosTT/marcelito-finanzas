@@ -17,6 +17,21 @@ xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
   -destination "platform=iOS Simulator,name=iPhone 16" test
 ```
 
+Para medir los PDFs reales con el mismo lector Vision, conserva los archivos
+fuera del repositorio y pasa la carpeta al test nativo. El test exige los ocho
+archivos del manifiesto, verifica los cuatro estados de texto y emite una línea
+`NATIVE_CORPUS_REPORT` con el resultado de cada escaneo:
+
+```bash
+MARCELITO_PDF_CORPUS_DIR="/ruta/a/estados-validados" \
+xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
+  -destination "platform=iOS Simulator,name=iPhone 16" test
+```
+
+Los estados escaneados que sigan en `pending` no alimentan el libro; cuando
+Vision concilie uno, se puede promover su expectativa a `valid` y exigir
+también conteo exacto de filas en la siguiente corrida.
+
 Las pruebas verifican que el emisor se identifica por el encabezado
 institucional, que las filas administrativas se descartan y que un crédito de
 Amex no termina como gasto. El workflow de GitHub las ejecuta automáticamente

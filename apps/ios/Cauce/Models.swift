@@ -271,6 +271,7 @@ struct StatementRecord: Identifiable, Codable {
 
 struct ImportSummary {
     let source: String
+    let kind: StatementKind
     let period: String
     let fileName: String
     let imported: Int
@@ -2367,6 +2368,7 @@ final class FinanceStore {
 
         return ImportSummary(
             source: source,
+            kind: detectedKind,
             period: period,
             fileName: url.lastPathComponent,
             imported: canonicalFresh.count,
