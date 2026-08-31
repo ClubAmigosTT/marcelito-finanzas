@@ -192,4 +192,6 @@ La ejecución está encapsulada en `apps/ios/scripts/run-native-corpus.sh`, que
 conserva el `.xcresult` y el log para que cada calibración sea reproducible.
 En Santander, si Vision no identifica los tres anclajes de columna, el lector
 puede reconstruir filas para diagnóstico con el layout conservador, pero la
-importación queda provisional y no puede autoalimentar los KPI.
+importación queda provisional y no puede autoalimentar los KPI. La calibración
+solo se considera válida si los anclajes aparecen en la misma página y línea
+visual; tampoco se combinan etiquetas de resúmenes o páginas distintas.
