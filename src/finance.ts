@@ -40,6 +40,7 @@ export function isStatementEligibleForDashboard(statement: Statement) {
   if (statement.reconciliationStatus !== undefined && statement.reconciliationStatus !== "valid") return false;
   if (statement.status === "review") return false;
   if (!hasSufficientOcrQuality(statement)) return false;
+  if (statement.source === "Desconocido") return false;
   const sourceEvidence = statement.sourceDetection;
   if (sourceEvidence && sourceEvidence.status !== "verified" && statement.issuerConfirmedByUser !== true) return false;
   return true;
@@ -686,6 +687,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     .map((statement) => statement.id);
   const blockedForSourceEvidence = statements
     .filter((statement) => {
+      if (statement.source === "Desconocido") return true;
       const sourceEvidence = statement.sourceDetection;
       return Boolean(sourceEvidence && sourceEvidence.status !== "verified" && statement.issuerConfirmedByUser !== true);
     })

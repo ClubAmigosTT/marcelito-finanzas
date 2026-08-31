@@ -1076,6 +1076,29 @@ test("un estado con emisor no verificado no puede alimentar KPI ni auditoría", 
   assert.equal(audit.status, "blocked");
 });
 
+test("un estado legado sin emisor conocido queda fuera aunque tenga conciliación válida", () => {
+  const statement: Statement = {
+    ...bank("unknown-legacy", "Desconocido", "agosto 2026"),
+    reconciliationStatus: "valid",
+    reconciliation: { status: "valid", tolerance: 0.05 },
+  };
+  const transaction = movement({
+    id: "unknown-legacy-spend",
+    date: "10 ago 2026",
+    description: "COMPRA SIN EMISOR",
+    account: "Desconocido",
+    amount: -450,
+    flow: "expense",
+    statementId: statement.id,
+  });
+  assert.equal(isStatementEligibleForDashboard(statement), false);
+  const pipeline = runTransactionPipeline([transaction], [statement]);
+  const metrics = buildFinanceMetrics([transaction], [statement], pipeline);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.dataQuality.critical, true);
+  assert.match(metrics.audit.criticalIssues.join(" "), /emisor no verificado/);
+});
+
 test("un modo de lectura desconocido nunca se considera texto confiable", () => {
   const statement = {
     ...bank("unknown-mode", "BBVA", "agosto 2026"),
