@@ -101,7 +101,9 @@ filas y totales esperados por archivo. Si falta un archivo declarado o aparece
 duplicado en el manifiesto, la corrida falla. El resultado incluye método
 (`pdf-text` u `ocr-required`), confianza del emisor, filas sospechosas,
 filas sin evidencia, cobertura de evidencia, cobertura de filas y motivo de
-cada bloqueo. Cuando existe manifiesto, también
+cada bloqueo. También conserva las señales institucionales usadas para
+identificar el emisor y las menciones de contrapartes que fueron ignoradas.
+Cuando existe manifiesto, también
 calcula `automaticAcceptancePrecision`:
 aceptaciones correctas divididas entre todas las aceptaciones automáticas
 doradas, incluyendo cualquier aceptación falsa. Un archivo no descrito en el
