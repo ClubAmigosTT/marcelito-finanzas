@@ -97,6 +97,24 @@ test("el resumen nativo exige cubrir todos los archivos con goldens", () => {
   assert.ok(result.errors.some((error) => error.includes("expectedValid + expectedPending")));
 });
 
+test("el resumen nativo no permite goldens aceptados fuera de accepted", () => {
+  const result = verifyNativeCorpusSummary({
+    readerVersion: "ios-reader-test",
+    files: 8,
+    accepted: 0,
+    blocked: 8,
+    expectedValid: 8,
+    expectedPending: 0,
+    goldenAutoAccepted: 8,
+    goldenFalseAccepted: 0,
+    automaticAcceptancePrecision: 1,
+    unresolvedOCR: 0,
+    certified: true,
+  }, "ios-reader-test");
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("golden superan el número de aceptados")));
+});
+
 test("el reporte nativo exige una identidad enmascarada por PDF", () => {
   const result = verifyNativeCorpusReport([
     { file: "bbva.pdf", accountKey: "bbva:4922", expectedAccountKey: "bbva:4922" },

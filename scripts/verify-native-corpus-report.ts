@@ -86,6 +86,10 @@ export function verifyNativeCorpusSummary(summary: NativeCorpusSummary, expected
     && files !== undefined && goldenAutoAccepted + goldenFalseAccepted > files) {
     errors.push("los contadores golden superan el número de archivos");
   }
+  if (accepted !== undefined && goldenAutoAccepted !== undefined && goldenFalseAccepted !== undefined
+    && goldenAutoAccepted + goldenFalseAccepted > accepted) {
+    errors.push("los contadores golden superan el número de aceptados");
+  }
   if (precision === undefined || precision < 0 || precision > 1 || precision < 0.99) {
     errors.push(`precisión automática ${precision ?? "ausente"} fuera del objetivo 0.99`);
   }
