@@ -22,6 +22,8 @@ gasto real sin separar esas secciones.
 
 - Emisor verificado por evidencia institucional del encabezado; nombres dentro de movimientos son contrapartes.
 - Estado bancario válido solo si depósitos, retiros y conteos concilian dentro de ±$0.05.
+- Cuando el estado imprime saldo inicial y saldo final, también se valida
+  `saldo inicial + depósitos − retiros = saldo final` dentro de ±$0.05.
 - Cuando el estado declara cantidades, se conserva la cobertura de filas
   extraídas/esperadas y cualquier diferencia bloquea la aceptación aunque los
   importes coincidan.
