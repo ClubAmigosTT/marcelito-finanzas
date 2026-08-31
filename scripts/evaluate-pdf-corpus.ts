@@ -61,6 +61,21 @@ async function evaluate(file: string) {
     ? { status: "pending" as const, tolerance: 0.05, extractedMovementCount: 0, reason: "Emisor no identificado" }
     : reconcileStatementImport(kind, summary, transactions);
   const suspiciousRows = transactions.filter((row) => !Number.isFinite(row.amount) || Math.abs(row.amount) >= 100_000_000 || row.date === "Sin fecha");
+  // A valid total is not enough to certify an extracted row. Every accepted
+  // movement must remain traceable to the source page and a bounded fragment
+  // of the input text so a reviewer can reproduce the amount and description.
+  const missingEvidenceRows = transactions.filter((row) => {
+    const evidence = row.extractionEvidence;
+    return !evidence
+      || !Number.isFinite(evidence.confidence)
+      || !evidence.method
+      || !Number.isInteger(evidence.page)
+      || (evidence.page ?? 0) < 1
+      || !evidence.sourceText?.trim();
+  });
+  const evidenceCoverage = transactions.length > 0
+    ? Number(((transactions.length - missingEvidenceRows.length) / transactions.length).toFixed(4))
+    : 1;
   return {
     file: fileName,
     mode,
@@ -70,6 +85,8 @@ async function evaluate(file: string) {
     kind,
     rows: transactions.length,
     suspiciousRows: suspiciousRows.length,
+    missingEvidenceRows: missingEvidenceRows.length,
+    evidenceCoverage,
     reconciliation: {
       status: reconciliation.status,
       reason: reconciliation.reason,
@@ -134,7 +151,8 @@ if (!directory) {
     if (mismatches.length) failures += 1;
     const autoAccepted = result.reconciliation.status === "valid"
       && result.sourceStatus === "verified"
-      && result.suspiciousRows === 0;
+      && result.suspiciousRows === 0
+      && result.missingEvidenceRows === 0;
     if (expected && autoAccepted) {
       if (expected.status === "valid" && mismatches.length === 0) goldenAutoAccepted += 1;
       else goldenFalseAccepted += 1;
@@ -142,7 +160,10 @@ if (!directory) {
     results.push({ ...result, ...(expected ? { expected: { checked, mismatches } } : {}) });
   }
 
-  const accepted = results.filter((result) => result.reconciliation.status === "valid" && result.sourceStatus === "verified" && result.suspiciousRows === 0).length;
+  const accepted = results.filter((result) => result.reconciliation.status === "valid"
+    && result.sourceStatus === "verified"
+    && result.suspiciousRows === 0
+    && result.missingEvidenceRows === 0).length;
   const automaticAcceptancePrecision = goldenAutoAccepted + goldenFalseAccepted > 0
     ? Number((goldenAutoAccepted / (goldenAutoAccepted + goldenFalseAccepted)).toFixed(4))
     : null;

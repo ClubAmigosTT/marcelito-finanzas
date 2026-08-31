@@ -38,6 +38,10 @@ gasto real sin separar esas secciones.
 - Cada fila también conserva un fragmento de origen acotado y, cuando existe
   OCR visual, sus coordenadas normalizadas. La vista de detalle permite
   inspeccionar esta evidencia sin guardar el PDF completo dentro del libro.
+- La certificación exige evidencia completa por fila: método, página, confianza
+  finita y fragmento de origen no vacío. Si falta uno de estos campos, la fila
+  puede permanecer visible para revisión, pero el estado no cuenta como
+  aceptación automática ni como evidencia del 99%.
 - El OCR web conserva confianza media y por página, limita la resolución de cada lienzo para evitar crashes por memoria y rechaza archivos de más de 50 MB con un mensaje recuperable.
 - Cada página OCR tiene un límite de 45 segundos; si el motor se atasca, la
   importación termina con un error recuperable y no deja un proceso de OCR
@@ -66,6 +70,8 @@ Métricas mínimas por versión:
 - 100% de estados aceptados conciliados contra importes y conteos;
 - 100% de duplicados de solapamiento eliminados sin borrar compras idénticas legítimas;
 - 100% de pagos de tarjeta y transferencias propias emparejados cuando existe la contraparte.
+- 100% de cobertura de evidencia en las filas aceptadas (página, método,
+  confianza y fragmento de origen).
 
 Si una métrica falla, el parser queda en revisión y el dashboard se bloquea hasta corregir la causa.
 
@@ -91,7 +97,8 @@ El manifiesto opcional fija emisor, tipo, estado de conciliación, número de
 filas y totales esperados por archivo. Si falta un archivo declarado o aparece
 duplicado en el manifiesto, la corrida falla. El resultado incluye método
 (`pdf-text` u `ocr-required`), confianza del emisor, filas sospechosas,
-cobertura de filas y motivo de cada bloqueo. Cuando existe manifiesto, también
+filas sin evidencia, cobertura de evidencia, cobertura de filas y motivo de
+cada bloqueo. Cuando existe manifiesto, también
 calcula `automaticAcceptancePrecision`:
 aceptaciones correctas divididas entre todas las aceptaciones automáticas
 doradas, incluyendo cualquier aceptación falsa. Un archivo no descrito en el
