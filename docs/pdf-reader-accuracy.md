@@ -113,6 +113,13 @@ La corrida reproducible sobre los 8 adjuntos disponibles encontró
 `ocr-required` no se cuenta como aceptación hasta que Vision/Tesseract extraiga
 filas y concilie sus totales.
 
+Como diagnóstico adicional, una corrida local de Tesseract sobre Santander
+agosto a 130 dpi produjo confianzas por página de 79%–93% (media aproximada
+85.4%). Ese resultado queda por debajo del umbral automático de 88%, por lo que
+el bloqueo es intencional: la siguiente calibración debe ejecutarse con Vision
+en macOS y contrastarse contra los totales del estado, no relajarse por una
+coincidencia parcial.
+
 ## Contrato de lectura en iOS
 
 El proyecto nativo incluye `apps/ios/Tests/ReaderContractTests.swift`. Estas
