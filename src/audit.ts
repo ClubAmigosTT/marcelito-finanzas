@@ -1,4 +1,5 @@
 import { buildDeduplicationKey, type PipelineResult } from "./reconciliation.ts";
+import { PDF_READER_VERSION } from "./pdfImport.ts";
 import type { AuditRunRecord, AuditRunStatus, Statement, Transaction } from "./types.ts";
 
 /**
@@ -60,6 +61,10 @@ export function createAuditRun(
       .filter((fingerprint): fingerprint is string => Boolean(fingerprint))
       .filter((fingerprint, index, all) => all.indexOf(fingerprint) === index)
       .sort(),
+    readerVersions: [...new Set([
+      PDF_READER_VERSION,
+      ...statements.map((statement) => statement.readerVersion).filter((version): version is string => Boolean(version)),
+    ])].sort(),
     message: pipeline.audit.criticalIssues[0] ?? (pendingStatements ? `${pendingStatements} estado(s) pendientes de conciliación o revisión.` : undefined),
   };
 }
