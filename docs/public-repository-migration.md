@@ -51,6 +51,8 @@ de cambiar la visibilidad.
 - [x] Mantener validación web/iOS sin secretos en cada push y pull request.
 - [x] Separar TestFlight en el entorno protegido `testflight`.
 - [x] Permitir que TestFlight despliegue únicamente desde tags `ios-v*`.
+- [ ] Tras borrar los tags históricos, comprobar que la regla del entorno ya no
+  incluye ningún tag antiguo (actualmente coincide con 23 tags).
 - [x] Reducir la retención de artefactos de diagnóstico.
 - [x] Activar dependency graph, alertas y actualizaciones de seguridad de
   Dependabot en la configuración del repositorio.
