@@ -94,7 +94,9 @@ export function detectSourceEvidence(text: string, fileName: string): SourceDete
     confidence,
     status: confidence >= 0.99 ? "verified" : confidence > 0 ? "review" : "unknown",
     evidence,
-    ignoredBodyMentions: knownBodyMentions,
+    // The detected issuer itself is not an ignored counterparty even when
+    // the legal footer repeats its name after the movement table.
+    ignoredBodyMentions: knownBodyMentions.filter((name) => name !== source),
   });
 
   // Prefer issuer legal names, domains, and other stable header markers over
