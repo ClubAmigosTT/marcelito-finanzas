@@ -179,6 +179,12 @@ concilia sus controles y supera la compuerta de confianza. La bandera
 `certified` sigue siendo `false` hasta ejecutar Vision y el corpus real en
 macOS/Xcode.
 
+El reporte diferencia `nativeVisionRequired` de `nativeOCRPending`: el primero
+también cuenta los PDFs procesados por OCR local, porque ese diagnóstico no
+puede sustituir Vision. Cada archivo incluye `qualityGate.statusBefore`,
+`qualityGate.statusAfter` y `qualityGate.applied`, y el nivel superior expone
+`certificationBlockers` para que una corrida parcial no parezca certificada.
+
 Métricas mínimas por versión:
 
 - precisión automática de filas >= 99%;
