@@ -247,11 +247,14 @@ También aplica la compuerta OCR por confianza media (88%) y página (78%);
 una página débil mantiene el estado en revisión aunque las sumas coincidan.
 En OCR visual se corrigen únicamente dentro del token de fecha errores
 acotados como `AG0`→`AGO`, `O5/AGO` y `OBIAGO`; esos reemplazos nunca se
-aplican a descripciones, referencias o importes.
+aplican a descripciones, referencias o importes. En filas Santander, un
+importe con un `1` inicial espurio (por ejemplo `160.00` cuando el saldo
+confirma `60.00`) solo se repara si los centavos restantes coinciden
+exactamente con el delta del saldo corrido; una deriva genérica no se corrige.
 
 La corrida reproducible sobre los 8 adjuntos disponibles encontró
 4 estados aceptables por texto (los 3 Amex y BBVA agosto) y 4 que requieren OCR
-(Santander mayo/julio/agosto y BBVA junio). Un estado marcado como
+(Santander mayo/junio/julio/agosto). Un estado marcado como
 `ocr-required` no se cuenta como aceptación hasta que Vision/Tesseract extraiga
 filas y concilie sus totales.
 
