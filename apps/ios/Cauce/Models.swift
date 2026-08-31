@@ -1,4 +1,5 @@
 import CryptoKit
+import CoreImage
 import Foundation
 import LocalAuthentication
 import Observation
@@ -2192,11 +2193,7 @@ final class FinanceStore {
         var observations: [OCRObservation] = []
         let pageSize = CGSize(width: 1800, height: 2400)
 
-        for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            let image = page.thumbnail(of: pageSize, for: .mediaBox)
-            guard let cgImage = image.cgImage else { continue }
-
+        func recognize(_ cgImage: CGImage, page: Int) -> [OCRObservation] {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
             request.recognitionLanguages = ["es-MX", "en-US"]
@@ -2205,17 +2202,17 @@ final class FinanceStore {
             do {
                 try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
             } catch {
-                continue
+                return []
             }
 
-            let pageObservations = (request.results ?? []).compactMap { result -> OCRObservation? in
+            return (request.results ?? []).compactMap { result -> OCRObservation? in
                 guard let candidate = result.topCandidates(1).first,
                       let text = candidate.string,
                       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     return nil
                 }
                 return OCRObservation(
-                    page: pageIndex,
+                    page: page,
                     text: text,
                     boundingBox: result.boundingBox,
                     confidence: Double(candidate.confidence)
@@ -2227,7 +2224,41 @@ final class FinanceStore {
                 }
                 return $0.centerX < $1.centerX
             }
-            observations.append(contentsOf: pageObservations)
+        }
+
+        func meanConfidence(_ pageObservations: [OCRObservation]) -> Double {
+            guard !pageObservations.isEmpty else { return 0 }
+            return pageObservations.map(\.confidence).reduce(0, +) / Double(pageObservations.count)
+        }
+
+        func enhancedImage(from cgImage: CGImage) -> CGImage? {
+            let input = CIImage(cgImage: cgImage)
+            guard let filter = CIFilter(name: "CIColorControls") else { return nil }
+            filter.setValue(input, forKey: kCIInputImageKey)
+            filter.setValue(1.35, forKey: kCIInputContrastKey)
+            filter.setValue(-0.02, forKey: kCIInputBrightnessKey)
+            guard let output = filter.outputImage else { return nil }
+            return CIContext(options: [.useSoftwareRenderer: false]).createCGImage(output, from: output.extent)
+        }
+
+        for pageIndex in 0..<document.pageCount {
+            guard let page = document.page(at: pageIndex) else { continue }
+            let image = page.thumbnail(of: pageSize, for: .mediaBox)
+            guard let cgImage = image.cgImage else { continue }
+
+            let baseObservations = recognize(cgImage, page: pageIndex)
+            var selectedObservations = baseObservations
+            // A contrast pass is attempted only for visually weak pages. It
+            // is bounded to one temporary image and the original result wins
+            // whenever the retry does not improve mean confidence.
+            if meanConfidence(baseObservations) < 0.88,
+               let contrastImage = enhancedImage(from: cgImage) {
+                let contrastObservations = recognize(contrastImage, page: pageIndex)
+                if meanConfidence(contrastObservations) > meanConfidence(baseObservations) {
+                    selectedObservations = contrastObservations
+                }
+            }
+            observations.append(contentsOf: selectedObservations)
         }
 
         return observations

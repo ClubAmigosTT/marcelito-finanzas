@@ -45,6 +45,9 @@ gasto real sin separar esas secciones.
 - En páginas con confianza inferior a 88%, el OCR web hace una segunda pasada
   acotada con contraste mejorado y conserva el resultado de mayor confianza;
   si la conciliación o el conteo no cuadran, el estado sigue bloqueado.
+- Vision en iOS aplica la misma estrategia por página: solo genera una imagen
+  temporal con contraste cuando la primera pasada es débil y conserva el
+  resultado que tenga mayor confianza media.
 - Aunque los totales coincidan, el OCR web queda provisional si la confianza
   media baja de 88% o alguna página baja de 78%; una coincidencia accidental no
   puede convertir una lectura visual débil en un KPI.
