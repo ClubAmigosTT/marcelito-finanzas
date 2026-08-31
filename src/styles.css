@@ -575,6 +575,14 @@ body { background: var(--bg); color: var(--ink); }
 .category-detail-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; padding-bottom: 13px; border-bottom: 1px solid var(--line); }
 .category-detail-head h3 { margin-top: 3px; color: var(--navy); font-size: 16px; }
 .category-detail-head p, .category-detail-caption { margin-top: 4px; color: var(--muted); font-size: 10px; }
+.category-trend { display: grid; gap: 10px; padding: 12px 13px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); }
+.category-trend-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.category-trend-head h4 { color: var(--navy); font-size: 12px; }
+.category-trend-head > strong { color: var(--navy); font-family: ui-monospace, monospace; font-size: 13px; }
+.category-trend-bars { height: 94px; display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); align-items: end; gap: 8px; padding-top: 4px; border-bottom: 1px solid var(--line); }
+.category-trend-bar-wrap { min-width: 0; height: 100%; display: grid; grid-template-rows: 1fr auto; align-items: end; gap: 5px; }
+.category-trend-bar { display: block; width: 100%; min-height: 2px; border-radius: 5px 5px 0 0; background: var(--navy); opacity: .84; }
+.category-trend-bar-wrap small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 9px; text-align: center; }
 .category-detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 .category-detail-grid h4 { color: var(--navy); font-size: 12px; }
 .category-detail-list { display: grid; gap: 0; margin: 10px 0 0; padding: 0; list-style: none; }

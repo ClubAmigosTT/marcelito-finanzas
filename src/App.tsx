@@ -961,7 +961,7 @@ function Expenses({ transactions, statements, metrics, onImport }: { transaction
     </section>
     <SpendingSplit period={current} />
     <div className="expense-analysis-grid">
-      <CategoryDistribution categories={metrics.categoryDistribution} period={current} transactions={transactions} statements={statements} />
+      <CategoryDistribution categories={metrics.categoryDistribution} period={current} analyticsPeriods={metrics.analyticsPeriods} transactions={transactions} statements={statements} />
       <MerchantRanking merchants={metrics.topMerchants} period={current} />
     </div>
     <div className="expense-analysis-grid">
@@ -972,7 +972,7 @@ function Expenses({ transactions, statements, metrics, onImport }: { transaction
   </section>;
 }
 
-function CategoryDistribution({ categories, period, transactions, statements }: { categories: ReturnType<typeof buildFinanceMetrics>["categoryDistribution"]; period?: AnalyticsPeriod; transactions: Transaction[]; statements: Statement[] }) {
+function CategoryDistribution({ categories, period, analyticsPeriods, transactions, statements }: { categories: ReturnType<typeof buildFinanceMetrics>["categoryDistribution"]; period?: AnalyticsPeriod; analyticsPeriods: AnalyticsPeriod[]; transactions: Transaction[]; statements: Statement[] }) {
   const [selectedCategory, setSelectedCategory] = useState<string | null>(null);
   const max = Math.max(...categories.map((category) => category.total), 1);
   const selectedTransactions = useMemo(() => {
@@ -1000,6 +1000,20 @@ function CategoryDistribution({ categories, period, transactions, statements }: 
     return Array.from(grouped.values()).sort((left, right) => right.count - left.count || right.total - left.total).slice(0, 5);
   }, [selectedTransactions]);
   const highest = useMemo(() => selectedTransactions.slice().sort((left, right) => Math.abs(right.amount) - Math.abs(left.amount)).slice(0, 5), [selectedTransactions]);
+  const categoryTrend = useMemo(() => {
+    if (!selectedCategory) return [];
+    const selectedKey = normalizeConcept(selectedCategory);
+    return analyticsPeriods.slice(0, 6).reverse().map((item) => ({
+      key: item.key,
+      label: item.label,
+      total: transactions
+        .filter((transaction) => isSpendTransaction(transaction)
+          && normalizeConcept(transaction.category) === selectedKey
+          && transactionPeriodKey(transaction, statements) === item.key)
+        .reduce((total, transaction) => total + Math.abs(transaction.amount), 0),
+    }));
+  }, [analyticsPeriods, selectedCategory, statements, transactions]);
+  const categoryTrendMax = Math.max(...categoryTrend.map((item) => item.total), 1);
   const detailId = selectedCategory ? `category-detail-${normalizeConcept(selectedCategory).replace(/\s+/g, "-")}` : undefined;
 
   function toggleCategory(category: string) {
@@ -1016,6 +1030,7 @@ function CategoryDistribution({ categories, period, transactions, statements }: 
   })}</div> : <EmptyState title="Sin categorías todavía" body="Revisa las categorías desde Cuentas › Movimientos." />}
     {selectedCategory && <div className="category-detail-panel" id={detailId} aria-label={`Detalle de ${selectedCategory}`}>
       <div className="category-detail-head"><div><span className="eyebrow">Detalle de categoría</span><h3>{selectedCategory}</h3><p>{selectedTransactions.length} movimiento{selectedTransactions.length === 1 ? "" : "s"} · {displayMoney(detailTotal)} en {periodLabel(period)}</p></div><button type="button" className="icon-button" aria-label="Cerrar detalle de categoría" onClick={() => setSelectedCategory(null)}><X size={18} /></button></div>
+      {categoryTrend.some((item) => item.total > 0) && <div className="category-trend" aria-label={`Evolución de ${selectedCategory} en los últimos periodos`}><div className="category-trend-head"><div><h4>Evolución</h4><p className="category-detail-caption">Gasto de esta categoría por periodo.</p></div><strong>{displayMoney(categoryTrend.at(-1)?.total)}</strong></div><div className="category-trend-bars" style={{ gridTemplateColumns: `repeat(${categoryTrend.length}, minmax(0, 1fr))` }} role="img" aria-label={categoryTrend.map((item) => `${item.label}: ${displayMoney(item.total)}`).join("; ")}>{categoryTrend.map((item) => <div className="category-trend-bar-wrap" key={item.key}><span className="category-trend-bar" style={{ height: `${Math.max(item.total ? 8 : 2, item.total / categoryTrendMax * 100)}%` }} title={`${item.label}: ${displayMoney(item.total)}`} /><small>{item.label}</small></div>)}</div></div>}
       {selectedTransactions.length ? <div className="category-detail-grid">
         <div><h4>Gastos más recurrentes</h4><p className="category-detail-caption">Comercios que aparecen con mayor frecuencia.</p>{recurring.length ? <ol className="category-detail-list">{recurring.map((merchant, index) => <li key={merchant.name}><span className="category-detail-rank">{index + 1}</span><div><strong>{merchant.name}</strong><small>{merchant.count} movimiento{merchant.count === 1 ? "" : "s"}</small></div><strong>{displayMoney(merchant.total)}</strong></li>)}</ol> : <p className="category-detail-empty">Sin recurrencias identificadas.</p>}</div>
         <div><h4>Gastos más altos</h4><p className="category-detail-caption">Movimientos de mayor importe en el periodo.</p>{highest.length ? <ol className="category-detail-list">{highest.map((transaction, index) => <li key={transaction.id}><span className="category-detail-rank">{index + 1}</span><div><strong>{compactMerchantName(transaction.description)}</strong><small>{transaction.date} · {transaction.account}</small></div><strong>{displayMoney(Math.abs(transaction.amount))}</strong></li>)}</ol> : <p className="category-detail-empty">Sin movimientos destacados.</p>}</div>
