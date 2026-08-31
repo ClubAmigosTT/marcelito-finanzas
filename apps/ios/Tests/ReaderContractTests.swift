@@ -101,6 +101,24 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(snapshot.sourceDetection.evidence.contains { $0.contains("marcadores legales conflictivos") })
     }
 
+    func testConflictingInstitutionalHeaderDoesNotUseFilenameFallback() {
+        let text = """
+        BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
+        Banco Santander México, Institución de Banca Múltiple, Grupo Financiero Santander
+        Detalle de Movimientos Realizados
+        01/08/2026 CARGO SUPERMERCADO 100.00
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "Santander-agosto-2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "Importado")
+        XCTAssertEqual(snapshot.sourceDetection.status, .unknown)
+        XCTAssertTrue(snapshot.sourceDetection.evidence.contains { $0.contains("marcadores legales conflictivos") })
+    }
+
     func testAmexCreditRowIsNotSilentlyConvertedToPurchase() {
         let text = """
         American Express
