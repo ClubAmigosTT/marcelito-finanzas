@@ -2008,10 +2008,19 @@ final class FinanceStore {
             guard let evidence = $0.extractionEvidence else { return true }
             return evidence.method != "vision-ocr" || evidence.confidence < 0.88
         }
+        let weakestOCRPage = ocrPageConfidences?.min()
+        let ocrConfidenceNeedsReview = usedOCR
+            && ((ocrConfidence ?? 0) < 0.88 || (weakestOCRPage ?? 0) < 0.78)
         if ocrFallbackNeedsReview {
             DiagnosticsRecorder.record(
                 stage: "import.ocr.review",
                 message: "\(url.lastPathComponent): se requiere revisión porque alguna fila OCR no conserva evidencia visual suficiente."
+            )
+        }
+        if ocrConfidenceNeedsReview {
+            DiagnosticsRecorder.record(
+                stage: "import.ocr.quality",
+                message: "\(url.lastPathComponent): OCR provisional (media \(Int(((ocrConfidence ?? 0) * 100).rounded()))%, página más débil \(Int(((weakestOCRPage ?? 0) * 100).rounded()))%)."
             )
         }
         let needsReview = fresh.isEmpty
@@ -2020,6 +2029,7 @@ final class FinanceStore {
             || reconciliation.status != .valid
             || sourceDetection.status != .verified
             || ocrFallbackNeedsReview
+            || ocrConfidenceNeedsReview
             || fresh.contains { $0.category == "Por revisar" }
 
         // Invalid/pending rows are quarantined by omission: the statement and
