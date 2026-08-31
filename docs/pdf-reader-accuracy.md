@@ -33,6 +33,14 @@ gasto real sin separar esas secciones.
   importes coincidan.
 - Estado de tarjeta válido solo si cargos y pagos reconocidos concilian con el resumen disponible.
 - Cualquier encabezado, referencia, cuenta, RFC, certificado, saldo o total se descarta como movimiento.
+- En estados bancarios, una fila solo conserva el primer importe y, si está
+  inmediatamente adyacente, un saldo corrido; folios, referencias, CLABE y
+  claves de rastreo posteriores no pueden convertirse en importes. Si OCR
+  fusiona los separadores decimales, el importe solo se recupera mediante el
+  delta del saldo y siempre se vuelve a comparar contra el total declarado.
+- Ningún movimiento individual puede superar el total declarado de depósitos
+  o retiros de su estado; esa fila bloquea la conciliación aunque el resto de
+  las sumas parezca correcto.
 - OCR web sin coordenadas queda provisional. Vision con coordenadas conserva
   página, método y la confianza real de cada observación en cada fila.
 - Cada fila también conserva un fragmento de origen acotado y, cuando existe

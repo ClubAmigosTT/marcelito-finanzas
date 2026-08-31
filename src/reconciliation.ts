@@ -329,16 +329,27 @@ function isValidDirection(transaction: Transaction, statement: Statement | undef
 function validateTransaction(transaction: Transaction, statements: Statement[]) {
   const statement = transaction.statementId ? statements.find((item) => item.id === transaction.statementId) : undefined;
   const description = transaction.description.trim();
+  const declaredDirectionTotal = statement && statementKind(statement) === "bank"
+    ? transaction.amount > 0 ? statement.summary?.depositTotal : statement.summary?.withdrawalTotal
+    : undefined;
+  // A single movement cannot exceed the issuer's declared total for that
+  // direction. This catches OCR tokens that merge separators (for example a
+  // balance misread as 1,633,480) before they can reach any aggregate.
+  const withinDeclaredDirectionTotal = declaredDirectionTotal === undefined
+    || Math.abs(transaction.amount) <= Math.abs(declaredDirectionTotal) + 0.05;
   const validAmount = Number.isFinite(transaction.amount)
     && transaction.amount !== 0
     // Numeric fragments from PDF headers (account numbers, certificate IDs,
     // running balances) must never enter the canonical ledger.
-    && Math.abs(transaction.amount) < 10_000_000;
+    && Math.abs(transaction.amount) < 10_000_000
+    && withinDeclaredDirectionTotal;
   const validDescription = description.length >= 3 && !isAdministrativeDescription(description);
   const validDate = parseDate(transaction.date, statement?.period) !== undefined;
   const validDirection = isValidDirection(transaction, statement);
   const invalid = !validAmount || !validDescription || !validDate || !validDirection;
-  const reason = !validAmount ? "importe inválido o fuera de rango" : !validDescription ? "descripción administrativa o vacía" : !validDate ? "fecha inválida" : !validDirection ? "dirección no clara" : undefined;
+  const reason = !withinDeclaredDirectionTotal
+    ? "importe individual supera el total declarado del estado"
+    : !validAmount ? "importe inválido o fuera de rango" : !validDescription ? "descripción administrativa o vacía" : !validDate ? "fecha inválida" : !validDirection ? "dirección no clara" : undefined;
   const status: TransactionValidationStatus = invalid ? "invalid" : transaction.category === "Sin categoría" || (transaction.confidence ?? 1) < 0.75 ? "review" : "valid";
   return { status, reason };
 }

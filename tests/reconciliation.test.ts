@@ -79,6 +79,18 @@ test("el pipeline rechaza importes absurdos de encabezados o identificadores", (
   assert.equal(result.audit.invalidCount, 1);
 });
 
+test("el pipeline rechaza un movimiento individual mayor que el total declarado del estado", () => {
+  const statement = {
+    ...bank("bbva", "BBVA", "agosto 2026"),
+    summary: { depositTotal: 1_000, withdrawalTotal: 500 },
+  };
+  const result = runTransactionPipeline([
+    movement({ id: "ocr-merged", date: "10 ago 2026", description: "DEPOSITO NOMINA", account: "BBVA", amount: 2_500, flow: "income", statementId: "bbva" }),
+  ], [statement]);
+  assert.equal(result.transactions.length, 0);
+  assert.equal(result.audit.invalidCount, 1);
+});
+
 test("el pipeline rechaza una dirección incompatible con el signo del importe", () => {
   const statements = [bank("bbva", "BBVA", "agosto 2026")];
   const result = runTransactionPipeline([
@@ -366,6 +378,16 @@ test("el estado BBVA completo reconstruye sus 11 filas y concilia los totales", 
   assert.equal(rows.every((row) => row.extractionEvidence?.method === "pdf-text"), true);
 });
 
+test("una fila bancaria sin saldo no usa referencias posteriores como importe", () => {
+  const rows = extractTransactions([
+    "30/JUL 30/JUL SPEI ENVIADO STP 500.00",
+    "2206260binance Referencia 0065112336 646",
+    "00646180191200273736",
+    "MBAN01002607300065112336 Marcelo Andres Diaz Sanchez",
+  ].join("\n"), "BBVA", "BBVA agosto.pdf", "bank");
+  assert.deepEqual(rows.map((row) => [row.description, row.amount]), [["SPEI ENVIADO STP", -500]]);
+});
+
 test("cada fila conserva página y fragmento de evidencia cuando el PDF trae sentinelas", () => {
   const rows = extractTransactions([
     "__PDF_PAGE_2__",
@@ -448,6 +470,34 @@ test("Santander elige el saldo inicial que cuadra cuando el OCR duplica el gráf
   const summary = parseStatementSummary(text, "bank");
   assert.equal(summary.previousBalance, 55_627.93);
   assert.equal(reconcileStatementImport("bank", summary, extractTransactions(text, "Santander", "Santander agosto 2026.pdf", "bank")).status, "valid");
+});
+
+test("Santander tolera que OCR lea RETIROS como RETROS sin perder el total", () => {
+  const summary = parseStatementSummary([
+    "Banco Santander México, S.A., Institución de Banca Múltiple",
+    "Saldo inicial 37,075.03",
+    "+ Depósitos 49,222.45",
+    "- Retros 61,676.00",
+    "= Saldo final 24,621.48",
+    "Detalle de movimientos",
+  ].join("\n"), "bank");
+  assert.equal(summary.depositTotal, 49_222.45);
+  assert.equal(summary.withdrawalTotal, 61_676);
+  assert.equal(summary.cashBalance, 24_621.48);
+});
+
+test("Santander recupera un separador OCR fusionado usando el delta del saldo", () => {
+  const rows = extractTransactions([
+    "Banco Santander México, S.A., Institución de Banca Múltiple",
+    "Saldo inicial 13,986.03",
+    "+ Depósitos 1 16,334.80",
+    "- Retiros 0 0.00",
+    "= Saldo final 30,320.83",
+    "Detalle de movimientos",
+    "29-ABR-2026 0000000 ABONO PAGO DE NOMINA 1,633,480 30,320.83",
+  ].join("\n"), "Santander", "Santander mayo 2026.pdf", "bank");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.amount, 16_334.80);
 });
 
 test("Amex separa compras y pagos sin convertir el pago en gasto", () => {

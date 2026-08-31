@@ -308,7 +308,10 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
       const normalizedLine = line.toLowerCase();
       // The BBVA statement repeats deposits/charges in a percentage chart
       // later in the PDF. Those values are not the declared period totals.
-      const aggregateLabelIndex = normalizedLine.search(/dep.?sitos?|retiros?|abonos?|cargos?/);
+      // Vision/Tesseract commonly drops the `i` in “retiros” (RETROS) or
+      // changes it to a nearby glyph. Keep that bounded variant so the
+      // bank's declared withdrawal total remains available for reconciliation.
+      const aggregateLabelIndex = normalizedLine.search(/dep.?sitos?|retiros?|ret(?:i)?ros?|abonos?|cargos?/);
       const percentIndex = normalizedLine.indexOf("%");
       if (/porcentaje|objetados|certificado|vencimiento|inversion|producto/.test(normalizedLine)
         || /otros\s*cargos|otros\s*abonos/.test(normalizedLine)
@@ -321,7 +324,7 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
       const monetaryValue = monetaryToken?.value;
       if (monetaryValue === undefined) return;
       const isDeposit = /dep.?sitos?|abonos?|total importe abonos?/.test(normalizedLine) && !/retiros?|cargos?/.test(normalizedLine);
-      const isWithdrawal = /retiros?|cargos?|total importe cargos?/.test(normalizedLine) && !/dep.?sitos?|abonos?/.test(normalizedLine);
+      const isWithdrawal = /retiros?|ret(?:i)?ros?|cargos?|total importe cargos?/.test(normalizedLine) && !/dep.?sitos?|abonos?/.test(normalizedLine);
       if (isDeposit) {
         summary.depositTotal = monetaryValue;
         const count = normalizedLine.match(/total movimientos abonos?\s+(\d{1,4})\b/)?.[1]
@@ -504,6 +507,10 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
     }
     const depositDifference = extractedDepositTotal - expectedDeposit;
     const withdrawalDifference = extractedWithdrawalTotal - expectedWithdrawal;
+    const overDeclaredMovement = transactions.some((transaction) => {
+      const expected = transaction.amount > 0 ? expectedDeposit : expectedWithdrawal;
+      return Math.abs(transaction.amount) > Math.abs(expected) + tolerance;
+    });
     const expectedClosingBalance = summary.previousBalance !== undefined && summary.cashBalance !== undefined
       ? summary.previousBalance + extractedDepositTotal - extractedWithdrawalTotal
       : undefined;
@@ -516,7 +523,8 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       || Math.abs(depositDifference) > tolerance
       || Math.abs(withdrawalDifference) > tolerance
       || (closingDifference !== undefined && Math.abs(closingDifference) > tolerance)
-      || countMismatch;
+      || countMismatch
+      || overDeclaredMovement;
     const balanceReason = closingDifference !== undefined && Math.abs(closingDifference) > tolerance
       ? `, saldo final ${closingDifference.toFixed(2)}`
       : "";
@@ -527,7 +535,7 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       extractedWithdrawalTotal,
       extractedMovementCount: transactions.length,
       expectedMovementCount,
-      reason: invalid ? `Las filas no concilian con el resumen (depósitos ${depositDifference.toFixed(2)}, retiros ${withdrawalDifference.toFixed(2)}${balanceReason})` : undefined,
+      reason: invalid ? `Las filas no concilian con el resumen (depósitos ${depositDifference.toFixed(2)}, retiros ${withdrawalDifference.toFixed(2)}${balanceReason}${overDeclaredMovement ? ", importe individual supera total declarado" : ""})` : undefined,
     };
   }
 
@@ -661,7 +669,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
   // layer uses “20 de Junio 2026”. Keep the optional year narrow so a
   // merchant such as “125TH FINEST” cannot be swallowed as year 125.
   const datePattern = new RegExp(
-    `^(?:(\\d{1,2})\\s*(?:de\\s*)?(${monthTokenPattern})(?:\\s*(?:de\\s*)?((?:20\\d{2}|\\d{2})(?!\\d)))?|(?:(\\d{1,2})[-/.](\\d{1,2})[-/.](20\\d{2}|\\d{2}))|(?:(20\\d{2})[-/.](\\d{1,2})[-/.](\\d{1,2}))|(?:(\\d{1,2})[-/](${monthTokenPattern})(?:[-/](20\\d{2}|\\d{2}))?))`,
+    `^(?:(\\d{1,2})\\s*(?:de\\s*)?(${monthTokenPattern})(?:\\s*(?:de\\s*)?((?:20\\d{2}|\\d{2})(?!\\d|\\s*[-/])))?|(?:(\\d{1,2})[-/.](\\d{1,2})[-/.](20\\d{2}|\\d{2}))|(?:(20\\d{2})[-/.](\\d{1,2})[-/.](\\d{1,2}))|(?:(\\d{1,2})[-/](${monthTokenPattern})(?:[-/](20\\d{2}|\\d{2}))?))`,
     "i",
   );
   const amountPattern = /(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?:\s*CR)?(?![A-Za-z0-9])/gi;
@@ -749,7 +757,15 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       .replace(/^(\d{1,2})HUL\b/i, "$1/JUL")
       .replace(/^O(?=\d\s*\/)/i, "0")
       .replace(/^O[B8](?:I)?(?=\s*\/?\s*AGO\b)/i, "07/");
-    const startsWithDate = datePattern.test(dateLine);
+    // BBVA prints operation and settlement dates at the start of one row.
+    // Remove only that second date before anchoring; otherwise the optional
+    // two-digit year branch can consume its day token and leave a malformed
+    // description, especially when the row has no running balance.
+    const rowDateLine = dateLine.replace(
+      /^(\d{1,2}[-/]\w+(?:[-/](?:20)?\d{2})?)\s+\d{1,2}[-/]\w+(?:[-/](?:20)?\d{2})?\s+/i,
+      "$1 ",
+    );
+    const startsWithDate = datePattern.test(rowDateLine);
     // In text-layer PDFs the RFC/reference for a purchase often appears on
     // its own line between the merchant and the amount. It is a continuation
     // of the date-anchored row, not a new administrative heading.
@@ -758,7 +774,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       || /^(?:del\s+al|total\b|saldo\b|periodo\b|fecha\s+de\s+corte|rfc\b|clabe\b)/.test(normalized));
     if (startsWithDate) {
       flushPending();
-      pending = dateLine;
+      pending = rowDateLine;
       pendingForeignCurrency = amexForeignSection;
       pendingPage = currentPage;
     } else if (pending && !breaks) {
@@ -788,46 +804,136 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       const adjustedIndex = joinedAmount ? index + match[0].lastIndexOf(raw) : index;
       return { raw, index: adjustedIndex, value: normalizeAmount(raw) };
     }).filter((candidate) => candidate.value !== 0 && Math.abs(candidate.value) < 100_000_000);
-    // Prefer tokens that look like money. This prevents terminal numbers in
-    // merchant names (store IDs, references and route numbers) from winning.
-    const candidates = allCandidates.filter((candidate) => /[.,]\d{1,2}|\$|\bCR\b/i.test(candidate.raw));
-    const usableCandidates = candidates.length ? candidates : allCandidates;
-    if (!usableCandidates.length) return;
     const normalizedLine = normalizeText(line);
     const bankLike = kind === "bank" || /deposito|retiro|saldo|cuenta de cheques|cuenta de ahorro|abono|cargo/.test(normalizedLine);
+    // OCR can drop every decimal separator in a bank row (for example
+    // “16,334.80” -> “1633480”). Restore the cents scale for large bare
+    // tokens; the final two tokens are the movement and running balance, so a
+    // non-zero folio earlier in the description cannot become the amount.
+    const normalizedAllCandidates = bankLike
+      ? allCandidates.map((candidate) => {
+        const hasDecimalCents = /[.,]\d{1,2}$/.test(candidate.raw);
+        if (!hasDecimalCents && Math.abs(candidate.value) >= 100_000) {
+          return { ...candidate, value: candidate.value / 100 };
+        }
+        return candidate;
+      })
+      : allCandidates;
+    // Prefer tokens that look like money. The end anchor is intentional:
+    // grouping commas such as “1,633,480” are not decimal cents. Bank rows
+    // may contain many bare identifiers after the amount (folio, referencia,
+    // CLABE, rastreo). Those tokens are never a safe substitute for a saldo
+    // corrido, so the selector below only keeps an adjacent candidate when
+    // the text between both tokens is free of identifier markers.
+    const candidates = normalizedAllCandidates.filter((candidate) => /[.,]\d{1,2}$|\$|\bCR\b/i.test(candidate.raw));
+    const hasIdentifierMarker = (from: number, to: number) => /referencia|folio|clabe|rfc|rastreo|mban|bnet|cliente|sanchez|binance|rappi/i.test(tail.slice(from, to));
+    const isLikelyBareIdentifier = (candidate: typeof normalizedAllCandidates[number]) => {
+      const raw = candidate.raw.replace(/\s/g, "");
+      return !/[.,$]/.test(raw) && (raw.length >= 6 || /^0\d+/.test(raw));
+    };
+    const adjacentCandidate = (candidate: typeof normalizedAllCandidates[number]) => {
+      const next = normalizedAllCandidates.find((item) => item.index > candidate.index);
+      if (!next || next.index - candidate.index > 44 || hasIdentifierMarker(candidate.index, next.index)) return undefined;
+      return next;
+    };
+    let usableCandidates: typeof normalizedAllCandidates;
+    if (bankLike) {
+      if (candidates.length) {
+        const first = candidates[0];
+        const previous = [...normalizedAllCandidates].reverse().find((item) => item.index < first.index);
+        // OCR may leave the movement bare (`1,633,480`) and preserve only the
+        // saldo's decimal separator (`30,320.83`). In that shape the amount
+        // is immediately before the sole monetary candidate; prefer it when
+        // it is not a bare identifier.
+        const precedingAmount = candidates.length === 1
+          && previous
+          && !isLikelyBareIdentifier(previous)
+          && first.index - previous.index <= 44
+          && !hasIdentifierMarker(previous.index, first.index)
+          ? previous
+          : undefined;
+        const second = precedingAmount
+          ? first
+          : candidates[1] && !hasIdentifierMarker(first.index, candidates[1].index)
+          && candidates[1].index - first.index <= 44 ? candidates[1] : adjacentCandidate(first);
+        usableCandidates = precedingAmount ? [precedingAmount, first] : second ? [first, second] : [first];
+      } else {
+        // If OCR removed every separator, use the first non-identifier token
+        // as the movement and only pair the next token when it is truly
+        // adjacent. This recovers `1,633,480 30,320.83` without treating a
+        // trailing 7–12 digit reference as a balance.
+        const first = normalizedAllCandidates.find((candidate) => !isLikelyBareIdentifier(candidate))
+          ?? normalizedAllCandidates[0];
+        if (!first) return;
+        const second = adjacentCandidate(first);
+        usableCandidates = second ? [first, second] : [first];
+      }
+    } else {
+      usableCandidates = candidates.length ? candidates : normalizedAllCandidates;
+    }
+    if (!usableCandidates.length) return;
     const foreignCurrency = sectionForeignCurrency || /d.?lar|euro|peso colombiano|tipo de cambio|\btc\b/.test(normalizedLine);
+    // At most two bank candidates are retained: movement plus one adjacent
+    // running balance. A repeated balance or a later reference is ignored.
+    const bankCandidates = bankLike ? usableCandidates.slice(0, 2) : usableCandidates;
     // Bank rows often finish with a running balance. Select the preceding
     // amount so the balance is not recorded as a purchase.
-    const amount = foreignCurrency
+    let amount = foreignCurrency
       ? (() => {
         const currencyIndex = tail.search(/d.?lar|euro|peso(?:s)?\s+colombiano?s?|tipo\s+de\s+cambio|\btc\b/i);
-        if (currencyIndex < 0) return usableCandidates.at(-1) ?? usableCandidates[0];
+        if (currencyIndex < 0) return bankCandidates.at(-1) ?? bankCandidates[0];
         // PDF text layers disagree on column order: some place the local
         // amount before “Peso Colombiano … TC…”, others place it after that
         // metadata. Prefer the last monetary token on the side that contains
         // the local amount and never the exchange-rate token itself.
-        const beforeCurrency = usableCandidates.filter((candidate) => candidate.index < currencyIndex);
-        const afterCurrency = usableCandidates.filter((candidate) => candidate.index > currencyIndex);
-        return (beforeCurrency.length ? beforeCurrency.at(-1) : afterCurrency.at(-1)) ?? usableCandidates[0];
+        const beforeCurrency = bankCandidates.filter((candidate) => candidate.index < currencyIndex);
+        const afterCurrency = bankCandidates.filter((candidate) => candidate.index > currencyIndex);
+        return (beforeCurrency.length ? beforeCurrency.at(-1) : afterCurrency.at(-1)) ?? bankCandidates[0];
       })()
-      : bankLike && usableCandidates.length > 1
-        ? usableCandidates[0]
-        : usableCandidates[usableCandidates.length - 1];
+      : bankLike && bankCandidates.length > 1
+        ? bankCandidates[0]
+        : bankCandidates[bankCandidates.length - 1];
+    let runningBalance = bankCandidates.length > 1 ? bankCandidates[1] : undefined;
+    // If the first of the final two tokens is bare but the second has decimal
+    // cents, it is usually the amount + balance pair with separators omitted
+    // from the amount. If the balance delta disproves that interpretation,
+    // treat the second token as a standalone amount (the first was likely a
+    // folio/reference number).
+    if (bankLike && bankCandidates.length > 1
+      && !/[.,]\d{1,2}$/.test(bankCandidates[0].raw)
+      && /[.,]\d{1,2}$/.test(bankCandidates[1].raw)
+      && previousRunningBalance !== undefined) {
+      const delta = bankCandidates[1].value - previousRunningBalance;
+      const balanceScale = Math.max(Math.abs(bankCandidates[1].value), Math.abs(previousRunningBalance), 1);
+      const deltaPlausible = Math.abs(delta) > 0 && Math.abs(delta) <= balanceScale * 1.25 + 0.05;
+      if (!deltaPlausible || Math.abs(Math.abs(delta) - Math.abs(bankCandidates[0].value)) > 2) {
+        amount = bankCandidates[1];
+        runningBalance = undefined;
+      }
+    }
     let amountValue = amount.value;
     if (bankLike) {
       // Bank rows expose a running balance immediately after the movement
       // amount. When OCR misreads the amount (for example 160.00 instead of
       // 60.00), the balance delta is the authoritative correction. If a row
       // has no balance, reset the chain rather than guessing across it.
-      const runningBalance = usableCandidates.length > 1 ? usableCandidates[1] : undefined;
       if (runningBalance && previousRunningBalance !== undefined) {
         const delta = runningBalance.value - previousRunningBalance;
+        const deltaMagnitude = Math.abs(delta);
+        const balanceScale = Math.max(Math.abs(runningBalance.value), Math.abs(previousRunningBalance), 1);
+        const hasDecimalCents = /[.,]\d{1,2}$/.test(amount.raw);
+        const malformedMagnitude = Math.abs(amountValue) > balanceScale * 2
+          || (!hasDecimalCents && Math.abs(amountValue) > balanceScale);
         if (Number.isFinite(delta) && Math.abs(delta) > 0 && Math.abs(delta) < 100_000_000
-          // A running-balance delta can repair a one- or two-cent OCR typo,
-          // but must not replace a valid amount when the OCR balance itself
-          // drifted (common on scanned BBVA statements).
+          // A running-balance delta can repair a one- or two-cent OCR typo.
+          // It can also recover a token whose separators were merged into a
+          // clearly impossible magnitude (for example 16,334.80 read as
+          // 1,633,480), but only while the delta remains within the balance's
+          // plausible scale. Never replace a normal amount with a drifting
+          // OCR balance (common on scanned BBVA statements).
           && Math.abs(Math.abs(delta) - Math.abs(amountValue)) > 0.05
-          && Math.abs(Math.abs(delta) - Math.abs(amountValue)) <= 2) {
+          && (Math.abs(Math.abs(delta) - Math.abs(amountValue)) <= 2
+            || (malformedMagnitude && deltaMagnitude <= balanceScale * 1.25 + 0.05))) {
           amountValue = Math.abs(delta);
         }
         previousRunningBalance = runningBalance.value;
