@@ -345,6 +345,9 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRCalibratesShiftedColumnsFromHeader() {
         let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "FOLIO", x: 0.14, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
             OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
             OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
@@ -365,6 +368,8 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRRequiresACompleteColumnHeaderForAutomaticAcceptance() {
         let calibrated = [
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
             OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
             OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
@@ -372,6 +377,8 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(FinanceStore.santanderOCRColumnsCalibratedForTesting(calibrated, fileName: "Santander agosto 2026.pdf"))
 
         let missingAnchor = [
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
             OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
         ]
@@ -380,6 +387,8 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRDoesNotMixColumnAnchorsAcrossPagesOrRows() {
         let splitAcrossPages = [
+            OCRObservationFixture(page: 0, text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(page: 0, text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(page: 0, text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
             OCRObservationFixture(page: 1, text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
             OCRObservationFixture(page: 0, text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
@@ -390,6 +399,8 @@ final class ReaderContractTests: XCTestCase {
         ))
 
         let splitAcrossRows = [
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
             OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.76, width: 0.08),
             OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
@@ -400,6 +411,8 @@ final class ReaderContractTests: XCTestCase {
         ))
 
         let splitLabelTokens = [
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSI TO", x: 0.50, y: 0.90, width: 0.08),
             OCRObservationFixture(text: "RETI RO", x: 0.64, y: 0.90, width: 0.08),
             OCRObservationFixture(text: "SAL DO", x: 0.79, y: 0.90, width: 0.08),

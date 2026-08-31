@@ -47,8 +47,9 @@ gasto real sin separar esas secciones.
   geometría de los encabezados cuando están presentes. Si el recorte no trae
   encabezado, usa los límites de la plantilla conocida; en ambos casos el
   saldo corrido queda fuera de la columna de movimientos. Los tres anclajes
-  deben pertenecer a la misma página y línea visual; nunca se mezclan etiquetas
-  de un resumen o de otra página para fabricar una calibración.
+  deben pertenecer a la misma página y línea visual y acompañarse de `FECHA` y
+  `DESCRIPCIÓN`; nunca se mezclan etiquetas de un resumen o de otra página para
+  fabricar una calibración.
 - El resultado de esa calibración se persiste como `ocrColumnsCalibrated` y se
   incluye en el reporte de importación; `false` siempre mantiene el estado en
   revisión aunque los totales coincidan.

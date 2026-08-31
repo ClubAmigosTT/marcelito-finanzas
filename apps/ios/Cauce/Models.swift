@@ -481,7 +481,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.08.31.4"
+    static let readerVersion = "ios-reader-2026.08.31.5"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -3412,6 +3412,12 @@ final class FinanceStore {
             let withdrawals = pageObservations.filter { ["retiro", "retiros"].contains(normalizedLabel($0)) }
             let balances = pageObservations.filter { normalizedLabel($0) == "saldo" }
             for deposit in deposits {
+                let hasTableRowHeader = pageObservations.contains { observation in
+                    let label = normalizedLabel(observation)
+                    guard label == "fecha" || label == "descripcion" || label == "description" else { return false }
+                    return abs(observation.centerY - deposit.centerY) <= headerYTolerance
+                }
+                guard hasTableRowHeader else { continue }
                 guard let withdrawal = withdrawals.first(where: {
                     $0.centerX > deposit.centerX
                         && abs($0.centerY - deposit.centerY) <= headerYTolerance
