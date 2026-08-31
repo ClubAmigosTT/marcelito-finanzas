@@ -398,6 +398,16 @@ final class ReaderContractTests: XCTestCase {
             splitAcrossRows,
             fileName: "Santander agosto 2026.pdf"
         ))
+
+        let splitLabelTokens = [
+            OCRObservationFixture(text: "DEPOSI TO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RETI RO", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SAL DO", x: 0.79, y: 0.90, width: 0.08),
+        ]
+        XCTAssertTrue(FinanceStore.santanderOCRColumnsCalibratedForTesting(
+            splitLabelTokens,
+            fileName: "Santander agosto 2026.pdf"
+        ))
     }
 
     func testSantanderOCRIgnoresMultilineFolioTraceAndRunningBalance() {

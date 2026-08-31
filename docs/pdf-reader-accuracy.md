@@ -52,6 +52,8 @@ gasto real sin separar esas secciones.
 - El resultado de esa calibración se persiste como `ocrColumnsCalibrated` y se
   incluye en el reporte de importación; `false` siempre mantiene el estado en
   revisión aunque los totales coincidan.
+- La comparación de esos tres encabezados tolera espacios internos insertados
+  por Vision, pero no corrige palabras de las filas ni del resto del PDF.
 - Ningún movimiento individual puede superar el total declarado de depósitos
   o retiros de su estado; esa fila bloquea la conciliación aunque el resto de
   las sumas parezca correcto.
