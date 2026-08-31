@@ -73,10 +73,18 @@ export function verifyNativeCorpusSummary(summary: NativeCorpusSummary, expected
   }
   if (expectedValid === undefined || expectedPending === undefined) errors.push("faltan expectedValid/expectedPending");
   if (goldenAutoAccepted === undefined || goldenFalseAccepted === undefined) errors.push("faltan contadores golden");
+  if (files !== undefined && expectedValid !== undefined && expectedPending !== undefined
+    && expectedValid + expectedPending !== files) {
+    errors.push("expectedValid + expectedPending no coincide con files");
+  }
   if (goldenFalseAccepted !== undefined && goldenFalseAccepted !== 0) errors.push(`hay ${goldenFalseAccepted} aceptación(es) falsa(s)`);
   if (expectedPending !== undefined && expectedPending !== 0) errors.push(`quedan ${expectedPending} golden(s) pendientes`);
   if (expectedValid !== undefined && goldenAutoAccepted !== undefined && goldenAutoAccepted !== expectedValid) {
     errors.push(`goldenAutoAccepted ${goldenAutoAccepted} no coincide con expectedValid ${expectedValid}`);
+  }
+  if (goldenAutoAccepted !== undefined && goldenFalseAccepted !== undefined
+    && files !== undefined && goldenAutoAccepted + goldenFalseAccepted > files) {
+    errors.push("los contadores golden superan el número de archivos");
   }
   if (precision === undefined || precision < 0 || precision > 1 || precision < 0.99) {
     errors.push(`precisión automática ${precision ?? "ausente"} fuera del objetivo 0.99`);

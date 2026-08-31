@@ -79,6 +79,24 @@ test("el resumen nativo rechaza contadores fraccionarios o negativos", () => {
   assert.ok(result.errors.some((error) => error.includes("objetivo 0.99")));
 });
 
+test("el resumen nativo exige cubrir todos los archivos con goldens", () => {
+  const result = verifyNativeCorpusSummary({
+    readerVersion: "ios-reader-test",
+    files: 8,
+    accepted: 8,
+    blocked: 0,
+    expectedValid: 0,
+    expectedPending: 0,
+    goldenAutoAccepted: 0,
+    goldenFalseAccepted: 0,
+    automaticAcceptancePrecision: 1,
+    unresolvedOCR: 0,
+    certified: true,
+  }, "ios-reader-test");
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("expectedValid + expectedPending")));
+});
+
 test("el reporte nativo exige una identidad enmascarada por PDF", () => {
   const result = verifyNativeCorpusReport([
     { file: "bbva.pdf", accountKey: "bbva:4922", expectedAccountKey: "bbva:4922" },
