@@ -58,10 +58,12 @@ PDFs a la aplicación:
 npm run pdf:corpus -- --dir "./estados-validados" --manifest ./corpus.json > corpus-result.json
 ```
 
-El manifiesto opcional fija emisor, tipo, estado de conciliación y totales
-esperados por archivo. El resultado incluye método (`pdf-text` u
-`ocr-required`), confianza del emisor, filas sospechosas y motivo de cada
-bloqueo. Cuando existe manifiesto, también calcula `automaticAcceptancePrecision`:
+El manifiesto opcional fija emisor, tipo, estado de conciliación, número de
+filas y totales esperados por archivo. Si falta un archivo declarado o aparece
+duplicado en el manifiesto, la corrida falla. El resultado incluye método
+(`pdf-text` u `ocr-required`), confianza del emisor, filas sospechosas,
+cobertura de filas y motivo de cada bloqueo. Cuando existe manifiesto, también
+calcula `automaticAcceptancePrecision`:
 aceptaciones correctas divididas entre todas las aceptaciones automáticas
 doradas, incluyendo cualquier aceptación falsa. Un archivo no descrito en el
 manifiesto se reporta, pero no se cuenta como una aceptación certificada; así
