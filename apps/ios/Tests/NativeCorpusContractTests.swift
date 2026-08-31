@@ -142,6 +142,10 @@ final class NativeCorpusContractTests: XCTestCase {
             )
             XCTAssertEqual(result.source, expected.source, file.lastPathComponent)
             if !expected.accountKey.isEmpty {
+                XCTAssertNotNil(
+                    expected.accountKey.range(of: #"^[a-z0-9]+:\d{4}$"#, options: .regularExpression),
+                    file.lastPathComponent + " expectativa de identidad sin máscara válida"
+                )
                 XCTAssertEqual(result.accountKey, expected.accountKey, file.lastPathComponent + " identidad de cuenta")
             }
             XCTAssertEqual(result.kind, expected.kind, file.lastPathComponent)
