@@ -505,6 +505,9 @@ body { background: var(--bg); color: var(--ink); }
 .audit-diagnostics summary strong { font-size: 13px; }
 .audit-diagnostics summary span, .audit-diagnostics summary b { color: var(--muted); font-size: 11px; font-weight: 600; }
 .audit-diagnostics summary b { white-space: nowrap; }
+.audit-actions { display: flex; align-items: center; gap: 10px; padding: 0 17px 12px; border-bottom: 1px solid var(--line); }
+.audit-actions .text-button { display: inline-flex; align-items: center; gap: 6px; }
+.audit-actions > span { color: var(--muted); font-size: 10px; }
 .audit-critical { margin: 0 17px 12px; padding: 9px 11px; border-radius: 8px; background: color-mix(in srgb, var(--expense) 10%, transparent); color: var(--expense); font-size: 11px; font-weight: 700; }
 .audit-table { overflow-x: auto; padding: 0 17px; }
 .audit-row { display: grid; grid-template-columns: minmax(125px, 1.2fr) repeat(7, minmax(95px, 1fr)); gap: 12px; min-width: 830px; padding: 10px 0; border-top: 1px solid var(--line); color: var(--navy-mid); font-size: 11px; align-items: center; }
@@ -612,6 +615,7 @@ body { background: var(--bg); color: var(--ink); }
 
 @media (max-width: 560px) {
   .executive-card, .detail-card { padding: 18px 16px; }
+  .audit-actions { align-items: flex-start; flex-direction: column; }
   .executive-card .section-heading, .detail-card .section-heading { display: flex; align-items: flex-start; }
   .executive-card .section-heading h2, .detail-card .section-heading h2 { font-size: 18px; }
   .executive-conclusion { font-size: 14px; }

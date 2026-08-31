@@ -11,6 +11,7 @@ import {
   CheckCircle,
   CircleNotch,
   CreditCard,
+  DownloadSimple,
   FilePdf,
   House,
   ListMagnifyingGlass,
@@ -127,6 +128,39 @@ function displayMoney(value: number | undefined | null) {
 
 function dashboardMoney(blocked: boolean, value: number | undefined | null) {
   return blocked ? "Bloqueado por conciliación" : displayMoney(value);
+}
+
+function exportAuditDiagnostics(metrics: ReturnType<typeof buildFinanceMetrics>, statements: Statement[], auditRun: AuditRunRecord | null) {
+  const payload = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    auditRun,
+    readerVersions: auditRun?.readerVersions ?? [...new Set(statements.map((statement) => statement.readerVersion).filter(Boolean))].sort(),
+    statements: statements.map((statement) => ({
+      id: statement.id,
+      source: statement.source,
+      period: statement.period,
+      fileName: statement.fileName,
+      mode: statement.mode,
+      status: statement.status,
+      transactionCount: statement.transactionCount,
+      reconciliationStatus: statement.reconciliationStatus,
+      reconciliation: statement.reconciliation,
+      sourceDetection: statement.sourceDetection,
+      ocrConfidence: statement.ocrConfidence,
+      ocrPageConfidences: statement.ocrPageConfidences,
+      sourceFingerprint: statement.sourceFingerprint,
+    })),
+    audit: metrics.audit,
+    consistencyChecks: metrics.consistencyChecks,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = `marcelito-auditoria-${new Date().toISOString().slice(0, 10)}.json`;
+  anchor.click();
+  window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
 function displayPercent(value: number | null | undefined) {
@@ -489,7 +523,7 @@ function Home({ transactions, statements, metrics, goals, setGoals, auditRun, on
         <GoalsPanel metrics={metrics} goals={goals} setGoals={setGoals} />
       </>}
       <DataQualityIndicator metrics={metrics} />
-      <AuditDiagnostics metrics={metrics} auditRun={auditRun} />
+      <AuditDiagnostics metrics={metrics} statements={statements} auditRun={auditRun} />
     </>
   );
 }
@@ -769,10 +803,11 @@ function DebtBreakdown({ metrics }: { metrics: ReturnType<typeof buildFinanceMet
   return <section className="debt-breakdown" aria-label="Desglose de deuda"><div><span>Saldo total de deuda</span><strong>{displayMoney(metrics.debtTotal)}</strong><small>Tarjetas y créditos al último corte</small></div><div><span>Pago próximo</span><strong>{displayMoney(metrics.latestPaymentDue)}</strong><small>Mínimo + MSI del estado</small></div><div><span>Pago para no generar intereses</span><strong>{displayMoney(metrics.latestPaymentForNoInterest)}</strong><small>Importe del estado</small></div><div><span>MSI pendientes</span><strong>{displayMoney(metrics.latestMsiPending)}</strong><small>{metrics.latestMsiInstallmentsCount ? `${metrics.latestMsiInstallmentsCount} mensualidades` : "Principal diferido"}</small></div></section>;
 }
 
-function AuditDiagnostics({ metrics, auditRun }: { metrics: ReturnType<typeof buildFinanceMetrics>; auditRun: AuditRunRecord | null }) {
+function AuditDiagnostics({ metrics, statements, auditRun }: { metrics: ReturnType<typeof buildFinanceMetrics>; statements: Statement[]; auditRun: AuditRunRecord | null }) {
   const audit = metrics.audit;
   return <details className="audit-diagnostics">
      <summary><div><strong>Auditoría de importación y conciliación</strong><span>Diagnóstico temporal reproducible · {audit.stages.join(" → ")}</span></div><b>{audit.periods.length} periodos</b></summary>
+    <div className="audit-actions"><button type="button" className="text-button" onClick={() => exportAuditDiagnostics(metrics, statements, auditRun)}><DownloadSimple size={15} /> Descargar diagnóstico JSON</button><span>No incluye descripciones ni importes individuales.</span></div>
     {auditRun && <div className="audit-run-meta"><span>Auditoría {auditRun.id} · libro {auditRun.ledgerFingerprint}{auditRun.sourceFingerprints?.length ? ` · PDF${auditRun.sourceFingerprints.length === 1 ? "" : "s"} ${auditRun.sourceFingerprints.map((fingerprint) => fingerprint.slice(0, 8)).join(", ")}` : ""}{auditRun.readerVersions?.length ? ` · lector ${auditRun.readerVersions.join(", ")}` : ""}</span><b className={`audit-status-${auditRun.status}`}>{auditRun.status === "passed" ? "Verificado" : auditRun.status === "warning" ? "Advertencias" : "Bloqueado"}</b></div>}
     {audit.criticalIssues.length > 0 && <div className="audit-critical">{audit.criticalIssues.join(" · ")}</div>}
     <div className="audit-table" role="table" aria-label="Auditoría por periodo"><div className="audit-row audit-head" role="row"><span>Periodo</span><span>Importados / válidos</span><span>Duplicados</span><span>Traspasos</span><span>Pagos tarjeta</span><span>Ingresos</span><span>Gasto real</span><span>Reembolsos / revisar</span></div>{audit.periods.map((period) => <div className="audit-row" role="row" key={period.key}><strong>{period.label}</strong><span>{period.importedCount} / {period.validCount}<small>{displayMoney(period.importedAmount)} / {displayMoney(period.validAmount)}</small></span><span>{period.duplicateCount}<small>{displayMoney(period.duplicateAmount)}</small></span><span>{period.internalTransferCount}<small>{displayMoney(period.internalTransferAmount)}</small></span><span>{period.cardPaymentCount}<small>{displayMoney(period.cardPaymentAmount)}</small></span><span>{period.incomeCount}<small>{displayMoney(period.incomeAmount)}</small></span><span>{period.expenseCount}<small>{displayMoney(period.expenseAmount)}</small></span><span>{period.refundCount} / {period.reviewCount}<small>{displayMoney(period.refundAmount)} / {displayMoney(period.reviewAmount)}</small></span></div>)}</div><div className="audit-totals"><span>Totales</span><b>{audit.importedCount} · {displayMoney(audit.importedAmount)} importados</b><b>{audit.validCount} · {displayMoney(audit.validAmount)} válidos</b><b>{audit.invalidCount} · {displayMoney(audit.invalidAmount)} rechazados</b><b>{audit.duplicateCount} · {displayMoney(audit.duplicateAmount)} duplicados</b><b>{audit.internalTransferCount} traspasos</b><b>{audit.cardPaymentCount} pagos tarjeta</b><b>{displayMoney(audit.incomeAmount)} ingresos</b><b>{displayMoney(audit.expenseAmount)} gasto</b></div><div className="consistency-list"><strong>Consistencias contables</strong>{metrics.consistencyChecks.map((check) => <span className={check.passed ? "check-pass" : "check-fail"} key={check.id}>{check.passed ? "✓" : "!"} {check.label}{check.difference === undefined ? " · pendiente" : ` · diferencia ${displayMoney(check.difference)}`}</span>)}</div>
