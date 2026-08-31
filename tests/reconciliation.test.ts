@@ -345,6 +345,7 @@ test("la auditoría mide cobertura de evidencia y no acepta filas opacas como tr
   const result = runTransactionPipeline(rows, [statement]);
   assert.equal(result.audit.missingEvidenceCount, 1);
   assert.equal(result.audit.evidencePercent, 50);
+  assert.equal(result.audit.criticalIssues.some((issue) => issue.includes("sin evidencia completa")), true);
 });
 
 test("Santander selecciona el cargo o abono y no el saldo corrido", () => {

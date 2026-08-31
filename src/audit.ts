@@ -40,7 +40,8 @@ export function createAuditRun(
   const issueCount = pendingStatements
     + pipeline.audit.invalidCount
     + pipeline.audit.duplicateCount
-    + pipeline.audit.relevantReviewCount;
+    + pipeline.audit.relevantReviewCount
+    + pipeline.audit.missingEvidenceCount;
   const status: AuditRunStatus = pipeline.audit.criticalIssues.length || pendingStatements > 0
     ? "blocked"
     : pipeline.audit.reviewCount > 0

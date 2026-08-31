@@ -668,6 +668,7 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
     criticalIssues: [
       ...(invalidTransactions.length ? [`${invalidTransactions.length} movimiento(s) rechazado(s) por datos inválidos o administrativos`] : []),
       ...(reviewTransactions.some((transaction) => absolute(transaction.amount) >= relevantReviewThreshold) ? ["Hay movimientos relevantes pendientes de revisión"] : []),
+      ...(missingEvidenceCount ? [`${missingEvidenceCount} movimiento(s) importado(s) sin evidencia completa`] : []),
     ],
     periods: Array.from(periods.values()).sort((left, right) => right.key.localeCompare(left.key)),
   };
