@@ -177,7 +177,7 @@ final class ReaderContractTests: XCTestCase {
 
         XCTAssertEqual(snapshot.kind, .card)
         XCTAssertEqual(snapshot.summary?.creditLimit, 20_000)
-        XCTAssertEqual(snapshot.summary?.creditAvailable, 16_682.25)
+        XCTAssertEqual(snapshot.summary?.creditAvailable, Decimal(string: "16682.25"))
         XCTAssertEqual(snapshot.summary?.debtBalance, 3_317.75)
         XCTAssertEqual(snapshot.summary.map { max(Decimal(0), ($0.creditLimit ?? 0) - ($0.creditAvailable ?? 0)) }, 3_317.75)
     }
