@@ -886,6 +886,13 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   pdfjs.GlobalWorkerOptions.workerSrc = workerModule.default;
   const buffer = await file.arrayBuffer();
   const document = await pdfjs.getDocument({ data: buffer }).promise;
+  // A monthly statement normally has fewer than ten pages. Refuse an
+  // accidentally selected scan bundle before allocating OCR canvases for
+  // hundreds of pages; the import dialog will show a recoverable message.
+  if (document.numPages > 80) {
+    await document.destroy();
+    throw new Error("El PDF contiene más de 80 páginas. Importa un estado mensual a la vez para mantener segura la memoria.");
+  }
   const pageTexts: string[] = [];
 
   for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {

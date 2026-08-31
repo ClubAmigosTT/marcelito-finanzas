@@ -1093,8 +1093,11 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
       });
       initialCategories.current = Object.fromEntries(withLearnedCategories.map((item) => [item.id, item.category]));
       setResult({ ...inspected, transactions: withLearnedCategories }); setItems(withLearnedCategories); setSummary(inspected.summary ?? {}); setReviewSource(inspected.source); setReviewKind(inspected.kind); setStage("review");
-    } catch {
-      setError("No pudimos leer este PDF. El archivo no se modificó; intenta con otra copia."); setStage("error");
+    } catch (cause) {
+      const safeMessage = cause instanceof Error && cause.message.startsWith("El PDF")
+        ? cause.message
+        : "No pudimos leer este PDF. El archivo no se modificó; intenta con otra copia.";
+      setError(safeMessage); setStage("error");
     }
   }
 

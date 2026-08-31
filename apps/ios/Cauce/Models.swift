@@ -77,6 +77,10 @@ struct StatementSummaryRecord: Codable {
     var msiInstallments: Int? = nil
     var msiMonthlyLoad: Decimal? = nil
     var domesticTransactionTotal: Decimal? = nil
+    /// Amex may print the domestic subtotal as a credit (CR). The
+    /// reconciliation layer compares net section values, so this flag is
+    /// retained when the parser can identify it.
+    var domesticTransactionTotalIsCredit: Bool? = nil
     var foreignTransactionTotal: Decimal? = nil
     /// Totals declared by bank statements. They are used as a hard control
     /// against the rows reconstructed from the PDF table.
@@ -120,6 +124,7 @@ struct StatementReconciliationRecord: Codable {
     var extractedChargeTotal: Decimal? = nil
     var extractedDomesticChargeTotal: Decimal? = nil
     var extractedForeignChargeTotal: Decimal? = nil
+    var extractedCreditTotal: Decimal? = nil
     var extractedPaymentTotal: Decimal? = nil
     var extractedMovementCount: Int? = nil
     var reason: String? = nil
@@ -1632,6 +1637,11 @@ final class FinanceStore {
         let charges = validRows.filter(isSpend).reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let domesticCharges = validRows.filter { isSpend($0) && !$0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let foreignCharges = validRows.filter { isSpend($0) && $0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let credits = validRows.filter { $0.amount > 0 && [.credit, .refund].contains(movementKind($0)) }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let domesticCredits = validRows.filter { $0.amount > 0 && [.credit, .refund].contains(movementKind($0)) && !$0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let foreignCredits = validRows.filter { $0.amount > 0 && [.credit, .refund].contains(movementKind($0)) && $0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let netDomesticCharges = domesticCharges - domesticCredits
+        let netForeignCharges = foreignCharges - foreignCredits
         let payments = validRows.filter { movementKind($0) == .cardPayment }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let movementCount = validRows.count
 
@@ -1644,6 +1654,7 @@ final class FinanceStore {
                 extractedChargeTotal: kind == .card ? charges : nil,
                 extractedDomesticChargeTotal: kind == .card ? domesticCharges : nil,
                 extractedForeignChargeTotal: kind == .card ? foreignCharges : nil,
+                extractedCreditTotal: kind == .card ? credits : nil,
                 extractedPaymentTotal: kind == .card ? payments : nil,
                 extractedMovementCount: movementCount,
                 reason: "El PDF no expone un resumen financiero verificable."
@@ -1694,6 +1705,7 @@ final class FinanceStore {
                     extractedChargeTotal: charges,
                     extractedDomesticChargeTotal: domesticCharges,
                     extractedForeignChargeTotal: foreignCharges,
+                    extractedCreditTotal: credits,
                     extractedPaymentTotal: payments,
                     extractedMovementCount: movementCount,
                     reason: "No se encontró total de cargos/transacciones en el resumen de tarjeta."
@@ -1701,18 +1713,27 @@ final class FinanceStore {
             }
             // If the issuer has no section subtotals, fall back to its
             // “nuevas transacciones” value and only then to “nuevos cargos”.
-            let chargeMatches = declaredChargeCandidates.contains { absolute(charges - $0) <= tolerance }
+            let chargeMatches: Bool
+            if let expectedDomestic = summary.domesticTransactionTotal,
+               let expectedForeign = summary.foreignTransactionTotal {
+                // Amex domestic subtotals are net of issuer-side credits such
+                // as “MONTO A DIFERIR … CR”. Compare each section separately.
+                chargeMatches = absolute(absolute(netDomesticCharges) - absolute(expectedDomestic)) <= tolerance
+                    && absolute(absolute(netForeignCharges) - absolute(expectedForeign)) <= tolerance
+            } else {
+                chargeMatches = declaredChargeCandidates.contains { absolute(charges - $0) <= tolerance }
+            }
             if !chargeMatches {
                 let declaredText = declaredChargeCandidates
                     .map { NSDecimalNumber(decimal: $0).stringValue }
                     .joined(separator: " o ")
                 mismatches.append("cargos: extraído \(charges) vs declarado \(declaredText)")
             }
-            if let expectedDomestic = summary.domesticTransactionTotal, absolute(domesticCharges - expectedDomestic) > tolerance {
-                mismatches.append("nacionales: extraído \(domesticCharges) vs declarado \(absolute(expectedDomestic))")
+            if let expectedDomestic = summary.domesticTransactionTotal, absolute(absolute(netDomesticCharges) - absolute(expectedDomestic)) > tolerance {
+                mismatches.append("nacionales: extraído \(netDomesticCharges) vs declarado \(absolute(expectedDomestic))")
             }
-            if let expectedForeign = summary.foreignTransactionTotal, absolute(foreignCharges - expectedForeign) > tolerance {
-                mismatches.append("moneda extranjera: extraído \(foreignCharges) vs declarado \(absolute(expectedForeign))")
+            if let expectedForeign = summary.foreignTransactionTotal, absolute(absolute(netForeignCharges) - absolute(expectedForeign)) > tolerance {
+                mismatches.append("moneda extranjera: extraído \(netForeignCharges) vs declarado \(absolute(expectedForeign))")
             }
             if charges == 0 && declaredChargeCandidates.contains(where: { $0 > tolerance }) {
                 mismatches.append("no se reconstruyeron filas de compras")
@@ -1726,6 +1747,7 @@ final class FinanceStore {
                 extractedChargeTotal: charges,
                 extractedDomesticChargeTotal: domesticCharges,
                 extractedForeignChargeTotal: foreignCharges,
+                extractedCreditTotal: credits,
                 extractedPaymentTotal: payments,
                 extractedMovementCount: movementCount,
                 reason: "No se pudo determinar si el estado es bancario o de tarjeta."
@@ -1740,6 +1762,7 @@ final class FinanceStore {
             extractedChargeTotal: kind == .card ? charges : nil,
             extractedDomesticChargeTotal: kind == .card ? domesticCharges : nil,
             extractedForeignChargeTotal: kind == .card ? foreignCharges : nil,
+            extractedCreditTotal: kind == .card ? credits : nil,
             extractedPaymentTotal: kind == .card ? payments : nil,
             extractedMovementCount: movementCount,
             reason: mismatches.isEmpty ? nil : mismatches.joined(separator: "; ")
