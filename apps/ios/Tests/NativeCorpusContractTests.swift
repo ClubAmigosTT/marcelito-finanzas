@@ -98,6 +98,8 @@ final class NativeCorpusContractTests: XCTestCase {
                 requireValidReconciliation: false
             )
             XCTAssertEqual(result.source, expected.source, file.lastPathComponent)
+            XCTAssertEqual(result.kind, expected.kind, file.lastPathComponent)
+            XCTAssertEqual(result.sourceDetection.status, .verified, file.lastPathComponent)
             XCTAssertLessThanOrEqual(result.imported, 1_000, file.lastPathComponent + " produjo un volumen de filas absurdo")
 
             // A pending scan is a diagnostic candidate, not a failed build:
@@ -123,7 +125,6 @@ final class NativeCorpusContractTests: XCTestCase {
             // promoted to valid, its exact row count is checked automatically.
             if expected.status == .valid {
                 XCTAssertEqual(result.reconciliation?.status, .valid, file.lastPathComponent)
-                XCTAssertEqual(result.kind, expected.kind, file.lastPathComponent)
                 XCTAssertEqual(result.imported, expected.rows, file.lastPathComponent)
                 XCTAssertFalse(result.requiresReview, file.lastPathComponent)
             } else if result.reconciliation?.status == .valid {
@@ -131,6 +132,7 @@ final class NativeCorpusContractTests: XCTestCase {
                 // golden is updated, require that such an acceptance still
                 // contains real rows and never silently accepts an empty PDF.
                 XCTAssertGreaterThan(result.imported, 0, file.lastPathComponent)
+                XCTAssertTrue(result.requiresReview, file.lastPathComponent + " quedó válido sin estar promovido en el golden")
             }
 
             report.append([
