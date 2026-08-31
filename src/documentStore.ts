@@ -74,8 +74,9 @@ async function readImportedPdf(key: string): Promise<StoredPdf | undefined> {
  */
 export async function openImportedPdf(key: string | undefined) {
   if (!key || typeof window === "undefined") return false;
-  const popup = window.open("about:blank", "_blank");
+  let popup: Window | null = null;
   try {
+    popup = window.open("about:blank", "_blank");
     const stored = await readImportedPdf(key);
     if (!stored) {
       popup?.close();
