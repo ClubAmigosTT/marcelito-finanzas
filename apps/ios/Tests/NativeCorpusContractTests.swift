@@ -132,7 +132,7 @@ final class NativeCorpusContractTests: XCTestCase {
         for file in files {
             guard let expected = expectations[file.lastPathComponent] else { continue }
             let actualFingerprint = try fingerprint(file)
-            let fileSizeBytes = file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            let fileSizeBytes = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
             XCTAssertEqual(actualFingerprint, expected.sourceFingerprint, file.lastPathComponent + " no coincide con el PDF dorado")
             let result = try store.importPDF(
                 from: file,
