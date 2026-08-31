@@ -106,21 +106,31 @@ final class NativeCorpusContractTests: XCTestCase {
             XCTAssertEqual(result.sourceDetection.status, .verified, file.lastPathComponent)
             XCTAssertLessThanOrEqual(result.imported, 1_000, file.lastPathComponent + " produjo un volumen de filas absurdo")
 
-            // A pending scan is a diagnostic candidate, not a failed build:
-            // its extracted controls are printed in the report for calibration
-            // and become hard assertions once the golden is promoted to valid.
-            let controlsReady = expected.status == .valid || result.reconciliation?.status == .valid
-            if controlsReady, let depositTotal = expected.depositTotal {
-                assertClose(result.reconciliation?.extractedDepositTotal, depositTotal, file: file.lastPathComponent, field: "depósitos")
+            // Summary controls are independent of row acceptance. Assert them
+            // even while a scan remains pending so a plausible-looking OCR
+            // header cannot silently move the golden forward with wrong
+            // deposits/withdrawals. Row totals remain conditional below.
+            if let depositTotal = expected.depositTotal {
+                assertClose(result.summary?.depositTotal, depositTotal, file: file.lastPathComponent, field: "depósitos del resumen")
+                if result.reconciliation?.status == .valid {
+                    assertClose(result.reconciliation?.extractedDepositTotal, depositTotal, file: file.lastPathComponent, field: "depósitos")
+                }
             }
-            if controlsReady, let withdrawalTotal = expected.withdrawalTotal {
-                assertClose(result.reconciliation?.extractedWithdrawalTotal, withdrawalTotal, file: file.lastPathComponent, field: "retiros")
+            if let withdrawalTotal = expected.withdrawalTotal {
+                assertClose(result.summary?.withdrawalTotal, withdrawalTotal, file: file.lastPathComponent, field: "retiros del resumen")
+                if result.reconciliation?.status == .valid {
+                    assertClose(result.reconciliation?.extractedWithdrawalTotal, withdrawalTotal, file: file.lastPathComponent, field: "retiros")
+                }
             }
-            if controlsReady, let chargeTotal = expected.chargeTotal {
-                assertClose(result.reconciliation?.extractedChargeTotal, chargeTotal, file: file.lastPathComponent, field: "cargos")
+            if let chargeTotal = expected.chargeTotal {
+                if result.reconciliation?.status == .valid {
+                    assertClose(result.reconciliation?.extractedChargeTotal, chargeTotal, file: file.lastPathComponent, field: "cargos")
+                }
             }
-            if controlsReady, let paymentTotal = expected.paymentTotal {
-                assertClose(result.reconciliation?.extractedPaymentTotal, paymentTotal, file: file.lastPathComponent, field: "pagos")
+            if let paymentTotal = expected.paymentTotal {
+                if result.reconciliation?.status == .valid {
+                    assertClose(result.reconciliation?.extractedPaymentTotal, paymentTotal, file: file.lastPathComponent, field: "pagos")
+                }
             }
 
             // Text-layer goldens are the hard acceptance contract. Scanned
