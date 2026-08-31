@@ -3,7 +3,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-2026.08.31.6";
+export const PDF_READER_VERSION = "web-reader-2026.08.31.7";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
@@ -1181,14 +1181,15 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
   try {
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
-      // A fixed scale of 2 can allocate hundreds of megabytes for a scanned
+      // A fixed high scale can allocate hundreds of megabytes for a scanned
       // poster or a high-DPI export. Adapt the scale to keep OCR within a
-      // predictable browser memory envelope while retaining the normal 2x
-      // resolution for bank-sized pages.
+      // predictable browser memory envelope while giving bank-sized pages
+      // roughly 200 DPI. This materially improves decimal/date recognition
+      // on the Santander scans without weakening the confidence gate.
       const baseViewport = page.getViewport({ scale: 1 });
       const baseDimension = Math.max(baseViewport.width, baseViewport.height, 1);
       const baseArea = Math.max(baseViewport.width * baseViewport.height, 1);
-      const scale = Math.max(0.75, Math.min(2, 2400 / baseDimension, Math.sqrt(9_000_000 / baseArea)));
+      const scale = Math.max(0.75, Math.min(3, 2800 / baseDimension, Math.sqrt(16_000_000 / baseArea)));
       const viewport = page.getViewport({ scale });
       const canvas = window.document.createElement("canvas");
       canvas.width = Math.ceil(viewport.width);
