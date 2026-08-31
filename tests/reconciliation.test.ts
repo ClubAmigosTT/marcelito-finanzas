@@ -999,3 +999,30 @@ test("una versión anterior del lector queda en cuarentena al abrir el libro", (
   assert.equal(prepared[1]?.reconciliationStatus, "pending");
   assert.match(prepared[1]?.reconciliation?.reason ?? "", /web-reader-legacy/);
 });
+
+test("la cuarentena de versión también bloquea las cifras del estado antiguo", () => {
+  const legacyStatement = {
+    ...bank("bbva-legacy", "BBVA", "agosto 2026"),
+    readerVersion: "web-reader-legacy",
+    status: "ready" as const,
+    reconciliationStatus: "valid" as const,
+    reconciliation: { status: "valid" as const, tolerance: 0.05 },
+    summary: { cashBalance: 88_833 },
+  };
+  const [prepared] = prepareStoredStatements([legacyStatement], "web-reader-current");
+  const metrics = buildFinanceMetrics([
+    movement({
+      id: "legacy-expense",
+      date: "10 ago 2026",
+      description: "COMPRA HEREDADA",
+      account: "BBVA",
+      amount: -88_833,
+      flow: "expense",
+      statementId: "bbva-legacy",
+    }),
+  ], [prepared]);
+
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.cashAvailable, undefined);
+  assert.equal(metrics.isProvisional, true);
+});
