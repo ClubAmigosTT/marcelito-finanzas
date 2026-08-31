@@ -168,6 +168,11 @@ struct DiagnosticsView: View {
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
+                            if let confidence = statement.ocrConfidence {
+                                Text("Confianza OCR: \(Int((confidence * 100).rounded()))%")
+                                    .font(.caption2)
+                                    .foregroundStyle(confidence >= 0.88 ? Color.marcelitoSuccess : Color.marcelitoAmber)
+                            }
                         }
                     }
                     ForEach(store.consistencyChecks) { check in

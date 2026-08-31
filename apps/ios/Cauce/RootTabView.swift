@@ -302,6 +302,7 @@ private struct ImportReportItem: Identifiable {
     let usedOCR: Bool
     let errorMessage: String?
     let sourceDetection: SourceDetectionEvidence?
+    let ocrConfidence: Double?
 
     init(summary: ImportSummary) {
         fileName = summary.fileName
@@ -313,6 +314,7 @@ private struct ImportReportItem: Identifiable {
         usedOCR = summary.usedOCR
         errorMessage = nil
         sourceDetection = summary.sourceDetection
+        ocrConfidence = summary.ocrConfidence
     }
 
     init(fileName: String, errorMessage: String) {
@@ -325,6 +327,7 @@ private struct ImportReportItem: Identifiable {
         usedOCR = false
         self.errorMessage = errorMessage
         sourceDetection = nil
+        ocrConfidence = nil
     }
 
     var state: State {
@@ -441,7 +444,7 @@ private struct ImportReportRow: View {
                         .lineLimit(2)
                     Spacer(minLength: 0)
                     if item.usedOCR {
-                        Text("OCR")
+                        Text(item.ocrConfidence.map { "OCR \(Int(($0 * 100).rounded()))%" } ?? "OCR")
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(Color.marcelitoNavyMid)
                             .padding(.horizontal, 7)
