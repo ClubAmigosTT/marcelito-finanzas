@@ -30,9 +30,10 @@ xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
 
 El reporte incluye controles esperados y extraídos de depósitos, retiros,
 cargos y pagos, además de confianza del emisor, confianza OCR media y página
-OCR más débil. Los cuatro estados de texto los validan como aserciones duras;
-los escaneos Santander se reportan para calibración mientras permanezcan en
-`pending`.
+OCR más débil. Todos los archivos deben identificar el emisor con estado
+`verified`; los cuatro estados de texto validan también filas y totales como
+aserciones duras. Los escaneos Santander se reportan para calibración mientras
+permanezcan en `pending`.
 
 Los estados escaneados que sigan en `pending` no alimentan el libro; cuando
 Vision concilie uno, se puede promover su expectativa a `valid` y exigir
