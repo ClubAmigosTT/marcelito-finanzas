@@ -38,7 +38,7 @@ En iOS, Resumen, Gastos, Cuentas, Patrimonio y sus tendencias leen el mismo arre
 
 - El libro activo se guarda en un sobre versionado (`schemaVersion`, `ledgerVersion` y fecha) que contiene estados y movimientos juntos. Las claves antiguas se conservan únicamente como compatibilidad de una versión.
 - Una reconstrucción marca primero `inProgress` y guarda el último sobre completo. Si iOS termina el proceso inesperadamente, al siguiente arranque se restaura ese sobre y la reconstrucción se reintenta; nunca se publica un libro parcial.
-- La auditoría automática corre al finalizar una reconstrucción y al volver la app a primer plano. Persiste el identificador de auditoría, disparador, versión del libro, porcentaje conciliado, conteo de problemas y estado `Verificado`, `Advertencias` o `Bloqueado`.
+- La auditoría automática corre al finalizar una reconstrucción, después de una importación y al volver la app a primer plano. Persiste el identificador, disparador, versión del libro, porcentaje conciliado, conteo de problemas y estado `Verificado`, `Advertencias` o `Bloqueado`; también conserva cuántas filas PDF heredadas fueron retiradas en cuarentena durante la migración.
 - Un estado de auditoría crítico bloquea KPI e históricos. Las correcciones automáticas se limitan a normalización, deduplicación y matching inequívoco; importes o fechas ambiguos quedan en cuarentena.
 
 Las pruebas reproducibles se ejecutan con `node --experimental-strip-types --test tests/reconciliation.test.ts` y cubren encabezados numéricos, compras idénticas, traslados propios, pagos de Amex y estados traslapados.
