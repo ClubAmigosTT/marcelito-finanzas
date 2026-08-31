@@ -1340,6 +1340,8 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
       period: detectPeriod(text, file.name),
       fileName: file.name,
       sourceFingerprint,
+      fileSizeBytes: file.size,
+      pageCount: document.numPages,
       readerVersion: PDF_READER_VERSION,
       mode,
       transactions: parsed,

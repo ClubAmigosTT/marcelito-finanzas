@@ -155,6 +155,9 @@ export type ImportResult = {
   fileName: string;
   /** SHA-256 of the original PDF when the browser crypto API is available. */
   sourceFingerprint?: string;
+  /** Original PDF metadata retained for reproducible audit, not for parsing. */
+  fileSizeBytes?: number;
+  pageCount?: number;
   /** Exact reader revision that produced this extraction. */
   readerVersion?: string;
   /** The parser either used the PDF text layer or rendered pages through OCR. */
@@ -181,6 +184,9 @@ export type Statement = {
   fileName: string;
   /** Stable identity of the exact source PDF used for this statement. */
   sourceFingerprint?: string;
+  /** Original PDF metadata used to reproduce an import decision. */
+  fileSizeBytes?: number;
+  pageCount?: number;
   /** Exact reader revision that produced this statement. */
   readerVersion?: string;
   importedAt: string;
@@ -206,6 +212,8 @@ export type ImportCommit = {
   period: string;
   fileName: string;
   sourceFingerprint?: string;
+  fileSizeBytes?: number;
+  pageCount?: number;
   readerVersion?: string;
   mode: ImportResult["mode"];
   transactions: Transaction[];

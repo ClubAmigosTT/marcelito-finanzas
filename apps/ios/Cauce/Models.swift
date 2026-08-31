@@ -278,6 +278,9 @@ struct StatementRecord: Identifiable, Codable {
     var sourceFingerprint: String? = nil
     /// Exact native reader revision that produced this statement.
     var readerVersion: String? = nil
+    /// Original PDF metadata retained for reproducible import diagnostics.
+    var fileSizeBytes: Int? = nil
+    var pageCount: Int? = nil
 }
 
 struct ImportSummary {
@@ -297,6 +300,8 @@ struct ImportSummary {
     let ocrConfidence: Double?
     let ocrPageConfidences: [Double]?
     let ocrColumnsCalibrated: Bool?
+    let fileSizeBytes: Int? = nil
+    let pageCount: Int? = nil
 }
 
 /// Deterministic reader output used by the iOS contract tests. Keeping this
@@ -2632,7 +2637,9 @@ final class FinanceStore {
             readerVersion: Self.readerVersion,
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences,
-            ocrColumnsCalibrated: ocrColumnsCalibrated
+            ocrColumnsCalibrated: ocrColumnsCalibrated,
+            fileSizeBytes: documentData.count,
+            pageCount: document.pageCount
         )
         if let index = statements.firstIndex(where: { $0.id == statementId }) {
             statements[index] = statement
@@ -2662,7 +2669,9 @@ final class FinanceStore {
             readerVersion: Self.readerVersion,
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences,
-            ocrColumnsCalibrated: ocrColumnsCalibrated
+            ocrColumnsCalibrated: ocrColumnsCalibrated,
+            fileSizeBytes: documentData.count,
+            pageCount: document.pageCount
         )
     }
 
