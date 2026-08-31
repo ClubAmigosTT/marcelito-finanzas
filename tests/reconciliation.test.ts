@@ -1031,6 +1031,9 @@ test("la confianza OCR baja bloquea estados persistidos aunque status diga listo
   assert.equal(metrics.dataQuality.critical, true);
   assert.equal(metrics.dataQuality.reconciledPercent, 0);
   assert.match(metrics.audit.criticalIssues.join(" "), /calidad OCR insuficiente/);
+  const audit = createAuditRun(runTransactionPipeline(transactions, statements), statements, [], "startup");
+  assert.equal(audit.reconciledStatementCount, 0);
+  assert.equal(audit.status, "blocked");
 });
 
 test("un modo de lectura desconocido nunca se considera texto confiable", () => {
