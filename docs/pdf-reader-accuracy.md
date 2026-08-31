@@ -135,6 +135,9 @@ gasto real sin separar esas secciones.
 - El predicado de elegibilidad de iOS aplica las mismas condiciones y además
   rechaza `Desconocido` y tipos `unknown`; así una actualización nativa no puede
   reintroducir una ruta de fallback que la capa web ya bloqueó.
+- Web e iOS agrupan saldos por esa misma identidad enmascarada, por lo que dos
+  cuentas Santander (o dos tarjetas del mismo emisor) conservan su saldo más
+  reciente de forma independiente.
   Estados antiguos o inferidos por nombre de archivo se migran a `pending`, se
   muestran en auditoría y sus filas quedan en cuarentena hasta confirmar el PDF.
 - Si el banco mostrado es conocido pero la evidencia automática es provisional,

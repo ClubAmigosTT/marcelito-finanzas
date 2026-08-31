@@ -737,17 +737,23 @@ private struct ExpenseCategoryDetailView: View {
     }
 }
 
+private struct AccountDisplayItem: Identifiable {
+    let source: String
+    let kind: StatementKind
+    let accountKey: String?
+
+    var id: String { "\(source)|\(kind.rawValue)|\(accountKey ?? "default")" }
+}
+
 private struct AccountSummaryRow: View {
     @Environment(FinanceStore.self) private var store
 
     let source: String
-
-    private var kind: StatementKind {
-        source.localizedCaseInsensitiveContains("Amex") ? .card : .bank
-    }
+    let kind: StatementKind
+    let accountKey: String?
 
     private var statement: StatementRecord? {
-        store.latestStatement(for: source, kind: kind)
+        store.latestStatement(for: source, kind: kind, accountKey: accountKey)
     }
 
     private var metric: StatementMetric? {
@@ -773,13 +779,13 @@ private struct AccountSummaryRow: View {
 
     var body: some View {
         NavigationLink {
-            AccountDetailView(source: source, kind: kind)
+            AccountDetailView(source: source, kind: kind, accountKey: accountKey)
         } label: {
             VStack(alignment: .leading, spacing: 6) {
                 HStack(spacing: 12) {
                     Image(systemName: kind == .card ? "creditcard.fill" : "building.columns.fill")
                         .foregroundStyle(Color.marcelitoNavyMid)
-                    Text(source)
+                    Text(source + (accountKey.flatMap { $0.split(separator: ":").last }.map { " · ••••\($0)" } ?? ""))
                         .font(.headline)
                     Spacer()
                     Text(balanceText)
@@ -797,10 +803,22 @@ private struct AccountSummaryRow: View {
 struct AccountsView: View {
     @Environment(FinanceStore.self) private var store
 
-    private var displayedSources: [String] {
+    private var displayedAccounts: [AccountDisplayItem] {
         let preferred = ["Santander", "BBVA", "Amex"]
-        let imported = store.statements.map(\.source).filter { !preferred.contains($0) }
-        return preferred + Array(Set(imported)).sorted()
+        var seen = Set<String>()
+        var result: [AccountDisplayItem] = []
+        for statement in store.statements {
+            let kind = statement.kind ?? (statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank)
+            let item = AccountDisplayItem(source: statement.source, kind: kind, accountKey: statement.accountKey)
+            if seen.insert(item.id).inserted { result.append(item) }
+        }
+        return result.sorted { left, right in
+            let leftRank = preferred.firstIndex(of: left.source) ?? preferred.count
+            let rightRank = preferred.firstIndex(of: right.source) ?? preferred.count
+            return leftRank != rightRank
+                ? leftRank < rightRank
+                : left.id.localizedCompare(right.id) == .orderedAscending
+        }
     }
 
     var body: some View {
@@ -810,8 +828,8 @@ struct AccountsView: View {
                     if store.dashboardIsBlocked {
                         LedgerQualityBanner(store: store)
                     }
-                    ForEach(displayedSources, id: \.self) { source in
-                        AccountSummaryRow(source: source)
+                    ForEach(displayedAccounts) { account in
+                        AccountSummaryRow(source: account.source, kind: account.kind, accountKey: account.accountKey)
                     }
                     NavigationLink {
                         MovementsView()
@@ -881,10 +899,11 @@ private struct AccountDetailView: View {
     @Environment(FinanceStore.self) private var store
     let source: String
     let kind: StatementKind
+    let accountKey: String?
 
     private var metrics: [StatementMetric] {
         store.periodMetrics
-            .filter { $0.source == source && $0.kind == kind }
+            .filter { $0.source == source && $0.kind == kind && $0.accountKey == accountKey }
             .reversed()
     }
 

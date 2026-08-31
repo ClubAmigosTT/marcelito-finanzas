@@ -723,6 +723,43 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
     }
 
+    func testLatestNativeBalanceUsesMaskedAccountIdentity() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        func statement(id: UUID, period: String, accountKey: String, cash: String) -> StatementRecord {
+            StatementRecord(
+                id: id,
+                source: "Santander",
+                accountKey: accountKey,
+                period: period,
+                fileName: "estado-\(accountKey).pdf",
+                importedAt: .now,
+                transactionCount: 0,
+                requiresReview: false,
+                kind: .bank,
+                summary: StatementSummaryRecord(cashBalance: Decimal(string: cash)),
+                reconciliation: StatementReconciliationRecord(
+                    status: .valid,
+                    tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+                ),
+                sourceDetection: SourceDetectionEvidence(
+                    source: "Santander",
+                    confidence: 0.999,
+                    status: .verified,
+                    evidence: ["encabezado institucional Santander"],
+                    ignoredBodyMentions: []
+                ),
+                readerVersion: FinanceStore.readerVersion
+            )
+        }
+        store.statements = [
+            statement(id: UUID(), period: "julio 2026", accountKey: "santander:1111", cash: "100"),
+            statement(id: UUID(), period: "agosto 2026", accountKey: "santander:1111", cash: "150"),
+            statement(id: UUID(), period: "julio 2026", accountKey: "santander:2222", cash: "300"),
+        ]
+        XCTAssertEqual(store.cashAvailable, Decimal(string: "450"))
+    }
+
     func testLegacyStatementJSONDecodesWithoutNewOCRFields() throws {
         // A user may upgrade with statements persisted by a previous build.
         // Remove every field introduced by the OCR/source-confirmation work

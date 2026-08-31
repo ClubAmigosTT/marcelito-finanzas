@@ -247,6 +247,9 @@ struct Movement: Identifiable, Codable {
 struct StatementRecord: Identifiable, Codable {
     var id: UUID
     var source: String
+    /// Issuer plus masked last four digits when the administrative header
+    /// exposes an account number. The full number is never persisted.
+    var accountKey: String? = nil
     var period: String
     var fileName: String
     /// Nombre relativo del PDF que guardamos en Application Support para poder
@@ -349,6 +352,7 @@ struct OCRObservationFixture {
 struct StatementMetric: Identifiable {
     let id: UUID
     let source: String
+    let accountKey: String?
     let period: String
     let kind: StatementKind
     let newTransactions: Decimal
@@ -979,10 +983,12 @@ final class FinanceStore {
 
     /// Returns the newest statement for an account, independent of the order
     /// in which PDFs were imported.
-    func latestStatement(for source: String, kind: StatementKind? = nil) -> StatementRecord? {
+    func latestStatement(for source: String, kind: StatementKind? = nil, accountKey: String? = nil) -> StatementRecord? {
         statements
             .filter { statement in
-                statement.source == source && (kind == nil || statementKind(statement) == kind)
+                statement.source == source
+                    && (kind == nil || statementKind(statement) == kind)
+                    && statement.accountKey == accountKey
             }
             .max { left, right in
                 let leftDate = statementEndDate(for: left.id)
@@ -1394,7 +1400,7 @@ final class FinanceStore {
         for metric in metrics {
             // Source alone is not an account identity: a bank account and a
             // credit card can share an issuer name.
-            let key = "\(metric.source)|\(metric.kind.rawValue)"
+            let key = metric.accountKey ?? (metric.source + "|" + metric.kind.rawValue)
             if let current = latest[key] {
                 let metricDate = statementEndDate(for: metric.id)
                 let currentDate = statementEndDate(for: current.id)
@@ -1711,6 +1717,7 @@ final class FinanceStore {
         return StatementMetric(
             id: statement.id,
             source: statement.source,
+            accountKey: statement.accountKey,
             period: statement.period,
             kind: kind,
             newTransactions: newTransactions,
@@ -2487,6 +2494,9 @@ final class FinanceStore {
             )
         } ?? detectedSourceEvidence
         let source = sourceDetection.source
+        let accountKey = detectedSourceEvidence.source == source
+            ? Self.maskedAccountKey(from: text, source: source)
+            : nil
         let detectedKind = kindOverride ?? Self.statementKind(from: text, source: source)
         var santanderColumnsCalibrated = true
         let parsedCandidates: [Movement]
@@ -2641,6 +2651,7 @@ final class FinanceStore {
         let statement = StatementRecord(
             id: statementId,
             source: source,
+            accountKey: accountKey,
             period: period,
             fileName: url.lastPathComponent,
             localFileName: storedFileName,
@@ -4746,6 +4757,46 @@ final class FinanceStore {
             return detected
         }
         return "Importado"
+    }
+
+    /// Returns an issuer-scoped, privacy-preserving account identity. Search
+    /// only the administrative header before the movement table and retain
+    /// the last four digits; references or account-like numbers in rows never
+    /// become an identity.
+    private static func maskedAccountKey(from text: String, source: String) -> String? {
+        let normalized = text.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: .current
+        )
+        var headerLines: [String] = []
+        for line in normalized.components(separatedBy: .newlines).prefix(120) {
+            let compact = line.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+            if compact.range(of: "detalle de movimientos|movimientos realizados|fecha (?:folio )?descripcion|fecha y detalle", options: .regularExpression) != nil {
+                break
+            }
+            if !compact.isEmpty { headerLines.append(compact) }
+        }
+        let header = headerLines.joined(separator: " ")
+        let patterns = [
+            #"(?:no\.?|numero)\s+de\s+cuenta(?:\s+clabe)?\D{0,12}([0-9][0-9\s-]{3,24})"#,
+            #"cuenta\s+(?:clabe|de\s+(?:cheques|ahorro|corriente))\D{0,12}([0-9][0-9\s-]{3,24})"#
+        ]
+        let range = NSRange(header.startIndex..<header.endIndex, in: header)
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            guard let match = regex.firstMatch(in: header, range: range), match.numberOfRanges > 1,
+                  let valueRange = Range(match.range(at: 1), in: header) else { continue }
+            let digits = String(header[valueRange]).filter { $0.isNumber }
+            guard (4...18).contains(digits.count) else { continue }
+            let issuer = source
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .joined()
+            guard !issuer.isEmpty else { continue }
+            return "\(issuer):\(String(digits.suffix(4)))"
+        }
+        return nil
     }
 
     private static func categoryRuleKey(_ value: String) -> String {
