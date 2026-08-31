@@ -51,7 +51,7 @@ enum MovementKind: String, CaseIterable, Identifiable, Codable, Hashable {
     var id: String { rawValue }
 }
 
-enum StatementKind: String, Codable, Hashable, CaseIterable {
+enum StatementKind: String, Codable, Hashable, CaseIterable, Sendable {
     case card
     case bank
     case unknown
@@ -478,6 +478,30 @@ struct CanonicalRebuildResult {
     let candidateCount: Int
     let importedCount: Int
     let invalidCount: Int
+}
+
+/// Resultado inmutable de la fase pesada de lectura. PDFKit y Vision se
+/// ejecutan fuera del actor de interfaz y solo este snapshot cruza de vuelta
+/// para escribir el libro canónico.
+private struct PDFImportExtraction: @unchecked Sendable {
+    let documentData: Data
+    let fileName: String
+    let pageCount: Int
+    let sourceFingerprint: String
+    let sourceDetection: SourceDetectionEvidence
+    let source: String
+    let accountKey: String?
+    let kind: StatementKind
+    let candidates: [Movement]
+    let period: String
+    let summary: StatementSummaryRecord?
+    let usedOCR: Bool
+    let ocrConfidence: Double?
+    let ocrPageConfidences: [Double]?
+    let ocrColumnsCalibrated: Bool?
+    let ocrFallbackNeedsReview: Bool
+    let ocrColumnCalibrationNeedsReview: Bool
+    let ocrConfidenceNeedsReview: Bool
 }
 
 struct LedgerConsistencyCheck: Identifiable {
@@ -2043,7 +2067,7 @@ final class FinanceStore {
         )
     }
 
-    private func pdfFingerprint(_ data: Data) -> String {
+    private static func pdfFingerprint(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
@@ -2068,7 +2092,7 @@ final class FinanceStore {
         var seenFingerprints = Set<String>()
         let candidates: [URL] = storedPDFURLs.compactMap { url in
             guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
-            let fingerprint = pdfFingerprint(data)
+            let fingerprint = Self.pdfFingerprint(data)
             guard seenFingerprints.insert(fingerprint).inserted else { return nil }
             return url
         }
@@ -2423,31 +2447,18 @@ final class FinanceStore {
         )
     }
 
-    func importPDF(
-        from url: URL,
-        allowOCR: Bool = true,
-        preserveExistingOnEmpty: Bool = false,
-        requireValidReconciliation: Bool = false,
-        sourceOverride: String? = nil,
-        kindOverride: StatementKind? = nil
-    ) throws -> ImportSummary {
-        let didStartAccessing = url.startAccessingSecurityScopedResource()
-        defer {
-            if didStartAccessing {
-                url.stopAccessingSecurityScopedResource()
-            }
-        }
-
-        let documentData: Data
-        do {
-            documentData = try Data(contentsOf: url, options: .mappedIfSafe)
-        } catch {
-            throw FinanceImportError.unreadableDocument
-        }
-        guard documentData.count <= 50 * 1024 * 1024 else {
+    private static func extractPDF(
+        data: Data,
+        fileName: String,
+        allowOCR: Bool,
+        sourceOverride: String?,
+        kindOverride: StatementKind?,
+        learnedRules: [String: String]
+    ) throws -> PDFImportExtraction {
+        guard data.count <= 50 * 1024 * 1024 else {
             throw FinanceImportError.documentTooLarge
         }
-        guard let document = PDFDocument(data: documentData) else {
+        guard let document = PDFDocument(data: data) else {
             throw FinanceImportError.unreadableDocument
         }
         guard document.pageCount <= 80 else {
@@ -2457,25 +2468,18 @@ final class FinanceStore {
         let extractedText = (0..<document.pageCount)
             .compactMap { document.page(at: $0)?.string }
             .joined(separator: "\n")
-        // Some scanned PDFs carry a short hidden text layer (cover labels,
-        // dates or PDF metadata) that is longer than the old 120-character
-        // cutoff but contains no reconstructable movement rows. Treat the
-        // text layer as usable only when it has both a movement date and a
-        // table signal; otherwise fall back to Vision instead of parsing
-        // administrative text as if it were a ledger.
+        // A short administrative text layer is not a trustworthy movement
+        // table; send it through Vision rather than parsing header numbers.
         let usedOCR = Self.shouldUseOCR(extractedText: extractedText, allowOCR: allowOCR)
         let ocrObservations = usedOCR ? Self.ocrObservations(from: document) : []
         let text = usedOCR ? Self.ocrText(from: ocrObservations) : extractedText
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FinanceImportError.emptyDocument
         }
-        let sourceFingerprint = pdfFingerprint(documentData)
         let ocrPageConfidences: [Double]? = {
             guard usedOCR else { return nil }
             let grouped = Dictionary(grouping: ocrObservations, by: \.page)
-            // Preserve a zero-confidence entry for an entirely blank or
-            // failed Vision page; omitting it would make the document mean
-            // look healthier than the pages the user actually uploaded.
+            // Preserve a zero-confidence entry for a failed/blank page.
             let values = (0..<document.pageCount).map { page -> Double in
                 guard let observations = grouped[page], !observations.isEmpty else { return 0 }
                 return observations.map(\.confidence).reduce(0, +) / Double(observations.count)
@@ -2485,11 +2489,8 @@ final class FinanceStore {
         let ocrConfidence = ocrPageConfidences.map { pages in
             pages.reduce(0, +) / Double(pages.count)
         }
-        // Institutional text wins over the filename. During a canonical
-        // rebuild the stored PDF has a UUID filename, and on a first import a
-        // user may have renamed it incorrectly. Transaction counterparties
-        // are excluded by sourceDetection's header scope.
-        let detectedSourceEvidence = Self.sourceDetection(from: text, fileName: url.lastPathComponent)
+
+        let detectedSourceEvidence = Self.sourceDetection(from: text, fileName: fileName)
         let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
         let sourceDetection = cleanedSourceOverride.flatMap { override -> SourceDetectionEvidence? in
             guard !override.isEmpty else { return nil }
@@ -2505,34 +2506,33 @@ final class FinanceStore {
         let accountKey = detectedSourceEvidence.source == source
             ? Self.maskedAccountKey(from: text, source: source)
             : nil
-        let detectedKind = kindOverride ?? Self.statementKind(from: text, source: source)
+        let kind = kindOverride ?? Self.statementKind(from: text, source: source)
         var santanderColumnsCalibrated = true
         let parsedCandidates: [Movement]
         if usedOCR, source == "Santander" {
-            let santanderResult = Self.parseSantanderOCRResult(ocrObservations, fileName: url.lastPathComponent)
+            let santanderResult = Self.parseSantanderOCRResult(ocrObservations, fileName: fileName)
             santanderColumnsCalibrated = santanderResult.columnsCalibrated
             parsedCandidates = santanderResult.movements.isEmpty
-                ? Self.parse(text: text, fileName: url.lastPathComponent, sourceHint: source)
+                ? Self.parse(text: text, fileName: fileName, sourceHint: source)
                 : santanderResult.movements
         } else if usedOCR, source == "Amex" {
-            let amexCandidates = Self.parseAmexOCR(Self.ocrLines(from: ocrObservations), fileName: url.lastPathComponent)
+            let amexCandidates = Self.parseAmexOCR(Self.ocrLines(from: ocrObservations), fileName: fileName)
             parsedCandidates = amexCandidates.isEmpty
-                ? Self.parse(text: text, fileName: url.lastPathComponent, sourceHint: source)
+                ? Self.parse(text: text, fileName: fileName, sourceHint: source)
                 : amexCandidates
         } else if usedOCR {
             let genericCandidates = Self.parseGenericOCR(
                 ocrObservations,
-                fileName: url.lastPathComponent,
+                fileName: fileName,
                 source: source,
-                kind: detectedKind
+                kind: kind
             )
             parsedCandidates = genericCandidates.isEmpty
-                ? Self.parse(text: text, fileName: url.lastPathComponent, sourceHint: source)
+                ? Self.parse(text: text, fileName: fileName, sourceHint: source)
                 : genericCandidates
         } else {
-            parsedCandidates = Self.parse(text: text, fileName: url.lastPathComponent, sourceHint: source)
+            parsedCandidates = Self.parse(text: text, fileName: fileName, sourceHint: source)
         }
-        let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
         let candidates = parsedCandidates.map { candidate -> Movement in
             var corrected = candidate
             if let learned = learnedRules[Self.categoryRuleKey(candidate.title)] {
@@ -2540,8 +2540,59 @@ final class FinanceStore {
             }
             return corrected
         }
-        let period = Self.periodLabel(from: text, fileName: url.lastPathComponent)
+        let period = Self.periodLabel(from: text, fileName: fileName)
         let summary = Self.summary(from: text, source: source)
+        let ocrFallbackNeedsReview = usedOCR && candidates.contains {
+            guard let evidence = $0.extractionEvidence else { return true }
+            return evidence.method != "vision-ocr" || evidence.confidence < 0.88
+        }
+        let ocrColumnCalibrationNeedsReview = usedOCR
+            && source == "Santander"
+            && !santanderColumnsCalibrated
+        let ocrConfidenceNeedsReview = usedOCR
+            && ((ocrConfidence ?? 0) < 0.88 || (ocrPageConfidences?.min() ?? 0) < 0.78)
+
+        return PDFImportExtraction(
+            documentData: data,
+            fileName: fileName,
+            pageCount: document.pageCount,
+            sourceFingerprint: Self.pdfFingerprint(data),
+            sourceDetection: sourceDetection,
+            source: source,
+            accountKey: accountKey,
+            kind: kind,
+            candidates: candidates,
+            period: period,
+            summary: summary,
+            usedOCR: usedOCR,
+            ocrConfidence: ocrConfidence,
+            ocrPageConfidences: ocrPageConfidences,
+            ocrColumnsCalibrated: usedOCR && source == "Santander" ? santanderColumnsCalibrated : nil,
+            ocrFallbackNeedsReview: ocrFallbackNeedsReview,
+            ocrColumnCalibrationNeedsReview: ocrColumnCalibrationNeedsReview,
+            ocrConfidenceNeedsReview: ocrConfidenceNeedsReview
+        )
+    }
+
+    private func applyPDFExtraction(
+        _ extraction: PDFImportExtraction,
+        url: URL,
+        preserveExistingOnEmpty: Bool,
+        requireValidReconciliation: Bool
+    ) throws -> ImportSummary {
+        let documentData = extraction.documentData
+        let sourceFingerprint = extraction.sourceFingerprint
+        let sourceDetection = extraction.sourceDetection
+        let source = extraction.source
+        let accountKey = extraction.accountKey
+        let detectedKind = extraction.kind
+        let candidates = extraction.candidates
+        let period = extraction.period
+        let summary = extraction.summary
+        let usedOCR = extraction.usedOCR
+        let ocrConfidence = extraction.ocrConfidence
+        let ocrPageConfidences = extraction.ocrPageConfidences
+        let ocrColumnsCalibrated = extraction.ocrColumnsCalibrated
         // The original export name is often reused every month. Match the
         // exact PDF by SHA-256 first so a new cutoff cannot overwrite history;
         // fall back to a legacy filename-only record once for older builds
@@ -2565,19 +2616,10 @@ final class FinanceStore {
                 message: "\(url.lastPathComponent): \(reconciliation.reason ?? "estado pendiente")"
             )
         }
-        let ocrFallbackNeedsReview = usedOCR && fresh.contains {
-            guard let evidence = $0.extractionEvidence else { return true }
-            return evidence.method != "vision-ocr" || evidence.confidence < 0.88
-        }
-        let ocrColumnCalibrationNeedsReview = usedOCR
-            && source == "Santander"
-            && !santanderColumnsCalibrated
-        let ocrColumnsCalibrated: Bool? = usedOCR && source == "Santander"
-            ? santanderColumnsCalibrated
-            : nil
+        let ocrFallbackNeedsReview = extraction.ocrFallbackNeedsReview
+        let ocrColumnCalibrationNeedsReview = extraction.ocrColumnCalibrationNeedsReview
         let weakestOCRPage = ocrPageConfidences?.min()
-        let ocrConfidenceNeedsReview = usedOCR
-            && ((ocrConfidence ?? 0) < 0.88 || (weakestOCRPage ?? 0) < 0.78)
+        let ocrConfidenceNeedsReview = extraction.ocrConfidenceNeedsReview
         if ocrFallbackNeedsReview {
             DiagnosticsRecorder.record(
                 stage: "import.ocr.review",
@@ -2677,7 +2719,7 @@ final class FinanceStore {
             ocrPageConfidences: ocrPageConfidences,
             ocrColumnsCalibrated: ocrColumnsCalibrated,
             fileSizeBytes: documentData.count,
-            pageCount: document.pageCount
+            pageCount: extraction.pageCount
         )
         if let index = statements.firstIndex(where: { $0.id == statementId }) {
             statements[index] = statement
@@ -2710,7 +2752,89 @@ final class FinanceStore {
             ocrPageConfidences: ocrPageConfidences,
             ocrColumnsCalibrated: ocrColumnsCalibrated,
             fileSizeBytes: documentData.count,
-            pageCount: document.pageCount
+            pageCount: extraction.pageCount
+        )
+    }
+
+    func importPDF(
+        from url: URL,
+        allowOCR: Bool = true,
+        preserveExistingOnEmpty: Bool = false,
+        requireValidReconciliation: Bool = false,
+        sourceOverride: String? = nil,
+        kindOverride: StatementKind? = nil
+    ) throws -> ImportSummary {
+        let didStartAccessing = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccessing {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let documentData: Data
+        do {
+            documentData = try Data(contentsOf: url, options: .mappedIfSafe)
+        } catch {
+            throw FinanceImportError.unreadableDocument
+        }
+        let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
+        let extraction = try Self.extractPDF(
+            data: documentData,
+            fileName: url.lastPathComponent,
+            allowOCR: allowOCR,
+            sourceOverride: sourceOverride,
+            kindOverride: kindOverride,
+            learnedRules: learnedRules
+        )
+        return try applyPDFExtraction(
+            extraction,
+            url: url,
+            preserveExistingOnEmpty: preserveExistingOnEmpty,
+            requireValidReconciliation: requireValidReconciliation
+        )
+    }
+
+    /// Asynchronous import path used by the UI. PDFKit parsing and Vision OCR
+    /// run off the main actor; only the small ledger commit returns to the
+    /// store's isolation context after extraction completes.
+    func importPDFAsync(
+        from url: URL,
+        allowOCR: Bool = true,
+        preserveExistingOnEmpty: Bool = false,
+        requireValidReconciliation: Bool = false,
+        sourceOverride: String? = nil,
+        kindOverride: StatementKind? = nil
+    ) async throws -> ImportSummary {
+        let didStartAccessing = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccessing {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let documentData: Data
+        do {
+            documentData = try Data(contentsOf: url, options: .mappedIfSafe)
+        } catch {
+            throw FinanceImportError.unreadableDocument
+        }
+        let fileName = url.lastPathComponent
+        let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
+        let extraction = try await Task.detached(priority: .userInitiated) {
+            try Self.extractPDF(
+                data: documentData,
+                fileName: fileName,
+                allowOCR: allowOCR,
+                sourceOverride: sourceOverride,
+                kindOverride: kindOverride,
+                learnedRules: learnedRules
+            )
+        }.value
+        return try applyPDFExtraction(
+            extraction,
+            url: url,
+            preserveExistingOnEmpty: preserveExistingOnEmpty,
+            requireValidReconciliation: requireValidReconciliation
         )
     }
 

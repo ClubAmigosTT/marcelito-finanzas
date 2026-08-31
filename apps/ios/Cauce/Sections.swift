@@ -1222,7 +1222,7 @@ private struct StatementSummaryEditor: View {
                         reimportError = nil
                         Task { @MainActor in
                             do {
-                                _ = try store.importPDF(
+                                _ = try await store.importPDFAsync(
                                     from: localURL,
                                     allowOCR: true,
                                     preserveExistingOnEmpty: false,

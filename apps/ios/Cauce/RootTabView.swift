@@ -140,7 +140,7 @@ struct HomeView: View {
                             // overlay before PDFKit/Vision starts its work.
                             await Task.yield()
                             do {
-                                let summary = try store.importPDF(from: url)
+                                let summary = try await store.importPDFAsync(from: url)
                                 items.append(ImportReportItem(summary: summary))
                                 DiagnosticsRecorder.record(
                                     stage: "import.file",
