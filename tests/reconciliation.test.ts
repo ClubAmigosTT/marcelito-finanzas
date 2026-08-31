@@ -654,6 +654,23 @@ test("el resumen Amex conserva deuda comprometida, pago MSI y saldo pendiente", 
   assert.equal(summary.msiMonthlyLoad, 16382.4);
 });
 
+test("el formato real de controles Amex no confunde la fecha con límite o disponible", () => {
+  const summary = parseStatementSummary([
+    "American Express / The Platinum Credit Card",
+    "23,150.88 - 32,744.61 + 49,559.88 = 39,966.15 3,197.29",
+    "Límite de Crédito Límite Disponible",
+    "a Agosto 27,2026 150,000.00 MN 99,632.79 MN",
+    "Pago para no generar intereses 39,966.15",
+    "Pago mínimo más meses sin intereses 19,579.69",
+  ].join("\n"), "card");
+
+  assert.equal(summary.creditLimit, 150_000);
+  assert.equal(summary.creditAvailable, 99_632.79);
+  assert.equal(summary.statementBalance, 39_966.15);
+  assert.equal(summary.paymentForNoInterest, 39_966.15);
+  assert.equal(summary.minimumPlusMsi, 19_579.69);
+});
+
 test("los totales bancarios declarados bloquean una importación que no concilia", () => {
   const summary = parseStatementSummary([
     "Saldo Anterior 100.00",
