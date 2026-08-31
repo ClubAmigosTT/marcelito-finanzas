@@ -555,6 +555,29 @@ test("un estado marcado como inválido bloquea el gasto aunque existan filas her
   assert.equal(metrics.dataQuality.critical, true);
 });
 
+test("un estado conciliado pero pendiente de revisión no alimenta los KPI", () => {
+  const statements: Statement[] = [{
+    ...bank("bbva-review", "BBVA", "agosto 2026"),
+    status: "review",
+    reconciliationStatus: "valid",
+    reconciliation: { status: "valid", tolerance: 0.05 },
+  }];
+  const transactions = [movement({
+    id: "reviewed-later",
+    date: "10 ago 2026",
+    description: "SUPERMERCADO",
+    account: "BBVA",
+    amount: -1200,
+    flow: "expense",
+    statementId: "bbva-review",
+    category: "Alimentos",
+  })];
+  const metrics = buildFinanceMetrics(transactions, statements);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.dataQuality.critical, true);
+  assert.equal(metrics.isProvisional, true);
+});
+
 test("el último corte se elige por fecha de cierre y no por orden de importación", () => {
   const statements: Statement[] = [
     { ...bank("santander-may", "Santander", "16/05/2026 AL 15/06/2026"), summary: { cashBalance: 24621.48 } },

@@ -636,11 +636,18 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   // invalid rows, overlapping statements, own transfers and card payments
   // are removed or linked before any KPI is calculated.
   const pipeline = providedPipeline ?? runTransactionPipeline(inputTransactions, statements);
-  const blockedStatementIds = new Set(statements
+  const blockedForReconciliation = statements
     .filter((statement) => statement.reconciliationStatus && statement.reconciliationStatus !== "valid")
-    .map((statement) => statement.id));
-  if (blockedStatementIds.size > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("conciliación de estado"))) {
-    pipeline.audit.criticalIssues.push(`${blockedStatementIds.size} estado(s) quedaron fuera de los KPI por conciliación de estado`);
+    .map((statement) => statement.id);
+  const blockedForReview = statements
+    .filter((statement) => statement.status === "review")
+    .map((statement) => statement.id);
+  const blockedStatementIds = new Set([...blockedForReconciliation, ...blockedForReview]);
+  if (blockedForReconciliation.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("conciliación de estado"))) {
+    pipeline.audit.criticalIssues.push(`${blockedForReconciliation.length} estado(s) quedaron fuera de los KPI por conciliación de estado`);
+  }
+  if (blockedForReview.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("revisión"))) {
+    pipeline.audit.criticalIssues.push(`${blockedForReview.length} estado(s) quedaron fuera de los KPI por revisión pendiente`);
   }
   // A document that failed issuer-total reconciliation can remain visible in
   // the audit screen, but none of its rows or summary values may feed an
