@@ -222,6 +222,9 @@ El runner nativo ya contrasta los controles de saldo inicial, saldo final,
 depósitos y retiros del resumen incluso cuando una lectura escaneada permanece
 `pending`; solo difiere la aserción de sumas de filas hasta que Vision
 reconstruye movimientos válidos.
+El verificador del reporte nativo exige además huella SHA-256, emisor, tipo,
+estado y conteo de filas por PDF, comparados con el manifiesto; un resumen
+agregado sin trazabilidad completa no puede certificar la corrida.
 El evaluador web también contrasta en los estados Amex de texto el límite,
 crédito disponible, deuda comprometida, pago para no generar intereses, mínimo
 más MSI y principal MSI pendiente; estos controles son independientes de las

@@ -73,7 +73,10 @@ permanezcan en `pending`.
 El verificador también exige el `NATIVE_CORPUS_REPORT` por archivo: comprueba
 que no falte ningún PDF, que no haya archivos repetidos, que el conjunto de
 nombres coincida con el manifiesto y que cada `accountKey` sea únicamente
-`emisor:últimos4` y coincida con su expectativa dorada.
+`emisor:últimos4` y coincida con su expectativa dorada. También exige la
+huella SHA-256, emisor, tipo, estado de conciliación y conteo de filas de cada
+registro, y contrasta esos campos contra el manifiesto; un resumen certificado
+sin trazabilidad por archivo no pasa la compuerta.
 
 El contrato nativo también verifica el SHA-256 de cada PDF contra el manifiesto
 privado del corpus. Si se sustituye, altera o renombra un archivo sin actualizar
