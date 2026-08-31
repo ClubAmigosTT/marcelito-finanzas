@@ -316,6 +316,7 @@ struct ImportSummary {
 struct ReaderParseSnapshot {
     let sourceDetection: SourceDetectionEvidence
     let source: String
+    let accountKey: String?
     let kind: StatementKind
     let movements: [Movement]
     let summary: StatementSummaryRecord?
@@ -556,12 +557,16 @@ final class FinanceStore {
     ) -> ReaderParseSnapshot {
         let detection = sourceDetection(from: text, fileName: fileName)
         let source = sourceHint ?? detection.source
+        let accountKey = detection.source == source
+            ? maskedAccountKey(from: text, source: source)
+            : nil
         let kind = statementKind(from: text, source: source)
         let movements = parse(text: text, fileName: fileName, sourceHint: source)
         let summary = summary(from: text, source: source)
         return ReaderParseSnapshot(
             sourceDetection: detection,
             source: source,
+            accountKey: accountKey,
             kind: kind,
             movements: movements,
             summary: summary

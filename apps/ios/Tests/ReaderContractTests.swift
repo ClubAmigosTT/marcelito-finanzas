@@ -47,6 +47,25 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("total importe") })
     }
 
+    func testAccountIdentityUsesOnlyHeaderLastFourDigits() {
+        let text = """
+        BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
+        Estado de cuenta
+        No. de Cuenta 1575694922
+        Fecha Descripcion Cargos Abonos Saldo
+        05/08/2026 SPEI RECIBIDO SANTANDER 4,500.00 6,116.63
+        06/08/2026 TRANSFERENCIA A CUENTA 012180001234567890 100.00 6,016.63
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "BBVA-agosto-2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.accountKey, "bbva:4922")
+        XCTAssertFalse(snapshot.accountKey?.contains("1575694922") == true)
+    }
+
     func testBBVAInstitutionalEvidenceWinsBeforeMovementTable() {
         let text = """
         BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
