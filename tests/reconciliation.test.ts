@@ -758,6 +758,17 @@ test("el formato real de controles Amex no confunde la fecha con límite o dispo
   assert.equal(summary.minimumPlusMsi, 19_579.69);
 });
 
+test("el resumen descarta identificadores administrativos usados como importes", () => {
+  const summary = parseStatementSummary([
+    "Límite de Crédito 12345678901234567890",
+    "Crédito Disponible 99,632.79",
+    "Nuevas transacciones 100.00",
+  ].join("\n"), "card");
+  assert.equal(summary.creditLimit, undefined);
+  assert.equal(summary.creditAvailable, 99_632.79);
+  assert.equal(summary.newTransactions, 100);
+});
+
 test("los totales bancarios declarados bloquean una importación que no concilia", () => {
   const summary = parseStatementSummary([
     "Saldo Anterior 100.00",

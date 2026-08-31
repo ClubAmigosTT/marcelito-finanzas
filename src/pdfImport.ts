@@ -3,7 +3,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-2026.08.31.3";
+export const PDF_READER_VERSION = "web-reader-2026.08.31.4";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
@@ -480,10 +480,25 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
       }
     }
 
-    const creditSection = cardSummaryText.normalize("NFD").replace(/[\u0300-\u036f]/g, "").match(new RegExp(`limite\\s+de\\s+credito[\\s\\S]{0,220}?(${decimalMoneyToken})[\\s\\S]{0,70}?(${decimalMoneyToken})`, "i"));
-    if (creditSection) {
-      summary.creditLimit = parseToken(creditSection[1]);
-      summary.creditAvailable = parseToken(creditSection[2]);
+    // The limit/available controls are often printed on a header line and
+    // their values on the immediately following line. Require both monetary
+    // values to coexist on one visual line; otherwise an account/reference
+    // number followed by a later payment can be paired incorrectly.
+    const creditLines = cardSummaryText.split(/\n+/);
+    const creditLabelIndex = creditLines.findIndex((line) => /limite\s+de\s+credito/i.test(normalizeText(line)));
+    const creditPair = creditLabelIndex >= 0
+      ? creditLines.slice(creditLabelIndex, creditLabelIndex + 5)
+        .map((line) => lineMoneyValues(line)
+          // Dates such as `27,2026` can be tokenised as bare 27/2026 values;
+          // only keep tokens carrying a monetary separator for this pair.
+          .filter((item) => /[.,$]/.test(item.raw))
+          .map((item) => item.value)
+          .filter((value): value is number => value !== undefined && value > 0))
+        .find((values) => values.length >= 2)
+      : undefined;
+    if (creditPair) {
+      summary.creditLimit = creditPair[0];
+      summary.creditAvailable = creditPair[1];
     }
 
     // Amex's MSI table ends with the remaining principal followed by the
@@ -509,6 +524,17 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
     }
     if (foreignSectionTotal) summary.foreignTransactionTotal = parseToken(foreignSectionTotal[1]);
   }
+  // A summary label can be followed by an administrative identifier (account,
+  // certificate or tracking number) that happens to look numeric. Keep the
+  // parser conservative: values outside the bounded financial domain are not
+  // usable controls and must not feed debt, cash or payment KPIs. Movement
+  // rows have an independent bound in validation/reconciliation.
+  (Object.keys(summary) as Array<keyof StatementSummary>).forEach((key) => {
+    const value = summary[key];
+    if (typeof value === "number" && (!Number.isFinite(value) || Math.abs(value) >= 100_000_000)) {
+      delete summary[key];
+    }
+  });
   return summary;
 }
 
