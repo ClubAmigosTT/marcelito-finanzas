@@ -1,0 +1,133 @@
+{
+  "schemaVersion": 1,
+  "readerVersion": "web-reader-public-synthetic",
+  "tolerance": 0.05,
+  "purpose": "Fixtures sintéticos para probar el contrato del lector; nunca contienen estados financieros reales.",
+  "files": [
+    {
+      "file": "sample-card-period-1.pdf",
+      "sourceFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "accountKey": "amex:1001",
+      "source": "Amex",
+      "kind": "card",
+      "status": "valid",
+      "rows": 4,
+      "summary": {
+        "extractedChargeTotal": 2803.42,
+        "creditLimit": 10000,
+        "creditAvailable": 7196.58,
+        "debtBalance": 2803.42,
+        "paymentForNoInterest": 967.57,
+        "minimumPlusMsi": 1052.92,
+        "msiPending": 1835.85
+      }
+    },
+    {
+      "file": "sample-card-period-2.pdf",
+      "sourceFingerprint": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "accountKey": "amex:1001",
+      "source": "Amex",
+      "kind": "card",
+      "status": "valid",
+      "rows": 5,
+      "summary": {
+        "extractedChargeTotal": 4671.16,
+        "extractedPaymentTotal": 3440.52,
+        "creditLimit": 10000,
+        "creditAvailable": 6590.61,
+        "debtBalance": 3409.39,
+        "paymentForNoInterest": 2315.09,
+        "minimumPlusMsi": 1503.66,
+        "msiPending": 1718.97
+      }
+    },
+    {
+      "file": "sample-bank-period-1.pdf",
+      "sourceFingerprint": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "accountKey": "santander:2001",
+      "source": "Santander",
+      "kind": "bank",
+      "status": "pending",
+      "summary": {
+        "previousBalance": 3700,
+        "cashBalance": 2462,
+        "depositTotal": 4922,
+        "withdrawalTotal": 6160
+      }
+    },
+    {
+      "file": "sample-bank-period-2.pdf",
+      "sourceFingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "accountKey": "santander:2001",
+      "source": "Santander",
+      "kind": "bank",
+      "status": "pending",
+      "summary": {
+        "previousBalance": 2462,
+        "cashBalance": 3780,
+        "depositTotal": 5160,
+        "withdrawalTotal": 3842
+      }
+    },
+    {
+      "file": "sample-bank-period-3.pdf",
+      "sourceFingerprint": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "accountKey": "santander:2001",
+      "source": "Santander",
+      "kind": "bank",
+      "status": "pending",
+      "summary": {
+        "previousBalance": 3780,
+        "cashBalance": 3250,
+        "depositTotal": 3618,
+        "withdrawalTotal": 4148
+      }
+    },
+    {
+      "file": "sample-card-period-3.pdf",
+      "sourceFingerprint": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "accountKey": "amex:1001",
+      "source": "Amex",
+      "kind": "card",
+      "status": "valid",
+      "rows": 6,
+      "summary": {
+        "extractedChargeTotal": 3317.75,
+        "extractedPaymentTotal": 2315.09,
+        "creditLimit": 20000,
+        "creditAvailable": 16682.25,
+        "debtBalance": 3317.75,
+        "paymentForNoInterest": 3996.62,
+        "minimumPlusMsi": 1957.97,
+        "msiPending": 1040.11
+      }
+    },
+    {
+      "file": "sample-bank-period-4.pdf",
+      "sourceFingerprint": "1111111111111111111111111111111111111111111111111111111111111111",
+      "accountKey": "santander:2001",
+      "source": "Santander",
+      "kind": "bank",
+      "status": "pending",
+      "summary": {
+        "previousBalance": 3250,
+        "cashBalance": 2950,
+        "depositTotal": 1820,
+        "withdrawalTotal": 2120
+      }
+    },
+    {
+      "file": "sample-bank-bbva.pdf",
+      "sourceFingerprint": "2222222222222222222222222222222222222222222222222222222222222222",
+      "accountKey": "bbva:3001",
+      "source": "BBVA",
+      "kind": "bank",
+      "status": "valid",
+      "rows": 11,
+      "summary": {
+        "extractedDepositTotal": 1950,
+        "extractedWithdrawalTotal": 2205.87
+      }
+    }
+  ]
+}

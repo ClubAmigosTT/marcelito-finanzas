@@ -1,0 +1,430 @@
+name: iOS TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      marketing_version:
+        description: "Versión de marketing (por ejemplo, 1.0.1)"
+        required: false
+        default: "1.0.0"
+        type: string
+  push:
+    tags:
+      - "ios-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-testflight
+  cancel-in-progress: false
+
+jobs:
+  archive-and-upload:
+    name: Compilar y subir Marcelito
+    # TestFlight is the only job allowed to access signing/App Store Connect
+    # credentials. Configure these secrets in the protected `testflight`
+    # environment and require an approval from a trusted maintainer.
+    if: github.repository == 'ClubAmigosTT/marcelito-finanzas' && (github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/ios-v'))
+    environment:
+      name: testflight
+    # Apple exige el SDK de iOS 26 para nuevas subidas desde abril de 2026.
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+      APPSTORE_API_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+      APPSTORE_API_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+      APPLE_DISTRIBUTION_P12: ${{ secrets.APPLE_DISTRIBUTION_P12 }}
+      APPLE_DISTRIBUTION_P12_PASSWORD: ${{ secrets.APPLE_DISTRIBUTION_P12_PASSWORD }}
+      APPLE_PROVISIONING_PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE }}
+      REQUESTED_MARKETING_VERSION: "${{ inputs.marketing_version }}"
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Auditar motor financiero antes de publicar
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Ejecutar pruebas del libro canónico
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm test
+          npm run build
+
+      - name: Mostrar toolchain de Apple
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "SDK de iPhone: $sdk_version"
+          sdk_major="${sdk_version%%.*}"
+          if ((sdk_major < 26)); then
+            echo "::error title=SDK de iOS no compatible::Apple exige iOS 26 o posterior para subir a App Store Connect."
+            exit 1
+          fi
+
+      - name: Validar secretos necesarios
+        shell: bash
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in APPLE_TEAM_ID APPSTORE_ISSUER_ID APPSTORE_API_KEY_ID APPSTORE_API_PRIVATE_KEY APPLE_DISTRIBUTION_P12 APPLE_DISTRIBUTION_P12_PASSWORD APPLE_PROVISIONING_PROFILE; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if ((${#missing[@]} > 0)); then
+            printf "::error title=Faltan secretos::Configura en GitHub Actions: %s\n" "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Resolver versión
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${REQUESTED_MARKETING_VERSION:-}"
+          if [[ -z "$version" && "$GITHUB_REF" == refs/tags/ios-v* ]]; then
+            version="${GITHUB_REF_NAME#ios-v}"
+          fi
+          version="${version:-1.0.0}"
+          if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            echo "::error title=Versión inválida::Usa un formato como 1.0.1"
+            exit 1
+          fi
+          echo "MARKETING_VERSION=$version" >> "$GITHUB_ENV"
+          echo "Se compilará Marcelito $version"
+
+      - name: Instalar XcodeGen
+        shell: bash
+        run: brew install xcodegen
+
+      - name: Generar proyecto Xcode
+        working-directory: apps/ios
+        shell: bash
+        run: xcodegen generate --spec project.yml
+
+      - name: Ejecutar contrato nativo del lector antes de publicar
+        working-directory: apps/ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/{print "platform=iOS Simulator,id=" $2; exit}')"
+          if [ -z "$destination" ]; then
+            echo "::error title=No hay simulador iPhone::No se puede certificar el lector nativo antes de publicar."
+            exit 1
+          fi
+          xcodebuild \
+            -project Marcelito.xcodeproj \
+            -scheme Marcelito \
+            -configuration Debug \
+            -destination "$destination" \
+            -derivedDataPath "$RUNNER_TEMP/MarcelitoPreflightDerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/MarcelitoPreflight.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            test
+
+      - name: Exigir certificación del corpus nativo real
+        env:
+          NATIVE_CORPUS_CERTIFIED: ${{ vars.MARCELITO_NATIVE_CORPUS_CERTIFIED }}
+          NATIVE_CORPUS_READER_VERSION: ${{ vars.MARCELITO_NATIVE_CORPUS_READER_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # macOS runners still ship Bash 3.2, which does not support the
+          # `${var,,}` lowercase expansion. Normalize portably with `tr` so
+          # the certification gate fails for the intended reason instead of a
+          # shell syntax error.
+          native_corpus_certified_normalized="$(printf '%s' "${NATIVE_CORPUS_CERTIFIED:-}" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$native_corpus_certified_normalized" != "true" ]]; then
+            echo "::error title=Corpus nativo sin certificar::Ejecuta el runner privado con Vision y registra MARCELITO_NATIVE_CORPUS_CERTIFIED=true antes de publicar."
+            exit 1
+          fi
+          if [[ -z "${NATIVE_CORPUS_READER_VERSION:-}" ]]; then
+            echo "::error title=Falta versión certificada::Registra MARCELITO_NATIVE_CORPUS_READER_VERSION con la versión del lector usada para certificar el corpus."
+            exit 1
+          fi
+          current_reader_version="$(sed -n 's/.*static let readerVersion = "\([^"]*\)".*/\1/p' apps/ios/Cauce/Models.swift | head -n 1)"
+          if [[ -z "$current_reader_version" || "$NATIVE_CORPUS_READER_VERSION" != "$current_reader_version" ]]; then
+            echo "::error title=Corpus desactualizado::La certificación declarada ($NATIVE_CORPUS_READER_VERSION) no corresponde al lector actual ($current_reader_version). Ejecuta de nuevo el corpus nativo."
+            exit 1
+          fi
+          echo "Corpus nativo certificado para la revisión declarada: $NATIVE_CORPUS_READER_VERSION"
+
+      - name: Guardar contrato nativo de prepublicación
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: marcelito-ios-preflight-results
+          path: |
+            ${{ runner.temp }}/MarcelitoPreflight.xcresult
+            ${{ runner.temp }}/MarcelitoPreflightDerivedData/Logs/Test
+          if-no-files-found: warn
+          retention-days: 1
+
+      - name: Preparar clave de App Store Connect
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_path="$RUNNER_TEMP/AuthKey_${APPSTORE_API_KEY_ID}.p8"
+          printf "%s" "$APPSTORE_API_PRIVATE_KEY" > "$key_path"
+          chmod 600 "$key_path"
+          echo "APPSTORE_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Preparar firma de distribución
+        shell: bash
+        run: |
+          set -euo pipefail
+          keychain_path="$RUNNER_TEMP/marcelito-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          p12_path="$RUNNER_TEMP/marcelito-distribution.p12"
+          profile_path="$RUNNER_TEMP/marcelito.mobileprovision"
+          profile_plist="$RUNNER_TEMP/marcelito-profile.plist"
+          profile_dir="$HOME/Library/MobileDevice/Provisioning Profiles"
+
+          printf "%s" "$APPLE_DISTRIBUTION_P12" | base64 -D > "$p12_path"
+          printf "%s" "$APPLE_PROVISIONING_PROFILE" | base64 -D > "$profile_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$p12_path" -P "$APPLE_DISTRIBUTION_P12_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -s "$keychain_path"
+
+          mkdir -p "$profile_dir"
+          security cms -D -i "$profile_path" > "$profile_plist"
+          profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$profile_plist")"
+          profile_name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$profile_plist")"
+          cp "$profile_path" "$profile_dir/$profile_uuid.mobileprovision"
+          echo "SIGNING_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+          echo "PROVISIONING_PROFILE_UUID=$profile_uuid" >> "$GITHUB_ENV"
+          echo "PROVISIONING_PROFILE_NAME=$profile_name" >> "$GITHUB_ENV"
+          echo "Perfil de distribución listo para $profile_name"
+
+      - name: Archivar aplicación
+        working-directory: apps/ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project Marcelito.xcodeproj \
+            -scheme Marcelito \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/Marcelito.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/MarcelitoDerivedData" \
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_UUID" \
+            CURRENT_PROJECT_VERSION="$GITHUB_RUN_NUMBER" \
+            MARKETING_VERSION="$MARKETING_VERSION" \
+            clean archive
+
+      - name: Exportar IPA para App Store
+        working-directory: apps/ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          export_options="$RUNNER_TEMP/ExportOptions.plist"
+          cat > "$export_options" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>method</key>
+            <string>app-store</string>
+            <key>signingStyle</key>
+            <string>manual</string>
+            <key>signingCertificate</key>
+            <string>Apple Distribution</string>
+            <key>teamID</key>
+            <string>$APPLE_TEAM_ID</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>mx.marcelito.personal</key>
+              <string>$PROVISIONING_PROFILE_NAME</string>
+            </dict>
+            <key>uploadSymbols</key>
+            <true/>
+          </dict>
+          </plist>
+          EOF
+          rm -rf "$RUNNER_TEMP/MarcelitoExport"
+          mkdir -p "$RUNNER_TEMP/MarcelitoExport"
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Marcelito.xcarchive" \
+            -exportPath "$RUNNER_TEMP/MarcelitoExport" \
+            -exportOptionsPlist "$export_options"
+          ipa_path="$RUNNER_TEMP/MarcelitoExport/Marcelito.ipa"
+          if [[ ! -f "$ipa_path" ]]; then
+            ipa_path="$(find "$RUNNER_TEMP/MarcelitoExport" -maxdepth 1 -name "*.ipa" -print -quit)"
+          fi
+          if [[ -z "$ipa_path" || ! -f "$ipa_path" ]]; then
+            echo "::error title=No se encontró el IPA::La exportación no generó un archivo .ipa"
+            exit 1
+          fi
+          echo "IPA_PATH=$ipa_path" >> "$GITHUB_ENV"
+
+      - name: Subir build a TestFlight
+        uses: apple-actions/upload-testflight-build@v4
+        with:
+          app-path: ${{ env.IPA_PATH }}
+          issuer-id: ${{ secrets.APPSTORE_ISSUER_ID }}
+          api-key-id: ${{ secrets.APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          uses-non-exempt-encryption: "false"
+          # La acción puede agotar el JWT mientras Apple procesa la compilación.
+          # La subida termina aquí y el paso siguiente renueva el token en cada intento.
+          wait-for-processing: "false"
+
+      - name: Confirmar procesamiento en App Store Connect
+        env:
+          ASC_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          ASC_BUNDLE_ID: mx.marcelito.personal
+          ASC_BUILD_NUMBER: ${{ github.run_number }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const crypto = require("node:crypto");
+
+          const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+          const base64Url = (value) => Buffer.from(value).toString("base64")
+            .replace(/=/g, "")
+            .replace(/\+/g, "-")
+            .replace(/\//g, "_");
+          const privateKey = (process.env.ASC_PRIVATE_KEY || "")
+            .replace(/\r\n/g, "\n")
+            .replace(/\\n/g, "\n");
+
+          function makeToken() {
+            const now = Math.floor(Date.now() / 1000);
+            const header = base64Url(JSON.stringify({
+              alg: "ES256",
+              kid: process.env.ASC_KEY_ID,
+              typ: "JWT",
+            }));
+            const payload = base64Url(JSON.stringify({
+              iss: process.env.ASC_ISSUER_ID,
+              iat: now - 30,
+              exp: now + 540,
+              aud: "appstoreconnect-v1",
+            }));
+            const signer = crypto.createSign("SHA256");
+            signer.update(`${header}.${payload}`);
+            signer.end();
+            const signature = signer.sign({
+              key: crypto.createPrivateKey(privateKey),
+              dsaEncoding: "ieee-p1363",
+            });
+            return `${header}.${payload}.${base64Url(signature)}`;
+          }
+
+          async function getJson(path) {
+            const response = await fetch(`https://api.appstoreconnect.apple.com${path}`, {
+              headers: { Authorization: `Bearer ${makeToken()}` },
+            });
+            const body = await response.text();
+            if (!response.ok) {
+              throw new Error(`HTTP ${response.status}: ${body.slice(0, 300)}`);
+            }
+            return JSON.parse(body);
+          }
+
+          (async () => {
+            const targetBuild = String(process.env.ASC_BUILD_NUMBER);
+            const maxAttempts = 40;
+
+            for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+              try {
+                const appResponse = await getJson(
+                  `/v1/apps?filter[bundleId]=${encodeURIComponent(process.env.ASC_BUNDLE_ID)}&limit=1`,
+                );
+                const app = appResponse.data?.[0];
+                if (!app) throw new Error("La app aún no aparece en App Store Connect");
+
+                const buildsResponse = await getJson(
+                  `/v1/builds?filter[app]=${encodeURIComponent(app.id)}&sort=-uploadedDate&limit=50`,
+                );
+                const build = (buildsResponse.data || []).find(
+                  (item) => String(item.attributes?.version) === targetBuild,
+                );
+
+                if (!build) {
+                  console.log(`Intento ${attempt}/${maxAttempts}: build ${targetBuild} aún no es visible.`);
+                } else {
+                  const state = build.attributes?.processingState || "DESCONOCIDO";
+                  console.log(`Intento ${attempt}/${maxAttempts}: build ${targetBuild} está ${state}.`);
+                  if (state === "VALID") {
+                    console.log("La compilación está VALID y disponible para TestFlight.");
+                    process.exit(0);
+                  }
+                  if (["FAILED", "INVALID"].includes(state)) {
+                    console.error(`Apple reportó el build como ${state}.`);
+                    process.exit(1);
+                  }
+                }
+
+                const uploadsResponse = await getJson(
+                  `/v1/apps/${encodeURIComponent(app.id)}/buildUploads?limit=50`,
+                );
+                const uploads = (uploadsResponse.data || [])
+                  .filter((item) => String(item.attributes?.cfBundleVersion) === targetBuild)
+                  .sort((a, b) => Date.parse(b.attributes?.createdDate || 0) - Date.parse(a.attributes?.createdDate || 0));
+                const uploadStates = uploads.map((item) => item.attributes?.state?.state).filter(Boolean);
+                if (uploads.length && uploadStates.length && uploadStates.every((state) => state === "FAILED")) {
+                  const details = uploads[0].attributes?.state?.errors || [];
+                  const message = details.map((error) => `${error.code}: ${error.description}`).join(" | ");
+                  console.error(`Apple rechazó el upload (${message || "sin detalle"}).`);
+                  process.exit(1);
+                }
+              } catch (error) {
+                console.log(`Intento ${attempt}/${maxAttempts}: Apple sigue procesando (${error.message}).`);
+              }
+
+              if (attempt < maxAttempts) await sleep(30_000);
+            }
+
+            throw new Error(`La compilación ${targetBuild} no llegó a VALID dentro del tiempo de espera.`);
+          })().catch((error) => {
+            console.error(error.message);
+            process.exit(1);
+          });
+          NODE
+
+      - name: Escribir resumen
+        if: success()
+        shell: bash
+        run: |
+          {
+            echo "## Marcelito en TestFlight"
+            echo ""
+            echo "Versión: $MARKETING_VERSION"
+            echo "Build: $GITHUB_RUN_NUMBER"
+            echo "El build fue enviado a App Store Connect; Apple puede tardar unos minutos en procesarlo."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Eliminar clave temporal
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${APPSTORE_KEY_PATH:-}" && -f "$APPSTORE_KEY_PATH" ]]; then
+            rm -f -- "$APPSTORE_KEY_PATH"
+          fi
+          if [[ -n "${SIGNING_KEYCHAIN_PATH:-}" && -f "$SIGNING_KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$SIGNING_KEYCHAIN_PATH" || true
+          fi

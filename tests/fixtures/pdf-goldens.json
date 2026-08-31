@@ -1,0 +1,84 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Valores sintéticos de control para probar el lector; no representa ninguna cuenta real.",
+  "automaticAcceptanceTarget": 0.99,
+  "statements": [
+    {
+      "id": "sample-bank-period-1",
+      "issuer": "Santander",
+      "kind": "bank",
+      "cutoff": "2030-01-15",
+      "expected": {
+        "cashBalance": 2462,
+        "depositTotal": 4922,
+        "withdrawalTotal": 6160
+      }
+    },
+    {
+      "id": "sample-bank-period-2",
+      "issuer": "Santander",
+      "kind": "bank",
+      "cutoff": "2030-02-15",
+      "expected": {
+        "cashBalance": 3780,
+        "depositTotal": 5160,
+        "withdrawalTotal": 3842
+      }
+    },
+    {
+      "id": "sample-bank-period-3",
+      "issuer": "Santander",
+      "kind": "bank",
+      "cutoff": "2030-03-15",
+      "expected": {
+        "cashBalance": 3250,
+        "depositTotal": 3618,
+        "withdrawalTotal": 4148
+      }
+    },
+    {
+      "id": "sample-bank-bbva",
+      "issuer": "BBVA",
+      "kind": "bank",
+      "cutoff": "2030-04-30",
+      "expected": {
+        "cashBalance": 1700,
+        "depositTotal": 1950,
+        "withdrawalTotal": 2205.87,
+        "depositCount": 2,
+        "withdrawalCount": 9
+      }
+    },
+    {
+      "id": "sample-card-period-1",
+      "issuer": "Amex",
+      "kind": "card",
+      "cutoff": "2030-01-27",
+      "expected": {
+        "newCharges": 2803.42
+      }
+    },
+    {
+      "id": "sample-card-period-2",
+      "issuer": "Amex",
+      "kind": "card",
+      "cutoff": "2030-02-27",
+      "expected": {
+        "newCharges": 4671.16
+      }
+    },
+    {
+      "id": "sample-card-period-3",
+      "issuer": "Amex",
+      "kind": "card",
+      "cutoff": "2030-03-27",
+      "expected": {
+        "debtBalance": 3317.75,
+        "creditLimit": 20000,
+        "creditAvailable": 16682.25,
+        "paymentForNoInterest": 3996.62,
+        "minimumPlusMsi": 1957.97
+      }
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "readerVersion": "web-reader-public-synthetic",
+  "tolerance": 0.05,
+  "files": [
+    {
+      "file": "sample-card-period-3.pdf",
+      "source": "Amex",
+      "kind": "card",
+      "status": "valid",
+      "rows": 6,
+      "summary": {
+        "extractedChargeTotal": 3317.75,
+        "extractedPaymentTotal": 2315.09
+      }
+    },
+    {
+      "file": "sample-bank-bbva.pdf",
+      "source": "BBVA",
+      "kind": "bank",
+      "status": "valid",
+      "rows": 11,
+      "summary": {
+        "extractedDepositTotal": 1950,
+        "extractedWithdrawalTotal": 2205.87
+      }
+    }
+  ]
+}

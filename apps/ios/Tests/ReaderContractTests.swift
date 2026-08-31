@@ -1,0 +1,983 @@
+import XCTest
+@testable import Marcelito
+
+final class ReaderContractTests: XCTestCase {
+    func testCanonicalRebuildIsInvalidatedWhenReaderVersionChanges() {
+        XCTAssertTrue(FinanceStore.needsCanonicalRebuild(
+            completed: true,
+            completedReaderVersion: "ios-reader-legacy",
+            currentReaderVersion: FinanceStore.readerVersion,
+            hasSources: true
+        ))
+        XCTAssertFalse(FinanceStore.needsCanonicalRebuild(
+            completed: true,
+            completedReaderVersion: FinanceStore.readerVersion,
+            currentReaderVersion: FinanceStore.readerVersion,
+            hasSources: true
+        ))
+        XCTAssertFalse(FinanceStore.needsCanonicalRebuild(
+            completed: false,
+            completedReaderVersion: nil,
+            currentReaderVersion: FinanceStore.readerVersion,
+            hasSources: false
+        ))
+    }
+
+    func testInstitutionalHeaderWinsOverCounterpartyMention() {
+        let text = """
+        Grupo Financiero BBVA
+        BBVA México, Institución de Banca Múltiple
+        Cuenta de cheques
+        Fecha Descripcion
+        01/08/2026 NOMINA EMPRESA 10,000.00 20,000.00
+        02/08/2026 TRANSFERENCIA SANTANDER 125.00 19,875.00
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "estado-renombrado.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "BBVA")
+        XCTAssertEqual(snapshot.sourceDetection.status, .verified)
+        XCTAssertTrue(snapshot.sourceDetection.ignoredBodyMentions.contains("Santander"))
+        XCTAssertEqual(snapshot.kind, .bank)
+        XCTAssertEqual(snapshot.movements.count, 2)
+        XCTAssertTrue(snapshot.movements.contains { $0.kind == .income })
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("total importe") })
+    }
+
+    func testAccountIdentityUsesOnlyHeaderLastFourDigits() {
+        let text = """
+        BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
+        Estado de cuenta
+        No. de Cuenta 9988776655
+        Fecha Descripcion Cargos Abonos Saldo
+        05/08/2026 SPEI RECIBIDO SANTANDER 4,500.00 6,116.63
+        06/08/2026 TRANSFERENCIA A CUENTA 111122223333444455 100.00 6,016.63
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-bank-bbva.pdf"
+        )
+
+        XCTAssertEqual(snapshot.accountKey, "bbva:4922")
+        XCTAssertFalse(snapshot.accountKey?.contains("9988776655") == true)
+    }
+
+    func testBBVAInstitutionalEvidenceWinsBeforeMovementTable() {
+        let text = """
+        BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
+        Transferencia recibida de Santander
+        Estado de cuenta
+        Detalle de Movimientos Realizados
+        05/AGO SPEI RECIBIDO SANTANDER 4,500.00 6,116.63
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "estado-renombrado.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "BBVA")
+        XCTAssertEqual(snapshot.sourceDetection.status, .verified)
+    }
+
+    func testInstitutionalBBVAHeaderBeatsAConflictingSantanderFilename() {
+        let text = """
+        BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
+        Estado de cuenta
+        Detalle de Movimientos Realizados
+        05/AGO SPEI RECIBIDO SANTANDER 4,500.00 6,116.63
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-bank-period-3.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "BBVA")
+        XCTAssertEqual(snapshot.sourceDetection.status, .verified)
+        XCTAssertTrue(snapshot.sourceDetection.evidence.contains { $0.contains("encabezado institucional BBVA") })
+    }
+
+    func testConflictingLegalFooterDoesNotUseFilenameFallback() {
+        let text = """
+        Detalle de Movimientos Realizados
+        01/08/2026 CARGO SUPERMERCADO 100.00
+        BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
+        Banco Santander México, Institución de Banca Múltiple, Grupo Financiero Santander
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-bank-period-3.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "Importado")
+        XCTAssertEqual(snapshot.sourceDetection.status, .unknown)
+        XCTAssertTrue(snapshot.sourceDetection.evidence.contains { $0.contains("marcadores legales conflictivos") })
+    }
+
+    func testConflictingInstitutionalHeaderDoesNotUseFilenameFallback() {
+        let text = """
+        BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
+        Banco Santander México, Institución de Banca Múltiple, Grupo Financiero Santander
+        Detalle de Movimientos Realizados
+        01/08/2026 CARGO SUPERMERCADO 100.00
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-bank-period-3.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "Importado")
+        XCTAssertEqual(snapshot.sourceDetection.status, .unknown)
+        XCTAssertTrue(snapshot.sourceDetection.evidence.contains { $0.contains("marcadores legales conflictivos") })
+    }
+
+    func testAmexCreditRowIsNotSilentlyConvertedToPurchase() {
+        let text = """
+        American Express
+        The Platinum Credit Card
+        Fecha y Detalle de las operaciones Importe en MN.
+        01/08/2026 AMAZON MX 123.45
+        02/08/2026 MONTO A DIFERIR A MESES SIN INTERESES 500.00 CR
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-card-period-3.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "Amex")
+        XCTAssertEqual(snapshot.kind, .card)
+        XCTAssertEqual(snapshot.movements.count, 2)
+        XCTAssertTrue(snapshot.movements.contains { $0.kind == .credit && $0.amount > 0 })
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("fecha y detalle") })
+    }
+
+    func testAmexLimitAndAvailableProduceCommittedDebt() {
+        let text = """
+        American Express
+        The Platinum Credit Card
+        Saldo Anterior Pagos y Créditos Nuevos Cargos Pago para no Pago
+        2,315.09 - 3,274.46 + 4,955.99 = 3,996.62 319.73
+        Límite de Crédito Límite Disponible
+        a Agosto 27,2026 20,000.00 MN 16,682.25 MN
+        Fecha y Detalle de las operaciones Importe en MN.
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-card-period-3.pdf"
+        )
+
+        XCTAssertEqual(snapshot.kind, .card)
+        XCTAssertEqual(snapshot.summary?.creditLimit, 20_000)
+        XCTAssertEqual(snapshot.summary?.creditAvailable, 16_682.25)
+        XCTAssertEqual(snapshot.summary?.debtBalance, 3_996.62)
+        XCTAssertEqual(snapshot.summary.map { max(Decimal(0), ($0.creditLimit ?? 0) - ($0.creditAvailable ?? 0)) }, 3_317.75)
+    }
+
+    func testAmexSummaryKeepsMinimumPlusMsiSeparate() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            American Express
+            The Platinum Credit Card
+            Pago mínimo más meses sin intereses 1,957.97
+            Pago para no generar intereses 3,996.62
+            """,
+            fileName: "sample-card-period-3.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.minimumPlusMsi, 1_957.97)
+        XCTAssertEqual(snapshot.summary?.paymentForNoInterest, 3_996.62)
+    }
+
+    func testReaderRejectsAdministrativeNumericRows() {
+        let text = """
+        Grupo Financiero BBVA
+        BBVA México, Institución de Banca Múltiple
+        Fecha Descripcion
+        03/08/2026 Ciudad de México No. de Serie del Certificado 2030010100001 123,456.78
+        05/08/2026 SPEI RECIBIDO 1234567
+        04/08/2026 OXXO 95.00 1,200.00
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-bank-bbva.pdf"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 1)
+        XCTAssertTrue(snapshot.movements.first?.title.localizedCaseInsensitiveContains("OXXO") == true)
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("certificado") })
+    }
+
+    func testReaderRejectsAllKnownAdministrativeHeadingsWithAmounts() {
+        // These lines deliberately look like dated monetary rows. They are
+        // common in scanned/text-layer statements, but none is a movement.
+        // Keep this contract broad so a parser change cannot turn a header or
+        // account identifier into an expense again.
+        let text = """
+        Grupo Financiero BBVA
+        BBVA México, Institución de Banca Múltiple
+        Fecha Descripcion Cargos Abonos Saldo
+        01/08/2026 Ciudad de México 123,456.78
+        02/08/2026 No. de Serie del Certificado 2030010100001 456,789.01
+        03/08/2026 TOTAL IMPORTE CARGOS 22,058.69
+        04/08/2026 DEL AL 01/08/2026 31/08/2026 1,230.94
+        05/08/2026 fecha de corte 27/08/2026 3,996.62
+        06/08/2026 número de cuenta 0123456789 10,000.00
+        07/08/2026 RFC ABC123456789 9,999.99
+        08/08/2026 cuenta CLABE 111122223333444455 8,888.88
+        09/08/2026 saldo disponible 7,777.77
+        10/08/2026 total del periodo 6,666.66
+        11/08/2026 periodo de facturación 5,555.55
+        12/08/2026 OXXO 95.00 935.94
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-bank-bbva.pdf"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 1)
+        XCTAssertEqual(snapshot.movements.first?.title, "OXXO")
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("saldo") })
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("periodo") })
+    }
+
+    func testBankShortMonthDatesKeepTheOperationYear() {
+        let text = """
+        Grupo Financiero BBVA
+        BBVA México, Institución de Banca Múltiple
+        Detalle de Movimientos Realizados
+        FECHA OPER LIQ DESCRIPCION CARGOS ABONOS SALDO
+        23/JUL 22/JUL FACEBK *XR4NKVVF52 120.00 3,469.63
+        27/JUL 27/JUL SPEI RECIBIDO INFLUENCER MARKETING 15,000.00 18,469.63
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-bank-bbva.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "BBVA")
+        XCTAssertEqual(snapshot.movements.count, 2)
+        XCTAssertTrue(snapshot.movements.allSatisfy { Calendar.current.component(.year, from: $0.date) == 2026 })
+        XCTAssertEqual(snapshot.movements.first?.amount, -120)
+        XCTAssertEqual(snapshot.movements.last?.amount, 15_000)
+    }
+
+    func testOcrMonthAndDayRepairsStayInsideDateToken() {
+        let text = """
+        Grupo Financiero BBVA
+        BBVA México, Institución de Banca Múltiple
+        Detalle de Movimientos Realizados
+        FECHA OPER LIQ DESCRIPCION CARGOS ABONOS SALDO
+        O5/AG0 TIENDA DE PRUEBA 125.00 1,230.94
+        OBIAGO NOMINA EMPRESA 1,000.00 2,030.94
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-bank-bbva.pdf"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 2)
+        XCTAssertTrue(snapshot.movements.allSatisfy { Calendar.current.component(.month, from: $0.date) == 8 })
+        XCTAssertEqual(snapshot.movements.first?.amount, -125)
+        XCTAssertEqual(snapshot.movements.last?.amount, 1_000)
+    }
+
+    func testMatchingUsesMagnitudeWhenCounterpartSignsDiffer() {
+        XCTAssertTrue(FinanceStore.matchingAmountsForTesting(-1_000, 1_000))
+        XCTAssertTrue(FinanceStore.matchingAmountsForTesting(-1_000.005, 1_000))
+        XCTAssertFalse(FinanceStore.matchingAmountsForTesting(-1_000, 1_001))
+    }
+
+    func testTextRowsRetainPageAndSourceFragment() {
+        let text = """
+        __PDF_PAGE_2__
+        Grupo Financiero BBVA
+        BBVA México, Institución de Banca Múltiple
+        Detalle de Movimientos Realizados
+        01/08/2026 SUPERMERCADO 120.00 880.00
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-bank-bbva.pdf"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 1)
+        XCTAssertEqual(snapshot.movements.first?.extractionEvidence?.page, 2)
+        XCTAssertFalse(snapshot.movements.first?.extractionEvidence?.sourceText?.isEmpty ?? true)
+    }
+
+    func testBankSummaryChoosesOpeningBalanceThatReconciles() {
+        let text = """
+        Banco Santander México, S.A., Institución de Banca Múltiple, Grupo Financiero Santander México
+        Saldo promedio 50,129.64 — Saldoinicial 5562.79
+        + Depósitos 3,618.74
+        − Retiros 6,416.11
+        = Saldo final 2,765.42
+        Gráfico cuenta de cheques
+        Otros cargos $6,416.11 Saldo inicial $562.79
+        Detalle de movimientos
+        16-JUL-2026 PAGO TRANSFERENCIA SPEI 6,416.11 5,559.79
+        17-JUL-2026 NOMINA 3,618.74 2,765.42
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-bank-period-3.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.previousBalance, 5562.79)
+        XCTAssertEqual(snapshot.summary?.cashBalance, 2_765.42)
+    }
+
+    func testBankSummaryToleratesOcrRetrosVariant() {
+        let text = """
+        Banco Santander México, S.A., Institución de Banca Múltiple
+        Saldo inicial 3,707.50
+        Depósitos 4,922.25
+        Retros 6,167.60
+        Saldo final 2,462.48
+        Detalle de movimientos
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-bank-period-1.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.depositTotal, 4_922.25)
+        XCTAssertEqual(snapshot.summary?.withdrawalTotal, 6_167.60)
+        XCTAssertEqual(snapshot.summary?.cashBalance, 2_462.48)
+    }
+
+    func testBankSummaryRecoversFusedOcrSeparators() {
+        let text = """
+        Banco Santander México, S.A., Institución de Banca Múltiple
+        Saldo inicial 5562793
+        Depósitos 3618742
+        Retros 6416111
+        Saldo final 2765424
+        Detalle de movimientos
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "sample-bank-period-3.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.previousBalance, 5562.79)
+        XCTAssertEqual(snapshot.summary?.depositTotal, Decimal(string: "36187.42"))
+        XCTAssertEqual(snapshot.summary?.withdrawalTotal, 6_416.11)
+        XCTAssertEqual(snapshot.summary?.cashBalance, 2_765.42)
+    }
+
+    func testHiddenAdministrativeTextLayerFallsBackToOCR() {
+        let hiddenLayer = String(repeating: "saldo cuenta metadata ", count: 12)
+        XCTAssertTrue(FinanceStore.shouldUseOCR(extractedText: hiddenLayer, allowOCR: true))
+    }
+
+    func testStructuredMonthDateTextLayerDoesNotForceOCR() {
+        let text = String(repeating: "16-JUL-2026 17-JUL-2026 COMPRA SUPERMERCADO 120.00 ", count: 5)
+            + "Detalle de Movimientos Realizados"
+        XCTAssertFalse(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: true))
+        XCTAssertFalse(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: false))
+    }
+
+    func testTableHeaderWithoutPlausibleRowsFallsBackToOCR() {
+        let text = String(repeating: "RFC DIRECCION CERTIFICADO SALDO ", count: 30)
+            + "Detalle de Movimientos Realizados\n"
+            + "Periodo 16-JUL-2026 AL 15-AGO-2026\n"
+            + "No. de Cuenta 9988776655"
+        XCTAssertTrue(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: true))
+    }
+
+    func testSantanderOCRAmountUsesSmallRunningBalanceDriftOnly() {
+        let repaired = FinanceStore.repairedBankOCRAmountForTesting(
+            selected: 30.01,
+            selectedText: "30.01",
+            previousBalance: 5562.79,
+            runningBalance: 5_559.79
+        )
+        XCTAssertEqual(NSDecimalNumber(decimal: repaired).doubleValue, 30, accuracy: 0.001)
+
+        let unchanged = FinanceStore.repairedBankOCRAmountForTesting(
+            selected: 500,
+            selectedText: "500.00",
+            previousBalance: 1_000,
+            runningBalance: 200
+        )
+        XCTAssertEqual(NSDecimalNumber(decimal: unchanged).doubleValue, 500, accuracy: 0.001)
+
+        let leadingOne = FinanceStore.repairedBankOCRAmountForTesting(
+            selected: 160,
+            selectedText: "160.00",
+            previousBalance: 65_879.07,
+            runningBalance: 65_819.07
+        )
+        XCTAssertEqual(NSDecimalNumber(decimal: leadingOne).doubleValue, 60, accuracy: 0.001)
+
+        let leadingOneWithThreeDigits = FinanceStore.repairedBankOCRAmountForTesting(
+            selected: 1_693,
+            selectedText: "1693.00",
+            previousBalance: 10_399.48,
+            runningBalance: 9_706.48
+        )
+        XCTAssertEqual(NSDecimalNumber(decimal: leadingOneWithThreeDigits).doubleValue, 693, accuracy: 0.001)
+    }
+
+    func testSantanderOCRUsesMovementColumnInsteadOfRunningBalance() {
+        let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "16-JUL-2026", x: 0.05, y: 0.80, width: 0.10),
+            OCRObservationFixture(text: "PAGO TRANSFERENCIA SPEI", x: 0.18, y: 0.80, width: 0.40),
+            OCRObservationFixture(text: "30.00", x: 0.76, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "5,559.79", x: 0.92, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "17-JUL-2026", x: 0.05, y: 0.70, width: 0.10),
+            OCRObservationFixture(text: "NOMINA EMPRESA", x: 0.18, y: 0.70, width: 0.40),
+            OCRObservationFixture(text: "500.00", x: 0.64, y: 0.70, width: 0.08),
+            OCRObservationFixture(text: "56,097.93", x: 0.92, y: 0.70, width: 0.08),
+        ], fileName: "sample-bank-period-3.pdf")
+
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].amount, -30)
+        XCTAssertEqual(rows[1].amount, 500)
+        XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 1_000 })
+    }
+
+    func testSantanderOCRCalibratesShiftedColumnsFromHeader() {
+        let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "FOLIO", x: 0.14, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "16-JUL-2026", x: 0.02, y: 0.80, width: 0.10),
+            OCRObservationFixture(text: "PAGO TRANSFERENCIA SPEI", x: 0.10, y: 0.80, width: 0.34),
+            OCRObservationFixture(text: "30.00", x: 0.66, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "5,559.79", x: 0.81, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "17-JUL-2026", x: 0.02, y: 0.70, width: 0.10),
+            OCRObservationFixture(text: "NOMINA EMPRESA", x: 0.10, y: 0.70, width: 0.34),
+            OCRObservationFixture(text: "500.00", x: 0.52, y: 0.70, width: 0.08),
+            OCRObservationFixture(text: "56,097.93", x: 0.81, y: 0.70, width: 0.08),
+        ], fileName: "sample-bank-period-3.pdf")
+
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].amount, -30)
+        XCTAssertEqual(rows[1].amount, 500)
+    }
+
+    func testSantanderOCRRequiresACompleteColumnHeaderForAutomaticAcceptance() {
+        let calibrated = [
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+        ]
+        XCTAssertTrue(FinanceStore.santanderOCRColumnsCalibratedForTesting(calibrated, fileName: "sample-bank-period-3.pdf"))
+
+        let missingAnchor = [
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+        ]
+        XCTAssertFalse(FinanceStore.santanderOCRColumnsCalibratedForTesting(missingAnchor, fileName: "sample-bank-period-3.pdf"))
+    }
+
+    func testSantanderOCRDoesNotMixColumnAnchorsAcrossPagesOrRows() {
+        let splitAcrossPages = [
+            OCRObservationFixture(page: 0, text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(page: 0, text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
+            OCRObservationFixture(page: 0, text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(page: 1, text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(page: 0, text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+        ]
+        XCTAssertFalse(FinanceStore.santanderOCRColumnsCalibratedForTesting(
+            splitAcrossPages,
+            fileName: "sample-bank-period-3.pdf"
+        ))
+
+        let splitAcrossRows = [
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.76, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+        ]
+        XCTAssertFalse(FinanceStore.santanderOCRColumnsCalibratedForTesting(
+            splitAcrossRows,
+            fileName: "sample-bank-period-3.pdf"
+        ))
+
+        let splitLabelTokens = [
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
+            OCRObservationFixture(text: "DEPOSI TO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RETI RO", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SAL DO", x: 0.79, y: 0.90, width: 0.08),
+        ]
+        XCTAssertTrue(FinanceStore.santanderOCRColumnsCalibratedForTesting(
+            splitLabelTokens,
+            fileName: "sample-bank-period-3.pdf"
+        ))
+
+        let glyphSubstitutions = [
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPC10N", x: 0.23, y: 0.90, width: 0.12),
+            OCRObservationFixture(text: "DEPOS1T0", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RET1R0", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALD0", x: 0.79, y: 0.90, width: 0.08),
+        ]
+        XCTAssertTrue(FinanceStore.santanderOCRColumnsCalibratedForTesting(
+            glyphSubstitutions,
+            fileName: "sample-bank-period-3.pdf"
+        ))
+    }
+
+    func testSantanderOCRIgnoresMultilineFolioTraceAndRunningBalance() {
+        let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "16-JUL-2026", x: 0.02, y: 0.80, width: 0.10),
+            OCRObservationFixture(text: "4309379 PAGO TRANSFERENCIA SPEI HORA 12:10:44", x: 0.10, y: 0.80, width: 0.45),
+            OCRObservationFixture(text: "30.00", x: 0.66, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "5,559.79", x: 0.81, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "CLAVE DE RASTREO 203001020014TEST000001", x: 0.10, y: 0.795, width: 0.55),
+            OCRObservationFixture(text: "REF 2603559 DATO NO VERIFICADO POR ESTA INSTITUCION", x: 0.10, y: 0.790, width: 0.55),
+        ], fileName: "sample-bank-period-3.pdf")
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].amount, -30)
+        XCTAssertFalse(rows[0].title.contains("5,559.79"))
+    }
+
+    func testSantanderOCRReconstructsSeveralRowsWithDepositsAndContinuationText() {
+        let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "DEPOSITO", x: 0.58, y: 0.94, width: 0.08),
+            OCRObservationFixture(text: "RETIRO", x: 0.71, y: 0.94, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.84, y: 0.94, width: 0.08),
+
+            OCRObservationFixture(text: "16-JUL-2026 4309379 PAGO TRANSFERENCIA SPEI HORA 12:10:44", x: 0.02, y: 0.82, width: 0.55),
+            OCRObservationFixture(text: "30.00", x: 0.72, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "5,559.79", x: 0.84, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "CLAVE DE RASTREO 203001020014TEST000001", x: 0.10, y: 0.805, width: 0.55),
+            OCRObservationFixture(text: "REF 2603559 DATO NO VERIFICADO POR ESTA INSTITUCION", x: 0.10, y: 0.79, width: 0.55),
+
+            OCRObservationFixture(text: "17-JUL-2026 1162428 PAGO TRANSFERENCIA SPEI TRANSFERENCIA A VICTORIA", x: 0.02, y: 0.72, width: 0.55),
+            OCRObservationFixture(text: "30.00", x: 0.72, y: 0.72, width: 0.08),
+            OCRObservationFixture(text: "55,567.93", x: 0.84, y: 0.72, width: 0.08),
+
+            OCRObservationFixture(text: "18-JUL-2026 000100 ABONO PAGO DE NOMINA", x: 0.02, y: 0.62, width: 0.55),
+            OCRObservationFixture(text: "500.00", x: 0.58, y: 0.62, width: 0.08),
+            OCRObservationFixture(text: "56,067.93", x: 0.84, y: 0.62, width: 0.08),
+        ], fileName: "sample-bank-period-3.pdf")
+
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertEqual(rows.map(\.amount), [-30, -30, 500])
+        XCTAssertEqual(rows[2].flow, .income)
+        XCTAssertTrue(rows[0].title.localizedCaseInsensitiveContains("transferencia"))
+        XCTAssertFalse(rows.contains {
+            $0.title.contains("5,559.79")
+                || $0.title.contains("202607160014")
+                || $0.title.localizedCaseInsensitiveContains("clave de rastreo")
+                || $0.title.localizedCaseInsensitiveContains("a la cuenta")
+                || $0.title.localizedCaseInsensitiveContains("dato no verificado")
+        })
+    }
+
+    func testSantanderOCRSkipsDatedPeriodAndBalanceHeaders() {
+        let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "ESTADO DE CUENTA NOMINA", x: 0.04, y: 0.96, width: 0.40),
+            OCRObservationFixture(text: "PERIODO 16-JUL-2026 AL 15-AGO-2026", x: 0.04, y: 0.94, width: 0.55),
+            OCRObservationFixture(text: "SALDO FINAL DEL PERIODO ANTERIOR: $5562.79", x: 0.04, y: 0.90, width: 0.55),
+            OCRObservationFixture(text: "FECHA FOLIO DESCRIPCION", x: 0.04, y: 0.86, width: 0.50),
+            OCRObservationFixture(text: "16-JUL-2026 4309379 PAGO TRANSFERENCIA SPEI", x: 0.02, y: 0.80, width: 0.55),
+            OCRObservationFixture(text: "30.00", x: 0.72, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "5,559.79", x: 0.84, y: 0.80, width: 0.08),
+        ], fileName: "sample-bank-period-3.pdf")
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].amount, -30)
+        XCTAssertFalse(rows[0].title.localizedCaseInsensitiveContains("saldo final"))
+        XCTAssertFalse(rows[0].title.localizedCaseInsensitiveContains("periodo 16"))
+    }
+
+    func testUnverifiedReadyStatementCannotFeedNativeDashboard() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "estado.pdf",
+            importedAt: .now,
+            transactionCount: 0,
+            requiresReview: false,
+            kind: .bank,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "BBVA",
+                confidence: 0.90,
+                status: .review,
+                evidence: ["nombre de archivo"],
+                ignoredBodyMentions: []
+            ),
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        store.movements = []
+
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+        XCTAssertTrue(store.confirmStatementReviewed(statement))
+        XCTAssertTrue(store.statements[0].issuerConfirmedByUser == true)
+        XCTAssertFalse(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
+    }
+
+    func testWeakVerifiedIssuerEvidenceCannotFeedNativeDashboard() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "estado-bbva.pdf",
+            importedAt: .now,
+            transactionCount: 0,
+            requiresReview: false,
+            kind: .bank,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "BBVA",
+                confidence: 0.98,
+                status: .verified,
+                evidence: [],
+                ignoredBodyMentions: []
+            ),
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+    }
+
+    func testVerifiedEvidenceFromAnotherIssuerCannotFeedNativeDashboard() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "estado-bbva.pdf",
+            importedAt: .now,
+            transactionCount: 0,
+            requiresReview: false,
+            kind: .bank,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "Santander",
+                confidence: 1,
+                status: .verified,
+                evidence: ["encabezado institucional Santander"],
+                ignoredBodyMentions: ["BBVA"]
+            ),
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+    }
+
+    func testUnknownStatementKindCannotFeedNativeDashboard() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "estado-bbva.pdf",
+            importedAt: .now,
+            transactionCount: 0,
+            requiresReview: false,
+            kind: .unknown,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "BBVA",
+                confidence: 1,
+                status: .verified,
+                evidence: ["encabezado institucional BBVA"],
+                ignoredBodyMentions: []
+            ),
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+    }
+
+    func testLatestNativeBalanceUsesMaskedAccountIdentity() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        func statement(id: UUID, period: String, accountKey: String, cash: String) -> StatementRecord {
+            StatementRecord(
+                id: id,
+                source: "Santander",
+                accountKey: accountKey,
+                period: period,
+                fileName: "estado-\(accountKey).pdf",
+                importedAt: .now,
+                transactionCount: 0,
+                requiresReview: false,
+                kind: .bank,
+                summary: StatementSummaryRecord(cashBalance: Decimal(string: cash)),
+                reconciliation: StatementReconciliationRecord(
+                    status: .valid,
+                    tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+                ),
+                sourceDetection: SourceDetectionEvidence(
+                    source: "Santander",
+                    confidence: 0.999,
+                    status: .verified,
+                    evidence: ["encabezado institucional Santander"],
+                    ignoredBodyMentions: []
+                ),
+                readerVersion: FinanceStore.readerVersion
+            )
+        }
+        store.statements = [
+            statement(id: UUID(), period: "julio 2026", accountKey: "santander:1111", cash: "100"),
+            statement(id: UUID(), period: "agosto 2026", accountKey: "santander:1111", cash: "150"),
+            statement(id: UUID(), period: "julio 2026", accountKey: "santander:2222", cash: "300"),
+        ]
+        XCTAssertEqual(store.cashAvailable, Decimal(string: "450"))
+    }
+
+    func testLegacyStatementJSONDecodesWithoutNewOCRFields() throws {
+        // A user may upgrade with statements persisted by a previous build.
+        // Remove every field introduced by the OCR/source-confirmation work
+        // and verify that the current Codable model still opens the record.
+        let original = StatementRecord(
+            id: UUID(),
+            source: "Santander",
+            period: "agosto 2026",
+            fileName: "estado.pdf",
+            importedAt: Date(timeIntervalSince1970: 1_725_000_000),
+            transactionCount: 2,
+            requiresReview: true,
+            kind: .bank,
+            summary: StatementSummaryRecord(cashBalance: Decimal(string: "27654.24")),
+            reconciliation: StatementReconciliationRecord(
+                status: .pending,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "Santander",
+                confidence: 0.90,
+                status: .review,
+                evidence: ["nombre de archivo"],
+                ignoredBodyMentions: []
+            ),
+            issuerConfirmedByUser: true,
+            ocrConfidence: 0.93,
+            ocrPageConfidences: [0.91, 0.95],
+            ocrColumnsCalibrated: false,
+            sourceFingerprint: "sha256",
+            readerVersion: FinanceStore.readerVersion
+        )
+
+        let encoded = try JSONEncoder().encode(original)
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: encoded) as? [String: Any]
+        )
+        for key in [
+            "issuerConfirmedByUser", "ocrConfidence", "ocrPageConfidences",
+            "ocrColumnsCalibrated", "sourceFingerprint", "readerVersion"
+        ] {
+            object.removeValue(forKey: key)
+        }
+
+        let legacyData = try JSONSerialization.data(withJSONObject: object)
+        let decoded = try JSONDecoder().decode(StatementRecord.self, from: legacyData)
+
+        XCTAssertEqual(decoded.id, original.id)
+        XCTAssertEqual(decoded.source, "Santander")
+        XCTAssertEqual(decoded.transactionCount, 2)
+        XCTAssertNil(decoded.issuerConfirmedByUser)
+        XCTAssertNil(decoded.ocrColumnsCalibrated)
+        XCTAssertNil(decoded.readerVersion)
+    }
+
+    func testUncalibratedSantanderOCRCannotFeedNativeDashboard() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "Santander",
+            period: "agosto 2026",
+            fileName: "estado-santander.pdf",
+            importedAt: .now,
+            transactionCount: 1,
+            // Deliberately false: the independent OCR gate below must still
+            // block even if a stale persisted record lost its review flag.
+            requiresReview: false,
+            kind: .bank,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "Santander",
+                confidence: 0.999,
+                status: .verified,
+                evidence: ["encabezado institucional Santander"],
+                ignoredBodyMentions: []
+            ),
+            ocrColumnsCalibrated: false,
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        store.movements = []
+
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+        XCTAssertTrue(store.ledgerQuality.message?.contains("columnas de movimientos") == true)
+
+        store.statements[0].ocrColumnsCalibrated = true
+        XCTAssertFalse(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
+    }
+
+    func testWeakOCRCannotFeedNativeDashboardEvenWhenReviewFlagIsStale() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "estado-bbva.pdf",
+            importedAt: .now,
+            transactionCount: 1,
+            // Simulate a legacy/corrupt persisted record. OCR confidence is
+            // an independent durable gate and must not rely on this flag.
+            requiresReview: false,
+            kind: .bank,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "BBVA",
+                confidence: 0.999,
+                status: .verified,
+                evidence: ["encabezado institucional BBVA"],
+                ignoredBodyMentions: []
+            ),
+            ocrConfidence: 0.86,
+            ocrPageConfidences: [0.86, 0.91],
+            ocrColumnsCalibrated: true,
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        store.movements = []
+
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+        XCTAssertTrue(store.ledgerQuality.message?.contains("confianza insuficiente") == true)
+    }
+
+    func testStatementAuditUsesTheCanonicalRowsForPeriodBreakdown() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statementID = UUID()
+        let statement = StatementRecord(
+            id: statementID,
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "bbva.pdf",
+            importedAt: .now,
+            transactionCount: 2,
+            requiresReview: false,
+            kind: .bank,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "BBVA",
+                confidence: 0.999,
+                status: .verified,
+                evidence: ["encabezado institucional BBVA"],
+                ignoredBodyMentions: []
+            ),
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        store.movements = [
+            Movement(
+                date: .now,
+                title: "Nómina",
+                account: "BBVA",
+                category: "Ingresos",
+                amount: 100,
+                flow: .income,
+                statementId: statementID,
+                kind: .income
+            ),
+            Movement(
+                date: .now,
+                title: "Supermercado",
+                account: "BBVA",
+                category: "Alimentos",
+                amount: -40,
+                flow: .expense,
+                statementId: statementID,
+                kind: .purchase
+            ),
+        ]
+
+        guard let audit = store.statementAudits.first else {
+            return XCTFail("La auditoría debe crear una fila por estado")
+        }
+        XCTAssertEqual(audit.importedRows, 2)
+        XCTAssertEqual(audit.canonicalRows, 2)
+        XCTAssertEqual(audit.validRows, 2)
+        XCTAssertEqual(audit.duplicateRows, 0)
+        XCTAssertEqual(audit.incomeRows, 1)
+        XCTAssertEqual(audit.expenseRows, 1)
+        XCTAssertEqual(audit.incomeTotal, 100)
+        XCTAssertEqual(audit.expenseTotal, 40)
+        XCTAssertEqual(audit.statusLabel, "Conciliado")
+
+        let exported = store.diagnosticExportText()
+        XCTAssertTrue(exported.contains("BBVA · agosto 2026"))
+        XCTAssertTrue(exported.contains("ingresos"))
+        XCTAssertFalse(exported.contains("Supermercado"), "La exportación agregada no debe incluir descripciones individuales")
+    }
+}

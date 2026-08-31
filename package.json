@@ -1,0 +1,38 @@
+{
+  "name": "marcelito-finanzas",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0",
+    "build": "tsc -b && vite build",
+    "lint": "eslint .",
+    "test": "node --experimental-strip-types --test tests/reconciliation.test.ts tests/native-corpus-report.test.ts tests/ios-concurrency-contract.test.ts tests/corpus-manifest.test.ts",
+    "pdf:corpus": "node --experimental-strip-types scripts/evaluate-pdf-corpus.ts",
+    "pdf:corpus:diagnose": "node --experimental-strip-types scripts/evaluate-pdf-corpus.ts --manifest tests/fixtures/pdf-corpus-attachments.json --require-manifest --ocr --ocr-dpi 220 --out artifacts/pdf-corpus-ocr.json",
+    "pdf:certify": "node --experimental-strip-types scripts/evaluate-pdf-corpus.ts --require-manifest --target-precision 0.99",
+    "pdf:native:verify": "node --experimental-strip-types scripts/verify-native-corpus-report.ts",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
+    "motion": "^12.23.12",
+    "pdfjs-dist": "^5.4.149",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "tesseract.js": "7.0.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.33.0",
+    "@types/react": "^19.1.10",
+    "@types/react-dom": "^19.1.7",
+    "@vitejs/plugin-react": "^5.0.2",
+    "eslint": "^9.33.0",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "eslint-plugin-react-refresh": "^0.4.20",
+    "globals": "^16.3.0",
+    "typescript": "~5.8.3",
+    "typescript-eslint": "^8.39.1",
+    "vite": "^7.1.3"
+  }
+}

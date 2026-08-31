@@ -1,0 +1,33 @@
+node_modules/
+dist/
+tmp/
+artifacts/
+.DS_Store
+*.log
+*.traineddata
+
+# Financial documents and signing material (never commit real statements).
+*.pdf
+*.csv
+*.tsv
+*.xls
+*.xlsx
+*.sqlite
+*.sqlite3
+*.db
+*.p8
+*.p12
+*.mobileprovision
+*.cer
+*.pem
+*.key
+private-corpus/
+public-corpus-local/
+
+# Local secrets and editor state
+.env
+.env.*
+!.env.example
+.vscode/
+.idea/
+

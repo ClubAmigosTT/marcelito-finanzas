@@ -1,0 +1,91 @@
+name: iOS Validate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ios-validate
+  cancel-in-progress: true
+
+jobs:
+  build-simulator:
+    name: Compilar Marcelito para simulador
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Mostrar toolchain de Apple
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          swift --version
+
+      - name: Instalar XcodeGen
+        shell: bash
+        run: brew install xcodegen
+
+      - name: Generar proyecto Xcode
+        working-directory: apps/ios
+        shell: bash
+        run: xcodegen generate --spec project.yml
+
+      - name: Compilar para iOS Simulator
+        working-directory: apps/ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project Marcelito.xcodeproj \
+            -scheme Marcelito \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "generic/platform=iOS Simulator" \
+            -derivedDataPath "$RUNNER_TEMP/MarcelitoSimulatorDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Ejecutar pruebas de contrato del lector
+        working-directory: apps/ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/{print "platform=iOS Simulator,id=" $2; exit}')"
+          if [ -z "$destination" ]; then
+            echo "No hay un simulador iPhone disponible para ejecutar las pruebas." >&2
+            exit 1
+          fi
+          xcodebuild \
+            -project Marcelito.xcodeproj \
+            -scheme Marcelito \
+            -configuration Debug \
+            -destination "$destination" \
+            -derivedDataPath "$RUNNER_TEMP/MarcelitoTestsDerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/MarcelitoTests.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            test
+
+      - name: Guardar resultados de Xcode
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: marcelito-ios-test-results
+          path: |
+            ${{ runner.temp }}/MarcelitoTests.xcresult
+            ${{ runner.temp }}/MarcelitoTestsDerivedData/Logs/Test
+          if-no-files-found: warn
+          retention-days: 3
+
+      - name: Escribir resumen
+        if: success()
+        shell: bash
+        run: echo "Compilación de simulador completada." >> "$GITHUB_STEP_SUMMARY"
