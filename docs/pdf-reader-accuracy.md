@@ -22,6 +22,9 @@ gasto real sin separar esas secciones.
 
 - Emisor verificado por evidencia institucional del encabezado; nombres dentro de movimientos son contrapartes.
 - Estado bancario válido solo si depósitos, retiros y conteos concilian dentro de ±$0.05.
+- Cuando el estado declara cantidades, se conserva la cobertura de filas
+  extraídas/esperadas y cualquier diferencia bloquea la aceptación aunque los
+  importes coincidan.
 - Estado de tarjeta válido solo si cargos y pagos reconocidos concilian con el resumen disponible.
 - Cualquier encabezado, referencia, cuenta, RFC, certificado, saldo o total se descarta como movimiento.
 - OCR web sin coordenadas queda provisional. Vision con coordenadas conserva
