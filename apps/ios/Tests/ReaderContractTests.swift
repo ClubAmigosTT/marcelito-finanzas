@@ -152,4 +152,27 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.movements.first?.extractionEvidence?.page, 2)
         XCTAssertFalse(snapshot.movements.first?.extractionEvidence?.sourceText?.isEmpty ?? true)
     }
+
+    func testBankSummaryChoosesOpeningBalanceThatReconciles() {
+        let text = """
+        Banco Santander México, S.A., Institución de Banca Múltiple, Grupo Financiero Santander México
+        Saldo promedio 50,129.64 — Saldoinicial 55,627.93
+        + Depósitos 36,187.42
+        − Retiros 64,161.11
+        = Saldo final 27,654.24
+        Gráfico cuenta de cheques
+        Otros cargos $64,161.11 Saldo inicial $5,627.93
+        Detalle de movimientos
+        16-JUL-2026 PAGO TRANSFERENCIA SPEI 64,161.11 55,597.93
+        17-JUL-2026 NOMINA 36,187.42 27,654.24
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "santander-agosto-2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.previousBalance, 55_627.93)
+        XCTAssertEqual(snapshot.summary?.cashBalance, 27_654.24)
+    }
 }

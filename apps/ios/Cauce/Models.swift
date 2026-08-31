@@ -2234,7 +2234,10 @@ final class FinanceStore {
     }
 
     private static func ocrText(from observations: [OCRObservation]) -> String {
-        ocrLines(from: observations).map(\.text).joined(separator: "\n")
+        let linesByPage = Dictionary(grouping: ocrLines(from: observations), by: \.page)
+        return linesByPage.keys.sorted().flatMap { page in
+            ["__PDF_PAGE_\(page + 1)__"] + (linesByPage[page] ?? []).map(\.text)
+        }.joined(separator: "\n")
     }
 
     private static func ocrLines(from observations: [OCRObservation]) -> [OCRObservation] {
@@ -3541,15 +3544,21 @@ final class FinanceStore {
     private static func summary(from text: String, source: String) -> StatementSummaryRecord? {
         let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
-        func amount(after labels: [String]) -> Decimal? {
-            let joined = labels.joined(separator: "|")
+        func amounts(after labels: [String]) -> [Decimal] {
+            let joined = labels
+                .map { $0.replacingOccurrences(of: " ", with: "\\s*") }
+                .joined(separator: "|")
             let pattern = "(?:\(joined))[^0-9$-]{0,90}((?<![A-Za-z])[-+]?\\s*\\$?\\s*(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{1,2})?)"
-            guard let regex = try? NSRegularExpression(pattern: pattern),
-                  let match = regex.firstMatch(in: normalized, range: range),
-                  let valueRange = Range(match.range(at: 1), in: normalized) else { return nil }
-            let raw = String(normalized[valueRange])
-            if raw.range(of: #"^\s*\d{7,}\s*$"#, options: .regularExpression) != nil { return nil }
-            return parseAmount(raw)
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+            return regex.matches(in: normalized, range: range).compactMap { match in
+                guard let valueRange = Range(match.range(at: 1), in: normalized) else { return nil }
+                let raw = String(normalized[valueRange])
+                if raw.range(of: #"^\s*\d{7,}\s*$"#, options: .regularExpression) != nil { return nil }
+                return parseAmount(raw)
+            }
+        }
+        func amount(after labels: [String]) -> Decimal? {
+            amounts(after: labels).first
         }
 
         // Bank summaries commonly print a row count before the monetary
@@ -3657,8 +3666,31 @@ final class FinanceStore {
         if source.localizedCaseInsensitiveContains("Amex") {
             summary.debtBalance = summary.statementBalance
         } else {
-            summary.cashBalance = amount(after: ["saldo disponible", "saldo final", "saldo actual"]).map(abs)
+            // “Saldo final del periodo anterior” and a chart can appear before
+            // the actual closing balance. Keep every candidate and resolve the
+            // correct one against the bank identity below instead of trusting
+            // the first OCR occurrence.
+            summary.cashBalance = amounts(after: ["saldo disponible", "saldo final", "saldo actual", "saldo al corte"]).last.map(abs)
             hasValue = hasValue || summary.cashBalance != nil
+            if let cash = summary.cashBalance,
+               let deposits = summary.depositTotal,
+               let withdrawals = summary.withdrawalTotal {
+                let openingCandidates = amounts(after: [
+                    "saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"
+                ])
+                let cashCandidates = amounts(after: ["saldo disponible", "saldo final", "saldo actual", "saldo al corte"])
+                if let pair = openingCandidates.compactMap({ opening in
+                    cashCandidates.first(where: { candidate in
+                        abs(opening + deposits - withdrawals - candidate) <= 0.05
+                    }).map { (opening, $0) }
+                }).first {
+                    summary.previousBalance = abs(pair.0)
+                    summary.cashBalance = abs(pair.1)
+                    hasValue = true
+                } else if let opening = openingCandidates.first {
+                    summary.previousBalance = abs(opening)
+                }
+            }
         }
         return hasValue ? summary : nil
     }
