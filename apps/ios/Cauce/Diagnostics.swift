@@ -173,6 +173,13 @@ struct DiagnosticsView: View {
                                     .font(.caption2)
                                     .foregroundStyle(confidence >= 0.88 ? Color.marcelitoSuccess : Color.marcelitoAmber)
                             }
+                            if let reconciliation = statement.reconciliation,
+                               let extracted = reconciliation.extractedMovementCount,
+                               let expected = reconciliation.expectedMovementCount {
+                                Text("Cobertura de filas: \(extracted)/\(expected)")
+                                    .font(.caption2)
+                                    .foregroundStyle(extracted == expected ? Color.marcelitoSuccess : Color.marcelitoDanger)
+                            }
                         }
                     }
                     ForEach(store.consistencyChecks) { check in

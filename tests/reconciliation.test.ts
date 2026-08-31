@@ -538,6 +538,7 @@ test("los conteos declarados bloquean una importación que perdió filas aunque 
   ].join("\n"), "BBVA", "BBVA agosto 2026.pdf", "bank");
   const reconciliation = reconcileStatementImport("bank", summary, rows);
   assert.equal(reconciliation.status, "invalid");
+  assert.equal(reconciliation.expectedMovementCount, 3);
 });
 
 test("un estado marcado como inválido bloquea el gasto aunque existan filas heredadas", () => {

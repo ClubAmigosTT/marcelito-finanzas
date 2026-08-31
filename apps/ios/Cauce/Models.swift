@@ -127,6 +127,8 @@ struct StatementReconciliationRecord: Codable {
     var extractedCreditTotal: Decimal? = nil
     var extractedPaymentTotal: Decimal? = nil
     var extractedMovementCount: Int? = nil
+    /// Expected rows when both deposit and withdrawal counts are printed.
+    var expectedMovementCount: Int? = nil
     var reason: String? = nil
 }
 
@@ -1681,6 +1683,10 @@ final class FinanceStore {
         let netForeignCharges = foreignCharges - foreignCredits
         let payments = validRows.filter { movementKind($0) == .cardPayment }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let movementCount = validRows.count
+        let expectedMovementCount = summary.flatMap { value in
+            guard let deposits = value.depositCount, let withdrawals = value.withdrawalCount else { return nil }
+            return deposits + withdrawals
+        }
 
         guard let summary else {
             return StatementReconciliationRecord(
@@ -1694,6 +1700,7 @@ final class FinanceStore {
                 extractedCreditTotal: kind == .card ? credits : nil,
                 extractedPaymentTotal: kind == .card ? payments : nil,
                 extractedMovementCount: movementCount,
+                expectedMovementCount: expectedMovementCount,
                 reason: "El PDF no expone un resumen financiero verificable."
             )
         }
@@ -1723,6 +1730,7 @@ final class FinanceStore {
                     extractedDepositTotal: deposits,
                     extractedWithdrawalTotal: withdrawals,
                     extractedMovementCount: movementCount,
+                    expectedMovementCount: expectedMovementCount,
                     reason: "No se encontraron totales de depósitos/retiros en el resumen bancario."
                 )
             }
@@ -1745,6 +1753,7 @@ final class FinanceStore {
                     extractedCreditTotal: credits,
                     extractedPaymentTotal: payments,
                     extractedMovementCount: movementCount,
+                    expectedMovementCount: expectedMovementCount,
                     reason: "No se encontró total de cargos/transacciones en el resumen de tarjeta."
                 )
             }
@@ -1787,6 +1796,7 @@ final class FinanceStore {
                 extractedCreditTotal: credits,
                 extractedPaymentTotal: payments,
                 extractedMovementCount: movementCount,
+                expectedMovementCount: expectedMovementCount,
                 reason: "No se pudo determinar si el estado es bancario o de tarjeta."
             )
         }
@@ -1802,6 +1812,7 @@ final class FinanceStore {
             extractedCreditTotal: kind == .card ? credits : nil,
             extractedPaymentTotal: kind == .card ? payments : nil,
             extractedMovementCount: movementCount,
+            expectedMovementCount: expectedMovementCount,
             reason: mismatches.isEmpty ? nil : mismatches.joined(separator: "; ")
         )
     }

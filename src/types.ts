@@ -66,6 +66,8 @@ export type StatementReconciliation = {
   extractedCreditTotal?: number;
   extractedPaymentTotal?: number;
   extractedMovementCount?: number;
+  /** Expected row count when the issuer declares deposit/withdrawal counts. */
+  expectedMovementCount?: number;
   reason?: string;
 };
 

@@ -446,9 +446,12 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
     const extractedWithdrawalTotal = sumAbsolute(transactions.filter((transaction) => transaction.amount < 0).map((transaction) => transaction.amount));
     const expectedDeposit = summary.depositTotal;
     const expectedWithdrawal = summary.withdrawalTotal;
+    const expectedMovementCount = summary.depositCount !== undefined && summary.withdrawalCount !== undefined
+      ? summary.depositCount + summary.withdrawalCount
+      : undefined;
     const missingTotals = expectedDeposit === undefined || expectedWithdrawal === undefined;
     if (missingTotals) {
-      return { status: "pending", tolerance, extractedDepositTotal, extractedWithdrawalTotal, extractedMovementCount: transactions.length, reason: "No se pudieron leer depósitos y retiros declarados" };
+      return { status: "pending", tolerance, extractedDepositTotal, extractedWithdrawalTotal, extractedMovementCount: transactions.length, expectedMovementCount, reason: "No se pudieron leer depósitos y retiros declarados" };
     }
     const depositDifference = extractedDepositTotal - expectedDeposit;
     const withdrawalDifference = extractedWithdrawalTotal - expectedWithdrawal;
@@ -464,6 +467,7 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       extractedDepositTotal,
       extractedWithdrawalTotal,
       extractedMovementCount: transactions.length,
+      expectedMovementCount,
       reason: invalid ? `Las filas no concilian con el resumen (depósitos ${depositDifference.toFixed(2)}, retiros ${withdrawalDifference.toFixed(2)})` : undefined,
     };
   }
