@@ -25,6 +25,10 @@ pull request automática abierta y la pestaña Actions muestra 100 ejecuciones.
 Esas referencias (incluida la pull request) deben limpiarse o eliminarse antes
 de cambiar la visibilidad.
 
+El dry-run local de esa limpieza dejó `main` únicamente con la historia limpia,
+pero todavía mostró objetos Git inalcanzables. Esto confirma que retirar ramas y
+tags no sustituye la eliminación de runs, artefactos y referencias de PR.
+
 ## Fase 2 — Rotación
 
 - [ ] Revocar la clave de Zen compartida fuera de GitHub y crear una nueva.
