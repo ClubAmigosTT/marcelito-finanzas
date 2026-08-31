@@ -183,10 +183,10 @@ export function verifyNativeCorpusReport(
       .forEach((file) => errors.push(`${file} no está en el manifiesto`));
     expectedEntries.forEach((entry) => {
       const expectedFile = entry.file.trim();
-      if (!expectedFile || !entry.accountKey) return;
+      if (!expectedFile) return;
       const row = rows.find((candidate) => (typeof candidate.file === "string" ? candidate.file.trim() : "") === expectedFile);
       const actual = typeof row?.accountKey === "string" ? row.accountKey.trim() : "";
-      if (actual !== entry.accountKey) {
+      if (entry.accountKey && actual !== entry.accountKey) {
         errors.push(`${expectedFile}: accountKey ${actual || "ausente"} no coincide con el manifiesto (${entry.accountKey})`);
       }
       if (!row) return;
