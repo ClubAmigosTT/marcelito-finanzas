@@ -1116,6 +1116,31 @@ test("la evidencia verificada de otro banco no puede cambiar el emisor guardado"
   assert.equal(ledger.quarantinedMovementCount, 1);
 });
 
+test("un estado de tipo desconocido no puede caer en el valor predeterminado bancario", () => {
+  const statement: Statement = {
+    ...bank("bbva-unknown-kind", "BBVA", "agosto 2026"),
+    readerVersion: "web-reader-current",
+    kind: "unknown",
+  };
+  const transaction = movement({
+    id: "unknown-kind-row",
+    date: "10 ago 2026",
+    description: "MOVIMIENTO SIN TIPO",
+    account: "BBVA",
+    amount: -500,
+    flow: "expense",
+    statementId: statement.id,
+  });
+  assert.equal(isStatementEligibleForDashboard(statement), false);
+  const metrics = buildFinanceMetrics([transaction], [statement]);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.isProvisional, true);
+  assert.match(metrics.audit.criticalIssues.join(" "), /tipo de estado no identificado/);
+  const [prepared] = prepareStoredStatements([statement], "web-reader-current");
+  assert.equal(prepared?.status, "review");
+  assert.match(prepared?.reconciliation?.reason ?? "", /identificar si el estado/);
+});
+
 test("un estado legado sin emisor conocido queda fuera aunque tenga conciliación válida", () => {
   const statement: Statement = {
     ...bank("unknown-legacy", "Desconocido", "agosto 2026"),

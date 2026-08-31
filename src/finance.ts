@@ -44,6 +44,7 @@ export function isStatementEligibleForDashboard(statement: Statement) {
   if (statement.status === "review") return false;
   if (!hasSufficientOcrQuality(statement)) return false;
   if (statement.source === "Desconocido") return false;
+  if (statement.kind === "unknown") return false;
   const sourceEvidence = statement.sourceDetection;
   // A missing evidence record is not equivalent to a verified issuer. Legacy
   // records are migrated to review, but keep this direct boundary strict too
@@ -708,6 +709,9 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
         && statement.issuerConfirmedByUser !== true);
     })
     .map((statement) => statement.id);
+  const blockedForStatementKind = statements
+    .filter((statement) => statement.kind === "unknown")
+    .map((statement) => statement.id);
   // Provenance is part of acceptance, not just an informational score. If a
   // PDF row cannot be traced to a page/method/confidence/source fragment, keep
   // the whole statement out of every KPI so a malformed direct pipeline cannot
@@ -723,6 +727,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     ...blockedForOcrQuality,
     ...blockedForSourceEvidence,
     ...blockedForExtractionEvidence,
+    ...blockedForStatementKind,
   ]);
   if (blockedForReconciliation.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("conciliación de estado"))) {
     pipeline.audit.criticalIssues.push(`${blockedForReconciliation.length} estado(s) quedaron fuera de los KPI por conciliación de estado`);
@@ -738,6 +743,9 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   }
   if (blockedForExtractionEvidence.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("evidencia de origen"))) {
     pipeline.audit.criticalIssues.push(`${blockedForExtractionEvidence.length} estado(s) quedaron fuera de los KPI por evidencia de origen incompleta`);
+  }
+  if (blockedForStatementKind.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("tipo de estado"))) {
+    pipeline.audit.criticalIssues.push(`${blockedForStatementKind.length} estado(s) quedaron fuera de los KPI por tipo de estado no identificado`);
   }
   // A document that failed issuer-total reconciliation can remain visible in
   // the audit screen, but none of its rows or summary values may feed an

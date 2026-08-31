@@ -28,8 +28,9 @@ export function prepareStoredStatements(
       && (statement.sourceDetection?.status !== "verified"
         || statement.sourceDetection.source !== statement.source)
       && statement.issuerConfirmedByUser !== true;
+    const kindNeedsReview = statement.kind === "unknown";
     const ocrNeedsReview = !hasSufficientOcrQuality(statement);
-    if (hasReconciliation && isCurrentReader && !sourceNeedsReview && !ocrNeedsReview) return statement;
+    if (hasReconciliation && isCurrentReader && !sourceNeedsReview && !kindNeedsReview && !ocrNeedsReview) return statement;
 
     const reason = !statement.readerVersion
       ? "Estado importado antes de la conciliación automática; vuelve a importarlo para usarlo en los KPI."
@@ -37,6 +38,8 @@ export function prepareStoredStatements(
         ? `Estado generado con el lector ${statement.readerVersion}; vuelve a importar el PDF con ${readerVersion}.`
         : sourceNeedsReview
           ? "Estado sin evidencia institucional verificada del emisor; vuelve a importarlo para confirmar el banco antes de usarlo en los KPI."
+          : kindNeedsReview
+            ? "No se pudo identificar si el estado es bancario o de tarjeta; confirma el tipo antes de usarlo en los KPI."
           : ocrNeedsReview
             ? "Estado OCR con confianza insuficiente; revisa las páginas y vuelve a importarlo antes de usarlo en los KPI."
             : "Estado sin evidencia de conciliación completa; vuelve a importarlo para usarlo en los KPI.";
@@ -84,6 +87,7 @@ export function prepareStoredLedger(
             && (statement.sourceDetection?.status !== "verified"
               || statement.sourceDetection.source !== statement.source)
             && statement.issuerConfirmedByUser !== true)
+            || statement.kind === "unknown"
         );
       })
       .map((statement) => statement.id),
