@@ -14,6 +14,9 @@ este orden, antes de que cualquier cifra llegue al dashboard:
 - La deuda procede de tarjetas/créditos: saldo al corte, saldo revolvente y MSI pendientes se mantienen separados del efectivo bancario.
 - En cuentas bancarias, la suma de filas positivas y negativas debe coincidir con los depósitos y retiros declarados (±$0.05); si no, la importación queda bloqueada. En tarjetas se concilian cargos y pagos contra el resumen del emisor.
 - Los estados con conciliación pendiente o inválida no entran al dashboard ejecutivo y se marcan como provisionales en la auditoría.
+- Un estado que concilia pero permanece en revisión manual tampoco se considera
+  verificado: sus filas quedan fuera de los KPI y el último `AuditRunRecord`
+  permanece bloqueado hasta que el usuario lo confirme.
 
 El bloque de auditoría del Inicio expone los conteos y montos de cada periodo. También muestra las identidades contables y marca los KPI como provisionales cuando hay filas rechazadas, movimientos relevantes por revisar o una conciliación fuera de tolerancia.
 
