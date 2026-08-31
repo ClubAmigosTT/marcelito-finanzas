@@ -1,4 +1,5 @@
 import { readdir, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import { detectSourceEvidence, extractTransactions, parseStatementSummary, rebuildPdfText, reconcileStatementImport } from "../src/pdfImport.ts";
@@ -34,6 +35,7 @@ function closeEnough(actual: unknown, expected: unknown, tolerance: number) {
 
 async function textFromPdf(file: string) {
   const data = new Uint8Array(await readFile(file));
+  const sourceFingerprint = createHash("sha256").update(data).digest("hex");
   const document = await pdfjs.getDocument({ data, disableWorker: true }).promise;
   try {
     const pages: string[] = [];
@@ -43,14 +45,15 @@ async function textFromPdf(file: string) {
       pages.push(`__PDF_PAGE_${pageNumber}__\n${rebuildPdfText(content.items)}`);
       page.cleanup();
     }
-    return pages.join("\n");
+    return { text: pages.join("\n"), sourceFingerprint };
   } finally {
     await document.destroy();
   }
 }
 
 async function evaluate(file: string) {
-  const text = await textFromPdf(file);
+  const extracted = await textFromPdf(file);
+  const text = extracted.text;
   const fileName = file.split(/[\\/]/).at(-1) ?? file;
   const mode = text.replace(/\s/g, "").length > 500 ? "pdf-text" : "ocr-required";
   const sourceDetection = detectSourceEvidence(text, fileName);
@@ -78,6 +81,7 @@ async function evaluate(file: string) {
     : 1;
   return {
     file: fileName,
+    sourceFingerprint: extracted.sourceFingerprint,
     mode,
     source: sourceDetection.source,
     sourceStatus: sourceDetection.status,
@@ -150,6 +154,7 @@ if (!directory) {
       failures += 1;
       result = {
         file: name,
+        sourceFingerprint: undefined,
         mode: "parse-error",
         source: "Desconocido",
         sourceStatus: "unknown",

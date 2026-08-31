@@ -103,6 +103,8 @@ duplicado en el manifiesto, la corrida falla. El resultado incluye método
 filas sin evidencia, cobertura de evidencia, cobertura de filas y motivo de
 cada bloqueo. También conserva las señales institucionales usadas para
 identificar el emisor y las menciones de contrapartes que fueron ignoradas.
+Cada archivo incluye además su huella SHA-256 para reproducir la corrida aun
+si cambia el nombre del PDF.
 Cuando existe manifiesto, también
 calcula `automaticAcceptancePrecision`:
 aceptaciones correctas divididas entre todas las aceptaciones automáticas
