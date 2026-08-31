@@ -147,6 +147,8 @@ export type DataQualityMetrics = {
   reviewCount: number;
   relevantReviewCount: number;
   reconciledPercent: number;
+  evidencePercent: number;
+  missingEvidenceCount: number;
   invalidCount: number;
   duplicateCount: number;
   critical: boolean;
@@ -949,6 +951,8 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     reviewCount: reviewItems.length,
     relevantReviewCount: pipeline.audit.relevantReviewCount,
     reconciledPercent: pipeline.audit.reconciledPercent,
+    evidencePercent: pipeline.audit.evidencePercent,
+    missingEvidenceCount: pipeline.audit.missingEvidenceCount,
     invalidCount: pipeline.audit.invalidCount,
     duplicateCount: pipeline.audit.duplicateCount,
     critical: pipeline.audit.criticalIssues.length > 0,

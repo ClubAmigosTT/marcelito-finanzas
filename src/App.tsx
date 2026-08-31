@@ -745,7 +745,7 @@ function DataQualityIndicator({ metrics }: { metrics: ReturnType<typeof buildFin
   const quality = metrics.dataQuality;
   const alert = quality.relevantReviewCount > 0 || quality.critical;
   return <section className={`data-quality${alert ? " has-alert" : ""}`} aria-label="Calidad de datos y conciliación">
-    <div><span>Calidad de datos / conciliación</span><strong>{Math.round(quality.classifiedPercent)}%</strong><small>{Math.round(quality.reconciledPercent)}% conciliado · {quality.classifiedCount} de {quality.totalCount} movimientos clasificados</small></div>
+    <div><span>Calidad de datos / conciliación</span><strong>{Math.round(quality.classifiedPercent)}%</strong><small>{Math.round(quality.reconciledPercent)}% conciliado · {Math.round(quality.evidencePercent)}% con evidencia · {quality.classifiedCount} de {quality.totalCount} movimientos clasificados</small></div>
     {alert ? <p className="quality-alert">{metrics.isProvisional ? "KPI provisionales: " : ""}{quality.relevantReviewCount ? `revisa ${quality.relevantReviewCount} movimiento${quality.relevantReviewCount === 1 ? " relevante" : "s relevantes"}` : "hay filas rechazadas por el parser"}.</p> : <p className="quality-ok">Sin alertas relevantes de clasificación.</p>}
   </section>;
 }

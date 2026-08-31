@@ -63,6 +63,9 @@ export type PipelineAudit = {
   relevantReviewCount: number;
   classifiedPercent: number;
   reconciledPercent: number;
+  /** Percentage of imported PDF rows that retain reconstructable provenance. */
+  evidencePercent: number;
+  missingEvidenceCount: number;
   criticalIssues: string[];
   periods: AuditPeriod[];
 };
@@ -396,6 +399,19 @@ function isRefund(transaction: Transaction) {
   return kindFromText(transaction) === "refund";
 }
 
+function hasTraceableEvidence(transaction: Transaction) {
+  // Manual rows are intentionally evidence-complete without a PDF page. They
+  // are user-entered events and must not lower the import quality score.
+  if (transaction.extractionEvidence?.method === "manual") return true;
+  const evidence = transaction.extractionEvidence;
+  return Boolean(evidence
+    && Number.isFinite(evidence.confidence)
+    && Number.isInteger(evidence.page)
+    && (evidence.page ?? 0) >= 1
+    && evidence.method
+    && evidence.sourceText?.trim());
+}
+
 /** Runs the full canonical ledger pipeline and emits period-level audit facts. */
 export function runTransactionPipeline(input: Transaction[], statements: Statement[]): PipelineResult {
   const stages = ["extraer", "validar", "normalizar", "deduplicar", "matching entre cuentas", "clasificar", "conciliar", "calcular"];
@@ -618,6 +634,13 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
 
   const reviewTransactions = classified.filter((transaction) => transaction.validationStatus === "review" || transaction.category === "Sin categoría" || (transaction.confidence ?? 1) < 0.75);
   const relevantReviewThreshold = 1000;
+  // Only rows that are demonstrably imported from a statement participate in
+  // provenance coverage. Legacy/manual entries without a statement id are
+  // not silently treated as failed PDF evidence.
+  const evidenceRows = input.filter((transaction) => Boolean(transaction.statementId)
+    || transaction.extractionEvidence?.method === "pdf-text"
+    || transaction.extractionEvidence?.method === "ocr");
+  const missingEvidenceCount = evidenceRows.filter((transaction) => !hasTraceableEvidence(transaction)).length;
   const audit: PipelineAudit = {
     stages,
     importedCount: input.length,
@@ -640,6 +663,8 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
     // score instead of silently making a bad import look healthy.
     classifiedPercent: input.length ? (Math.max(0, valid.length - reviewTransactions.length) / input.length) * 100 : 100,
     reconciledPercent: input.length ? (Math.max(0, valid.length - duplicateTransactions.length) / input.length) * 100 : 100,
+    evidencePercent: evidenceRows.length ? ((evidenceRows.length - missingEvidenceCount) / evidenceRows.length) * 100 : 100,
+    missingEvidenceCount,
     criticalIssues: [
       ...(invalidTransactions.length ? [`${invalidTransactions.length} movimiento(s) rechazado(s) por datos inválidos o administrativos`] : []),
       ...(reviewTransactions.some((transaction) => absolute(transaction.amount) >= relevantReviewThreshold) ? ["Hay movimientos relevantes pendientes de revisión"] : []),
