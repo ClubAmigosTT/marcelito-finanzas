@@ -271,6 +271,36 @@ struct DiagnosticsView: View {
                     }
                 }
 
+                Section("Resumen por periodo") {
+                    if store.statementAudits.isEmpty {
+                        Text("Aún no hay estados para auditar.")
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(store.statementAudits) { audit in
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack {
+                                    Text("\(audit.source) · \(audit.period)")
+                                        .font(.subheadline.weight(.semibold))
+                                    Spacer()
+                                    Text(audit.statusLabel)
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(audit.reconciliation == .invalid ? Color.marcelitoDanger : (audit.requiresReview ? Color.marcelitoAmber : Color.marcelitoSuccess))
+                                }
+                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas(audit.duplicateRows.map { " · \($0) duplicadas" } ?? "")")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(.secondary)
+                                Text("Ingresos \(money(audit.incomeTotal)) · Gasto \(money(audit.expenseTotal)) · Reembolsos \(money(audit.refundTotal))")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(Color.marcelitoNavyMid)
+                                Text("Transferencias \(money(audit.transferTotal)) · Pagos de tarjeta \(money(audit.cardPaymentTotal))")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(Color.marcelitoNavyMid)
+                            }
+                            .padding(.vertical, 3)
+                        }
+                    }
+                }
+
                 Section("Eventos recientes") {
                     if events.isEmpty {
                         Text("Aún no hay eventos registrados.")

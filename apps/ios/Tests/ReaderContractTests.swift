@@ -659,4 +659,66 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(store.dashboardIsBlocked)
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
     }
+
+    func testStatementAuditUsesTheCanonicalRowsForPeriodBreakdown() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statementID = UUID()
+        let statement = StatementRecord(
+            id: statementID,
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "bbva.pdf",
+            importedAt: .now,
+            transactionCount: 2,
+            requiresReview: false,
+            kind: .bank,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "BBVA",
+                confidence: 0.999,
+                status: .verified,
+                evidence: ["encabezado institucional BBVA"],
+                ignoredBodyMentions: []
+            ),
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        store.movements = [
+            Movement(
+                date: .now,
+                title: "Nómina",
+                account: "BBVA",
+                category: "Ingresos",
+                amount: 100,
+                flow: .income,
+                statementId: statementID,
+                kind: .income
+            ),
+            Movement(
+                date: .now,
+                title: "Supermercado",
+                account: "BBVA",
+                category: "Alimentos",
+                amount: -40,
+                flow: .expense,
+                statementId: statementID,
+                kind: .purchase
+            ),
+        ]
+
+        let audit = try! XCTUnwrap(store.statementAudits.first)
+        XCTAssertEqual(audit.importedRows, 2)
+        XCTAssertEqual(audit.canonicalRows, 2)
+        XCTAssertEqual(audit.validRows, 2)
+        XCTAssertEqual(audit.duplicateRows, 0)
+        XCTAssertEqual(audit.incomeRows, 1)
+        XCTAssertEqual(audit.expenseRows, 1)
+        XCTAssertEqual(audit.incomeTotal, 100)
+        XCTAssertEqual(audit.expenseTotal, 40)
+        XCTAssertEqual(audit.statusLabel, "Conciliado")
+    }
 }

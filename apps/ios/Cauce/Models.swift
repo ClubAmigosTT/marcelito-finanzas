@@ -373,6 +373,39 @@ struct StatementMetric: Identifiable {
     var pendingPercent: Decimal? { newCharges == 0 ? nil : max(Decimal(0), accumulatedBalance) / newCharges }
 }
 
+/// Per-statement audit projection. It is intentionally derived from the
+/// canonical movements and persisted statement metadata so the diagnostics
+/// screen can explain a period without re-running a second aggregation path.
+struct StatementAuditRow: Identifiable {
+    let id: UUID
+    let source: String
+    let period: String
+    let importedRows: Int
+    let canonicalRows: Int
+    let validRows: Int
+    let rejectedRows: Int
+    let duplicateRows: Int?
+    let reviewRows: Int
+    let incomeRows: Int
+    let expenseRows: Int
+    let transferRows: Int
+    let cardPaymentRows: Int
+    let refundRows: Int
+    let incomeTotal: Decimal
+    let expenseTotal: Decimal
+    let transferTotal: Decimal
+    let cardPaymentTotal: Decimal
+    let refundTotal: Decimal
+    let reconciliation: StatementReconciliationStatus?
+    let requiresReview: Bool
+
+    var statusLabel: String {
+        if reconciliation == .invalid { return "Inválido" }
+        if requiresReview || reconciliation == .pending { return "En revisión" }
+        return "Conciliado"
+    }
+}
+
 /// A daily point used to compare real income, real spending, and the
 /// accumulated balance on the dashboard. Values are already converted to
 /// `Double` so Swift Charts can render them without exposing accounting
@@ -833,6 +866,56 @@ final class FinanceStore {
     }
     var cardPeriodMetrics: [StatementMetric] { periodMetrics.filter { $0.kind == .card } }
     var cardPeriodCount: Int { Set(cardPeriodMetrics.map { periodKey($0.period) }).count }
+
+    /// One auditable row per imported PDF. All amounts below come from the
+    /// same `eligibleMovements`/canonical ledger used by the dashboard; the
+    /// projection never reparses a document or sums a second source.
+    var statementAudits: [StatementAuditRow] {
+        statements
+            .sorted { left, right in
+                let leftDate = statementEndDate(for: left.id)
+                let rightDate = statementEndDate(for: right.id)
+                if leftDate != rightDate { return leftDate > rightDate }
+                return left.importedAt > right.importedAt
+            }
+            .map { statement in
+                let linked = movements.filter { $0.statementId == statement.id }
+                let valid = linked.filter(isValidStoredMovement)
+                let review = valid.filter { $0.category == "Por revisar" || $0.category == "Sin categoría" }
+                let income = valid.filter(isRealIncome)
+                let expenses = valid.filter(isSpend)
+                let transfers = valid.filter { movementKind($0) == .bankTransfer }
+                let cardPayments = valid.filter { movementKind($0) == .cardPayment }
+                let refunds = valid.filter { movementKind($0) == .refund }
+                let reconciliation = statement.reconciliation?.status
+                let duplicateRows: Int? = reconciliation == .valid
+                    ? max(0, statement.transactionCount - linked.count)
+                    : nil
+                return StatementAuditRow(
+                    id: statement.id,
+                    source: statement.source,
+                    period: statement.period,
+                    importedRows: statement.transactionCount,
+                    canonicalRows: linked.count,
+                    validRows: valid.count,
+                    rejectedRows: max(0, statement.transactionCount - valid.count),
+                    duplicateRows: duplicateRows,
+                    reviewRows: review.count,
+                    incomeRows: income.count,
+                    expenseRows: expenses.count,
+                    transferRows: transfers.count,
+                    cardPaymentRows: cardPayments.count,
+                    refundRows: refunds.count,
+                    incomeTotal: income.reduce(Decimal(0)) { $0 + absolute($1.amount) },
+                    expenseTotal: expenses.reduce(Decimal(0)) { $0 + absolute($1.amount) },
+                    transferTotal: transfers.reduce(Decimal(0)) { $0 + absolute($1.amount) },
+                    cardPaymentTotal: cardPayments.reduce(Decimal(0)) { $0 + absolute($1.amount) },
+                    refundTotal: refunds.reduce(Decimal(0)) { $0 + absolute($1.amount) },
+                    reconciliation: reconciliation,
+                    requiresReview: statement.requiresReview
+                )
+            }
+    }
 
     /// Resolves a statement metric outside of a SwiftUI view builder. Keeping
     /// the lookup here avoids making the compiler type-check the entire
