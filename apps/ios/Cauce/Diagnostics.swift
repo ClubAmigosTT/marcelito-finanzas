@@ -202,6 +202,17 @@ struct DiagnosticsView: View {
                                     .font(.caption2)
                                     .foregroundStyle(weakestPage >= 0.78 ? Color.marcelitoSuccess : Color.marcelitoAmber)
                             }
+                            if let columnsCalibrated = statement.ocrColumnsCalibrated {
+                                Label(
+                                    columnsCalibrated
+                                        ? "Columnas OCR calibradas con encabezado visual"
+                                        : "Columnas OCR provisionales; requiere revisión",
+                                    systemImage: columnsCalibrated ? "checkmark.ruler" : "ruler"
+                                )
+                                .font(.caption2)
+                                .foregroundStyle(columnsCalibrated ? Color.marcelitoSuccess : Color.marcelitoAmber)
+                                .fixedSize(horizontal: false, vertical: true)
+                            }
                             if let reconciliation = statement.reconciliation,
                                let extracted = reconciliation.extractedMovementCount,
                                let expected = reconciliation.expectedMovementCount {
