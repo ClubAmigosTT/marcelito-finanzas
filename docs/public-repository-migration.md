@@ -20,9 +20,10 @@ expone código, historial, ejecuciones, logs, artefactos, issues y forks.
   antiguas antes de publicar.
 
 Inventario remoto al 2026-08-31: `main` y la rama automática de Dependabot
-todavía apuntan a la historia privada, hay 23 tags `ios-v*` históricos y la
-pestaña Actions muestra 100 ejecuciones. Esas referencias deben limpiarse o
-eliminarse antes de cambiar la visibilidad.
+todavía apuntan a la historia privada, hay 23 tags `ios-v*` históricos, una
+pull request automática abierta y la pestaña Actions muestra 100 ejecuciones.
+Esas referencias (incluida la pull request) deben limpiarse o eliminarse antes
+de cambiar la visibilidad.
 
 ## Fase 2 — Rotación
 
