@@ -1925,13 +1925,13 @@ final class FinanceStore {
                 return absolute(movement.amount) > absolute(declared) + tolerance
             }
             if !overDeclaredRows.isEmpty {
-                mismatches.append("(overDeclaredRows.count) importe(s) individual(es) superan el total declarado")
+                mismatches.append("\(overDeclaredRows.count) importe(s) individual(es) superan el total declarado")
             }
             if let opening = summary.previousBalance,
                let closing = summary.cashBalance {
                 let reconstructedClosing = opening + deposits - withdrawals
                 if absolute(reconstructedClosing - closing) > tolerance {
-                    mismatches.append("saldo final: reconstruido (reconstructedClosing) vs declarado (closing)")
+                    mismatches.append("saldo final: reconstruido \(reconstructedClosing) vs declarado \(closing)")
                 }
             }
             if summary.depositTotal == nil && summary.withdrawalTotal == nil {

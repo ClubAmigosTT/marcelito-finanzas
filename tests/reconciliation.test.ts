@@ -902,3 +902,48 @@ test("la auditoría bloquea un estado pendiente aunque no queden filas canónica
   assert.equal(audit.reconciledStatementCount, 0);
   assert.match(audit.message ?? "", /pendientes/);
 });
+
+test("un resumen histórico bloqueado no contamina deuda, gasto ni patrimonio", () => {
+  const statements: Statement[] = [
+    {
+      ...card("amex-historico", "Amex", "junio 2026", 999_999),
+      status: "review",
+      reconciliationStatus: "invalid",
+      reconciliation: { status: "invalid", tolerance: 0.05, reason: "filas heredadas no concilian" },
+      summary: {
+        debtBalance: 999_999,
+        newCharges: 999_999,
+        statementBalance: 999_999,
+        creditLimit: 150_000,
+        creditAvailable: 0,
+      },
+    },
+    {
+      ...card("amex-actual", "Amex", "28/07/2026 AL 27/08/2026", 50_367.21),
+      reconciliationStatus: "valid",
+      reconciliation: { status: "valid", tolerance: 0.05 },
+      summary: {
+        debtBalance: 50_367.21,
+        statementBalance: 39_966.15,
+        creditLimit: 150_000,
+        creditAvailable: 99_632.79,
+      },
+    },
+  ];
+  const inheritedRows = [movement({
+    id: "legacy-absurd",
+    date: "15 jun 2026",
+    description: "COMPRA HEREDADA",
+    account: "Amex",
+    amount: -999_999,
+    flow: "expense",
+    statementId: "amex-historico",
+  })];
+
+  const metrics = buildFinanceMetrics(inheritedRows, statements);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.totalNewCharges, 0);
+  assert.ok(Math.abs((metrics.debtTotal ?? 0) - 50_367.21) < 0.001);
+  assert.equal(metrics.isProvisional, true);
+  assert.equal(metrics.dataQuality.critical, true);
+});
