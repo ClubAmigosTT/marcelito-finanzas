@@ -134,6 +134,11 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
   `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`: la calibración puede dejar
   goldens `pending`, pero una certificación no puede pasar mientras exista
   alguno, haya OCR sin resolver o la precisión automática sea menor a 99%.
+- El workflow de TestFlight añade una segunda compuerta: exige las variables
+  `MARCELITO_NATIVE_CORPUS_CERTIFIED=true` y
+  `MARCELITO_NATIVE_CORPUS_READER_VERSION`, que debe coincidir con la revisión
+  actual del lector. Si el corpus no se volvió a ejecutar después de una
+  modificación, la build no se archiva ni se sube.
 
 ## Umbrales y respuesta
 
@@ -181,7 +186,10 @@ cuando Vision conserva el saldo corrido de dos filas consecutivas, un importe
 con separador decimal perdido solo se corrige si coincide con el delta del
 saldo (o con un desvío menor o igual a $2). Sin saldos confiables, la fila no
 se adivina y la conciliación mantiene el estado bloqueado. Esta regla ya tiene
-prueba de contrato. También existe un runner nativo de corpus (`NativeCorpusContractTests`)
+prueba de contrato. La misma reparación cubre confusiones OCR con un `1`
+inicial espurio (`160.00`→`60.00` y `1693.00`→`693.00`) únicamente cuando
+los centavos coinciden exactamente con el delta del saldo. También existe un
+runner nativo de corpus (`NativeCorpusContractTests`)
 que recibe `MARCELITO_PDF_CORPUS_DIR`, procesa los ocho PDFs con
 `PDFDocument + Vision`, verifica los estados de texto y emite un informe
 `NATIVE_CORPUS_REPORT`; falta ejecutarlo contra los cuatro escaneos en
