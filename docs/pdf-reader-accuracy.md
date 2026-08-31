@@ -54,6 +54,9 @@ gasto real sin separar esas secciones.
   resultado que tenga mayor confianza media.
 - Las páginas sin observaciones Vision se registran explícitamente como 0%
   de confianza; nunca desaparecen del promedio ni de la revisión.
+- En iOS, una fila importada sin página, confianza o fragmento de origen
+  completo reduce la cobertura de evidencia y bloquea el libro; las filas
+  creadas manualmente quedan fuera de este denominador.
 - Aunque los totales coincidan, el OCR web queda provisional si la confianza
   media baja de 88% o alguna página baja de 78%; una coincidencia accidental no
   puede convertir una lectura visual débil en un KPI.
