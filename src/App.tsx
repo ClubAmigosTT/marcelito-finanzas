@@ -319,12 +319,14 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
 
   // Persist one deterministic audit record per ledger generation. The
   // fingerprint prevents render loops and makes it possible to correlate a
-  // production report with the exact canonical rows that were shown.
+  // production report with the exact canonical rows and source PDFs shown.
   const auditedFingerprint = useRef("");
   useEffect(() => {
     const next = createAuditRun(pipeline, statements, ledgerTransactions, lastAuditRun ? "foreground" : "startup");
-    if (next.ledgerFingerprint === auditedFingerprint.current && lastAuditRun?.status === next.status) return;
-    auditedFingerprint.current = next.ledgerFingerprint;
+    const sourceIdentity = next.sourceFingerprints?.join("|") ?? "";
+    const auditIdentity = `${next.ledgerFingerprint}|${sourceIdentity}`;
+    if (auditIdentity === auditedFingerprint.current && lastAuditRun?.status === next.status) return;
+    auditedFingerprint.current = auditIdentity;
     setLastAuditRun(next);
     localStorage.setItem(auditStorageKey, JSON.stringify(next));
   }, [pipeline, statements, ledgerTransactions, lastAuditRun]);
