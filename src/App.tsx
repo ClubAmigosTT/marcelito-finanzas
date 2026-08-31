@@ -35,6 +35,7 @@ import { buildFinanceMetrics, defaultStatementKind, isSpendTransaction, type Ana
 import { gateOcrReconciliation, inspectPdf, PDF_READER_VERSION, reconcileStatementImport } from "./pdfImport";
 import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
 import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey } from "./reconciliation";
+import { prepareStoredStatements } from "./statementMigration";
 import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
@@ -52,24 +53,6 @@ function latestStatementFor(statements: Statement[]) {
     const byCutoff = statementPeriodEndTimestamp(right.period, right.importedAt) - statementPeriodEndTimestamp(left.period, left.importedAt);
     return byCutoff || right.importedAt.localeCompare(left.importedAt) || right.id.localeCompare(left.id);
   })[0];
-}
-
-function prepareStoredStatements(statements: Statement[]) {
-  // Imports created before issuer-total reconciliation existed cannot be
-  // trusted retroactively: their raw rows may already contain the old parser
-  // errors. Keep them visible for audit, but require a fresh import before
-  // they can feed executive KPIs.
-  return statements.map((statement) => statement.reconciliationStatus
-    ? statement
-    : {
-      ...statement,
-      reconciliationStatus: "pending" as const,
-      reconciliation: {
-        status: "pending" as const,
-        tolerance: 0.05,
-        reason: "Estado importado antes de la conciliación automática; vuelve a importarlo para usarlo en los KPI.",
-      },
-    });
 }
 
 async function passwordDigest(username: string, password: string) {

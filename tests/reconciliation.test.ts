@@ -4,6 +4,7 @@ import { detectSource, detectSourceEvidence, extractTransactions, gateOcrReconci
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
 import { buildFinanceMetrics } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
+import { prepareStoredStatements } from "../src/statementMigration.ts";
 import type { Statement, Transaction } from "../src/types.ts";
 
 const bank = (id: string, source: string, period: string): Statement => ({
@@ -973,4 +974,28 @@ test("un resumen histórico bloqueado no contamina deuda, gasto ni patrimonio", 
   assert.ok(Math.abs((metrics.debtTotal ?? 0) - 50_367.21) < 0.001);
   assert.equal(metrics.isProvisional, true);
   assert.equal(metrics.dataQuality.critical, true);
+});
+
+test("una versión anterior del lector queda en cuarentena al abrir el libro", () => {
+  const current = {
+    ...bank("bbva-current", "BBVA", "agosto 2026"),
+    readerVersion: "web-reader-test",
+    status: "ready" as const,
+    reconciliationStatus: "valid" as const,
+    reconciliation: { status: "valid" as const, tolerance: 0.05 },
+  };
+  const previous = {
+    ...bank("bbva-previous", "BBVA", "julio 2026"),
+    readerVersion: "web-reader-legacy",
+    status: "ready" as const,
+    reconciliationStatus: "valid" as const,
+    reconciliation: { status: "valid" as const, tolerance: 0.05 },
+  };
+
+  const prepared = prepareStoredStatements([current, previous], "web-reader-test");
+  assert.equal(prepared[0]?.status, "ready");
+  assert.equal(prepared[0]?.reconciliationStatus, "valid");
+  assert.equal(prepared[1]?.status, "review");
+  assert.equal(prepared[1]?.reconciliationStatus, "pending");
+  assert.match(prepared[1]?.reconciliation?.reason ?? "", /web-reader-legacy/);
 });
