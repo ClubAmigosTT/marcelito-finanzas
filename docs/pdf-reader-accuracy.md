@@ -24,6 +24,10 @@ gasto real sin separar esas secciones.
 - Estado bancario válido solo si depósitos, retiros y conteos concilian dentro de ±$0.05.
 - Cuando el estado imprime saldo inicial y saldo final, también se valida
   `saldo inicial + depósitos − retiros = saldo final` dentro de ±$0.05.
+- Si el OCR repite un saldo en un gráfico o pierde un dígito, se prueban las
+  candidatas del resumen contra esa identidad bancaria y solo se conserva la
+  que cuadra; por ejemplo, Santander agosto recupera $55,627.93 frente a un
+  gráfico OCR que producía $5,627.93.
 - Cuando el estado declara cantidades, se conserva la cobertura de filas
   extraídas/esperadas y cualquier diferencia bloquea la aceptación aunque los
   importes coincidan.
