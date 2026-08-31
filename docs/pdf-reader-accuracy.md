@@ -193,6 +193,18 @@ npm run pdf:corpus -- --ocr --ocr-dpi 220 \
   --out artifacts/pdf-corpus-ocr.json
 ```
 
+Para evitar olvidar el manifiesto, la resolución o el destino del informe,
+el repositorio incluye un atajo equivalente:
+
+```bash
+npm run pdf:corpus:diagnose -- --dir <carpeta>
+```
+
+Guarda el resultado en `artifacts/pdf-corpus-ocr.json` (una carpeta local
+ignorada por Git). El informe sigue marcando `certified=false` hasta ejecutar
+Vision nativa; este comando solo automatiza el diagnóstico reproducible de
+texto y OCR local.
+
 Se puede indicar una ruta explícita con `--pdftoppm <ruta>` o con la variable
 `MARCELITO_PDFTOPPM`. Los PNG y el modelo OCR se eliminan al terminar; el JSON
 no guarda el texto completo del estado. En modo `--ocr`, un estado marcado como
@@ -214,7 +226,9 @@ puede sustituir Vision. Cada archivo incluye `qualityGate.statusBefore`,
 `certificationBlockers` para que una corrida parcial no parezca certificada.
 El verificador nativo además revisa el `NATIVE_CORPUS_REPORT` por archivo y
 rechaza reportes truncados, duplicados o con una identidad de cuenta que no
-coincida con el `accountKey` dorado.
+coincida con el `accountKey` dorado. También compara `status` y, cuando el
+golden ya fue promovido a válido, el número exacto de `rows`; un cambio de
+promoción o de conteo exige actualizar el golden de forma explícita.
 
 Métricas mínimas por versión:
 
