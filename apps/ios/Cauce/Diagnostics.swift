@@ -180,14 +180,14 @@ struct DiagnosticsView: View {
                             }
                             if let detection = statement.sourceDetection,
                                !detection.evidence.isEmpty {
-                                Text("Señales del emisor: (detection.evidence.joined(separator: " · "))")
+                                Text("Señales del emisor: \(detection.evidence.joined(separator: " · "))")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
                             if let detection = statement.sourceDetection,
                                !detection.ignoredBodyMentions.isEmpty {
-                                Text("Menciones ignoradas en movimientos: (detection.ignoredBodyMentions.joined(separator: ", "))")
+                                Text("Menciones ignoradas en movimientos: \(detection.ignoredBodyMentions.joined(separator: ", "))")
                                     .font(.caption2)
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
