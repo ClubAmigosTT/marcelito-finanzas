@@ -6,7 +6,7 @@ import type {
   Transaction,
   TransactionKind,
 } from "./types.ts";
-import { normalizeConcept, parseDate, periodKeyFromLabel, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey, type PipelineAudit, type PipelineResult } from "./reconciliation.ts";
+import { hasTraceableEvidence, normalizeConcept, parseDate, periodKeyFromLabel, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey, type PipelineAudit, type PipelineResult } from "./reconciliation.ts";
 
 const OCR_MIN_AVERAGE_CONFIDENCE = 0.88;
 const OCR_MIN_PAGE_CONFIDENCE = 0.78;
@@ -698,11 +698,21 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
       return Boolean((!sourceEvidence || sourceEvidence.status !== "verified") && statement.issuerConfirmedByUser !== true);
     })
     .map((statement) => statement.id);
+  // Provenance is part of acceptance, not just an informational score. If a
+  // PDF row cannot be traced to a page/method/confidence/source fragment, keep
+  // the whole statement out of every KPI so a malformed direct pipeline cannot
+  // bypass the evidence gate. Manual rows (without statementId) are exempt.
+  const blockedForExtractionEvidence = Array.from(new Set(
+    inputTransactions
+      .filter((transaction) => Boolean(transaction.statementId) && !hasTraceableEvidence(transaction))
+      .map((transaction) => transaction.statementId as string),
+  ));
   const blockedStatementIds = new Set([
     ...blockedForReconciliation,
     ...blockedForReview,
     ...blockedForOcrQuality,
     ...blockedForSourceEvidence,
+    ...blockedForExtractionEvidence,
   ]);
   if (blockedForReconciliation.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("conciliación de estado"))) {
     pipeline.audit.criticalIssues.push(`${blockedForReconciliation.length} estado(s) quedaron fuera de los KPI por conciliación de estado`);
@@ -715,6 +725,9 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   }
   if (blockedForSourceEvidence.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("emisor"))) {
     pipeline.audit.criticalIssues.push(`${blockedForSourceEvidence.length} estado(s) quedaron fuera de los KPI por emisor no verificado`);
+  }
+  if (blockedForExtractionEvidence.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("evidencia de origen"))) {
+    pipeline.audit.criticalIssues.push(`${blockedForExtractionEvidence.length} estado(s) quedaron fuera de los KPI por evidencia de origen incompleta`);
   }
   // A document that failed issuer-total reconciliation can remain visible in
   // the audit screen, but none of its rows or summary values may feed an

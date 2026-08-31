@@ -446,7 +446,7 @@ function isRefund(transaction: Transaction) {
   return kindFromText(transaction) === "refund";
 }
 
-function hasTraceableEvidence(transaction: Transaction) {
+export function hasTraceableEvidence(transaction: Transaction) {
   // Manual rows are intentionally evidence-complete without a PDF page. They
   // are user-entered events and must not lower the import quality score.
   if (transaction.extractionEvidence?.method === "manual") return true;

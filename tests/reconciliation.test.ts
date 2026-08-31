@@ -41,6 +41,9 @@ const card = (id: string, source: string, period: string, debtBalance = 0): Stat
 const movement = (overrides: Partial<Transaction> & Pick<Transaction, "id" | "date" | "description" | "account" | "amount" | "flow">): Transaction => ({
   category: "Sin categoría",
   ...overrides,
+  extractionEvidence: overrides.extractionEvidence ?? (overrides.statementId
+    ? { method: "pdf-text", page: 1, confidence: 1, sourceText: overrides.description }
+    : undefined),
 });
 
 test("el parser rechaza encabezados administrativos con importes", () => {
@@ -1308,6 +1311,25 @@ test("un estado sin conciliación explícita no alimenta KPI aunque tenga emisor
   assert.equal(metrics.consolidatedRealSpend, 0);
   assert.equal(metrics.isProvisional, true);
   assert.match(metrics.audit.criticalIssues.join(" "), /conciliación de estado/);
+});
+
+test("un estado con filas PDF sin trazabilidad queda fuera aunque concilie", () => {
+  const statement = bank("bbva-no-evidence", "BBVA", "agosto 2026");
+  const transaction = movement({
+    id: "missing-evidence-row",
+    date: "10 ago 2026",
+    description: "COMPRA SIN PÁGINA",
+    account: "BBVA",
+    amount: -100,
+    flow: "expense",
+    statementId: statement.id,
+    extractionEvidence: { method: "pdf-text", confidence: 1, sourceText: "10 ago 2026 COMPRA SIN PÁGINA" },
+  });
+  const metrics = buildFinanceMetrics([transaction], [statement]);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.isProvisional, true);
+  assert.equal(metrics.dataQuality.evidencePercent, 0);
+  assert.match(metrics.audit.criticalIssues.join(" "), /evidencia de origen incompleta/);
 });
 
 test("la migración devuelve a revisión un OCR débil aunque conserve la versión actual", () => {
