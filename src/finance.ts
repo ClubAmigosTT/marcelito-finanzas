@@ -67,6 +67,7 @@ export type PeriodMetrics = {
   key: string;
   label: string;
   source: StatementSource;
+  accountKey?: string;
   statementId: string;
   kind: StatementKind;
   newTransactions: number;
@@ -614,6 +615,7 @@ export function calculatePeriod(statement: Statement, transactions: Transaction[
     key: periodKey(statement.period),
     label: statement.period,
     source: statement.source,
+    accountKey: statement.accountKey,
     statementId: statement.id,
     kind,
     newTransactions,
@@ -663,7 +665,7 @@ function latestBySource(periods: PeriodMetrics[]) {
     // Keep a bank account and a card from the same issuer independent. The
     // issuer name alone is not an account identity (e.g. Santander checking
     // plus a Santander credit card can both be present).
-    const accountKey = `${period.source}|${period.kind}`;
+    const accountKey = period.accountKey ?? `${period.source}|${period.kind}`;
     const current = latest.get(accountKey);
     if (!current
       || period.statementEndTimestamp > current.statementEndTimestamp

@@ -182,6 +182,41 @@ export function detectSource(text: string, fileName: string): StatementSource {
   return detectSourceEvidence(text, fileName).source;
 }
 
+/**
+ * Extracts a privacy-preserving account identity from the administrative
+ * header. Only the last four digits are retained, prefixed by the issuer; the
+ * movement body is never searched, so a transaction reference cannot become
+ * an account identity. Missing or ambiguous headers deliberately return
+ * undefined and the caller falls back to issuer + statement kind.
+ */
+export function detectAccountKey(text: string, source: StatementSource) {
+  if (source === "Desconocido") return undefined;
+  const headerLines: string[] = [];
+  const lines = normalizeText(text)
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  for (const line of lines.slice(0, 120)) {
+    if (/detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripcion|fecha\s+y\s+detalle/.test(line)) break;
+    headerLines.push(line);
+  }
+  const header = headerLines.join(" ");
+  const patterns = [
+    /(?:no\.?|numero)\s+de\s+cuenta(?:\s+clabe)?\D{0,12}([0-9][0-9\s-]{3,24})/i,
+    /cuenta\s+(?:clabe|de\s+(?:cheques|ahorro|corriente))\D{0,12}([0-9][0-9\s-]{3,24})/i,
+  ];
+  for (const pattern of patterns) {
+    const match = header.match(pattern);
+    if (!match?.[1]) continue;
+    const digits = match[1].replace(/\D/g, "");
+    if (digits.length < 4 || digits.length > 18) continue;
+    const issuer = normalizeText(source).replace(/[^a-z0-9]+/g, "");
+    if (!issuer) return undefined;
+    return `${issuer}:${digits.slice(-4)}`;
+  }
+  return undefined;
+}
+
 function detectStatementKind(text: string, source: StatementSource): StatementKind {
   if (source === "Amex") return "card";
   if (source === "Santander" || source === "BBVA") return "bank";
@@ -1314,6 +1349,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   const text = ocrResult?.text ?? extractedText;
   const sourceDetection = detectSourceEvidence(text, file.name);
   const source = sourceDetection.source;
+  const accountKey = detectAccountKey(text, source);
   const kind = detectStatementKind(text, source);
   onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
@@ -1335,6 +1371,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
 
     const result: ImportResult = {
       source,
+      accountKey,
       sourceDetection,
       kind,
       period: detectPeriod(text, file.name),

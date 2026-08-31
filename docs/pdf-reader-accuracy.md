@@ -13,6 +13,11 @@ El 99% se mide como **precisión de aceptación automática**: de cada 100 filas
 7. Conciliar: comparar filas contra totales y conteos declarados por el emisor.
 8. Calcular: alimentar todos los módulos exclusivamente desde el libro canónico conciliado.
 
+La selección de saldo usa una identidad de cuenta enmascarada cuando el
+encabezado la ofrece (`emisor:últimos4`). Solo se conservan los últimos cuatro
+dígitos; el número completo nunca entra al modelo ni al diagnóstico. Si falta o
+es ambiguo, se usa el fallback emisor+tipo y no se adivina una cuenta.
+
 En tarjetas Amex, cuando están disponibles, la conciliación usa además los
 subtotales impresos de transacciones nacionales y moneda extranjera. El total
 de nuevos cargos puede incluir cuotas MSI o conversiones y no se trata como

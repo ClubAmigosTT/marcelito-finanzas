@@ -149,6 +149,8 @@ export type StatementSummary = {
 
 export type ImportResult = {
   source: StatementSource;
+  /** Stable masked account identity (issuer + last four digits), when the PDF header provides it. */
+  accountKey?: string;
   sourceDetection?: SourceDetection;
   kind: StatementKind;
   period: string;
@@ -180,6 +182,8 @@ export type ImportResult = {
 export type Statement = {
   id: string;
   source: StatementSource;
+  /** Stable masked account identity; never stores the full account number. */
+  accountKey?: string;
   period: string;
   fileName: string;
   /** Stable identity of the exact source PDF used for this statement. */
@@ -208,6 +212,7 @@ export type Statement = {
 
 export type ImportCommit = {
   source: StatementSource;
+  accountKey?: string;
   kind: StatementKind;
   period: string;
   fileName: string;

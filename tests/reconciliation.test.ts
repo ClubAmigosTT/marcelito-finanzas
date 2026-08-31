@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { adaptiveOcrScale, detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
+import { adaptiveOcrScale, detectAccountKey, detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
 import { buildFinanceMetrics, hasVerifiedSourceEvidence, isStatementEligibleForDashboard } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
@@ -58,6 +58,19 @@ test("el parser rechaza encabezados administrativos con importes", () => {
   assert.equal(rows.length, 1);
   assert.equal(rows[0].description, "CARGO SUPERMERCADO");
   assert.equal(rows[0].amount, -1200);
+});
+
+test("la identidad de cuenta solo toma los últimos cuatro dígitos del encabezado", () => {
+  const text = [
+    "BBVA México",
+    "Número de cuenta: 0123 4567 8901",
+    "Número de cliente: 9988 7766",
+    "Fecha Descripción Cargos Abonos Saldo",
+    "10/08/2026 COMPRA 100.00",
+    "Transferencia a cuenta 4444",
+  ].join("\n");
+  assert.equal(detectAccountKey(text, "BBVA"), "bbva:8901");
+  assert.equal(detectAccountKey(text, "Desconocido"), undefined);
 });
 
 test("los encabezados administrativos parametrizados nunca se convierten en movimientos", () => {
@@ -1215,6 +1228,16 @@ test("el último corte se elige por fecha de cierre y no por orden de importaci�
   assert.equal(metrics.cashAvailable, 27654.24);
   assert.ok(Math.abs((metrics.debtTotal ?? 0) - 50367.21) < 0.001);
   assert.ok(Math.abs((metrics.liquidPatrimony ?? 0) - (-22712.97)) < 0.001);
+});
+
+test("el último corte se elige por cuenta y no mezcla dos cuentas del mismo banco", () => {
+  const statements: Statement[] = [
+    { ...bank("santander-a-jul", "Santander", "julio 2026"), accountKey: "santander:1111", summary: { cashBalance: 100 } },
+    { ...bank("santander-a-ago", "Santander", "agosto 2026"), accountKey: "santander:1111", summary: { cashBalance: 150 } },
+    { ...bank("santander-b-jul", "Santander", "julio 2026"), accountKey: "santander:2222", summary: { cashBalance: 300 } },
+  ];
+  const metrics = buildFinanceMetrics([], statements);
+  assert.equal(metrics.cashAvailable, 450);
 });
 
 test("una cuenta bancaria y una tarjeta del mismo emisor conservan sus saldos", () => {
