@@ -32,6 +32,9 @@ gasto real sin separar esas secciones.
 - OCR web sin coordenadas queda provisional. Vision con coordenadas conserva
   página, método y la confianza real de cada observación en cada fila.
 - El OCR web conserva confianza media y por página, limita la resolución de cada lienzo para evitar crashes por memoria y rechaza archivos de más de 50 MB con un mensaje recuperable.
+- En páginas con confianza inferior a 88%, el OCR web hace una segunda pasada
+  acotada con contraste mejorado y conserva el resultado de mayor confianza;
+  si la conciliación o el conteo no cuadran, el estado sigue bloqueado.
 - Aunque los totales coincidan, el OCR web queda provisional si la confianza
   media baja de 88% o alguna página baja de 78%; una coincidencia accidental no
   puede convertir una lectura visual débil en un KPI.
