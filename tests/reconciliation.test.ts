@@ -168,6 +168,7 @@ test("una coincidencia ambigua relevante queda en revisión y vuelve provisional
   ];
   const result = runTransactionPipeline(transactions, statements);
   assert.equal(result.audit.relevantReviewCount, 2);
+  assert.equal(result.audit.periods.find((period) => period.key === "2026-08")?.reviewCount, 2);
   assert.equal(result.transactions.every((row) => row.validationStatus === "review"), true);
   assert.equal(buildFinanceMetrics(transactions, statements, result).isProvisional, true);
 });
