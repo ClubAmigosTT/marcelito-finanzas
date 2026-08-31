@@ -172,6 +172,14 @@ struct DiagnosticsView: View {
                                     .font(.caption2.weight(.semibold))
                                     .foregroundStyle(reconciliationColor(statement))
                             }
+                            Text("Filas reconstruidas: \(statement.transactionCount)")
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            if statement.issuerConfirmedByUser == true {
+                                Label("Emisor confirmado manualmente", systemImage: "person.crop.circle.badge.checkmark")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.marcelitoNavyMid)
+                            }
                             if let reason = statement.reconciliation?.reason {
                                 Text(reason)
                                     .font(.caption2)
