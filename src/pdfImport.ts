@@ -473,6 +473,15 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
     const foreignCharges = charges.filter((transaction) => transaction.foreignCurrency);
     const extractedDomesticChargeTotal = sumAbsolute(domesticCharges.map((transaction) => transaction.amount));
     const extractedForeignChargeTotal = sumAbsolute(foreignCharges.map((transaction) => transaction.amount));
+    const credits = transactions.filter((transaction) => transaction.amount > 0 && ["credit", "refund"].includes(transactionKindForReconciliation(transaction)));
+    const extractedCreditTotal = sumAbsolute(credits.map((transaction) => transaction.amount));
+    const domesticCredits = sumAbsolute(credits.filter((transaction) => !transaction.foreignCurrency).map((transaction) => transaction.amount));
+    const foreignCredits = sumAbsolute(credits.filter((transaction) => transaction.foreignCurrency).map((transaction) => transaction.amount));
+    // The Amex domestic subtotal is net of issuer-side credits such as
+    // “MONTO A DIFERIR … CR”. Keep gross rows for the audit, but reconcile the
+    // subtotal against the net amount the statement itself declares.
+    const netDomesticChargeTotal = extractedDomesticChargeTotal - domesticCredits;
+    const netForeignChargeTotal = extractedForeignChargeTotal - foreignCredits;
     // “Nuevos cargos”/“Nuevas transacciones” may include deferred credits or
     // MSI installments. When the issuer exposes domestic + foreign subtotals,
     // those are the authoritative real-spend control; otherwise prefer
@@ -481,16 +490,18 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       ? summary.domesticTransactionTotal + summary.foreignTransactionTotal
       : undefined;
     const declaredCharges = sectionDeclaredCharges ?? summary.newTransactions ?? summary.newCharges;
-    if (declaredCharges === undefined) return { status: "pending", tolerance, extractedChargeTotal, extractedDomesticChargeTotal, extractedForeignChargeTotal, extractedPaymentTotal, extractedMovementCount: transactions.length, reason: "El estado no contiene total de cargos" };
-    const chargeDifference = extractedChargeTotal - declaredCharges;
+    if (declaredCharges === undefined) return { status: "pending", tolerance, extractedChargeTotal, extractedDomesticChargeTotal, extractedForeignChargeTotal, extractedCreditTotal, extractedPaymentTotal, extractedMovementCount: transactions.length, reason: "El estado no contiene total de cargos" };
+    const chargeDifference = sectionDeclaredCharges !== undefined
+      ? netDomesticChargeTotal + netForeignChargeTotal - declaredCharges
+      : extractedChargeTotal - declaredCharges;
     const paymentDifference = summary.payments !== undefined ? extractedPaymentTotal - summary.payments : 0;
     const sectionDifferences: string[] = [];
     if (summary.domesticTransactionTotal !== undefined) {
-      const difference = extractedDomesticChargeTotal - summary.domesticTransactionTotal;
+      const difference = netDomesticChargeTotal - summary.domesticTransactionTotal;
       if (Math.abs(difference) > tolerance) sectionDifferences.push(`nacionales ${difference.toFixed(2)}`);
     }
     if (summary.foreignTransactionTotal !== undefined) {
-      const difference = extractedForeignChargeTotal - summary.foreignTransactionTotal;
+      const difference = netForeignChargeTotal - summary.foreignTransactionTotal;
       if (Math.abs(difference) > tolerance) sectionDifferences.push(`moneda extranjera ${difference.toFixed(2)}`);
     }
     const invalid = transactions.length === 0 && declaredCharges > tolerance
@@ -503,6 +514,7 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       extractedChargeTotal,
       extractedDomesticChargeTotal,
       extractedForeignChargeTotal,
+      extractedCreditTotal,
       extractedPaymentTotal,
       extractedMovementCount: transactions.length,
       reason: invalid ? `Las filas no concilian con cargos/pagos del estado (cargos ${chargeDifference.toFixed(2)}, pagos ${paymentDifference.toFixed(2)}${sectionDifferences.length ? `, secciones ${sectionDifferences.join("; ")}` : ""})` : undefined,
@@ -639,8 +651,12 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       .replace(/^O(?=\d\s*\/)/i, "0")
       .replace(/^O[B8](?:I)?(?=\s*\/?\s*AGO\b)/i, "07/");
     const startsWithDate = datePattern.test(dateLine);
-    const breaks = breakPhrases.some((phrase) => normalized.includes(phrase))
-      || /^(?:del\s+al|total\b|saldo\b|periodo\b|fecha\s+de\s+corte|rfc\b|clabe\b)/.test(normalized);
+    // In text-layer PDFs the RFC/reference for a purchase often appears on
+    // its own line between the merchant and the amount. It is a continuation
+    // of the date-anchored row, not a new administrative heading.
+    const referenceContinuation = Boolean(pending) && /^(?:rfc|rec|ref)[a-z0-9]/.test(normalized);
+    const breaks = !referenceContinuation && (breakPhrases.some((phrase) => normalized.includes(phrase))
+      || /^(?:del\s+al|total\b|saldo\b|periodo\b|fecha\s+de\s+corte|rfc\b|clabe\b)/.test(normalized));
     if (startsWithDate) {
       flushPending();
       pending = dateLine;
@@ -679,14 +695,21 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     if (!usableCandidates.length) return;
     const normalizedLine = normalizeText(line);
     const bankLike = kind === "bank" || /deposito|retiro|saldo|cuenta de cheques|cuenta de ahorro|abono|cargo/.test(normalizedLine);
-    const foreignCurrency = sectionForeignCurrency || /dolar|euro|peso colombiano|tipo de cambio|\btc\b/.test(normalizedLine);
+    const foreignCurrency = sectionForeignCurrency || /d.?lar|euro|peso colombiano|tipo de cambio|\btc\b/.test(normalizedLine);
     // Bank rows often finish with a running balance. Select the preceding
     // amount so the balance is not recorded as a purchase.
     const amount = foreignCurrency
-      ? (usableCandidates.filter((candidate) => {
-        const currencyIndex = tail.search(/d[oó]lar|euro|peso(?:s)?\s+colombiano?s?|tipo\s+de\s+cambio|\btc\b/i);
-        return currencyIndex < 0 || candidate.index < currencyIndex;
-      }).at(-1) ?? usableCandidates[0])
+      ? (() => {
+        const currencyIndex = tail.search(/d.?lar|euro|peso(?:s)?\s+colombiano?s?|tipo\s+de\s+cambio|\btc\b/i);
+        if (currencyIndex < 0) return usableCandidates.at(-1) ?? usableCandidates[0];
+        // PDF text layers disagree on column order: some place the local
+        // amount before “Peso Colombiano … TC…”, others place it after that
+        // metadata. Prefer the last monetary token on the side that contains
+        // the local amount and never the exchange-rate token itself.
+        const beforeCurrency = usableCandidates.filter((candidate) => candidate.index < currencyIndex);
+        const afterCurrency = usableCandidates.filter((candidate) => candidate.index > currencyIndex);
+        return (beforeCurrency.length ? beforeCurrency.at(-1) : afterCurrency.at(-1)) ?? usableCandidates[0];
+      })()
       : bankLike && usableCandidates.length > 1
         ? usableCandidates[0]
         : usableCandidates[usableCandidates.length - 1];
@@ -719,7 +742,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       // BBVA prints operation and settlement dates before the merchant. They
       // are already represented by `date`, so do not pollute merchant keys.
       .replace(/^\d{1,2}[-/]\w+(?:[-/](?:20)?\d{2})?(?:\s+\d{1,2}[-/]\w+(?:[-/](?:20)?\d{2})?)?\s+/i, "")
-      .replace(/\s+(?:d[oó]lar(?:es)?(?:\s+u\.s\.a\.)?|euro?s?|peso(?:s)?\s+colombiano?s?|tipo\s+de\s+cambio).*$/i, "")
+      .replace(/\s+(?:d.?lar(?:es)?(?:\s+u\.s\.a\.)?|euro?s?|peso(?:s)?\s+colombiano?s?|tipo\s+de\s+cambio).*$/i, "")
       .replace(/\s+/g, " ")
       .trim();
     if (!description || description.length < 3 || isAdministrativeDescription(description)) return;
@@ -729,6 +752,11 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     // expense. Bank rows retain integer amounts when their direction is clear.
     if (kind === "card" && !/[.,$]/.test(amount.raw) && !/\bcr\b/i.test(amount.raw)) return;
     const normalizedDescription = normalizeConcept(description);
+    // The Amex cover page contains dated customer-service/payment guidance
+    // lines (for example “americanexpress.com.mx Servicio al cliente …
+    // 3,197.29”). They look like a card payment to a row parser but are not
+    // movements from the transaction table.
+    if (kind === "card" && /americanexpress\.com|servicio\s+al\s+cliente|linea\s+de\s+credito|pago\s+para\s+no\s+generar|monto\s+total\s+a\s+pagar/.test(normalizedDescription)) return;
     const isRefund = /devolucion|reembolso|bonificacion/.test(normalizedDescription);
     const isCardPayment = /gracias por su pago|pago de tarjeta|pago.*(?:tarjeta|credito|recibido)|tarjeta.*pago|abono.*(?:tarjeta|credito|recibido)/.test(normalizedDescription);
     const isIncome = /nomina|sueldo|salario|deposito|abono|ingreso|recibid|transferencia recibida|spei recibido/.test(normalizedDescription);

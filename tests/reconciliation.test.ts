@@ -457,6 +457,24 @@ test("la conciliación Amex usa subtotales nacional y extranjero como gasto real
   assert.equal(reconcileStatementImport("card", summary, rows).status, "valid");
 });
 
+test("la conciliación Amex descuenta créditos del subtotal doméstico y rechaza guías fechadas", () => {
+  const summary = parseStatementSummary([
+    "Nuevas transacciones: 33,177.48",
+    "Total Nuevos Cargos: 49,559.88",
+    "Total de las transacciones en $ de CLIENTE 13,990.02",
+    "Total de Transacciones en Moneda Extranjera de CLIENTE 9,593.73",
+  ].join("\n"), "card");
+  const rows = extractTransactions([
+    "27 de Agosto americanexpress.com.mx Servicio al cliente 800 504 040 3,197.29",
+    "01/08/2026 COMPRA NACIONAL 23,583.75",
+    "27/08/2026 MONTO A DIFERIR MESES EN AUTOMÁTICO 9,593.73 CR",
+    "02/08/2026 COMPRA EXTRANJERA Dólar 9,593.73",
+  ].join("\n"), "Amex", "Amex agosto 2026.pdf", "card");
+  const reconciliation = reconcileStatementImport("card", summary, rows);
+  assert.equal(reconciliation.status, "valid");
+  assert.equal(reconciliation.extractedCreditTotal, 9593.73);
+});
+
 test("la frontera de secciones Amex conserva como extranjeras las filas posteriores al subtotal", () => {
   const rows = extractTransactions([
     "01/08/2026 COMPRA NACIONAL 100.00",

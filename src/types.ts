@@ -62,6 +62,8 @@ export type StatementReconciliation = {
   extractedChargeTotal?: number;
   extractedDomesticChargeTotal?: number;
   extractedForeignChargeTotal?: number;
+  /** Créditos del estado (por ejemplo, “monto a diferir”) descontados del gasto neto. */
+  extractedCreditTotal?: number;
   extractedPaymentTotal?: number;
   extractedMovementCount?: number;
   reason?: string;
