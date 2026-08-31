@@ -604,6 +604,26 @@ test("Santander recupera un separador OCR fusionado usando el delta del saldo", 
   assert.equal(rows[0]?.amount, 16_334.80);
 });
 
+test("Santander corrige un 1 inicial alucinado cuando el saldo confirma el importe", () => {
+  const rows = extractTransactions([
+    "Banco Santander México, S.A., Institución de Banca Múltiple",
+    "Saldo inicial 65,879.07",
+    "Detalle de movimientos",
+    "07-JUL-2026 CONSUMO LOCAL AJENO 160.00 65,819.07",
+  ].join("\n"), "Santander", "Santander julio 2026.pdf", "bank");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]?.amount, -60);
+
+  const second = extractTransactions([
+    "Banco Santander México, S.A., Institución de Banca Múltiple",
+    "Saldo inicial 10,399.48",
+    "Detalle de movimientos",
+    "25-MAY-2026 CONSUMO LOCAL AJENO 1693.00 9,706.48",
+  ].join("\n"), "Santander", "Santander junio 2026.pdf", "bank");
+  assert.equal(second.length, 1);
+  assert.equal(second[0]?.amount, -693);
+});
+
 test("Amex separa compras y pagos sin convertir el pago en gasto", () => {
   const text = [
     "American Express",

@@ -400,6 +400,22 @@ final class ReaderContractTests: XCTestCase {
             runningBalance: 200
         )
         XCTAssertEqual(NSDecimalNumber(decimal: unchanged).doubleValue, 500, accuracy: 0.001)
+
+        let leadingOne = FinanceStore.repairedBankOCRAmountForTesting(
+            selected: 160,
+            selectedText: "160.00",
+            previousBalance: 65_879.07,
+            runningBalance: 65_819.07
+        )
+        XCTAssertEqual(NSDecimalNumber(decimal: leadingOne).doubleValue, 60, accuracy: 0.001)
+
+        let leadingOneWithThreeDigits = FinanceStore.repairedBankOCRAmountForTesting(
+            selected: 1_693,
+            selectedText: "1693.00",
+            previousBalance: 10_399.48,
+            runningBalance: 9_706.48
+        )
+        XCTAssertEqual(NSDecimalNumber(decimal: leadingOneWithThreeDigits).doubleValue, 693, accuracy: 0.001)
     }
 
     func testSantanderOCRUsesMovementColumnInsteadOfRunningBalance() {

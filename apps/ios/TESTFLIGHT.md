@@ -38,7 +38,7 @@ El workflow `.github/workflows/ios-testflight.yml` compila Marcelito en un runne
 
 5. Antes de publicar, certifica los ocho estados con Vision en un Mac siguiendo el procedimiento del README. En **Settings > Secrets and variables > Actions > Variables** registra:
    - `MARCELITO_NATIVE_CORPUS_CERTIFIED=true` solo si `NATIVE_CORPUS_SUMMARY` devuelve `certified=true`.
-   - `MARCELITO_NATIVE_CORPUS_READER_VERSION` con la versión del lector que produjo ese informe (por ejemplo, `ios-reader-2026.08.31.10`).
+   - `MARCELITO_NATIVE_CORPUS_READER_VERSION` con la versión del lector que produjo ese informe (por ejemplo, `ios-reader-2026.08.31.11`).
    El workflow detiene el archivo si falta cualquiera de estas variables; así una build no puede llegar a TestFlight mientras los escaneos sigan pendientes o se haya certificado otra revisión del lector.
 6. Cuando finalice el workflow, espera a que App Store Connect procese el build y agrégalo a un grupo de testers en TestFlight.
 

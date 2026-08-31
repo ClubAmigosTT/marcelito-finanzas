@@ -3,7 +3,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-2026.08.31.4";
+export const PDF_READER_VERSION = "web-reader-2026.08.31.5";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
@@ -1006,6 +1006,17 @@ export function extractTransactions(text: string, source: StatementSource, fileN
           && amountValue >= 1_000
           && deltaMagnitude > 0
           && Math.abs(amountValue - deltaMagnitude * 100) <= Math.max(2, deltaMagnitude * 0.02);
+        // Tesseract occasionally hallucinates a leading `1` in a Santander
+        // amount (`60.00` -> `160.00`, `693.00` -> `1693.00`). Treat this as
+        // repairable only when the exact cents digits after that leading one
+        // equal the running-balance delta. A generic balance drift remains
+        // untouched and the reconciliation gate still decides acceptance.
+        const selectedCents = Math.round(Math.abs(amountValue) * 100).toString();
+        const deltaCents = Math.round(deltaMagnitude * 100).toString();
+        const leadingOneConfusion = /[.,]\d{1,2}$/.test(amount.raw)
+          && selectedCents.length === deltaCents.length + 1
+          && selectedCents.startsWith("1")
+          && selectedCents.slice(1) === deltaCents;
         if (Number.isFinite(delta) && Math.abs(delta) > 0 && Math.abs(delta) < 100_000_000
           // A running-balance delta can repair a one- or two-cent OCR typo.
           // It can also recover a token whose separators were merged into a
@@ -1016,7 +1027,8 @@ export function extractTransactions(text: string, source: StatementSource, fileN
           && Math.abs(Math.abs(delta) - Math.abs(amountValue)) > 0.05
           && (Math.abs(Math.abs(delta) - Math.abs(amountValue)) <= 2
             || (malformedMagnitude && deltaMagnitude <= balanceScale * 1.25 + 0.05)
-            || (fusedSeparator && deltaMagnitude <= balanceScale * 1.25 + 0.05))) {
+            || (fusedSeparator && deltaMagnitude <= balanceScale * 1.25 + 0.05)
+            || (leadingOneConfusion && deltaMagnitude <= balanceScale * 1.25 + 0.05))) {
           amountValue = Math.abs(delta);
         }
         previousRunningBalance = runningBalance.value;

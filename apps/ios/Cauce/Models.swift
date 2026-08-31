@@ -516,7 +516,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.08.31.10"
+    static let readerVersion = "ios-reader-2026.08.31.11"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -663,7 +663,17 @@ final class FinanceStore {
         let malformedMagnitude = selectedMagnitude > scale * Decimal(2)
             || (!hasDecimalCents && selectedMagnitude > scale)
         let deltaWithinBalanceScale = deltaMagnitude <= scale * Decimal(string: "1.25", locale: Locale(identifier: "en_US_POSIX"))! + Decimal(string: "0.05", locale: Locale(identifier: "en_US_POSIX"))!
-        guard difference <= tolerance || (malformedMagnitude && deltaWithinBalanceScale) else {
+        let selectedCents = NSDecimalNumber(decimal: selectedMagnitude * 100).int64Value
+        let deltaCents = NSDecimalNumber(decimal: deltaMagnitude * 100).int64Value
+        let selectedDigits = String(selectedCents)
+        let deltaDigits = String(deltaCents)
+        let leadingOneConfusion = hasDecimalCents
+            && selectedDigits.count == deltaDigits.count + 1
+            && selectedDigits.first == "1"
+            && String(selectedDigits.dropFirst()) == deltaDigits
+        guard difference <= tolerance
+            || (malformedMagnitude && deltaWithinBalanceScale)
+            || (leadingOneConfusion && deltaWithinBalanceScale) else {
             return selectedMagnitude
         }
         return deltaMagnitude
