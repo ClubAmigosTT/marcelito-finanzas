@@ -911,6 +911,23 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
   });
   const pages: string[] = [];
   const pageConfidences: number[] = [];
+  const recognitionTimeoutMs = 45_000;
+  const recognizeWithTimeout = async (image: HTMLCanvasElement) => {
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        worker.recognize(image),
+        new Promise<never>((_, reject) => {
+          timeoutId = setTimeout(
+            () => reject(new Error("El OCR tardó demasiado en una página; intenta importar un PDF más ligero.")),
+            recognitionTimeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+    }
+  };
 
   try {
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
@@ -931,7 +948,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       if (!context) throw new Error("No se pudo preparar el lienzo para OCR");
 
       await page.render({ canvas: null, canvasContext: context, viewport }).promise;
-      const baseResult = await worker.recognize(canvas);
+      const baseResult = await recognizeWithTimeout(canvas);
       let bestText = baseResult.data.text;
       let confidence = Number(baseResult.data.confidence);
 
@@ -957,7 +974,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
               image.data[pixel + 2] = contrasted;
             }
             enhancedContext.putImageData(image, 0, 0);
-            const enhancedResult = await worker.recognize(enhancedCanvas);
+            const enhancedResult = await recognizeWithTimeout(enhancedCanvas);
             const enhancedConfidence = Number(enhancedResult.data.confidence);
             if (Number.isFinite(enhancedConfidence) && enhancedConfidence > confidence) {
               confidence = enhancedConfidence;

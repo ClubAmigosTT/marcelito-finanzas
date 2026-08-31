@@ -39,6 +39,9 @@ gasto real sin separar esas secciones.
   OCR visual, sus coordenadas normalizadas. La vista de detalle permite
   inspeccionar esta evidencia sin guardar el PDF completo dentro del libro.
 - El OCR web conserva confianza media y por página, limita la resolución de cada lienzo para evitar crashes por memoria y rechaza archivos de más de 50 MB con un mensaje recuperable.
+- Cada página OCR tiene un límite de 45 segundos; si el motor se atasca, la
+  importación termina con un error recuperable y no deja un proceso de OCR
+  abierto ni datos parciales.
 - En páginas con confianza inferior a 88%, el OCR web hace una segunda pasada
   acotada con contraste mejorado y conserva el resultado de mayor confianza;
   si la conciliación o el conteo no cuadran, el estado sigue bloqueado.
