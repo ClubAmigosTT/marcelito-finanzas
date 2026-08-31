@@ -114,6 +114,17 @@ manifiesto también conserva los controles de saldo anterior, saldo final,
 depósitos y retiros; el evaluador los expone como `statementControls` para
 comparar una corrida OCR aunque todavía no se acepten sus filas.
 
+Cada corrida puede conservarse como evidencia auditable pasando `--out` al
+evaluador. El archivo incluye la versión exacta del lector, huellas SHA-256,
+estado por PDF, filas con evidencia faltante, precisión de aceptación y la
+bandera `certified`:
+
+```bash
+npm run pdf:corpus -- --dir <carpeta> \
+  --manifest tests/fixtures/pdf-corpus-attachments.json \
+  --require-manifest --target-precision 0.99 --out artifacts/pdf-corpus.json
+```
+
 Métricas mínimas por versión:
 
 - precisión automática de filas >= 99%;

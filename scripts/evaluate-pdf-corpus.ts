@@ -1,4 +1,4 @@
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
@@ -130,11 +130,12 @@ async function evaluate(file: string) {
 
 const directory = argument("--dir");
 const manifestPath = argument("--manifest");
+const outputPath = argument("--out");
 const requireManifest = process.argv.includes("--require-manifest");
 const targetPrecisionRaw = argument("--target-precision");
 const targetPrecision = targetPrecisionRaw === undefined ? 0.99 : Number(targetPrecisionRaw);
 if (!directory) {
-  console.error("Uso: npm run pdf:corpus -- --dir <carpeta> [--manifest <archivo.json>] [--require-manifest] [--target-precision 0.99]");
+  console.error("Uso: npm run pdf:corpus -- --dir <carpeta> [--manifest <archivo.json>] [--out <reporte.json>] [--require-manifest] [--target-precision 0.99]");
   process.exitCode = 2;
 } else if (requireManifest && !manifestPath) {
   console.error("La certificación requiere --manifest con expectativas doradas para cada PDF.");
@@ -276,6 +277,10 @@ if (!directory) {
     automaticAcceptancePrecision,
     results,
   };
-  console.log(JSON.stringify(output, null, 2));
+  const serialized = JSON.stringify(output, null, 2);
+  console.log(serialized);
+  if (outputPath) {
+    await writeFile(resolve(outputPath), `${serialized}\n`, "utf8");
+  }
   if (failures > 0) process.exitCode = 1;
 }
