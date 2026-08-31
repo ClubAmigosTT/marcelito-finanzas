@@ -1984,8 +1984,8 @@ final class FinanceStore {
         // table signal; otherwise fall back to Vision instead of parsing
         // administrative text as if it were a ledger.
         let compactText = extractedText.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
-        let hasDateSignal = extractedText.range(of: #"(?i)\b\d{1,2}\s*[\/-]\s*\d{1,2}(?:\s*[\/-]\s*\d{2,4})?\b"#, options: .regularExpression) != nil
-        let hasTableSignal = extractedText.range(of: #"(?i)detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripcion|fecha\s+y\s+detalle"#, options: .regularExpression) != nil
+        let hasDateSignal = extractedText.range(of: #"(?i)\b(?:\d{1,2}\s*[\/-]\s*\d{1,2}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s*[\/-]\s*[a-záéíóú]{3,}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s+(?:de\s+)?[a-záéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?)\b"#, options: .regularExpression) != nil
+        let hasTableSignal = extractedText.range(of: #"(?i)detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripci[oó]n|fecha\s+y\s+detalle"#, options: .regularExpression) != nil
         let usedOCR = allowOCR && (compactText.count < 120 || !hasDateSignal || !hasTableSignal)
         let ocrObservations = usedOCR ? Self.ocrObservations(from: document) : []
         let text = usedOCR ? Self.ocrText(from: ocrObservations) : extractedText
