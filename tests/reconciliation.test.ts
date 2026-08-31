@@ -343,7 +343,7 @@ test("Santander elige el saldo inicial que cuadra cuando el OCR duplica el gráf
     "− Retiros 64,161.11",
     "= Saldo final 27,654.24",
     "Gráfico cuenta de cheques",
-    "Otros cargos $64,161.11 Saldo inicial $5,627.93",
+    "Otroscargos $64,161.11 Saldo inicial $5,627.93",
     "Detalle de movimientos",
     "16-JUL-2026 PAGO TRANSFERENCIA SPEI 64,161.11 55,597.93",
     "17-JUL-2026 NOMINA 36,187.42 27,654.24",

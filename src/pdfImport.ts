@@ -229,14 +229,6 @@ function findLastSummaryAmount(text: string, labels: string[]) {
   return value ? normalizeAmount(value) : undefined;
 }
 
-function findLastClosingBalance(text: string) {
-  const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
-  const money = "-?\\s*\\$?(?:(?:\\d{1,3}(?:[ ,.\\u00a0]\\d{3})+|\\d+)(?:[.,]\\d{1,2})?)";
-  const matches = Array.from(normalized.matchAll(new RegExp(`saldo\\s+final(?!\\s+del\\s+periodo\\s+anterior)[^\\d$-]{0,90}(${money})`, "gi")));
-  const value = matches.at(-1)?.[1];
-  return value ? normalizeAmount(value) : undefined;
-}
-
 const summaryMoneyPattern = /(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?![A-Za-z0-9])/g;
 
 function lineMoneyValues(line: string) {
@@ -285,7 +277,8 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
   if (kind !== "card") {
     // Bank summaries usually show the opening balance before the closing
     // balance. Pick the last closing value so an older cutoff cannot win.
-    const cashBalance = findLastClosingBalance(text) ?? findLastSummaryAmount(text, ["saldo disponible", "saldo actual", "saldo al corte"]);
+    const closingCandidates = findSummaryAmounts(text, ["saldo disponible", "saldo final", "saldo actual", "saldo al corte"]);
+    const cashBalance = closingCandidates.at(-1) ?? findLastSummaryAmount(text, ["saldo disponible", "saldo actual", "saldo al corte"]);
     if (cashBalance !== undefined) summary.cashBalance = cashBalance;
 
     const normalizedLines = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/\n+/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
@@ -301,7 +294,7 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
       const aggregateLabelIndex = normalizedLine.search(/dep.?sitos?|retiros?|abonos?|cargos?/);
       const percentIndex = normalizedLine.indexOf("%");
       if (/porcentaje|objetados|certificado|vencimiento|inversion|producto/.test(normalizedLine)
-        || /otros\s+cargos|otros\s+abonos/.test(normalizedLine)
+        || /otros\s*cargos|otros\s*abonos/.test(normalizedLine)
         || (percentIndex >= 0 && aggregateLabelIndex >= 0 && percentIndex > aggregateLabelIndex)) return;
       const valuesInLine = lineMoneyValues(line);
       if (!valuesInLine.length) return;
@@ -351,10 +344,14 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
       && summary.depositTotal !== undefined
       && summary.withdrawalTotal !== undefined) {
       const openingCandidates = findSummaryAmounts(text, ["saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"]);
-      const reconciledOpening = openingCandidates.find((opening) =>
-        Math.abs(opening + summary.depositTotal! - summary.withdrawalTotal! - summary.cashBalance!) <= 0.05,
-      );
-      if (reconciledOpening !== undefined) summary.previousBalance = reconciledOpening;
+      const reconciledPair = openingCandidates.flatMap((opening) => closingCandidates
+        .filter((closing) => Math.abs(opening + summary.depositTotal! - summary.withdrawalTotal! - closing) <= 0.05)
+        .map((closing) => ({ opening, closing })))
+        .at(0);
+      if (reconciledPair) {
+        summary.previousBalance = reconciledPair.opening;
+        summary.cashBalance = reconciledPair.closing;
+      }
     }
   }
 
