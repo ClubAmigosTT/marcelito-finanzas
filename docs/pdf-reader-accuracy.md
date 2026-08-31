@@ -43,6 +43,9 @@ gasto real sin separar esas secciones.
   puede permanecer visible para revisión, pero el estado no cuenta como
   aceptación automática ni como evidencia del 99%.
 - El OCR web conserva confianza media y por página, limita la resolución de cada lienzo para evitar crashes por memoria y rechaza archivos de más de 50 MB con un mensaje recuperable.
+- iOS no confía solo en la longitud de una capa de texto oculta: exige señal
+  de fecha y de tabla de movimientos antes de omitir Vision. Así un escaneo
+  con metadatos administrativos no se interpreta como un PDF estructurado.
 - Cada página OCR tiene un límite de 45 segundos; si el motor se atasca, la
   importación termina con un error recuperable y no deja un proceso de OCR
   abierto ni datos parciales.

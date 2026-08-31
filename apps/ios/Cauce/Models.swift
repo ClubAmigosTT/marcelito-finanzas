@@ -1977,7 +1977,16 @@ final class FinanceStore {
         let extractedText = (0..<document.pageCount)
             .compactMap { document.page(at: $0)?.string }
             .joined(separator: "\n")
-        let usedOCR = allowOCR && extractedText.trimmingCharacters(in: .whitespacesAndNewlines).count < 120
+        // Some scanned PDFs carry a short hidden text layer (cover labels,
+        // dates or PDF metadata) that is longer than the old 120-character
+        // cutoff but contains no reconstructable movement rows. Treat the
+        // text layer as usable only when it has both a movement date and a
+        // table signal; otherwise fall back to Vision instead of parsing
+        // administrative text as if it were a ledger.
+        let compactText = extractedText.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+        let hasDateSignal = extractedText.range(of: #"(?i)\b\d{1,2}\s*[\/-]\s*\d{1,2}(?:\s*[\/-]\s*\d{2,4})?\b"#, options: .regularExpression) != nil
+        let hasTableSignal = extractedText.range(of: #"(?i)detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripcion|fecha\s+y\s+detalle"#, options: .regularExpression) != nil
+        let usedOCR = allowOCR && (compactText.count < 120 || !hasDateSignal || !hasTableSignal)
         let ocrObservations = usedOCR ? Self.ocrObservations(from: document) : []
         let text = usedOCR ? Self.ocrText(from: ocrObservations) : extractedText
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
