@@ -37,6 +37,11 @@ function numberField(summary: NativeCorpusSummary, key: keyof NativeCorpusSummar
   return Number.isFinite(value) ? value : undefined;
 }
 
+function countField(summary: NativeCorpusSummary, key: keyof NativeCorpusSummary) {
+  const value = numberField(summary, key);
+  return value !== undefined && Number.isInteger(value) && value >= 0 ? value : undefined;
+}
+
 function booleanField(value: NativeCorpusSummary["certified"]) {
   return value === true || ["true", "1", "yes"].includes(String(value ?? "").toLowerCase());
 }
@@ -49,15 +54,15 @@ function booleanField(value: NativeCorpusSummary["certified"]) {
  */
 export function verifyNativeCorpusSummary(summary: NativeCorpusSummary, expectedReaderVersion?: string): Verification {
   const errors: string[] = [];
-  const files = numberField(summary, "files");
-  const accepted = numberField(summary, "accepted");
-  const blocked = numberField(summary, "blocked");
-  const expectedValid = numberField(summary, "expectedValid");
-  const expectedPending = numberField(summary, "expectedPending");
-  const goldenAutoAccepted = numberField(summary, "goldenAutoAccepted");
-  const goldenFalseAccepted = numberField(summary, "goldenFalseAccepted");
+  const files = countField(summary, "files");
+  const accepted = countField(summary, "accepted");
+  const blocked = countField(summary, "blocked");
+  const expectedValid = countField(summary, "expectedValid");
+  const expectedPending = countField(summary, "expectedPending");
+  const goldenAutoAccepted = countField(summary, "goldenAutoAccepted");
+  const goldenFalseAccepted = countField(summary, "goldenFalseAccepted");
   const precision = numberField(summary, "automaticAcceptancePrecision");
-  const unresolvedOCR = numberField(summary, "unresolvedOCR");
+  const unresolvedOCR = countField(summary, "unresolvedOCR");
 
   if (!summary.readerVersion) errors.push("el informe no incluye readerVersion");
   if (expectedReaderVersion && summary.readerVersion !== expectedReaderVersion) {
@@ -73,7 +78,9 @@ export function verifyNativeCorpusSummary(summary: NativeCorpusSummary, expected
   if (expectedValid !== undefined && goldenAutoAccepted !== undefined && goldenAutoAccepted !== expectedValid) {
     errors.push(`goldenAutoAccepted ${goldenAutoAccepted} no coincide con expectedValid ${expectedValid}`);
   }
-  if (precision === undefined || precision < 0.99) errors.push(`precisión automática ${precision ?? "ausente"} < 0.99`);
+  if (precision === undefined || precision < 0 || precision > 1 || precision < 0.99) {
+    errors.push(`precisión automática ${precision ?? "ausente"} fuera del objetivo 0.99`);
+  }
   if (unresolvedOCR === undefined || unresolvedOCR !== 0) errors.push(`quedan ${unresolvedOCR ?? "desconocido"} OCR sin resolver`);
   if (!booleanField(summary.certified)) errors.push("el runner no marcó certified=true");
 

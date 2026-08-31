@@ -38,7 +38,7 @@ test("el resumen nativo pendiente o desactualizado no pasa la certificación", (
   assert.ok(result.errors.some((error) => error.includes("readerVersion")));
   assert.ok(result.errors.some((error) => error.includes("golden(s) pendientes")));
   assert.ok(result.errors.some((error) => error.includes("aceptación(es) falsa(s)")));
-  assert.ok(result.errors.some((error) => error.includes("< 0.99")));
+  assert.ok(result.errors.some((error) => error.includes("objetivo 0.99")));
 });
 
 test("el resumen no se acepta si los conteos estructurales no cuadran", () => {
@@ -57,6 +57,26 @@ test("el resumen no se acepta si los conteos estructurales no cuadran", () => {
   }, "ios-reader-test");
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((error) => error.includes("accepted + blocked")));
+});
+
+test("el resumen nativo rechaza contadores fraccionarios o negativos", () => {
+  const result = verifyNativeCorpusSummary({
+    readerVersion: "ios-reader-test",
+    files: -1,
+    accepted: 0.5,
+    blocked: 1,
+    expectedValid: 8,
+    expectedPending: 0,
+    goldenAutoAccepted: 8,
+    goldenFalseAccepted: 0,
+    automaticAcceptancePrecision: 1.2,
+    unresolvedOCR: -1,
+    certified: true,
+  }, "ios-reader-test");
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("files no coincide")));
+  assert.ok(result.errors.some((error) => error.includes("OCR sin resolver")));
+  assert.ok(result.errors.some((error) => error.includes("objetivo 0.99")));
 });
 
 test("el reporte nativo exige una identidad enmascarada por PDF", () => {
