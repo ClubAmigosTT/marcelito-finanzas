@@ -155,6 +155,26 @@ npm run pdf:corpus -- --dir <carpeta> \
   --require-manifest --target-precision 0.99 --out artifacts/pdf-corpus.json
 ```
 
+Para diagnosticar escaneos sin capa de texto se puede ejecutar el mismo
+evaluador con OCR local. `pdftoppm` renderiza cada página y Tesseract.js usa el
+mismo parser y las mismas reglas de conciliación que la aplicación; el reporte
+conserva confianza media y confianza de cada página, pero nunca convierte esa
+corrida en certificación nativa:
+
+```bash
+npm run pdf:corpus -- --ocr --ocr-dpi 150 \
+  --dir <carpeta> --manifest tests/fixtures/pdf-corpus-attachments.json \
+  --out artifacts/pdf-corpus-ocr.json
+```
+
+Se puede indicar una ruta explícita con `--pdftoppm <ruta>` o con la variable
+`MARCELITO_PDFTOPPM`. Los PNG y el modelo OCR se eliminan al terminar; el JSON
+no guarda el texto completo del estado. En modo `--ocr`, un estado marcado como
+`pending` en el manifiesto solo se considera promovido si produce filas,
+concilia sus controles y supera la compuerta de confianza. La bandera
+`certified` sigue siendo `false` hasta ejecutar Vision y el corpus real en
+macOS/Xcode.
+
 Métricas mínimas por versión:
 
 - precisión automática de filas >= 99%;

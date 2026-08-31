@@ -1,9 +1,14 @@
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
-import { resolve } from "node:path";
+import { execFile as execFileCallback } from "node:child_process";
+import { promisify } from "node:util";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
-import { detectSourceEvidence, extractTransactions, parseStatementSummary, PDF_READER_VERSION, rebuildPdfText, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
+import { detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, PDF_READER_VERSION, rebuildPdfText, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import type { StatementKind, StatementSource } from "../src/types.ts";
+
+const execFile = promisify(execFileCallback);
 
 type ExpectedFile = {
   file: string;
@@ -48,23 +53,80 @@ async function textFromPdf(file: string) {
       pages.push(`__PDF_PAGE_${pageNumber}__\n${rebuildPdfText(content.items)}`);
       page.cleanup();
     }
-    return { text: pages.join("\n"), sourceFingerprint };
+    return { text: pages.join("\n"), sourceFingerprint, numPages: document.numPages };
   } finally {
     await document.destroy();
   }
 }
 
-async function evaluate(file: string) {
+async function ocrTextFromPdf(file: string, numPages: number, dpi: number, pdftoppmPath: string) {
+  const temporaryDirectory = await mkdtemp(join(tmpdir(), "marcelito-pdf-ocr-"));
+  const outputPrefix = join(temporaryDirectory, "page");
+  try {
+    await execFile(pdftoppmPath, [
+      "-f", "1",
+      "-l", String(numPages),
+      "-r", String(dpi),
+      "-png",
+      file,
+      outputPrefix,
+    ], { maxBuffer: 1024 * 1024 });
+    const imageFiles = (await readdir(temporaryDirectory))
+      .filter((name) => name.toLowerCase().endsWith(".png"))
+      .sort((left, right) => {
+        const leftNumber = Number(left.match(/(\d+)\.png$/i)?.[1] ?? 0);
+        const rightNumber = Number(right.match(/(\d+)\.png$/i)?.[1] ?? 0);
+        return leftNumber - rightNumber;
+      });
+    if (imageFiles.length !== numPages) {
+      throw new Error(`pdftoppm generó ${imageFiles.length} páginas de ${numPages}`);
+    }
+    const { createWorker } = await import("tesseract.js");
+    const worker = await createWorker("spa");
+    const pages: string[] = [];
+    const pageConfidences: number[] = [];
+    try {
+      for (let index = 0; index < imageFiles.length; index += 1) {
+        const image = await readFile(join(temporaryDirectory, imageFiles[index]));
+        const result = await worker.recognize(image);
+        pages.push(`__PDF_PAGE_${index + 1}__\n${result.data.text}`);
+        pageConfidences.push(Math.max(0, Math.min(1, Number(result.data.confidence) / 100)));
+      }
+    } finally {
+      await worker.terminate();
+    }
+    const confidence = pageConfidences.length
+      ? pageConfidences.reduce((total, value) => total + value, 0) / pageConfidences.length
+      : 0;
+    return { text: pages.join("\n"), confidence, pageConfidences };
+  } finally {
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdftoppmPath: string }) {
   const extracted = await textFromPdf(file);
-  const text = extracted.text;
+  let text = extracted.text;
   const fileName = file.split(/[\\/]/).at(-1) ?? file;
   // Keep corpus diagnostics on the exact same text/OCR decision as the app;
   // otherwise a hidden administrative layer could be certified as text here
   // while the product correctly falls back to visual OCR (or vice versa).
-  const mode = shouldUseOCR(text) ? "ocr-required" : "pdf-text";
+  const requiresOCR = shouldUseOCR(text);
+  let mode: "ocr-required" | "pdf-text" | "ocr" = requiresOCR ? "ocr-required" : "pdf-text";
+  let ocrConfidence: number | undefined;
+  let ocrPageConfidences: number[] | undefined;
+  if (requiresOCR && options.ocr) {
+    const ocr = await ocrTextFromPdf(file, extracted.numPages, options.dpi, options.pdftoppmPath);
+    text = ocr.text;
+    mode = "ocr";
+    ocrConfidence = ocr.confidence;
+    ocrPageConfidences = ocr.pageConfidences;
+  }
   const sourceDetection = detectSourceEvidence(text, fileName);
   const kind = kindFor(sourceDetection.source);
-  const transactions = kind === "unknown" ? [] : extractTransactions(text, sourceDetection.source, fileName, kind);
+  const transactions = kind === "unknown" ? [] : mode === "ocr"
+    ? parseImportedTransactions(text, sourceDetection.source, fileName, kind, "ocr", ocrPageConfidences)
+    : extractTransactions(text, sourceDetection.source, fileName, kind);
   const summary = kind === "unknown" ? undefined : parseStatementSummary(text, kind);
   const creditUsed = summary?.creditLimit !== undefined && summary.creditAvailable !== undefined
     ? Math.max(0, summary.creditLimit - summary.creditAvailable)
@@ -84,9 +146,12 @@ async function evaluate(file: string) {
     minimumPlusMsi: summary.minimumPlusMsi,
     msiPending: summary.msiPending,
   } : {};
-  const reconciliation = kind === "unknown"
+  const baseReconciliation = kind === "unknown"
     ? { status: "pending" as const, tolerance: 0.05, extractedMovementCount: 0, reason: "Emisor no identificado" }
     : reconcileStatementImport(kind, summary, transactions);
+  const reconciliation = mode === "ocr"
+    ? gateOcrReconciliation(baseReconciliation, "ocr", ocrConfidence, ocrPageConfidences)
+    : baseReconciliation;
   const suspiciousRows = transactions.filter((row) => !Number.isFinite(row.amount) || Math.abs(row.amount) >= 100_000_000 || row.date === "Sin fecha");
   // A valid total is not enough to certify an extracted row. Every accepted
   // movement must remain traceable to the source page and a bounded fragment
@@ -108,6 +173,8 @@ async function evaluate(file: string) {
     readerVersion: PDF_READER_VERSION,
     sourceFingerprint: extracted.sourceFingerprint,
     mode,
+    ocrConfidence,
+    ocrPageConfidences,
     source: sourceDetection.source,
     sourceStatus: sourceDetection.status,
     sourceConfidence: Number(sourceDetection.confidence.toFixed(4)),
@@ -141,17 +208,24 @@ async function evaluate(file: string) {
 const directory = argument("--dir");
 const manifestPath = argument("--manifest");
 const outputPath = argument("--out");
+const useOCR = process.argv.includes("--ocr");
+const ocrDpiRaw = argument("--ocr-dpi");
+const ocrDpi = ocrDpiRaw === undefined ? 150 : Number(ocrDpiRaw);
+const pdftoppmPath = argument("--pdftoppm") ?? process.env.MARCELITO_PDFTOPPM ?? "pdftoppm";
 const requireManifest = process.argv.includes("--require-manifest");
 const targetPrecisionRaw = argument("--target-precision");
 const targetPrecision = targetPrecisionRaw === undefined ? 0.99 : Number(targetPrecisionRaw);
 if (!directory) {
-  console.error("Uso: npm run pdf:corpus -- --dir <carpeta> [--manifest <archivo.json>] [--out <reporte.json>] [--require-manifest] [--target-precision 0.99]");
+  console.error("Uso: npm run pdf:corpus -- --dir <carpeta> [--manifest <archivo.json>] [--out <reporte.json>] [--require-manifest] [--target-precision 0.99] [--ocr --ocr-dpi 150 --pdftoppm <ruta>]");
   process.exitCode = 2;
 } else if (requireManifest && !manifestPath) {
   console.error("La certificación requiere --manifest con expectativas doradas para cada PDF.");
   process.exitCode = 2;
 } else if (!Number.isFinite(targetPrecision) || targetPrecision < 0 || targetPrecision > 1) {
   console.error("--target-precision debe ser un número entre 0 y 1.");
+  process.exitCode = 2;
+} else if (useOCR && (!Number.isFinite(ocrDpi) || ocrDpi < 72 || ocrDpi > 300)) {
+  console.error("--ocr-dpi debe ser un número entre 72 y 300.");
   process.exitCode = 2;
 } else {
   const root = resolve(directory);
@@ -179,7 +253,7 @@ if (!directory) {
   for (const name of names) {
     let result: Awaited<ReturnType<typeof evaluate>>;
     try {
-      result = await evaluate(resolve(root, name));
+      result = await evaluate(resolve(root, name), { ocr: useOCR, dpi: ocrDpi, pdftoppmPath });
     } catch (error) {
       // A damaged/encrypted PDF must not abort the whole corpus run. Keep a
       // deterministic per-file failure so every file is accounted for and a
@@ -221,8 +295,10 @@ if (!directory) {
     }
     if (expected?.kind && expected.kind !== result.kind) mismatches.push(`tipo esperado ${expected.kind}, obtenido ${result.kind}`);
     if (expected?.sourceFingerprint && expected.sourceFingerprint !== result.sourceFingerprint) mismatches.push("huella SHA-256 del archivo no coincide");
-    if (expected?.status && expected.status !== result.reconciliation.status) mismatches.push(`estado esperado ${expected.status}, obtenido ${result.reconciliation.status}`);
-    if (expected?.rows !== undefined && expected.rows !== result.rows) mismatches.push(`filas esperadas ${expected.rows}, obtenidas ${result.rows}`);
+    const expectedOCRPromotion = useOCR && expected?.status === "pending";
+    if (expected?.status && !expectedOCRPromotion && expected.status !== result.reconciliation.status) mismatches.push(`estado esperado ${expected.status}, obtenido ${result.reconciliation.status}`);
+    if (expected?.rows !== undefined && !expectedOCRPromotion && expected.rows !== result.rows) mismatches.push(`filas esperadas ${expected.rows}, obtenidas ${result.rows}`);
+    if (expectedOCRPromotion && result.mode === "ocr" && result.reconciliation.status === "valid" && result.rows === 0) mismatches.push("OCR no produjo movimientos válidos");
     for (const [key, value] of Object.entries(expected?.summary ?? {})) {
       const actual = result.reconciliation[key as keyof typeof result.reconciliation]
         ?? result.statementControls[key as keyof typeof result.statementControls];
@@ -260,6 +336,7 @@ if (!directory) {
     : 0;
   const certified = Boolean(
     requireManifest
+      && !useOCR
       && failures === 0
       && nativeOCRPending === 0
       && expectedFiles.length === results.length
@@ -275,6 +352,8 @@ if (!directory) {
     blocked: results.length - accepted,
     manifestChecked: Boolean(manifestPath),
     readerVersion: PDF_READER_VERSION,
+    ocrEnabled: useOCR,
+    ocrDpi: useOCR ? ocrDpi : undefined,
     manifestReaderVersion: manifest.readerVersion,
     manifestReaderVersionMismatch,
     manifestFailures: failures,
