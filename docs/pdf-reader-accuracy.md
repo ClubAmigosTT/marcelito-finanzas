@@ -48,6 +48,8 @@ gasto real sin separar esas secciones.
 - Vision en iOS aplica la misma estrategia por página: solo genera una imagen
   temporal con contraste cuando la primera pasada es débil y conserva el
   resultado que tenga mayor confianza media.
+- Las páginas sin observaciones Vision se registran explícitamente como 0%
+  de confianza; nunca desaparecen del promedio ni de la revisión.
 - Aunque los totales coincidan, el OCR web queda provisional si la confianza
   media baja de 88% o alguna página baja de 78%; una coincidencia accidental no
   puede convertir una lectura visual débil en un KPI.

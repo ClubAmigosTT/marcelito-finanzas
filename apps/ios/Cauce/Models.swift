@@ -1966,8 +1966,11 @@ final class FinanceStore {
         let ocrPageConfidences: [Double]? = {
             guard usedOCR else { return nil }
             let grouped = Dictionary(grouping: ocrObservations, by: \.page)
-            let values = grouped.keys.sorted().compactMap { page -> Double? in
-                guard let observations = grouped[page], !observations.isEmpty else { return nil }
+            // Preserve a zero-confidence entry for an entirely blank or
+            // failed Vision page; omitting it would make the document mean
+            // look healthier than the pages the user actually uploaded.
+            let values = (0..<document.pageCount).map { page -> Double in
+                guard let observations = grouped[page], !observations.isEmpty else { return 0 }
                 return observations.map(\.confidence).reduce(0, +) / Double(observations.count)
             }
             return values.isEmpty ? nil : values
