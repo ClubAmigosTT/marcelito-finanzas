@@ -308,6 +308,7 @@ final class NativeCorpusContractTests: XCTestCase {
             )
         }
         let summary: [String: String] = [
+            "readerVersion": FinanceStore.readerVersion,
             "files": String(files.count),
             "accepted": String(automaticAcceptances),
             "blocked": String(max(0, files.count - automaticAcceptances)),

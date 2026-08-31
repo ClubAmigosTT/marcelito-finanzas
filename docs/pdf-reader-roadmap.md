@@ -137,6 +137,9 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
   `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`: la calibración puede dejar
   goldens `pending`, pero una certificación no puede pasar mientras exista
   alguno, haya OCR sin resolver o la precisión automática sea menor a 99%.
+  El resumen emitido por XCTest se valida además con
+  `npm run pdf:native:verify -- --log ... --reader-version ... --require-certified`,
+  para que la variable de publicación no pueda sustituir al informe real.
 - El workflow de TestFlight añade una segunda compuerta: exige las variables
   `MARCELITO_NATIVE_CORPUS_CERTIFIED=true` y
   `MARCELITO_NATIVE_CORPUS_READER_VERSION`, que debe coincidir con la revisión

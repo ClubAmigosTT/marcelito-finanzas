@@ -36,6 +36,18 @@ MARCELITO_PDF_CORPUS_DIR="/ruta/a/estados-validados" \
   ./scripts/run-native-corpus.sh
 ```
 
+Después de una corrida certificable, valida el resumen de XCTest antes de
+registrar la versión en GitHub Actions. El verificador lee únicamente la línea
+`NATIVE_CORPUS_SUMMARY` del log y falla si falta un golden, queda OCR pendiente,
+hay falsos positivos o la precisión cae por debajo de 99%:
+
+```bash
+npm run pdf:native:verify -- \
+  --log /ruta/al/xcodebuild.log \
+  --reader-version ios-reader-2026.08.31.13 \
+  --require-certified
+```
+
 El reporte incluye controles esperados y extraídos de saldo inicial, saldo
 final, depósitos, retiros, cargos y pagos, además de confianza del emisor,
 confianza OCR media y página OCR más débil. Todos los archivos deben identificar el emisor con estado
