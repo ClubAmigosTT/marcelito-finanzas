@@ -108,6 +108,12 @@ export function detectSourceEvidence(text: string, fileName: string): SourceDete
   // marker can win; otherwise leave the document for manual review.
   const santanderInstitutional = /grupo\s+financiero\s+santander|banco\s+santander\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com/.test(institutional);
   const bbvaInstitutional = /grupo\s+financiero\s+bbva|bbva\.mx|bba830831lj2|bbva\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple/.test(institutional);
+  // Two competing legal issuer markers are not evidence for either bank.
+  // Keep the document unknown instead of allowing the later standalone-brand
+  // fallback to guess BBVA (or Santander) and select the wrong parser.
+  if (santanderInstitutional && bbvaInstitutional) {
+    return result("Desconocido", 0, ["marcadores institucionales conflictivos"]);
+  }
   if (santanderInstitutional && !bbvaInstitutional) {
     return result("Santander", filenameSource === "Santander" ? 0.999 : 0.998, ["encabezado institucional Santander", ...(filenameSource === "Santander" ? ["nombre de archivo Santander"] : [])]);
   }

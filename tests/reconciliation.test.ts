@@ -675,6 +675,19 @@ test("la razón social Santander gana a una contraparte BBVA del resumen", () =>
   assert.equal(evidence.status, "verified");
 });
 
+test("marcadores legales de bancos en conflicto no eligen un emisor por descarte", () => {
+  const text = [
+    "BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México",
+    "Banco Santander México, Institución de Banca Múltiple, Grupo Financiero Santander",
+    "Detalle de Movimientos Realizados",
+    "01/08/2026 CARGO SUPERMERCADO 100.00",
+  ].join("\n");
+  const detection = detectSourceEvidence(text, "estado-renombrado.pdf");
+  assert.equal(detection.source, "Desconocido");
+  assert.equal(detection.status, "unknown");
+  assert.match(detection.evidence[0] ?? "", /conflictivos/);
+});
+
 test("un prefijo numérico del comercio no se convierte en año", () => {
   const [row] = extractTransactions("20 de Junio 125TH FINEST DELI INC 101.77", "Amex", "amex junio 2026.pdf", "card");
   assert.equal(row.date, "20 jun 2026");
