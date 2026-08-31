@@ -18,8 +18,8 @@ xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
 ```
 
 Para medir los PDFs reales con el mismo lector Vision, conserva los archivos
-fuera del repositorio y pasa la carpeta al test nativo. El test exige los ocho
-archivos del manifiesto, verifica los cuatro estados de texto y emite una línea
+fuera del repositorio y pasa la carpeta al test nativo. El test exige todos los
+archivos del manifiesto, verifica los estados de texto disponibles y emite una línea
 `NATIVE_CORPUS_REPORT` con el resultado de cada escaneo:
 
 ```bash
