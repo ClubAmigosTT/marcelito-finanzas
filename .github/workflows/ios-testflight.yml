@@ -106,6 +106,37 @@ jobs:
         shell: bash
         run: xcodegen generate --spec project.yml
 
+      - name: Ejecutar contrato nativo del lector antes de publicar
+        working-directory: apps/ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/{print "platform=iOS Simulator,id=" $2; exit}')"
+          if [ -z "$destination" ]; then
+            echo "::error title=No hay simulador iPhone::No se puede certificar el lector nativo antes de publicar."
+            exit 1
+          fi
+          xcodebuild \
+            -project Marcelito.xcodeproj \
+            -scheme Marcelito \
+            -configuration Debug \
+            -destination "$destination" \
+            -derivedDataPath "$RUNNER_TEMP/MarcelitoPreflightDerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/MarcelitoPreflight.xcresult" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            test
+
+      - name: Guardar contrato nativo de prepublicación
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: marcelito-ios-preflight-results
+          path: |
+            ${{ runner.temp }}/MarcelitoPreflight.xcresult
+            ${{ runner.temp }}/MarcelitoPreflightDerivedData/Logs/Test
+          if-no-files-found: warn
+
       - name: Preparar clave de App Store Connect
         shell: bash
         run: |
