@@ -127,6 +127,28 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             test
 
+      - name: Exigir certificación del corpus nativo real
+        env:
+          NATIVE_CORPUS_CERTIFIED: ${{ vars.MARCELITO_NATIVE_CORPUS_CERTIFIED }}
+          NATIVE_CORPUS_READER_VERSION: ${{ vars.MARCELITO_NATIVE_CORPUS_READER_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${NATIVE_CORPUS_CERTIFIED,,}" != "true" ]]; then
+            echo "::error title=Corpus nativo sin certificar::Ejecuta el runner privado con Vision y registra MARCELITO_NATIVE_CORPUS_CERTIFIED=true antes de publicar."
+            exit 1
+          fi
+          if [[ -z "${NATIVE_CORPUS_READER_VERSION:-}" ]]; then
+            echo "::error title=Falta versión certificada::Registra MARCELITO_NATIVE_CORPUS_READER_VERSION con la versión del lector usada para certificar el corpus."
+            exit 1
+          fi
+          current_reader_version="$(sed -n 's/.*static let readerVersion = "\([^"]*\)".*/\1/p' apps/ios/Cauce/Models.swift | head -n 1)"
+          if [[ -z "$current_reader_version" || "$NATIVE_CORPUS_READER_VERSION" != "$current_reader_version" ]]; then
+            echo "::error title=Corpus desactualizado::La certificación declarada ($NATIVE_CORPUS_READER_VERSION) no corresponde al lector actual ($current_reader_version). Ejecuta de nuevo el corpus nativo."
+            exit 1
+          fi
+          echo "Corpus nativo certificado para la revisión declarada: $NATIVE_CORPUS_READER_VERSION"
+
       - name: Guardar contrato nativo de prepublicación
         if: always()
         uses: actions/upload-artifact@v4
