@@ -162,4 +162,8 @@ cuando Vision conserva el saldo corrido de dos filas consecutivas, un importe
 con separador decimal perdido solo se corrige si coincide con el delta del
 saldo (o con un desvío menor o igual a $2). Sin saldos confiables, la fila no
 se adivina y la conciliación mantiene el estado bloqueado. Esta regla ya tiene
-prueba de contrato; falta ejecutarla contra los cuatro escaneos en macOS/Xcode.
+prueba de contrato. También existe un runner nativo de corpus (`NativeCorpusContractTests`)
+que recibe `MARCELITO_PDF_CORPUS_DIR`, procesa los ocho PDFs con
+`PDFDocument + Vision`, verifica los estados de texto y emite un informe
+`NATIVE_CORPUS_REPORT`; falta ejecutarlo contra los cuatro escaneos en
+macOS/Xcode para cerrar la certificación.
