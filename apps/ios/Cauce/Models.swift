@@ -782,7 +782,7 @@ final class FinanceStore {
         } else if uncalibratedOCR > 0 {
             message = "\(uncalibratedOCR) estado(s) OCR tienen columnas de movimientos sin calibrar; confirma la tabla visual antes de usar los KPI."
         } else if weakOCR > 0 {
-            message = "(weakOCR) estado(s) OCR tienen confianza insuficiente; revisa las páginas antes de usar los KPI."
+            message = "\(weakOCR) estado(s) OCR tienen confianza insuficiente; revisa las páginas antes de usar los KPI."
         } else if pending.count > 0 {
             let reviewOnly = pending.filter { $0.reconciliation?.status == .valid && $0.requiresReview && isCurrentReader($0) }.count
             message = reviewOnly > 0
@@ -891,7 +891,7 @@ final class FinanceStore {
         lines.append("Resumen por estado")
         lines.append(contentsOf: statementAudits.map { audit in
             let duplicateText = audit.duplicateRows.map { " · duplicados \($0)" } ?? ""
-            return "(audit.source) · (audit.period) · (audit.statusLabel) · filas (audit.validRows)/(audit.importedRows) · canónicas (audit.canonicalRows)(duplicateText) · ingresos (diagnosticMoney(audit.incomeTotal)) · gasto (diagnosticMoney(audit.expenseTotal)) · transferencias (diagnosticMoney(audit.transferTotal)) · pagos tarjeta (diagnosticMoney(audit.cardPaymentTotal)) · reembolsos (diagnosticMoney(audit.refundTotal))"
+            return "\(audit.source) · \(audit.period) · \(audit.statusLabel) · filas \(audit.validRows)/\(audit.importedRows) · canónicas \(audit.canonicalRows)\(duplicateText) · ingresos \(diagnosticMoney(audit.incomeTotal)) · gasto \(diagnosticMoney(audit.expenseTotal)) · transferencias \(diagnosticMoney(audit.transferTotal)) · pagos tarjeta \(diagnosticMoney(audit.cardPaymentTotal)) · reembolsos \(diagnosticMoney(audit.refundTotal))"
         })
         return lines.joined(separator: "\n")
     }
