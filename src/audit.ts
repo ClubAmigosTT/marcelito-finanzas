@@ -30,6 +30,7 @@ export function createAuditRun(
   statements: Statement[],
   transactions: Transaction[],
   trigger: AuditRunRecord["trigger"],
+  migration?: { quarantinedMovementCount?: number },
 ): AuditRunRecord {
   // A conciliación válida todavía requiere confirmación cuando el usuario
   // debe revisar filas OCR, categorías o una detección ambigua. Esos estados
@@ -57,6 +58,9 @@ export function createAuditRun(
     reconciledStatementCount: statements.length - pendingStatements,
     canonicalMovementCount: transactions.length,
     issueCount,
+    ...(migration?.quarantinedMovementCount
+      ? { quarantinedMovementCount: migration.quarantinedMovementCount }
+      : {}),
     sourceFingerprints: statements
       .map((statement) => statement.sourceFingerprint)
       .filter((fingerprint): fingerprint is string => Boolean(fingerprint))

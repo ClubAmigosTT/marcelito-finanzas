@@ -345,8 +345,15 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   // fingerprint prevents render loops and makes it possible to correlate a
   // production report with the exact canonical rows and source PDFs shown.
   const auditedFingerprint = useRef("");
+  const auditTrigger = useRef<AuditRunRecord["trigger"]>("startup");
   useEffect(() => {
-    const next = createAuditRun(pipeline, statements, ledgerTransactions, lastAuditRun ? "foreground" : "startup");
+    const next = createAuditRun(
+      pipeline,
+      statements,
+      ledgerTransactions,
+      auditTrigger.current,
+      { quarantinedMovementCount: initialLedger.quarantinedMovementCount },
+    );
     const sourceIdentity = next.sourceFingerprints?.join("|") ?? "";
     const readerIdentity = next.readerVersions?.join("|") ?? "";
     const auditIdentity = `${next.ledgerFingerprint}|${sourceIdentity}|${readerIdentity}`;
@@ -354,13 +361,15 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
     auditedFingerprint.current = auditIdentity;
     setLastAuditRun(next);
     localStorage.setItem(auditStorageKey, JSON.stringify(next));
-  }, [pipeline, statements, ledgerTransactions, lastAuditRun]);
+    auditTrigger.current = "foreground";
+  }, [pipeline, statements, ledgerTransactions, lastAuditRun, initialLedger.quarantinedMovementCount]);
 
   function saveImport(commit: ImportCommit) {
     // An issuer-total mismatch is not safe to merge into an existing ledger.
     // The review dialog normally blocks this path, but keep the guard here so
     // programmatic callers cannot bypass the quality gate.
     if (commit.reconciliation && commit.reconciliation.status !== "valid") return;
+    auditTrigger.current = "import";
     // The same PDF may have been imported before with a wrong bank label.
     // Prefer the immutable SHA-256 identity so monthly exports that reuse a
     // generic name (for example, "Estado de cuenta.pdf") never overwrite a
@@ -801,7 +810,7 @@ function AuditDiagnostics({ metrics, statements, auditRun }: { metrics: ReturnTy
   return <details className="audit-diagnostics">
      <summary><div><strong>Auditoría de importación y conciliación</strong><span>Diagnóstico temporal reproducible · {audit.stages.join(" → ")}</span></div><b>{audit.periods.length} periodos</b></summary>
     <div className="audit-actions"><button type="button" className="text-button" onClick={() => exportAuditDiagnostics(metrics, statements, auditRun)}><DownloadSimple size={15} /> Descargar diagnóstico JSON</button><span>No incluye descripciones ni importes individuales.</span></div>
-    {auditRun && <div className="audit-run-meta"><span>Auditoría {auditRun.id} · libro {auditRun.ledgerFingerprint}{auditRun.sourceFingerprints?.length ? ` · PDF${auditRun.sourceFingerprints.length === 1 ? "" : "s"} ${auditRun.sourceFingerprints.map((fingerprint) => fingerprint.slice(0, 8)).join(", ")}` : ""}{auditRun.readerVersions?.length ? ` · lector ${auditRun.readerVersions.join(", ")}` : ""}</span><b className={`audit-status-${auditRun.status}`}>{auditRun.status === "passed" ? "Verificado" : auditRun.status === "warning" ? "Advertencias" : "Bloqueado"}</b></div>}
+    {auditRun && <div className="audit-run-meta"><span>Auditoría {auditRun.id} · {auditRun.trigger} · libro {auditRun.ledgerFingerprint}{auditRun.sourceFingerprints?.length ? ` · PDF${auditRun.sourceFingerprints.length === 1 ? "" : "s"} ${auditRun.sourceFingerprints.map((fingerprint) => fingerprint.slice(0, 8)).join(", ")}` : ""}{auditRun.readerVersions?.length ? ` · lector ${auditRun.readerVersions.join(", ")}` : ""}{auditRun.quarantinedMovementCount ? ` · ${auditRun.quarantinedMovementCount} fila${auditRun.quarantinedMovementCount === 1 ? "" : "s"} heredada${auditRun.quarantinedMovementCount === 1 ? "" : "s"} en cuarentena` : ""}</span><b className={`audit-status-${auditRun.status}`}>{auditRun.status === "passed" ? "Verificado" : auditRun.status === "warning" ? "Advertencias" : "Bloqueado"}</b></div>}
     {audit.criticalIssues.length > 0 && <div className="audit-critical">{audit.criticalIssues.join(" · ")}</div>}
     <div className="audit-table" role="table" aria-label="Auditoría por periodo"><div className="audit-row audit-head" role="row"><span>Periodo</span><span>Importados / válidos</span><span>Duplicados</span><span>Traspasos</span><span>Pagos tarjeta</span><span>Ingresos</span><span>Gasto real</span><span>Reembolsos / revisar</span></div>{audit.periods.map((period) => <div className="audit-row" role="row" key={period.key}><strong>{period.label}</strong><span>{period.importedCount} / {period.validCount}<small>{displayMoney(period.importedAmount)} / {displayMoney(period.validAmount)}</small></span><span>{period.duplicateCount}<small>{displayMoney(period.duplicateAmount)}</small></span><span>{period.internalTransferCount}<small>{displayMoney(period.internalTransferAmount)}</small></span><span>{period.cardPaymentCount}<small>{displayMoney(period.cardPaymentAmount)}</small></span><span>{period.incomeCount}<small>{displayMoney(period.incomeAmount)}</small></span><span>{period.expenseCount}<small>{displayMoney(period.expenseAmount)}</small></span><span>{period.refundCount} / {period.reviewCount}<small>{displayMoney(period.refundAmount)} / {displayMoney(period.reviewAmount)}</small></span></div>)}</div><div className="audit-totals"><span>Totales</span><b>{audit.importedCount} · {displayMoney(audit.importedAmount)} importados</b><b>{audit.validCount} · {displayMoney(audit.validAmount)} válidos</b><b>{audit.invalidCount} · {displayMoney(audit.invalidAmount)} rechazados</b><b>{audit.duplicateCount} · {displayMoney(audit.duplicateAmount)} duplicados</b><b>{audit.internalTransferCount} traspasos</b><b>{audit.cardPaymentCount} pagos tarjeta</b><b>{displayMoney(audit.incomeAmount)} ingresos</b><b>{displayMoney(audit.expenseAmount)} gasto</b></div><div className="consistency-list"><strong>Consistencias contables</strong>{metrics.consistencyChecks.map((check) => <span className={check.passed ? "check-pass" : "check-fail"} key={check.id}>{check.passed ? "✓" : "!"} {check.label}{check.difference === undefined ? " · pendiente" : ` · diferencia ${displayMoney(check.difference)}`}</span>)}</div>
   </details>;

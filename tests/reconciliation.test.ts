@@ -1099,3 +1099,16 @@ test("la migración conserva filas del lector actual que esperan revisión OCR",
   assert.equal(prepared.statements[0]?.reconciliationStatus, "pending");
   assert.equal(prepared.statements[0]?.reconciliation?.reason, "OCR provisional");
 });
+
+test("la auditoría conserva el conteo de filas PDF heredadas en cuarentena", () => {
+  const pipeline = runTransactionPipeline([], []);
+  const audit = createAuditRun(
+    pipeline,
+    [],
+    [],
+    "startup",
+    { quarantinedMovementCount: 3 },
+  );
+  assert.equal(audit.quarantinedMovementCount, 3);
+  assert.equal(audit.trigger, "startup");
+});

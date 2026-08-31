@@ -229,6 +229,9 @@ export type AuditRunRecord = {
   reconciledStatementCount: number;
   canonicalMovementCount: number;
   issueCount: number;
+  /** PDF-derived rows removed during startup migration because their reader
+   * revision or reconciliation evidence was stale. */
+  quarantinedMovementCount?: number;
   /** SHA-256 identities of the source PDFs included in this audit. */
   sourceFingerprints?: string[];
   /** Reader revisions represented by the canonical ledger. */
