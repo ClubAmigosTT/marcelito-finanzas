@@ -476,7 +476,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.08.31.2"
+    static let readerVersion = "ios-reader-2026.08.31.3"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -3377,28 +3377,40 @@ final class FinanceStore {
     }
 
     private static func santanderOCRColumns(from observations: [OCRObservation]) -> SantanderOCRColumns {
-        var depositCenter: CGFloat?
-        var withdrawalCenter: CGFloat?
-        var balanceCenter: CGFloat?
-
-        for observation in observations {
-            let normalized = observation.text
+        // Do not combine labels from different pages (or from unrelated
+        // summary rows on the same page). A valid table header has all three
+        // anchors on one visual line; otherwise the fallback layout remains
+        // provisional and cannot feed the dashboard automatically.
+        let normalizedLabel: (OCRObservation) -> String = { observation in
+            observation.text
                 .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            switch normalized {
-            case "deposito", "depositos":
-                depositCenter = depositCenter ?? observation.centerX
-            case "retiro", "retiros":
-                withdrawalCenter = withdrawalCenter ?? observation.centerX
-            case "saldo":
-                balanceCenter = balanceCenter ?? observation.centerX
-            default:
-                continue
+        }
+        let grouped = Dictionary(grouping: observations, by: \.page)
+        let headerYTolerance: CGFloat = 0.05
+        var anchors: (deposit: CGFloat, withdrawal: CGFloat, balance: CGFloat)?
+        for page in grouped.keys.sorted() {
+            let pageObservations = grouped[page] ?? []
+            let deposits = pageObservations.filter { ["deposito", "depositos"].contains(normalizedLabel($0)) }
+            let withdrawals = pageObservations.filter { ["retiro", "retiros"].contains(normalizedLabel($0)) }
+            let balances = pageObservations.filter { normalizedLabel($0) == "saldo" }
+            for deposit in deposits {
+                guard let withdrawal = withdrawals.first(where: {
+                    $0.centerX > deposit.centerX
+                        && abs($0.centerY - deposit.centerY) <= headerYTolerance
+                }), let balance = balances.first(where: {
+                    $0.centerX > withdrawal.centerX
+                        && abs($0.centerY - deposit.centerY) <= headerYTolerance
+                }) else { continue }
+                anchors = (deposit.centerX, withdrawal.centerX, balance.centerX)
+                break
             }
+            if anchors != nil { break }
         }
 
-        guard let depositCenter, let withdrawalCenter, let balanceCenter,
-              depositCenter < withdrawalCenter, withdrawalCenter < balanceCenter else {
+        guard let anchors,
+              anchors.deposit < anchors.withdrawal,
+              anchors.withdrawal < anchors.balance else {
             return .fallback
         }
 
@@ -3406,9 +3418,9 @@ final class FinanceStore {
         // box. Leave a small margin around each anchor and keep every bound
         // inside the normalized page so malformed Vision boxes cannot make a
         // running balance look like a movement.
-        let movementMinX = max(0.40, min(0.70, depositCenter - 0.10))
-        let balanceMinX = max(0.72, min(0.96, (withdrawalCenter + balanceCenter) / 2))
-        let depositMaxX = max(movementMinX + 0.04, min(balanceMinX - 0.04, (depositCenter + withdrawalCenter) / 2))
+        let movementMinX = max(0.40, min(0.70, anchors.deposit - 0.10))
+        let balanceMinX = max(0.72, min(0.96, (anchors.withdrawal + anchors.balance) / 2))
+        let depositMaxX = max(movementMinX + 0.04, min(balanceMinX - 0.04, (anchors.deposit + anchors.withdrawal) / 2))
         guard movementMinX < depositMaxX, depositMaxX < balanceMinX else {
             return .fallback
         }

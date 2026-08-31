@@ -46,7 +46,9 @@ gasto real sin separar esas secciones.
 - La lectura Vision de Santander calibra `DEPÓSITO`, `RETIRO` y `SALDO` con la
   geometría de los encabezados cuando están presentes. Si el recorte no trae
   encabezado, usa los límites de la plantilla conocida; en ambos casos el
-  saldo corrido queda fuera de la columna de movimientos.
+  saldo corrido queda fuera de la columna de movimientos. Los tres anclajes
+  deben pertenecer a la misma página y línea visual; nunca se mezclan etiquetas
+  de un resumen o de otra página para fabricar una calibración.
 - Ningún movimiento individual puede superar el total declarado de depósitos
   o retiros de su estado; esa fila bloquea la conciliación aunque el resto de
   las sumas parezca correcto.
