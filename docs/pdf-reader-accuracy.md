@@ -113,6 +113,10 @@ gasto real sin separar esas secciones.
 - Aunque los totales coincidan, el OCR web queda provisional si la confianza
   media baja de 88% o alguna página baja de 78%; una coincidencia accidental no
   puede convertir una lectura visual débil en un KPI.
+- Esa compuerta se vuelve a evaluar al abrir el libro: un registro persistido
+  como `ready` con OCR débil se devuelve a revisión aunque conserve una bandera
+  antigua `requiresReview=false`. La elegibilidad no depende de un único campo
+  editable.
 - Un estado inválido, pendiente o provisional no alimenta Resumen, Gastos, Patrimonio ni gráficas.
 - Un estado `ready` solo alimenta el libro canónico si `sourceDetection.status`
   es `verified` o si el usuario confirmó explícitamente un emisor conocido.

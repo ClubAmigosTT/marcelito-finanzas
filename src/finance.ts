@@ -8,6 +8,23 @@ import type {
 } from "./types.ts";
 import { normalizeConcept, parseDate, periodKeyFromLabel, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey, type PipelineAudit, type PipelineResult } from "./reconciliation.ts";
 
+const OCR_MIN_AVERAGE_CONFIDENCE = 0.88;
+const OCR_MIN_PAGE_CONFIDENCE = 0.78;
+
+/**
+ * OCR quality is part of statement eligibility, not merely a review hint.
+ * Persisted data can outlive the import dialog and may have been edited by an
+ * older build, so every KPI boundary must re-check the same thresholds.
+ */
+function hasSufficientOcrQuality(statement: Statement) {
+  if (statement.mode !== "ocr") return true;
+  const average = statement.ocrConfidence;
+  const pages = statement.ocrPageConfidences;
+  if (average === undefined || !Number.isFinite(average) || average < OCR_MIN_AVERAGE_CONFIDENCE) return false;
+  if (!pages?.length || pages.some((page) => !Number.isFinite(page) || page < OCR_MIN_PAGE_CONFIDENCE)) return false;
+  return true;
+}
+
 export type PeriodMetrics = {
   key: string;
   label: string;
@@ -644,12 +661,18 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   const blockedForReview = statements
     .filter((statement) => statement.status === "review")
     .map((statement) => statement.id);
-  const blockedStatementIds = new Set([...blockedForReconciliation, ...blockedForReview]);
+  const blockedForOcrQuality = statements
+    .filter((statement) => !hasSufficientOcrQuality(statement))
+    .map((statement) => statement.id);
+  const blockedStatementIds = new Set([...blockedForReconciliation, ...blockedForReview, ...blockedForOcrQuality]);
   if (blockedForReconciliation.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("conciliación de estado"))) {
     pipeline.audit.criticalIssues.push(`${blockedForReconciliation.length} estado(s) quedaron fuera de los KPI por conciliación de estado`);
   }
   if (blockedForReview.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("revisión"))) {
     pipeline.audit.criticalIssues.push(`${blockedForReview.length} estado(s) quedaron fuera de los KPI por revisión pendiente`);
+  }
+  if (blockedForOcrQuality.length > 0 && !pipeline.audit.criticalIssues.some((issue) => issue.includes("calidad OCR"))) {
+    pipeline.audit.criticalIssues.push(`${blockedForOcrQuality.length} estado(s) quedaron fuera de los KPI por calidad OCR insuficiente`);
   }
   // A document that failed issuer-total reconciliation can remain visible in
   // the audit screen, but none of its rows or summary values may feed an

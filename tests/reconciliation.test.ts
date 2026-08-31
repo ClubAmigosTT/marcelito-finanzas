@@ -997,6 +997,41 @@ test("un estado conciliado pero pendiente de revisión no alimenta los KPI", () 
   assert.equal(audit.reconciledStatementCount, 0);
 });
 
+test("la confianza OCR baja bloquea estados persistidos aunque status diga listo", () => {
+  const statements: Statement[] = [{
+    ...bank("bbva-ocr", "BBVA", "agosto 2026"),
+    mode: "ocr",
+    status: "ready",
+    reconciliationStatus: "valid",
+    reconciliation: { status: "valid", tolerance: 0.05 },
+    sourceDetection: {
+      source: "BBVA",
+      confidence: 0.99,
+      status: "verified",
+      evidence: ["encabezado institucional BBVA"],
+      ignoredBodyMentions: [],
+    },
+    ocrConfidence: 0.86,
+    ocrPageConfidences: [0.86, 0.91],
+  }];
+  const transactions = [movement({
+    id: "weak-ocr-row",
+    date: "10 ago 2026",
+    description: "SUPERMERCADO",
+    account: "BBVA",
+    amount: -1200,
+    flow: "expense",
+    category: "Alimentos",
+    statementId: "bbva-ocr",
+  })];
+
+  const metrics = buildFinanceMetrics(transactions, statements);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.isProvisional, true);
+  assert.equal(metrics.dataQuality.critical, true);
+  assert.match(metrics.audit.criticalIssues.join(" "), /calidad OCR insuficiente/);
+});
+
 test("el último corte se elige por fecha de cierre y no por orden de importación", () => {
   const statements: Statement[] = [
     { ...bank("santander-may", "Santander", "16/05/2026 AL 15/06/2026"), summary: { cashBalance: 24621.48 } },
@@ -1154,6 +1189,30 @@ test("un estado listo sin emisor verificado queda en cuarentena aunque concilie"
   })], "web-reader-current");
   assert.equal(ledger.quarantinedMovementCount, 1);
   assert.equal(ledger.transactions.length, 0);
+});
+
+test("la migración devuelve a revisión un OCR débil aunque conserve la versión actual", () => {
+  const statement: Statement = {
+    ...bank("bbva-weak-ocr", "BBVA", "agosto 2026"),
+    readerVersion: "web-reader-current",
+    mode: "ocr",
+    status: "ready",
+    reconciliationStatus: "valid",
+    reconciliation: { status: "valid", tolerance: 0.05 },
+    sourceDetection: {
+      source: "BBVA",
+      confidence: 0.99,
+      status: "verified",
+      evidence: ["encabezado institucional BBVA"],
+      ignoredBodyMentions: [],
+    },
+    ocrConfidence: 0.86,
+    ocrPageConfidences: [0.86, 0.91],
+  };
+  const [prepared] = prepareStoredStatements([statement], "web-reader-current");
+  assert.equal(prepared?.status, "review");
+  assert.equal(prepared?.reconciliationStatus, "pending");
+  assert.match(prepared?.reconciliation?.reason ?? "", /OCR con confianza insuficiente/);
 });
 
 test("una confirmación humana explícita conserva un estado conocido sin evidencia automática", () => {

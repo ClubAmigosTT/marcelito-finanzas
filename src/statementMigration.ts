@@ -2,6 +2,19 @@ import { PDF_READER_VERSION } from "./pdfImport.ts";
 import type { Statement, Transaction } from "./types.ts";
 
 const MIGRATION_TOLERANCE = 0.05;
+const OCR_MIN_AVERAGE_CONFIDENCE = 0.88;
+const OCR_MIN_PAGE_CONFIDENCE = 0.78;
+
+function hasSufficientOcrQuality(statement: Statement) {
+  if (statement.mode !== "ocr") return true;
+  const average = statement.ocrConfidence;
+  const pages = statement.ocrPageConfidences;
+  return average !== undefined
+    && Number.isFinite(average)
+    && average >= OCR_MIN_AVERAGE_CONFIDENCE
+    && Boolean(pages?.length)
+    && pages?.every((page) => Number.isFinite(page) && page >= OCR_MIN_PAGE_CONFIDENCE) === true;
+}
 
 /**
  * Makes persisted statements safe across parser revisions.
@@ -26,7 +39,8 @@ export function prepareStoredStatements(
     const sourceNeedsReview = statement.status === "ready"
       && statement.sourceDetection?.status !== "verified"
       && statement.issuerConfirmedByUser !== true;
-    if (hasReconciliation && isCurrentReader && !sourceNeedsReview) return statement;
+    const ocrNeedsReview = !hasSufficientOcrQuality(statement);
+    if (hasReconciliation && isCurrentReader && !sourceNeedsReview && !ocrNeedsReview) return statement;
 
     const reason = !statement.readerVersion
       ? "Estado importado antes de la conciliación automática; vuelve a importarlo para usarlo en los KPI."
@@ -34,7 +48,9 @@ export function prepareStoredStatements(
         ? `Estado generado con el lector ${statement.readerVersion}; vuelve a importar el PDF con ${readerVersion}.`
         : sourceNeedsReview
           ? "Estado sin evidencia institucional verificada del emisor; vuelve a importarlo para confirmar el banco antes de usarlo en los KPI."
-        : "Estado sin evidencia de conciliación completa; vuelve a importarlo para usarlo en los KPI.";
+          : ocrNeedsReview
+            ? "Estado OCR con confianza insuficiente; revisa las páginas y vuelve a importarlo antes de usarlo en los KPI."
+            : "Estado sin evidencia de conciliación completa; vuelve a importarlo para usarlo en los KPI.";
 
     return {
       ...statement,

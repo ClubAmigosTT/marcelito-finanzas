@@ -728,6 +728,44 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
     }
 
+    func testWeakOCRCannotFeedNativeDashboardEvenWhenReviewFlagIsStale() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "estado-bbva.pdf",
+            importedAt: .now,
+            transactionCount: 1,
+            // Simulate a legacy/corrupt persisted record. OCR confidence is
+            // an independent durable gate and must not rely on this flag.
+            requiresReview: false,
+            kind: .bank,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "BBVA",
+                confidence: 0.999,
+                status: .verified,
+                evidence: ["encabezado institucional BBVA"],
+                ignoredBodyMentions: []
+            ),
+            ocrConfidence: 0.86,
+            ocrPageConfidences: [0.86, 0.91],
+            ocrColumnsCalibrated: true,
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        store.movements = []
+
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+        XCTAssertTrue(store.ledgerQuality.message?.contains("confianza insuficiente") == true)
+    }
+
     func testStatementAuditUsesTheCanonicalRowsForPeriodBreakdown() {
         let store = FinanceStore()
         defer { store.clearLocalData() }

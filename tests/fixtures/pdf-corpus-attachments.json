@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "readerVersion": "web-reader-2026.08.31.5",
+  "readerVersion": "web-reader-2026.08.31.6",
   "tolerance": 0.05,
   "purpose": "Expectativas del corpus de adjuntos validado; los PDFs permanecen fuera del repositorio.",
   "files": [

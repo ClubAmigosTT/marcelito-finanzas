@@ -42,6 +42,9 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
    tabla de movimientos conciliados; nunca el texto crudo ni estados parciales.
 10. **Puerta de calidad**: estados `pending`, `invalid` o con OCR débil no
     alimentan KPI; se muestran en diagnóstico con el motivo exacto.
+    La elegibilidad se reevalúa al abrir el libro con `mode`, confianza media,
+    todas las páginas OCR y `requiresReview`, para que un registro persistido
+    no pueda saltarse la compuerta por una bandera antigua.
     Un estado `ready` también exige evidencia institucional del emisor con
     estado `verified` o una confirmación humana explícita (`issuerConfirmedByUser`);
     si falta cualquiera de las dos (incluidos registros heredados), la

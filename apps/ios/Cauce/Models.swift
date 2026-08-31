@@ -516,7 +516,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.08.31.11"
+    static let readerVersion = "ios-reader-2026.08.31.12"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -734,11 +734,14 @@ final class FinanceStore {
         let failedChecks = consistencyChecks.filter { !$0.passed }
         let blocking = invalid.count > 0 || pending.count > 0 || absurdCount > 0 || missingEvidenceCount > 0 || spendMismatch || !failedChecks.isEmpty || missingRebuiltStatements
         let uncalibratedOCR = pending.filter { $0.ocrColumnsCalibrated == false }.count
+        let weakOCR = pending.filter { hasSufficientOCRQuality($0) == false }.count
         let message: String?
         if invalid.count > 0 {
             message = "\(invalid.count) estado(s) no concilian contra sus totales originales."
         } else if uncalibratedOCR > 0 {
             message = "\(uncalibratedOCR) estado(s) OCR tienen columnas de movimientos sin calibrar; confirma la tabla visual antes de usar los KPI."
+        } else if weakOCR > 0 {
+            message = "(weakOCR) estado(s) OCR tienen confianza insuficiente; revisa las páginas antes de usar los KPI."
         } else if pending.count > 0 {
             let reviewOnly = pending.filter { $0.reconciliation?.status == .valid && $0.requiresReview && isCurrentReader($0) }.count
             message = reviewOnly > 0
@@ -1166,6 +1169,21 @@ final class FinanceStore {
         statement.readerVersion == Self.readerVersion
     }
 
+    /// OCR quality remains an eligibility gate after the import dialog closes.
+    /// Re-check persisted values here so an old/corrupt `requiresReview=false`
+    /// flag cannot promote a weak visual read into a KPI.
+    private func hasSufficientOCRQuality(_ statement: StatementRecord) -> Bool {
+        let hasOCRSignal = statement.ocrConfidence != nil || statement.ocrPageConfidences != nil
+        guard hasOCRSignal else { return true }
+        guard let average = statement.ocrConfidence,
+              average.isFinite,
+              average >= 0.88,
+              let pages = statement.ocrPageConfidences,
+              !pages.isEmpty,
+              pages.allSatisfy({ $0.isFinite && $0 >= 0.78 }) else { return false }
+        return true
+    }
+
     private func isEligibleStatement(_ statement: StatementRecord) -> Bool {
         isCurrentReader(statement)
             && statement.reconciliation?.status == .valid
@@ -1175,6 +1193,7 @@ final class FinanceStore {
             // trusting only `requiresReview`, so stale/corrupt persisted data
             // cannot silently promote an OCR row into a KPI.
             && statement.ocrColumnsCalibrated != false
+            && hasSufficientOCRQuality(statement)
             && !statement.requiresReview
     }
 
@@ -2535,14 +2554,43 @@ final class FinanceStore {
                 message: "\(url.lastPathComponent): OCR provisional (media \(Int(((ocrConfidence ?? 0) * 100).rounded()))%, página más débil \(Int(((weakestOCRPage ?? 0) * 100).rounded()))%)."
             )
         }
+        let ocrQualityNeedsReview = ocrFallbackNeedsReview
+            || ocrColumnCalibrationNeedsReview
+            || ocrConfidenceNeedsReview
+        // Keep the reconciliation status itself provisional when visual
+        // evidence is weak. `requiresReview` is a UI flag and can be stale in
+        // persisted data; the status is the durable accounting boundary used
+        // by rebuilds and downstream callers.
+        let gatedReconciliation: StatementReconciliationRecord = {
+            guard ocrQualityNeedsReview, reconciliation.status == .valid else { return reconciliation }
+            let reason: String
+            if ocrColumnCalibrationNeedsReview {
+                reason = "OCR provisional: columnas de movimientos sin calibrar; revisa la tabla visual antes de aceptar."
+            } else if ocrFallbackNeedsReview {
+                reason = "OCR provisional: alguna fila no conserva evidencia visual suficiente; revisa el estado antes de aceptar."
+            } else {
+                reason = "OCR provisional: confianza media \(Int(((ocrConfidence ?? 0) * 100).rounded()))% y página más débil \(Int(((weakestOCRPage ?? 0) * 100).rounded()))%; revisa las filas antes de aceptar."
+            }
+            return StatementReconciliationRecord(
+                status: .pending,
+                tolerance: reconciliation.tolerance,
+                extractedDepositTotal: reconciliation.extractedDepositTotal,
+                extractedWithdrawalTotal: reconciliation.extractedWithdrawalTotal,
+                extractedChargeTotal: reconciliation.extractedChargeTotal,
+                extractedDomesticChargeTotal: reconciliation.extractedDomesticChargeTotal,
+                extractedForeignChargeTotal: reconciliation.extractedForeignChargeTotal,
+                extractedCreditTotal: reconciliation.extractedCreditTotal,
+                extractedPaymentTotal: reconciliation.extractedPaymentTotal,
+                extractedMovementCount: reconciliation.extractedMovementCount,
+                expectedMovementCount: reconciliation.expectedMovementCount,
+                reason: reason
+            )
+        }()
         let needsReview = fresh.isEmpty
             || summary == nil
             || detectedKind == .unknown
-            || reconciliation.status != .valid
+            || gatedReconciliation.status != .valid
             || sourceDetection.status != .verified
-            || ocrFallbackNeedsReview
-            || ocrColumnCalibrationNeedsReview
-            || ocrConfidenceNeedsReview
             || fresh.contains { $0.category == "Por revisar" }
 
         // Re-importing the exact same bytes must not silently erase a prior
@@ -2560,7 +2608,7 @@ final class FinanceStore {
         // Invalid/pending rows are quarantined by omission: the statement and
         // its reconciliation evidence remain visible in diagnostics, while
         // no questionable amount can leak into any KPI or chart.
-        let canonicalFresh = reconciliation.status == .valid ? fresh : []
+        let canonicalFresh = gatedReconciliation.status == .valid ? fresh : []
 
         movements.removeAll { $0.statementId == statementId }
         movements.insert(contentsOf: canonicalFresh.reversed(), at: 0)
@@ -2577,7 +2625,7 @@ final class FinanceStore {
             requiresReview: needsReview,
             kind: detectedKind,
             summary: summary,
-            reconciliation: reconciliation,
+            reconciliation: gatedReconciliation,
             sourceDetection: sourceDetection,
             issuerConfirmedByUser: preservedIssuerConfirmation,
             sourceFingerprint: sourceFingerprint,
@@ -2608,7 +2656,7 @@ final class FinanceStore {
             requiresReview: needsReview,
             summary: summary,
             usedOCR: usedOCR,
-            reconciliation: reconciliation,
+            reconciliation: gatedReconciliation,
             sourceDetection: sourceDetection,
             sourceFingerprint: sourceFingerprint,
             readerVersion: Self.readerVersion,
