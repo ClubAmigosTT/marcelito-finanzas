@@ -411,6 +411,7 @@ final class ReaderContractTests: XCTestCase {
                 || $0.title.contains("202607160014")
                 || $0.title.localizedCaseInsensitiveContains("clave de rastreo")
                 || $0.title.localizedCaseInsensitiveContains("a la cuenta")
+                || $0.title.localizedCaseInsensitiveContains("dato no verificado")
         })
     }
 

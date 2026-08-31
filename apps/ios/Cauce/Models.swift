@@ -3435,6 +3435,11 @@ final class FinanceStore {
             .filter { observation in
                 let normalized = observation.text
                     .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                    .replacingOccurrences(
+                        of: #"^(?:\[\s*)?\(\s*\d+\s*\)\s*|^\[\s*\d+\s*\]\s*"#,
+                        with: "",
+                        options: .regularExpression
+                    )
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 // Santander places folio/rastreo metadata on continuation
                 // lines below the actual concept. It is evidence for the
@@ -3445,7 +3450,11 @@ final class FinanceStore {
                     "dato no verificado", "(1) dato no verificado",
                     "clave de rastreo ", "ref "
                 ]
-                return !administrativePrefixes.contains(where: { normalized.hasPrefix($0) })
+                let referenceLine = normalized.range(
+                    of: #"^ref(?:erencia)?\s*[:#]?\s*[a-z0-9]"#,
+                    options: .regularExpression
+                ) != nil
+                return !referenceLine && !administrativePrefixes.contains(where: { normalized.hasPrefix($0) })
             }
             .map(\.text)
         var title = titleParts.isEmpty ? fullText : titleParts.joined(separator: " ")
