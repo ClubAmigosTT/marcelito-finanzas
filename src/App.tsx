@@ -1171,6 +1171,15 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
       return learned ? { ...item, category: learned, confidence: 1 } : item;
     });
     const reparsedSummary = parseStatementSummary(result.extractedText, reviewKind);
+    const sourceDetection = result.sourceDetection && source !== result.sourceDetection.source
+      ? {
+        ...result.sourceDetection,
+        source,
+        confidence: 0,
+        status: "review" as const,
+        evidence: [...result.sourceDetection.evidence, "origen corregido por el usuario"],
+      }
+      : result.sourceDetection;
     initialCategories.current = Object.fromEntries(withLearnedCategories.map((item) => [item.id, item.category]));
     setItems(withLearnedCategories);
     setSummary(reparsedSummary);
@@ -1180,6 +1189,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
       kind: reviewKind,
       transactions: withLearnedCategories,
       summary: reparsedSummary,
+      sourceDetection,
     } : current);
   }
 
