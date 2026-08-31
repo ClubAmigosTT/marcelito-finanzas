@@ -49,6 +49,10 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
     estado `verified` o una confirmación humana explícita (`issuerConfirmedByUser`);
     si falta cualquiera de las dos (incluidos registros heredados), la
     migración lo devuelve a revisión y retira sus filas del ledger canónico.
+11. **Aislamiento de ejecución**: la extracción PDFKit/Vision se ejecuta en
+    una tarea asíncrona fuera del hilo de interfaz; solo el snapshot validado
+    vuelve al store para hacer un commit atómico. El indicador de carga cubre
+    cada archivo y una cancelación o error no deja filas parciales.
 
 ## Fases y criterios de salida
 
