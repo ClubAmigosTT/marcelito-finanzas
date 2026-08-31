@@ -347,6 +347,20 @@ test("BBVA no se convierte en Santander por una contraparte dentro de movimiento
   assert.deepEqual(evidence.ignoredBodyMentions, ["Santander"]);
 });
 
+test("la evidencia legal de BBVA gana aunque Santander aparezca antes de la tabla", () => {
+  const text = [
+    "BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México",
+    "Transferencia recibida de Santander",
+    "Estado de cuenta",
+    "Detalle de Movimientos Realizados",
+    "05/AGO SPEI RECIBIDO SANTANDER 4,500.00 6,116.63",
+  ].join("\n");
+
+  const evidence = detectSourceEvidence(text, "estado-renombrado.pdf");
+  assert.equal(evidence.source, "BBVA");
+  assert.equal(evidence.status, "verified");
+});
+
 test("una mención de Santander solo en el cuerpo no basta para identificar el emisor", () => {
   const text = [
     "Estado de Cuenta",
