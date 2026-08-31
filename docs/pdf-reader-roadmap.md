@@ -96,6 +96,9 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
   transferencias, pagos de tarjeta, ingresos, gastos, reembolsos, pendientes,
   confianza OCR y diferencias de conciliación.
 - Registrar versión del parser, hash del archivo y razones de bloqueo.
+- Asociar las huellas SHA-256 de los PDFs a cada corrida de auditoría para
+  reproducir un KPI desde su fuente exacta, incluso cuando se reutiliza el
+  nombre del archivo.
 - Salida: cada cifra del dashboard se puede explicar hasta filas y evidencia.
 
 ### Fase 6 — Certificación y despliegue
