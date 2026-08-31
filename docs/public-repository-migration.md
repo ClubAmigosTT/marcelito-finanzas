@@ -66,10 +66,10 @@ externa, aunque no bloquea el saneamiento del repositorio.
 - [x] Actualizar `pdfjs-dist` a una versión con el parche de seguridad y
   liberar el `PDFDocumentLoadingTask` en todas las rutas; el importador no
   ejecuta scripting/XFA interactivo.
-- [ ] Activar secret scanning y push protection al quedar el repositorio
+- [x] Activar secret scanning y push protection al quedar el repositorio
   público, y revisar sus primeros resultados.
-- [ ] Configurar protección de `main` (pull request, checks obligatorios y sin
-  force-push después de la migración).
+- [x] Configurar protección de `main` (pull request, checks web/iOS obligatorios
+  y sin force-push después de la migración).
 
 ## Fase 5 — Reemplazar referencias remotas
 
@@ -105,13 +105,27 @@ privada para auditoría y recuperación.
 
 ## Fase 6 — Publicar y verificar
 
-- [ ] Cambiar la visibilidad a pública desde Settings → General.
-- [ ] Verificar un clon anónimo: solo debe existir la historia limpia.
-- [ ] Revisar que no haya PDFs, artefactos, logs o secretos visibles.
-- [ ] Ejecutar validación web/iOS y confirmar que usa runners estándar sin
-  bloqueo de facturación.
+- [x] Cambiar la visibilidad a pública desde Settings → General (2026-08-31).
+- [x] Verificar un clon anónimo: solo debe existir la historia limpia; `main`
+  apunta a `3fdf021`.
+- [x] Revisar que no haya PDFs, CSV/DB, artefactos, logs o marcadores de
+  secretos visibles en el clon público.
+- [x] Ejecutar validación web/iOS y confirmar que usa runners estándar sin
+  bloqueo de facturación. Web e iOS pasaron en `main` después del merge.
 - [ ] Ejecutar TestFlight únicamente desde el tag aprobado y comprobar la
   subida en App Store Connect.
+
+El repositorio quedó público en GitHub. El ruleset activo `Protect main` exige
+PR, los checks `Web Reader Validate` e `iOS Validate`, y bloquea force-push. La
+protección de secretos (secret scanning y push protection) también está activa.
+Los warnings actuales de Actions corresponden a que `actions/checkout@v4` y
+`actions/upload-artifact@v4` aún apuntan a Node.js 20; no impiden la validación.
+
+TestFlight permanece deliberadamente fuera de esta migración: antes de crear un
+tag de publicación el propietario debe revocar/rotar la clave de Zen y las
+credenciales de Apple/App Store Connect, y guardarlas como secretos del entorno
+`testflight` con aprobación requerida. Los secretos cifrados de repositorio no
+se pueden leer ni rotar desde esta sesión.
 
 Si alguna puerta falla, detener la publicación y devolver el estado a privado;
 los forks o clones ya creados no se vuelven privados automáticamente.
