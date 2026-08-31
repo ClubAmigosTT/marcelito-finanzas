@@ -415,6 +415,23 @@ final class ReaderContractTests: XCTestCase {
         })
     }
 
+    func testSantanderOCRSkipsDatedPeriodAndBalanceHeaders() {
+        let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "ESTADO DE CUENTA NOMINA", x: 0.04, y: 0.96, width: 0.40),
+            OCRObservationFixture(text: "PERIODO 16-JUL-2026 AL 15-AGO-2026", x: 0.04, y: 0.94, width: 0.55),
+            OCRObservationFixture(text: "SALDO FINAL DEL PERIODO ANTERIOR: $55,627.93", x: 0.04, y: 0.90, width: 0.55),
+            OCRObservationFixture(text: "FECHA FOLIO DESCRIPCION", x: 0.04, y: 0.86, width: 0.50),
+            OCRObservationFixture(text: "16-JUL-2026 4309379 PAGO TRANSFERENCIA SPEI", x: 0.02, y: 0.80, width: 0.55),
+            OCRObservationFixture(text: "30.00", x: 0.72, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "55,597.93", x: 0.84, y: 0.80, width: 0.08),
+        ], fileName: "Santander agosto 2026.pdf")
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].amount, -30)
+        XCTAssertFalse(rows[0].title.localizedCaseInsensitiveContains("saldo final"))
+        XCTAssertFalse(rows[0].title.localizedCaseInsensitiveContains("periodo 16"))
+    }
+
     func testUnverifiedReadyStatementCannotFeedNativeDashboard() {
         let store = FinanceStore()
         defer { store.clearLocalData() }
