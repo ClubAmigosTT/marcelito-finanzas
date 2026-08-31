@@ -175,4 +175,16 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.summary?.previousBalance, 55_627.93)
         XCTAssertEqual(snapshot.summary?.cashBalance, 27_654.24)
     }
+
+    func testHiddenAdministrativeTextLayerFallsBackToOCR() {
+        let hiddenLayer = String(repeating: "saldo cuenta metadata ", count: 12)
+        XCTAssertTrue(FinanceStore.shouldUseOCR(extractedText: hiddenLayer, allowOCR: true))
+    }
+
+    func testStructuredMonthDateTextLayerDoesNotForceOCR() {
+        let text = String(repeating: "16-JUL-2026 17-JUL-2026 COMPRA SUPERMERCADO 120.00 ", count: 5)
+            + "Detalle de Movimientos Realizados"
+        XCTAssertFalse(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: true))
+        XCTAssertFalse(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: false))
+    }
 }

@@ -461,6 +461,16 @@ final class FinanceStore {
         )
     }
 
+    /// Decides whether a PDF's selectable text is structurally usable. Kept
+    /// internal so the contract tests can cover the OCR boundary without
+    /// opening a PDF or invoking Vision in a unit-test fixture.
+    static func shouldUseOCR(extractedText: String, allowOCR: Bool) -> Bool {
+        let compactText = extractedText.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+        let hasDateSignal = extractedText.range(of: #"(?i)\b(?:\d{1,2}\s*[\/-]\s*\d{1,2}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s*[\/-]\s*[a-záéíóú]{3,}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s+(?:de\s+)?[a-záéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?)\b"#, options: .regularExpression) != nil
+        let hasTableSignal = extractedText.range(of: #"(?i)detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripci[oó]n|fecha\s+y\s+detalle"#, options: .regularExpression) != nil
+        return allowOCR && (compactText.count < 120 || !hasDateSignal || !hasTableSignal)
+    }
+
     var movements: [Movement]
     var statements: [StatementRecord]
     private(set) var ledgerVersion: UUID
@@ -1983,10 +1993,7 @@ final class FinanceStore {
         // text layer as usable only when it has both a movement date and a
         // table signal; otherwise fall back to Vision instead of parsing
         // administrative text as if it were a ledger.
-        let compactText = extractedText.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
-        let hasDateSignal = extractedText.range(of: #"(?i)\b(?:\d{1,2}\s*[\/-]\s*\d{1,2}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s*[\/-]\s*[a-záéíóú]{3,}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s+(?:de\s+)?[a-záéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?)\b"#, options: .regularExpression) != nil
-        let hasTableSignal = extractedText.range(of: #"(?i)detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripci[oó]n|fecha\s+y\s+detalle"#, options: .regularExpression) != nil
-        let usedOCR = allowOCR && (compactText.count < 120 || !hasDateSignal || !hasTableSignal)
+        let usedOCR = Self.shouldUseOCR(extractedText: extractedText, allowOCR: allowOCR)
         let ocrObservations = usedOCR ? Self.ocrObservations(from: document) : []
         let text = usedOCR ? Self.ocrText(from: ocrObservations) : extractedText
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {

@@ -99,6 +99,9 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
 - Asociar las huellas SHA-256 de los PDFs a cada corrida de auditoría para
   reproducir un KPI desde su fuente exacta, incluso cuando se reutiliza el
   nombre del archivo.
+- Probar explícitamente el umbral que decide entre texto y Vision para evitar
+  que capas ocultas administrativas desactiven OCR o que estados de texto
+  válidos se procesen visualmente sin necesidad.
 - Salida: cada cifra del dashboard se puede explicar hasta filas y evidencia.
 
 ### Fase 6 — Certificación y despliegue
