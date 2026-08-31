@@ -35,6 +35,11 @@ OCR más débil. Todos los archivos deben identificar el emisor con estado
 aserciones duras. Los escaneos Santander se reportan para calibración mientras
 permanezcan en `pending`.
 
+Al final se emite también `NATIVE_CORPUS_SUMMARY` con aceptados, bloqueados,
+aceptaciones falsas, precisión automática, OCR pendiente y `certified`. La
+bandera solo puede ser verdadera cuando todos los goldens están promovidos,
+no hay falsos positivos, la precisión es ≥99% y no queda OCR sin resolver.
+
 Los estados escaneados que sigan en `pending` no alimentan el libro; cuando
 Vision concilie uno, se puede promover su expectativa a `valid` y exigir
 también conteo exacto de filas en la siguiente corrida.

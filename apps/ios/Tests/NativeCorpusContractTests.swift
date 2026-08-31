@@ -88,6 +88,10 @@ final class NativeCorpusContractTests: XCTestCase {
         let store = FinanceStore()
         defer { store.clearLocalData() }
         var report: [[String: String]] = []
+        var automaticAcceptances = 0
+        var goldenAutoAccepted = 0
+        var goldenFalseAccepted = 0
+        var unresolvedOCR = 0
 
         for file in files {
             guard let expected = expectations[file.lastPathComponent] else { continue }
@@ -135,6 +139,25 @@ final class NativeCorpusContractTests: XCTestCase {
                 XCTAssertTrue(result.requiresReview, file.lastPathComponent + " quedó válido sin estar promovido en el golden")
             }
 
+            let autoAccepted = result.reconciliation?.status == .valid
+                && result.sourceDetection.status == .verified
+                && !result.requiresReview
+            if autoAccepted {
+                automaticAcceptances += 1
+                if expected.status == .valid {
+                    goldenAutoAccepted += 1
+                } else {
+                    // A scan that becomes valid before its golden is promoted
+                    // must remain provisional; count it as a false automatic
+                    // acceptance even though the XCTest assertion above also
+                    // reports the contract violation.
+                    goldenFalseAccepted += 1
+                }
+            }
+            if result.usedOCR && !autoAccepted {
+                unresolvedOCR += 1
+            }
+
             report.append([
                 "file": file.lastPathComponent,
                 "source": result.source,
@@ -161,5 +184,33 @@ final class NativeCorpusContractTests: XCTestCase {
 
         let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
         print("NATIVE_CORPUS_REPORT " + (String(data: data, encoding: .utf8) ?? "[]"))
+
+        let precisionDenominator = goldenAutoAccepted + goldenFalseAccepted
+        let automaticAcceptancePrecision = precisionDenominator > 0
+            ? Double(goldenAutoAccepted) / Double(precisionDenominator)
+            : 0
+        let expectedValidCount = expectations.values.filter { $0.status == .valid }.count
+        let expectedPendingCount = expectations.values.filter { $0.status != .valid }.count
+        let exactCorpus = Set(files.map(\.lastPathComponent)) == Set(expectations.keys)
+        let certified = exactCorpus
+            && expectedPendingCount == 0
+            && goldenFalseAccepted == 0
+            && goldenAutoAccepted == expectedValidCount
+            && automaticAcceptancePrecision >= 0.99
+            && unresolvedOCR == 0
+        let summary: [String: String] = [
+            "files": String(files.count),
+            "accepted": String(automaticAcceptances),
+            "blocked": String(max(0, files.count - automaticAcceptances)),
+            "expectedValid": String(expectedValidCount),
+            "expectedPending": String(expectedPendingCount),
+            "goldenAutoAccepted": String(goldenAutoAccepted),
+            "goldenFalseAccepted": String(goldenFalseAccepted),
+            "automaticAcceptancePrecision": String(format: "%.4f", automaticAcceptancePrecision),
+            "unresolvedOCR": String(unresolvedOCR),
+            "certified": String(certified)
+        ]
+        let summaryData = try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys])
+        print("NATIVE_CORPUS_SUMMARY " + (String(data: summaryData, encoding: .utf8) ?? "{}"))
     }
 }

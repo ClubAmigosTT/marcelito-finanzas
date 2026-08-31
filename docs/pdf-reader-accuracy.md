@@ -258,6 +258,13 @@ coordenadas normalizadas. Verifica que Santander tome el retiro/depósito de
 las columnas de movimiento y no el saldo corrido; así una modificación de los
 umbrales de columnas falla en CI antes de tocar el corpus de estados reales.
 
+Cuando se ejecuta `NativeCorpusContractTests` con el corpus real, además del
+detalle `NATIVE_CORPUS_REPORT` se emite `NATIVE_CORPUS_SUMMARY`. Esa salida
+resume aceptaciones automáticas, bloqueos, falsos positivos, precisión,
+documentos OCR aún pendientes y la bandera `certified`; esta última permanece
+en `false` mientras existan goldens pendientes o cualquier estado OCR sin
+resolver.
+
 El contrato cubre tres regresiones de alto riesgo: evidencia institucional que
 vence a una contraparte (BBVA no se convierte en Santander), créditos Amex que
 no se convierten en compras y encabezados administrativos con números que no
