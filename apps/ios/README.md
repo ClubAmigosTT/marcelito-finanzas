@@ -43,6 +43,10 @@ confianza OCR media y página OCR más débil. Todos los archivos deben identifi
 aserciones duras. Los escaneos Santander se reportan para calibración mientras
 permanezcan en `pending`.
 
+El contrato nativo también verifica el SHA-256 de cada PDF contra el manifiesto
+privado del corpus. Si se sustituye, altera o renombra un archivo sin actualizar
+su expectativa, la corrida falla antes de considerar sus filas como evidencia.
+
 Al final se emite también `NATIVE_CORPUS_SUMMARY` con aceptados, bloqueados,
 aceptaciones falsas, precisión automática, OCR pendiente y `certified`. La
 bandera solo puede ser verdadera cuando todos los goldens están promovidos,
