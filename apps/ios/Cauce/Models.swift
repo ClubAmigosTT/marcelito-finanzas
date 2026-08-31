@@ -366,6 +366,8 @@ struct LedgerQuality {
     let reviewMovementCount: Int
     let absurdMovementCount: Int
     let reconciledPercent: Double
+    let evidencePercent: Double
+    let missingEvidenceCount: Int
     let isBlocking: Bool
     let message: String?
 }
@@ -483,6 +485,21 @@ final class FinanceStore {
         let absurdCount = movements.filter { abs($0.amount) >= 10_000_000 || !isValidStoredMovement($0) }.count
         let statementCount = statements.count
         let reconciledPercent = statementCount == 0 ? 100 : Double(validated.count) / Double(statementCount) * 100
+        let evidenceRows = movements.filter { movement in
+            guard movement.statementId != nil else { return false }
+            return movement.extractionEvidence?.method != "manual"
+        }
+        let missingEvidenceCount = evidenceRows.filter { movement in
+            guard let evidence = movement.extractionEvidence else { return true }
+            return evidence.method.isEmpty
+                || !evidence.confidence.isFinite
+                || evidence.page == nil
+                || (evidence.page ?? 0) < 1
+                || evidence.sourceText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+        }.count
+        let evidencePercent = evidenceRows.isEmpty
+            ? 100
+            : Double(evidenceRows.count - missingEvidenceCount) / Double(evidenceRows.count) * 100
         let expectedRebuildCount = UserDefaults.standard.integer(forKey: canonicalRebuildExpectedCountKey)
         let missingRebuiltStatements = UserDefaults.standard.bool(forKey: canonicalRebuildKey)
             && expectedRebuildCount > 0
@@ -492,7 +509,7 @@ final class FinanceStore {
         let canonicalNetSpend = max(Decimal(0), canonicalGross - canonicalRefunds)
         let spendMismatch = consolidatedRealSpend > canonicalNetSpend + max(Decimal(1), canonicalNetSpend * Decimal(string: "0.01")!)
         let failedChecks = consistencyChecks.filter { !$0.passed }
-        let blocking = invalid.count > 0 || pending.count > 0 || absurdCount > 0 || spendMismatch || !failedChecks.isEmpty || missingRebuiltStatements
+        let blocking = invalid.count > 0 || pending.count > 0 || absurdCount > 0 || missingEvidenceCount > 0 || spendMismatch || !failedChecks.isEmpty || missingRebuiltStatements
         let message: String?
         if invalid.count > 0 {
             message = "\(invalid.count) estado(s) no concilian contra sus totales originales."
@@ -503,6 +520,8 @@ final class FinanceStore {
                 : "\(pending.count) estado(s) aún no tienen conciliación validada."
         } else if absurdCount > 0 {
             message = "Hay \(absurdCount) movimiento(s) con importes fuera de rango."
+        } else if missingEvidenceCount > 0 {
+            message = "Hay \(missingEvidenceCount) movimiento(s) importado(s) sin evidencia completa."
         } else if spendMismatch {
             message = "El gasto consolidado supera los movimientos canónicos; se bloqueó el KPI."
         } else if let failed = failedChecks.first {
@@ -521,6 +540,8 @@ final class FinanceStore {
             reviewMovementCount: reviewCount,
             absurdMovementCount: absurdCount,
             reconciledPercent: reconciledPercent,
+            evidencePercent: evidencePercent,
+            missingEvidenceCount: missingEvidenceCount,
             isBlocking: blocking,
             message: message
         )

@@ -146,6 +146,13 @@ struct DiagnosticsView: View {
                     LabeledContent("Estados", value: "\(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount) conciliados")
                     LabeledContent("Movimientos canónicos", value: "\(store.ledgerQuality.movementCount)")
                     LabeledContent("Importes fuera de rango", value: "\(store.ledgerQuality.absurdMovementCount)")
+                    LabeledContent("Filas con evidencia", value: "\(Int(store.ledgerQuality.evidencePercent.rounded()))%")
+                    if store.ledgerQuality.missingEvidenceCount > 0 {
+                        Text("\(store.ledgerQuality.missingEvidenceCount) movimiento(s) importado(s) sin página, confianza o fragmento de origen completo.")
+                            .font(.caption)
+                            .foregroundStyle(Color.marcelitoDanger)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if let message = store.ledgerQuality.message {
                         Text(message)
                             .font(.caption)
