@@ -654,6 +654,7 @@ final class ReaderContractTests: XCTestCase {
 
         XCTAssertTrue(store.dashboardIsBlocked)
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+        XCTAssertTrue(store.ledgerQuality.message?.contains("columnas de movimientos") == true)
 
         store.statements[0].ocrColumnsCalibrated = true
         XCTAssertFalse(store.dashboardIsBlocked)

@@ -720,9 +720,12 @@ final class FinanceStore {
         let spendMismatch = consolidatedRealSpend > canonicalNetSpend + max(Decimal(1), canonicalNetSpend * Decimal(string: "0.01")!)
         let failedChecks = consistencyChecks.filter { !$0.passed }
         let blocking = invalid.count > 0 || pending.count > 0 || absurdCount > 0 || missingEvidenceCount > 0 || spendMismatch || !failedChecks.isEmpty || missingRebuiltStatements
+        let uncalibratedOCR = pending.filter { $0.ocrColumnsCalibrated == false }.count
         let message: String?
         if invalid.count > 0 {
             message = "\(invalid.count) estado(s) no concilian contra sus totales originales."
+        } else if uncalibratedOCR > 0 {
+            message = "\(uncalibratedOCR) estado(s) OCR tienen columnas de movimientos sin calibrar; confirma la tabla visual antes de usar los KPI."
         } else if pending.count > 0 {
             let reviewOnly = pending.filter { $0.reconciliation?.status == .valid && $0.requiresReview && isCurrentReader($0) }.count
             message = reviewOnly > 0
