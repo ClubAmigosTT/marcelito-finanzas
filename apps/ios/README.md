@@ -28,6 +28,11 @@ xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
   -destination "platform=iOS Simulator,name=iPhone 16" test
 ```
 
+El reporte incluye controles esperados y extraídos de depósitos, retiros,
+cargos y pagos. Los cuatro estados de texto los validan como aserciones duras;
+los escaneos Santander se reportan para calibración mientras permanezcan en
+`pending`.
+
 Los estados escaneados que sigan en `pending` no alimentan el libro; cuando
 Vision concilie uno, se puede promover su expectativa a `valid` y exigir
 también conteo exacto de filas en la siguiente corrida.
