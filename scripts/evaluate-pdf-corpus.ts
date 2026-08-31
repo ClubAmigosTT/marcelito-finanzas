@@ -152,6 +152,7 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
   const reconciliation = mode === "ocr"
     ? gateOcrReconciliation(baseReconciliation, "ocr", ocrConfidence, ocrPageConfidences)
     : baseReconciliation;
+  const qualityGateApplied = baseReconciliation.status !== reconciliation.status;
   const suspiciousRows = transactions.filter((row) => !Number.isFinite(row.amount) || Math.abs(row.amount) >= 100_000_000 || row.date === "Sin fecha");
   // A valid total is not enough to certify an extracted row. Every accepted
   // movement must remain traceable to the source page and a bounded fragment
@@ -175,6 +176,11 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
     mode,
     ocrConfidence,
     ocrPageConfidences,
+    qualityGate: {
+      applied: qualityGateApplied,
+      statusBefore: baseReconciliation.status,
+      statusAfter: reconciliation.status,
+    },
     source: sourceDetection.source,
     sourceStatus: sourceDetection.status,
     sourceConfidence: Number(sourceDetection.confidence.toFixed(4)),
@@ -273,6 +279,11 @@ if (!directory) {
         kind: "unknown",
         rows: 0,
         statementControls: {},
+        qualityGate: {
+          applied: false,
+          statusBefore: "pending",
+          statusAfter: "pending",
+        },
         suspiciousRows: 0,
         missingEvidenceRows: 0,
         evidenceCoverage: 0,
@@ -329,6 +340,9 @@ if (!directory) {
   const precisionFailure = Boolean(requireManifest && (automaticAcceptancePrecision === null || automaticAcceptancePrecision < targetPrecision));
   if (precisionFailure) failures += 1;
   const nativeOCRPending = results.filter((result) => result.mode === "ocr-required").length;
+  const nativeVisionRequired = useOCR
+    ? results.filter((result) => result.mode === "ocr").length
+    : nativeOCRPending;
   // Precision answers “of the rows we accepted, how many were correct?”;
   // certification also requires every manifest file to have been evaluated
   // by the appropriate reader. A text-only run must never look certified
@@ -345,6 +359,15 @@ if (!directory) {
       && automaticAcceptancePrecision !== null
       && automaticAcceptancePrecision >= targetPrecision,
   );
+  const certificationBlockers = [
+    ...(!requireManifest ? ["falta --require-manifest"] : []),
+    ...(useOCR ? ["--ocr es diagnóstico local y no sustituye Vision nativa"] : []),
+    ...(nativeVisionRequired > 0 ? [`${nativeVisionRequired} PDF(s) requieren certificación Vision nativa`] : []),
+    ...(manifestReaderVersionMismatch ? ["la versión del manifiesto no coincide con el lector"] : []),
+    ...(parseErrors > 0 ? [`${parseErrors} PDF(s) no se pudieron leer`] : []),
+    ...(precisionFailure ? ["la precisión automática está por debajo del objetivo"] : []),
+    ...(failures > 0 && !parseErrors && !manifestReaderVersionMismatch && !precisionFailure ? ["hay discrepancias con el manifiesto"] : []),
+  ];
   const output = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -368,6 +391,8 @@ if (!directory) {
     certified,
     acceptanceRate,
     nativeOCRPending,
+    nativeVisionRequired,
+    certificationBlockers,
     goldenExpectedFiles: expectedFiles.length,
     goldenAutoAccepted,
     goldenFalseAccepted,
