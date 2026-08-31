@@ -152,8 +152,9 @@ gasto real sin separar esas secciones.
 
 Los valores de control sin datos personales están en `tests/fixtures/pdf-goldens.json` e incluyen los cortes Santander de mayo, julio y agosto, BBVA agosto y los tres cortes Amex. El corpus completo debe conservarse fuera del repositorio y evaluarse por emisor, plantilla y tipo de extracción (texto/OCR). Cada nueva variante de PDF se añade como fixture antes de activar su parser.
 
-El manifiesto `tests/fixtures/pdf-corpus-attachments.json` fija los ocho
-adjuntos de prueba disponibles mediante SHA-256. No incluye los PDFs: deben
+El manifiesto `tests/fixtures/pdf-corpus-attachments.json` fija los adjuntos
+de prueba disponibles mediante SHA-256 (actualmente son ocho; cualquier
+estado adicional debe añadirse al manifiesto antes de certificar). No incluye los PDFs: deben
 montarse desde la carpeta local de adjuntos al ejecutar la certificación. Los
 campos `accountKey` del manifiesto solo contienen `emisor:últimos4` y permiten
 detectar que un reimport no mezcle dos cuentas del mismo banco; nunca se
