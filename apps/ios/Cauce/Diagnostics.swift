@@ -277,6 +277,7 @@ struct DiagnosticsView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(store.statementAudits) { audit in
+                            let duplicateSuffix = audit.duplicateRows.map { " · \($0) duplicadas" } ?? ""
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
                                     Text("\(audit.source) · \(audit.period)")
@@ -286,7 +287,7 @@ struct DiagnosticsView: View {
                                         .font(.caption2.weight(.semibold))
                                         .foregroundStyle(audit.reconciliation == .invalid ? Color.marcelitoDanger : (audit.requiresReview ? Color.marcelitoAmber : Color.marcelitoSuccess))
                                 }
-                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas(audit.duplicateRows.map { " · \($0) duplicadas" } ?? "")")
+                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas\(duplicateSuffix)")
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(.secondary)
                                 Text("Ingresos \(money(audit.incomeTotal)) · Gasto \(money(audit.expenseTotal)) · Reembolsos \(money(audit.refundTotal))")
