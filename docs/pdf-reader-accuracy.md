@@ -66,6 +66,9 @@ gasto real sin separar esas secciones.
   lector (o sin conciliación registrada) pasan automáticamente a revisión y
   dejan de alimentar el libro canónico hasta reimportar su PDF. Así una
   corrección del parser no queda contaminada por filas históricas antiguas.
+- En iOS, la reconstrucción canónica también guarda la revisión del lector que
+  la produjo; una actualización de reglas invalida esa marca y reintenta la
+  reconstrucción desde los PDFs locales antes de mostrar el dashboard.
 - Cada página OCR tiene un límite de 45 segundos; si el motor se atasca, la
   importación termina con un error recuperable y no deja un proceso de OCR
   abierto ni datos parciales.

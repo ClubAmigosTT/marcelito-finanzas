@@ -447,6 +447,7 @@ final class FinanceStore {
     private let categoryRulesKey = "marcelito.categoryRules.v1"
     private let numericRepairKey = "marcelito.numericRepair.v1"
     private let canonicalRebuildKey = "marcelito.canonicalRebuild.v1"
+    private let canonicalRebuildReaderVersionKey = "marcelito.canonicalRebuild.readerVersion.v1"
     private let canonicalRebuildExpectedCountKey = "marcelito.canonicalRebuild.expectedCount.v1"
     private let ledgerEnvelopeKey = "marcelito.ledger.active.v1"
     private let ledgerBackupKey = "marcelito.ledger.backup.v1"
@@ -486,6 +487,16 @@ final class FinanceStore {
         let hasDateSignal = extractedText.range(of: #"(?i)\b(?:\d{1,2}\s*[\/-]\s*\d{1,2}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s*[\/-]\s*[a-záéíóú]{3,}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s+(?:de\s+)?[a-záéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?)\b"#, options: .regularExpression) != nil
         let hasTableSignal = extractedText.range(of: #"(?i)detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripci[oó]n|fecha\s+y\s+detalle"#, options: .regularExpression) != nil
         return allowOCR && (compactText.count < 120 || !hasDateSignal || !hasTableSignal)
+    }
+
+    static func needsCanonicalRebuild(
+        completed: Bool,
+        completedReaderVersion: String?,
+        currentReaderVersion: String,
+        hasSources: Bool
+    ) -> Bool {
+        guard hasSources else { return false }
+        return !completed || completedReaderVersion != currentReaderVersion
     }
 
     var movements: [Movement]
@@ -1584,6 +1595,7 @@ final class FinanceStore {
         defaults.removeObject(forKey: categoryRulesKey)
         defaults.removeObject(forKey: numericRepairKey)
         defaults.removeObject(forKey: canonicalRebuildKey)
+        defaults.removeObject(forKey: canonicalRebuildReaderVersionKey)
         defaults.removeObject(forKey: canonicalRebuildExpectedCountKey)
         defaults.removeObject(forKey: ledgerEnvelopeKey)
         defaults.removeObject(forKey: ledgerBackupKey)
@@ -1619,8 +1631,13 @@ final class FinanceStore {
 
     var hasCanonicalRebuildPending: Bool {
         let defaults = UserDefaults.standard
-        guard !defaults.bool(forKey: canonicalRebuildKey) else { return false }
-        return !statements.isEmpty || !storedPDFURLs.isEmpty
+        let hasSources = !statements.isEmpty || !storedPDFURLs.isEmpty
+        return Self.needsCanonicalRebuild(
+            completed: defaults.bool(forKey: canonicalRebuildKey),
+            completedReaderVersion: defaults.string(forKey: canonicalRebuildReaderVersionKey),
+            currentReaderVersion: Self.readerVersion,
+            hasSources: hasSources
+        )
     }
 
     private func currentEnvelope() -> LedgerEnvelope {
@@ -1671,7 +1688,7 @@ final class FinanceStore {
         progress: ((Int, Int, String) -> Void)? = nil
     ) -> CanonicalRebuildResult {
         let defaults = UserDefaults.standard
-        guard !defaults.bool(forKey: canonicalRebuildKey), !repairInProgress else {
+        guard hasCanonicalRebuildPending, !repairInProgress else {
             return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
         }
         repairInProgress = true
@@ -1715,6 +1732,7 @@ final class FinanceStore {
 
         guard !candidates.isEmpty else {
             defaults.set(true, forKey: canonicalRebuildKey)
+            defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
             defaults.set(true, forKey: numericRepairKey)
             defaults.set("complete", forKey: rebuildStateKey)
             defaults.removeObject(forKey: ledgerBackupKey)
@@ -1762,6 +1780,7 @@ final class FinanceStore {
             progress?(index + 1, candidates.count, url.lastPathComponent)
         }
         defaults.set(true, forKey: canonicalRebuildKey)
+        defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
         defaults.set(true, forKey: numericRepairKey)
         defaults.set("complete", forKey: rebuildStateKey)
         defaults.removeObject(forKey: ledgerBackupKey)

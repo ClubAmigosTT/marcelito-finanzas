@@ -2,6 +2,27 @@ import XCTest
 @testable import Marcelito
 
 final class ReaderContractTests: XCTestCase {
+    func testCanonicalRebuildIsInvalidatedWhenReaderVersionChanges() {
+        XCTAssertTrue(FinanceStore.needsCanonicalRebuild(
+            completed: true,
+            completedReaderVersion: "ios-reader-legacy",
+            currentReaderVersion: FinanceStore.readerVersion,
+            hasSources: true
+        ))
+        XCTAssertFalse(FinanceStore.needsCanonicalRebuild(
+            completed: true,
+            completedReaderVersion: FinanceStore.readerVersion,
+            currentReaderVersion: FinanceStore.readerVersion,
+            hasSources: true
+        ))
+        XCTAssertFalse(FinanceStore.needsCanonicalRebuild(
+            completed: false,
+            completedReaderVersion: nil,
+            currentReaderVersion: FinanceStore.readerVersion,
+            hasSources: false
+        ))
+    }
+
     func testInstitutionalHeaderWinsOverCounterpartyMention() {
         let text = """
         Grupo Financiero BBVA
