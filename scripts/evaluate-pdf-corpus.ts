@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
-import { detectSourceEvidence, extractTransactions, parseStatementSummary, rebuildPdfText, reconcileStatementImport } from "../src/pdfImport.ts";
+import { detectSourceEvidence, extractTransactions, parseStatementSummary, PDF_READER_VERSION, rebuildPdfText, reconcileStatementImport } from "../src/pdfImport.ts";
 import type { StatementKind, StatementSource } from "../src/types.ts";
 
 type ExpectedFile = {
@@ -17,6 +17,8 @@ type ExpectedFile = {
 
 type CorpusManifest = {
   tolerance?: number;
+  /** The manifest is tied to the exact extraction rules it certifies. */
+  readerVersion?: string;
   files?: ExpectedFile[];
 };
 
@@ -82,6 +84,7 @@ async function evaluate(file: string) {
     : 1;
   return {
     file: fileName,
+    readerVersion: PDF_READER_VERSION,
     sourceFingerprint: extracted.sourceFingerprint,
     mode,
     source: sourceDetection.source,
@@ -142,6 +145,10 @@ if (!directory) {
   if (duplicateManifestFiles.length) failures += duplicateManifestFiles.length;
   if (missingManifestFiles.length) failures += missingManifestFiles.length;
   if (requireManifest && unlistedCorpusFiles.length) failures += unlistedCorpusFiles.length;
+  const manifestReaderVersionMismatch = Boolean(
+    requireManifest && manifest.readerVersion !== PDF_READER_VERSION,
+  );
+  if (manifestReaderVersionMismatch) failures += 1;
 
   for (const name of names) {
     let result: Awaited<ReturnType<typeof evaluate>>;
@@ -155,6 +162,7 @@ if (!directory) {
       failures += 1;
       result = {
         file: name,
+        readerVersion: PDF_READER_VERSION,
         sourceFingerprint: undefined,
         mode: "parse-error",
         source: "Desconocido",
@@ -216,6 +224,9 @@ if (!directory) {
     accepted,
     blocked: results.length - accepted,
     manifestChecked: Boolean(manifestPath),
+    readerVersion: PDF_READER_VERSION,
+    manifestReaderVersion: manifest.readerVersion,
+    manifestReaderVersionMismatch,
     manifestFailures: failures,
     manifestMissingFiles: missingManifestFiles,
     manifestDuplicateFiles: duplicateManifestFiles,
