@@ -69,9 +69,20 @@ jobs:
             -configuration Debug \
             -destination "$destination" \
             -derivedDataPath "$RUNNER_TEMP/MarcelitoTestsDerivedData" \
+            -resultBundlePath "$RUNNER_TEMP/MarcelitoTests.xcresult" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             test
+
+      - name: Guardar resultados de Xcode
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: marcelito-ios-test-results
+          path: |
+            ${{ runner.temp }}/MarcelitoTests.xcresult
+            ${{ runner.temp }}/MarcelitoTestsDerivedData/Logs/Test
+          if-no-files-found: warn
 
       - name: Escribir resumen
         if: success()

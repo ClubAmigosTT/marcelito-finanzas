@@ -108,7 +108,9 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
   una versión y solo después se habilita su aceptación automática.
 - El workflow de iOS se ejecuta en `push`, `pull_request` y manualmente para
   evitar que cambios del lector lleguen a distribución sin compilar y correr
-  las pruebas de contrato en macOS.
+  las pruebas de contrato en macOS. Cada corrida conserva el `.xcresult` de
+  Xcode como artefacto, incluso si una prueba falla, para poder diagnosticar
+  el PDF, página o regla que rompió la certificación.
 
 ## Umbrales y respuesta
 
