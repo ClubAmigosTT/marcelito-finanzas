@@ -59,6 +59,9 @@ gasto real sin separar esas secciones.
 - iOS no confía solo en la longitud de una capa de texto oculta: exige señal
   de fecha y de tabla de movimientos antes de omitir Vision. Así un escaneo
   con metadatos administrativos no se interpreta como un PDF estructurado.
+- La capa web aplica la misma decisión estructural: solo conserva lectura
+  directa cuando encuentra señal de fechas y encabezado de tabla; una capa
+  larga de texto administrativo vuelve a activar OCR visual.
 - Cada página OCR tiene un límite de 45 segundos; si el motor se atasca, la
   importación termina con un error recuperable y no deja un proceso de OCR
   abierto ni datos parciales.

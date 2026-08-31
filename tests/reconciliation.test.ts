@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseStatementSummary, reconcileStatementImport } from "../src/pdfImport.ts";
+import { detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
 import { buildFinanceMetrics } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
@@ -59,6 +59,16 @@ test("la compuerta OCR se conserva al recalcular la vista de revisión", () => {
   assert.equal(gated.status, "pending");
   assert.match(gated.reason ?? "", /OCR provisional/);
   assert.equal(gateOcrReconciliation(base, "text", 0.1).status, "valid");
+});
+
+test("una capa de texto administrativo larga no desactiva el OCR visual", () => {
+  const hiddenLayer = `${"RFC DIRECCION CERTIFICADO SALDO METADATOS ".repeat(30)}\nEstado de cuenta\nNúmero de cuenta 1234567890`;
+  assert.equal(shouldUseOCR(hiddenLayer), true);
+});
+
+test("una tabla estructurada larga conserva la lectura directa", () => {
+  const table = `${"Información del estado ".repeat(30)}\nDetalle de Movimientos Realizados\n23/JUL 22/JUL SUPERMERCADO 120.00 3,469.63`;
+  assert.equal(shouldUseOCR(table), false);
 });
 
 test("el pipeline rechaza fechas imposibles aunque tengan importe y descripción", () => {

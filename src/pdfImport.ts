@@ -219,6 +219,20 @@ function detectPeriod(text: string, fileName: string) {
   return fileLabel || "Periodo no identificado";
 }
 
+/**
+ * Decide whether the selectable PDF layer is structurally usable. Some bank
+ * scans contain a long hidden layer with addresses, certificates or metadata;
+ * using only its character count would incorrectly skip visual OCR. Require
+ * both a date signal and a movement-table heading before trusting text.
+ */
+export function shouldUseOCR(extractedText: string) {
+  const compactText = extractedText.replace(/\s+/g, "");
+  if (compactText.length < 500) return true;
+  const hasDateSignal = /(?:\b\d{1,2}[-/.]\d{1,2}[-/.](?:20)?\d{2}\b|\b\d{1,2}[-/]\w{3,}(?:[-/](?:20)?\d{2})?\b|\b\d{1,2}\s+(?:de\s+)?(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\b)/i.test(extractedText);
+  const hasTableSignal = /detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripci[oó]n|fecha\s+y\s+detalle|fecha\s+oper\s+liq/i.test(extractedText);
+  return !hasDateSignal || !hasTableSignal;
+}
+
 function normalizeBareBankSummaryAmount(raw: string, parsed: number) {
   const compact = raw.replace(/\s/g, "");
   // Santander scans can lose both decimal separators (64,161.11 ->
@@ -1196,7 +1210,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   }
 
   const extractedText = pageTexts.join("\n");
-  const mode = extractedText.replace(/\s/g, "").length > 500 ? "text" : "ocr";
+  const mode = shouldUseOCR(extractedText) ? "ocr" : "text";
   const ocrResult = mode === "ocr" ? await recognizePdfText(document, onProgress) : undefined;
   const text = ocrResult?.text ?? extractedText;
   const sourceDetection = detectSourceEvidence(text, file.name);
