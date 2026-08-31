@@ -13,18 +13,55 @@ final class NativeCorpusContractTests: XCTestCase {
         let kind: StatementKind
         let status: StatementReconciliationStatus
         let rows: Int
+        let depositTotal: Decimal?
+        let withdrawalTotal: Decimal?
+        let chargeTotal: Decimal?
+        let paymentTotal: Decimal?
+
+        init(
+            source: String,
+            kind: StatementKind,
+            status: StatementReconciliationStatus,
+            rows: Int,
+            depositTotal: Decimal? = nil,
+            withdrawalTotal: Decimal? = nil,
+            chargeTotal: Decimal? = nil,
+            paymentTotal: Decimal? = nil
+        ) {
+            self.source = source
+            self.kind = kind
+            self.status = status
+            self.rows = rows
+            self.depositTotal = depositTotal
+            self.withdrawalTotal = withdrawalTotal
+            self.chargeTotal = chargeTotal
+            self.paymentTotal = paymentTotal
+        }
     }
 
     private let expectations: [String: Expectation] = [
-        "1-28_may_2026_-_27_jun_2026.pdf": Expectation(source: "Amex", kind: .card, status: .valid, rows: 92),
-        "2-28_jun_2026_-_27_jul_2026.pdf": Expectation(source: "Amex", kind: .card, status: .valid, rows: 145),
-        "3-Estado-de-cuenta-mayo-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0),
-        "4-Estado-de-cuenta-julio-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0),
-        "5-Estado-de-cuenta-agosto-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0),
-        "6-28_jul_2026_-_27_ago_2026.pdf": Expectation(source: "Amex", kind: .card, status: .valid, rows: 105),
-        "7-Estado-de-cuenta-junio-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0),
-        "8-BBVA-agosto-.pdf": Expectation(source: "BBVA", kind: .bank, status: .valid, rows: 11),
+        "1-28_may_2026_-_27_jun_2026.pdf": Expectation(source: "Amex", kind: .card, status: .valid, rows: 92, chargeTotal: 28_034.19),
+        "2-28_jun_2026_-_27_jul_2026.pdf": Expectation(source: "Amex", kind: .card, status: .valid, rows: 145, chargeTotal: 46_711.63, paymentTotal: 34_405.21),
+        "3-Estado-de-cuenta-mayo-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0, depositTotal: 49_222.45, withdrawalTotal: 61_676.00),
+        "4-Estado-de-cuenta-julio-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0, depositTotal: 40_833.38, withdrawalTotal: 73_007.21),
+        "5-Estado-de-cuenta-agosto-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0, depositTotal: 36_187.42, withdrawalTotal: 64_161.11),
+        "6-28_jul_2026_-_27_ago_2026.pdf": Expectation(source: "Amex", kind: .card, status: .valid, rows: 105, chargeTotal: 33_177.48, paymentTotal: 23_150.88),
+        "7-Estado-de-cuenta-junio-2026.pdf": Expectation(source: "Santander", kind: .bank, status: .pending, rows: 0, depositTotal: 98_629.30, withdrawalTotal: 35_449.02),
+        "8-BBVA-agosto-.pdf": Expectation(source: "BBVA", kind: .bank, status: .valid, rows: 11, depositTotal: 19_500.00, withdrawalTotal: 22_058.69),
     ]
+
+    private func assertClose(_ actual: Decimal?, _ expected: Decimal, file: String, field: String) {
+        guard let actual else {
+            XCTFail("\(file): falta \(field), esperado \(expected)")
+            return
+        }
+        let difference = abs(NSDecimalNumber(decimal: actual - expected).doubleValue)
+        XCTAssertLessThanOrEqual(difference, 0.05, "\(file): \(field) extraído \(actual), esperado \(expected)")
+    }
+
+    private func decimalText(_ value: Decimal?) -> String {
+        value.map { NSDecimalNumber(decimal: $0).stringValue } ?? ""
+    }
 
     func testValidatedCorpusThroughNativeReaderWhenProvided() throws {
         guard let rawDirectory = ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_DIR"],
@@ -58,6 +95,23 @@ final class NativeCorpusContractTests: XCTestCase {
             XCTAssertEqual(result.source, expected.source, file.lastPathComponent)
             XCTAssertLessThanOrEqual(result.imported, 1_000, file.lastPathComponent + " produjo un volumen de filas absurdo")
 
+            // A pending scan is a diagnostic candidate, not a failed build:
+            // its extracted controls are printed in the report for calibration
+            // and become hard assertions once the golden is promoted to valid.
+            let controlsReady = expected.status == .valid || result.reconciliation?.status == .valid
+            if controlsReady, let depositTotal = expected.depositTotal {
+                assertClose(result.reconciliation?.extractedDepositTotal, depositTotal, file: file.lastPathComponent, field: "depósitos")
+            }
+            if controlsReady, let withdrawalTotal = expected.withdrawalTotal {
+                assertClose(result.reconciliation?.extractedWithdrawalTotal, withdrawalTotal, file: file.lastPathComponent, field: "retiros")
+            }
+            if controlsReady, let chargeTotal = expected.chargeTotal {
+                assertClose(result.reconciliation?.extractedChargeTotal, chargeTotal, file: file.lastPathComponent, field: "cargos")
+            }
+            if controlsReady, let paymentTotal = expected.paymentTotal {
+                assertClose(result.reconciliation?.extractedPaymentTotal, paymentTotal, file: file.lastPathComponent, field: "pagos")
+            }
+
             // Text-layer goldens are the hard acceptance contract. Scanned
             // Santander rows remain pending in this manifest until Vision is
             // run and calibrated against the printed totals; once a scan is
@@ -82,6 +136,14 @@ final class NativeCorpusContractTests: XCTestCase {
                 "status": result.reconciliation?.status.rawValue ?? "pending",
                 "rows": String(result.imported),
                 "requiresReview": String(result.requiresReview),
+                "expectedDeposits": decimalText(expected.depositTotal),
+                "extractedDeposits": decimalText(result.reconciliation?.extractedDepositTotal),
+                "expectedWithdrawals": decimalText(expected.withdrawalTotal),
+                "extractedWithdrawals": decimalText(result.reconciliation?.extractedWithdrawalTotal),
+                "expectedCharges": decimalText(expected.chargeTotal),
+                "extractedCharges": decimalText(result.reconciliation?.extractedChargeTotal),
+                "expectedPayments": decimalText(expected.paymentTotal),
+                "extractedPayments": decimalText(result.reconciliation?.extractedPaymentTotal),
                 "reason": result.reconciliation?.reason ?? "",
             ])
         }
