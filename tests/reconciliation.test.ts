@@ -318,6 +318,35 @@ test("cada fila conserva página y fragmento de evidencia cuando el PDF trae sen
   assert.equal(rows.every((row) => (row.extractionEvidence?.sourceText?.length ?? 0) > 0), true);
 });
 
+test("la auditoría mide cobertura de evidencia y no acepta filas opacas como trazables", () => {
+  const statement = bank("bbva-evidence", "BBVA", "agosto 2026");
+  const rows = [
+    movement({
+      id: "evidence-ok",
+      statementId: statement.id,
+      date: "01 ago 2026",
+      description: "SUPERMERCADO",
+      account: "BBVA",
+      amount: -120,
+      flow: "expense",
+      extractionEvidence: { method: "pdf-text", page: 2, confidence: 0.96, sourceText: "01/AGO SUPERMERCADO 120.00" },
+    }),
+    movement({
+      id: "evidence-missing",
+      statementId: statement.id,
+      date: "02 ago 2026",
+      description: "FARMACIA",
+      account: "BBVA",
+      amount: -80,
+      flow: "expense",
+      extractionEvidence: { method: "pdf-text", confidence: 0.96 },
+    }),
+  ];
+  const result = runTransactionPipeline(rows, [statement]);
+  assert.equal(result.audit.missingEvidenceCount, 1);
+  assert.equal(result.audit.evidencePercent, 50);
+});
+
 test("Santander selecciona el cargo o abono y no el saldo corrido", () => {
   const text = [
     "BANCO SANTANDER MEXICO GRUPO FINANCIERO SANTANDER",
