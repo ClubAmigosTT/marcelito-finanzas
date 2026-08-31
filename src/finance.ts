@@ -42,7 +42,10 @@ export function isStatementEligibleForDashboard(statement: Statement) {
   if (!hasSufficientOcrQuality(statement)) return false;
   if (statement.source === "Desconocido") return false;
   const sourceEvidence = statement.sourceDetection;
-  if (sourceEvidence && sourceEvidence.status !== "verified" && statement.issuerConfirmedByUser !== true) return false;
+  // A missing evidence record is not equivalent to a verified issuer. Legacy
+  // records are migrated to review, but keep this direct boundary strict too
+  // so programmatic callers cannot feed an unlabeled PDF into the dashboard.
+  if ((!sourceEvidence || sourceEvidence.status !== "verified") && statement.issuerConfirmedByUser !== true) return false;
   return true;
 }
 
@@ -689,7 +692,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     .filter((statement) => {
       if (statement.source === "Desconocido") return true;
       const sourceEvidence = statement.sourceDetection;
-      return Boolean(sourceEvidence && sourceEvidence.status !== "verified" && statement.issuerConfirmedByUser !== true);
+      return Boolean((!sourceEvidence || sourceEvidence.status !== "verified") && statement.issuerConfirmedByUser !== true);
     })
     .map((statement) => statement.id);
   const blockedStatementIds = new Set([

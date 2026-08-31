@@ -17,6 +17,9 @@ const bank = (id: string, source: string, period: string): Statement => ({
   transactionCount: 0,
   status: "ready",
   kind: "bank",
+  reconciliationStatus: "valid",
+  reconciliation: { status: "valid", tolerance: 0.05 },
+  sourceDetection: { source, confidence: 1, status: "verified", evidence: [`encabezado institucional ${source}`], ignoredBodyMentions: [] },
 });
 
 const card = (id: string, source: string, period: string, debtBalance = 0): Statement => ({
@@ -29,6 +32,9 @@ const card = (id: string, source: string, period: string, debtBalance = 0): Stat
   transactionCount: 0,
   status: "ready",
   kind: "card",
+  reconciliationStatus: "valid",
+  reconciliation: { status: "valid", tolerance: 0.05 },
+  sourceDetection: { source, confidence: 1, status: "verified", evidence: [`encabezado institucional ${source}`], ignoredBodyMentions: [] },
   summary: { debtBalance, statementBalance: debtBalance, creditLimit: 100000, creditAvailable: 100000 - debtBalance },
 });
 
@@ -1263,6 +1269,7 @@ test("un estado listo sin emisor verificado queda en cuarentena aunque concilie"
     status: "ready" as const,
     reconciliationStatus: "valid" as const,
     reconciliation: { status: "valid" as const, tolerance: 0.05 },
+    sourceDetection: undefined,
   };
   const [prepared] = prepareStoredStatements([statement], "web-reader-current");
   assert.equal(prepared?.status, "review");
