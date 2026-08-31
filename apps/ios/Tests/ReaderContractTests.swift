@@ -342,4 +342,24 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(rows[1].amount, 500)
         XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 1_000 })
     }
+
+    func testSantanderOCRCalibratesShiftedColumnsFromHeader() {
+        let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "16-JUL-2026", x: 0.02, y: 0.80, width: 0.10),
+            OCRObservationFixture(text: "PAGO TRANSFERENCIA SPEI", x: 0.10, y: 0.80, width: 0.34),
+            OCRObservationFixture(text: "30.00", x: 0.66, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "55,597.93", x: 0.81, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "17-JUL-2026", x: 0.02, y: 0.70, width: 0.10),
+            OCRObservationFixture(text: "NOMINA EMPRESA", x: 0.10, y: 0.70, width: 0.34),
+            OCRObservationFixture(text: "500.00", x: 0.52, y: 0.70, width: 0.08),
+            OCRObservationFixture(text: "56,097.93", x: 0.81, y: 0.70, width: 0.08),
+        ], fileName: "Santander agosto 2026.pdf")
+
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].amount, -30)
+        XCTAssertEqual(rows[1].amount, 500)
+    }
 }

@@ -2453,6 +2453,22 @@ final class FinanceStore {
         let order: Int
     }
 
+    /// Visual column anchors for a Santander table. The statement examples
+    /// use slightly different page margins/scales, so prefer the header
+    /// geometry when Vision recognizes it and retain the known layout as a
+    /// conservative fallback when a crop omits the header.
+    private struct SantanderOCRColumns {
+        let movementMinX: CGFloat
+        let balanceMinX: CGFloat
+        let depositMaxX: CGFloat
+
+        static let fallback = SantanderOCRColumns(
+            movementMinX: 0.59,
+            balanceMinX: 0.86,
+            depositMaxX: 0.73
+        )
+    }
+
     private struct SantanderRowResult {
         let movement: Movement
         let runningBalance: Decimal?
@@ -3205,6 +3221,7 @@ final class FinanceStore {
         }()
 
         let observationsByPage = Dictionary(grouping: observations, by: \.page)
+        let columns = santanderOCRColumns(from: observations)
         var parsed: [Movement] = []
         var previousRunningBalance: Decimal?
 
@@ -3245,7 +3262,8 @@ final class FinanceStore {
                     dateRegex: dateRegex,
                     amountRegex: amountRegex,
                     defaultYear: defaultYear,
-                    previousRunningBalance: previousRunningBalance
+                    previousRunningBalance: previousRunningBalance,
+                    columns: columns
                 ) {
                     parsed.append(result.movement)
                     previousRunningBalance = result.runningBalance
@@ -3260,12 +3278,56 @@ final class FinanceStore {
         return parsed
     }
 
+    private static func santanderOCRColumns(from observations: [OCRObservation]) -> SantanderOCRColumns {
+        var depositCenter: CGFloat?
+        var withdrawalCenter: CGFloat?
+        var balanceCenter: CGFloat?
+
+        for observation in observations {
+            let normalized = observation.text
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            switch normalized {
+            case "deposito", "depositos":
+                depositCenter = depositCenter ?? observation.centerX
+            case "retiro", "retiros":
+                withdrawalCenter = withdrawalCenter ?? observation.centerX
+            case "saldo":
+                balanceCenter = balanceCenter ?? observation.centerX
+            default:
+                continue
+            }
+        }
+
+        guard let depositCenter, let withdrawalCenter, let balanceCenter,
+              depositCenter < withdrawalCenter, withdrawalCenter < balanceCenter else {
+            return .fallback
+        }
+
+        // The header center is more stable than the left edge of a wide OCR
+        // box. Leave a small margin around each anchor and keep every bound
+        // inside the normalized page so malformed Vision boxes cannot make a
+        // running balance look like a movement.
+        let movementMinX = max(0.40, min(0.70, depositCenter - 0.10))
+        let balanceMinX = max(0.72, min(0.96, (withdrawalCenter + balanceCenter) / 2))
+        let depositMaxX = max(movementMinX + 0.04, min(balanceMinX - 0.04, (depositCenter + withdrawalCenter) / 2))
+        guard movementMinX < depositMaxX, depositMaxX < balanceMinX else {
+            return .fallback
+        }
+        return SantanderOCRColumns(
+            movementMinX: movementMinX,
+            balanceMinX: balanceMinX,
+            depositMaxX: depositMaxX
+        )
+    }
+
     private static func parseSantanderRow(
         _ row: [OCRObservation],
         dateRegex: NSRegularExpression,
         amountRegex: NSRegularExpression,
         defaultYear: Int,
-        previousRunningBalance: Decimal?
+        previousRunningBalance: Decimal?,
+        columns: SantanderOCRColumns
     ) -> SantanderRowResult? {
         guard let dateObservation = row.first(where: {
             $0.boundingBox.minX < 0.24 && firstMatch(in: $0.text, regex: dateRegex) != nil
@@ -3309,7 +3371,7 @@ final class FinanceStore {
         // On Santander's table the deposit and withdrawal columns sit before
         // the running balance. Prefer those columns so the balance is never
         // mistaken for a purchase.
-        let columnCandidates = amountCandidates.filter { $0.x >= 0.59 && $0.x < 0.86 }
+        let columnCandidates = amountCandidates.filter { $0.x >= columns.movementMinX && $0.x < columns.balanceMinX }
         let selected = columnCandidates.sorted { $0.order < $1.order }.first
             ?? { () -> OCRAmountCandidate? in
                 let fallbackCandidates = amountCandidates
@@ -3325,7 +3387,7 @@ final class FinanceStore {
             }()
         guard let selected else { return nil }
         let runningBalance = amountCandidates
-            .filter { $0.x >= 0.86 }
+            .filter { $0.x >= columns.balanceMinX }
             .sorted { $0.order < $1.order }
             .first?.value
         let selectedValue = repairedBankOCRAmount(
@@ -3362,7 +3424,7 @@ final class FinanceStore {
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: .current
         )
-        let depositColumn = selected.x >= 0.59 && selected.x < 0.73
+        let depositColumn = selected.x >= columns.movementMinX && selected.x < columns.depositMaxX
         let semanticDeposit = titleNormalized.contains("nomina")
             || titleNormalized.contains("sueldo")
             || titleNormalized.contains("deposito")
