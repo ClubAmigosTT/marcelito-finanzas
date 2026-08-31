@@ -2040,7 +2040,12 @@ final class FinanceStore {
         }
         let period = Self.periodLabel(from: text, fileName: url.lastPathComponent)
         let summary = Self.summary(from: text, source: source)
-        let existingStatement = statements.first(where: { $0.fileName == url.lastPathComponent })
+        // The original export name is often reused every month. Match the
+        // exact PDF by SHA-256 first so a new cutoff cannot overwrite history;
+        // fall back to a legacy filename-only record once for older builds
+        // that did not persist fingerprints.
+        let existingStatement = statements.first(where: { $0.sourceFingerprint == sourceFingerprint })
+            ?? statements.first(where: { $0.sourceFingerprint == nil && $0.fileName == url.lastPathComponent })
         let statementId = existingStatement?.id ?? UUID()
         let fresh = candidates.map { candidate -> Movement in
             var imported = candidate
