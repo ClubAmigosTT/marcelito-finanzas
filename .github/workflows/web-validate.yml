@@ -36,6 +36,9 @@ jobs:
       - name: Ejecutar lint
         run: npm exec -- eslint src scripts tests --max-warnings=0
 
+      - name: Auditar contenido apto para repositorio público
+        run: npm run audit:public
+
       - name: Ejecutar pruebas de conciliación
         run: npm test
 

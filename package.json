@@ -12,6 +12,7 @@
     "pdf:corpus:diagnose": "node --experimental-strip-types scripts/evaluate-pdf-corpus.ts --manifest tests/fixtures/pdf-corpus-attachments.json --require-manifest --ocr --ocr-dpi 220 --out artifacts/pdf-corpus-ocr.json",
     "pdf:certify": "node --experimental-strip-types scripts/evaluate-pdf-corpus.ts --require-manifest --target-precision 0.99",
     "pdf:native:verify": "node --experimental-strip-types scripts/verify-native-corpus-report.ts",
+    "audit:public": "node scripts/audit-public-repo.mjs",
     "preview": "vite preview"
   },
   "dependencies": {
