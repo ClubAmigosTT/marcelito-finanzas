@@ -8,7 +8,7 @@ expone código, historial, ejecuciones, logs, artefactos, issues y forks.
 
 - [x] Congelar cambios funcionales durante la limpieza.
 - [x] Crear un backup espejo fuera del repositorio.
-- [ ] Registrar quién aprueba el cambio de visibilidad.
+- [x] Registrar la autorización del propietario para sanear y continuar.
 
 ## Fase 1 — Inventario
 
@@ -16,14 +16,12 @@ expone código, historial, ejecuciones, logs, artefactos, issues y forks.
   el árbol actual.
 - [x] Buscar secretos, credenciales de revisión, nombres, cuentas, referencias
   y saldos en el árbol actual.
-- [ ] Revisar los logs y artefactos de Actions; eliminar todas las ejecuciones
+- [x] Revisar los logs y artefactos de Actions; eliminar todas las ejecuciones
   antiguas antes de publicar.
 
-Inventario remoto al 2026-08-31: `main` y la rama automática de Dependabot
-todavía apuntan a la historia privada, hay 23 tags `ios-v*` históricos, una
-pull request automática abierta y la pestaña Actions muestra 100 ejecuciones.
-Esas referencias (incluida la pull request) deben limpiarse o eliminarse antes
-de cambiar la visibilidad.
+La limpieza remota se ejecutó el 2026-08-31: la PR automática fue cerrada, la
+rama de Dependabot y los 23 tags `ios-v*` históricos fueron eliminados, y
+Actions quedó sin ejecuciones antiguas.
 
 El dry-run local de esa limpieza dejó `main` únicamente con la historia limpia,
 pero todavía mostró objetos Git inalcanzables. Esto confirma que retirar ramas y
@@ -38,16 +36,21 @@ tags no sustituye la eliminación de runs, artefactos y referencias de PR.
 - [ ] Confirmar que no queda ningún secreto de repositorio que el workflow de
   publicación pueda leer sin pasar la aprobación del entorno.
 
+La clave de Zen compartida no aparece en el código ni en la historia limpia,
+pero su revocación solo puede hacerla el propietario desde la cuenta de Zen;
+esta sesión no tiene acceso a ese panel. Debe completarse como operación
+externa, aunque no bloquea el saneamiento del repositorio.
+
 ## Fase 3 — Saneamiento del código
 
 - [x] Sustituir fixtures y ejemplos por valores sintéticos.
 - [x] Eliminar cuentas de revisión sembradas y credenciales del binario.
 - [x] Ignorar documentos financieros y material de firma en `.gitignore`.
 - [x] Añadir `SECURITY.md`, `CONTRIBUTING.md`, `CODEOWNERS` y README público.
-- [x] Crear una historia limpia de un solo commit (`public-clean-history`).
-- [x] Confirmar que los 7 commits de `public-clean-history` no contienen
+- [x] Crear una historia limpia en `public-clean-history`.
+- [x] Confirmar que los commits de `public-clean-history` no contienen
   marcadores sensibles ni extensiones financieras o de firma (auditoría local).
-- [ ] Repetir la auditoría después de eliminar las referencias remotas antiguas
+- [x] Repetir la auditoría después de eliminar las referencias remotas antiguas
   y antes de forzar `main`.
 
 ## Fase 4 — CI seguro
@@ -55,8 +58,8 @@ tags no sustituye la eliminación de runs, artefactos y referencias de PR.
 - [x] Mantener validación web/iOS sin secretos en cada push y pull request.
 - [x] Separar TestFlight en el entorno protegido `testflight`.
 - [x] Permitir que TestFlight despliegue únicamente desde tags `ios-v*`.
-- [ ] Tras borrar los tags históricos, comprobar que la regla del entorno ya no
-  incluye ningún tag antiguo (actualmente coincide con 23 tags).
+- [x] Tras borrar los tags históricos, comprobar que la regla del entorno ya no
+  incluye ningún tag antiguo (0 tags coincidentes).
 - [x] Reducir la retención de artefactos de diagnóstico.
 - [x] Activar dependency graph, alertas y actualizaciones de seguridad de
   Dependabot en la configuración del repositorio.
@@ -69,6 +72,10 @@ tags no sustituye la eliminación de runs, artefactos y referencias de PR.
   force-push después de la migración).
 
 ## Fase 5 — Reemplazar referencias remotas
+
+- [x] Cerrar la PR automática y retirar su rama de Dependabot.
+- [x] Eliminar los tags históricos `ios-v*`.
+- [x] Reemplazar `main` por `public-clean-history` con `--force-with-lease`.
 
 Con la aprobación final y después de rotar secretos:
 
