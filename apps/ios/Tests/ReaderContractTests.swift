@@ -85,6 +85,40 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("certificado") })
     }
 
+    func testReaderRejectsAllKnownAdministrativeHeadingsWithAmounts() {
+        // These lines deliberately look like dated monetary rows. They are
+        // common in scanned/text-layer statements, but none is a movement.
+        // Keep this contract broad so a parser change cannot turn a header or
+        // account identifier into an expense again.
+        let text = """
+        Grupo Financiero BBVA
+        BBVA México, Institución de Banca Múltiple
+        Fecha Descripcion Cargos Abonos Saldo
+        01/08/2026 Ciudad de México 123,456.78
+        02/08/2026 No. de Serie del Certificado 2026070840014 456,789.01
+        03/08/2026 TOTAL IMPORTE CARGOS 22,058.69
+        04/08/2026 DEL AL 01/08/2026 31/08/2026 1,030.94
+        05/08/2026 fecha de corte 27/08/2026 39,966.15
+        06/08/2026 número de cuenta 0123456789 10,000.00
+        07/08/2026 RFC ABC123456789 9,999.99
+        08/08/2026 cuenta CLABE 012180001234567890 8,888.88
+        09/08/2026 saldo disponible 7,777.77
+        10/08/2026 total del periodo 6,666.66
+        11/08/2026 periodo de facturación 5,555.55
+        12/08/2026 OXXO 95.00 935.94
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "bbva-agosto-2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 1)
+        XCTAssertEqual(snapshot.movements.first?.title, "OXXO")
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("saldo") })
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("periodo") })
+    }
+
     func testBankShortMonthDatesKeepTheOperationYear() {
         let text = """
         Grupo Financiero BBVA

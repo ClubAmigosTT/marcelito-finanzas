@@ -3506,6 +3506,10 @@ final class FinanceStore {
             .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
             .lowercased()
             .replacingOccurrences(of: #"\b\d{2,}\b"#, with: " ", options: .regularExpression)
+            // OCR/text layers vary between `No. de cuenta`, `No de cuenta`
+            // and `No-de-cuenta`. Compare a punctuation-free form so these
+            // administrative labels share one rejection rule.
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let phrases = [
