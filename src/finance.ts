@@ -48,7 +48,10 @@ export function isStatementEligibleForDashboard(statement: Statement) {
   // A missing evidence record is not equivalent to a verified issuer. Legacy
   // records are migrated to review, but keep this direct boundary strict too
   // so programmatic callers cannot feed an unlabeled PDF into the dashboard.
-  if ((!sourceEvidence || sourceEvidence.status !== "verified") && statement.issuerConfirmedByUser !== true) return false;
+  if ((!sourceEvidence
+    || sourceEvidence.status !== "verified"
+    || sourceEvidence.source !== statement.source)
+    && statement.issuerConfirmedByUser !== true) return false;
   return true;
 }
 
@@ -699,7 +702,10 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     .filter((statement) => {
       if (statement.source === "Desconocido") return true;
       const sourceEvidence = statement.sourceDetection;
-      return Boolean((!sourceEvidence || sourceEvidence.status !== "verified") && statement.issuerConfirmedByUser !== true);
+      return Boolean((!sourceEvidence
+        || sourceEvidence.status !== "verified"
+        || sourceEvidence.source !== statement.source)
+        && statement.issuerConfirmedByUser !== true);
     })
     .map((statement) => statement.id);
   // Provenance is part of acceptance, not just an informational score. If a

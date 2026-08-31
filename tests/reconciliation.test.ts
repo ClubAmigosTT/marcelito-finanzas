@@ -1085,6 +1085,37 @@ test("un estado con emisor no verificado no puede alimentar KPI ni auditoría", 
   assert.equal(audit.status, "blocked");
 });
 
+test("la evidencia verificada de otro banco no puede cambiar el emisor guardado", () => {
+  const statement: Statement = {
+    ...bank("bbva-mismatched-evidence", "BBVA", "agosto 2026"),
+    sourceDetection: {
+      source: "Santander",
+      confidence: 1,
+      status: "verified",
+      evidence: ["encabezado institucional Santander"],
+      ignoredBodyMentions: ["BBVA"],
+    },
+  };
+  const transaction = movement({
+    id: "mismatched-source-row",
+    date: "10 ago 2026",
+    description: "COMPRA CON EMISOR DISTINTO",
+    account: "BBVA",
+    amount: -700,
+    flow: "expense",
+    statementId: statement.id,
+  });
+  assert.equal(isStatementEligibleForDashboard(statement), false);
+  const metrics = buildFinanceMetrics([transaction], [statement]);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(metrics.isProvisional, true);
+  assert.match(metrics.audit.criticalIssues.join(" "), /emisor no verificado/);
+  const [prepared] = prepareStoredStatements([statement], "web-reader-current");
+  assert.equal(prepared?.status, "review");
+  const ledger = prepareStoredLedger([statement], [transaction], "web-reader-current");
+  assert.equal(ledger.quarantinedMovementCount, 1);
+});
+
 test("un estado legado sin emisor conocido queda fuera aunque tenga conciliación válida", () => {
   const statement: Statement = {
     ...bank("unknown-legacy", "Desconocido", "agosto 2026"),
