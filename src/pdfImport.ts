@@ -925,6 +925,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
     const content = await page.getTextContent();
     pageTexts.push(rebuildPdfText(content.items));
     onProgress(12 + Math.round((pageNumber / document.numPages) * 58), `Leyendo pagina ${pageNumber} de ${document.numPages}`);
+    page.cleanup();
   }
 
   const extractedText = pageTexts.join("\n");
