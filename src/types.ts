@@ -153,6 +153,8 @@ export type ImportResult = {
   kind: StatementKind;
   period: string;
   fileName: string;
+  /** SHA-256 of the original PDF when the browser crypto API is available. */
+  sourceFingerprint?: string;
   /** The parser either used the PDF text layer or rendered pages through OCR. */
   mode: "text" | "ocr";
   transactions: Transaction[];
@@ -169,6 +171,8 @@ export type Statement = {
   source: StatementSource;
   period: string;
   fileName: string;
+  /** Stable identity of the exact source PDF used for this statement. */
+  sourceFingerprint?: string;
   importedAt: string;
   mode: ImportResult["mode"];
   transactionCount: number;
@@ -189,6 +193,7 @@ export type ImportCommit = {
   kind: StatementKind;
   period: string;
   fileName: string;
+  sourceFingerprint?: string;
   mode: ImportResult["mode"];
   transactions: Transaction[];
   summary?: StatementSummary;

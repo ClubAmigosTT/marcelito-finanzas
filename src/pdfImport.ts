@@ -154,6 +154,18 @@ export function detectSourceEvidence(text: string, fileName: string): SourceDete
   return result("Desconocido", 0, []);
 }
 
+async function fingerprintPdf(buffer: ArrayBuffer) {
+  try {
+    if (!globalThis.crypto?.subtle) return undefined;
+    const digest = await globalThis.crypto.subtle.digest("SHA-256", buffer);
+    return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  } catch {
+    // Importing must remain available in older/non-secure browser contexts;
+    // the fingerprint is an audit enhancement, never a parsing dependency.
+    return undefined;
+  }
+}
+
 export function detectSource(text: string, fileName: string): StatementSource {
   return detectSourceEvidence(text, fileName).source;
 }
@@ -1023,6 +1035,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   ]);
   pdfjs.GlobalWorkerOptions.workerSrc = workerModule.default;
   const buffer = await file.arrayBuffer();
+  const sourceFingerprint = await fingerprintPdf(buffer);
   const document = await pdfjs.getDocument({ data: buffer }).promise;
   try {
     // A monthly statement normally has fewer than ten pages. Refuse an
@@ -1084,6 +1097,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
       kind,
       period: detectPeriod(text, file.name),
       fileName: file.name,
+      sourceFingerprint,
       mode,
       transactions: parsed,
       summary,
