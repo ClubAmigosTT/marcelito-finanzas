@@ -1067,15 +1067,26 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   const kind = detectStatementKind(text, source);
   onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
-  const parsed = extractTransactions(text, source, file.name, kind).map((transaction) => ({
-    ...transaction,
+  const parsed = extractTransactions(text, source, file.name, kind).map((transaction) => {
     // The parser is shared by text and OCR input. Preserve the actual method
     // selected by inspectPdf so diagnostics never call an OCR row "text".
-    extractionEvidence: {
-      ...(transaction.extractionEvidence ?? { confidence: transaction.confidence ?? 0.75 }),
-      method: mode === "ocr" ? "ocr" as const : "pdf-text" as const,
-    },
-  }));
+    const page = transaction.extractionEvidence?.page;
+    const pageConfidence = mode === "ocr" && page !== undefined
+      ? ocrResult?.pageConfidences?.[page - 1]
+      : undefined;
+    const rowConfidence = pageConfidence === undefined
+      ? transaction.confidence ?? 0.75
+      : Math.min(transaction.confidence ?? pageConfidence, pageConfidence);
+    return {
+      ...transaction,
+      confidence: rowConfidence,
+      extractionEvidence: {
+        ...(transaction.extractionEvidence ?? { confidence: rowConfidence }),
+        method: mode === "ocr" ? "ocr" as const : "pdf-text" as const,
+        confidence: rowConfidence,
+      },
+    };
+  });
   const summary = parseStatementSummary(text, kind);
   const baseReconciliation = reconcileStatementImport(kind, summary, parsed);
   // A matching total is necessary but not sufficient for automatic OCR
