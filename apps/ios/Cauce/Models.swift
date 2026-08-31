@@ -2354,6 +2354,17 @@ final class FinanceStore {
                   abs(parsedAmount) < 10_000_000 else {
                 return nil
             }
+            // A bare long integer in a PDF row is overwhelmingly an account,
+            // certificate or operation identifier, not a monetary amount.
+            // Keep ordinary integer charges (up to six digits), but require a
+            // currency marker, grouping separator or cents for larger values
+            // so administrative numbers cannot become million-peso expenses.
+            let rawAmount = amountMatch.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let digitsOnly = rawAmount.filter { $0.isNumber }
+            let hasMoneyShape = rawAmount.contains("$")
+                || rawAmount.range(of: #"[.,]\d{1,2}$"#, options: .regularExpression) != nil
+                || rawAmount.range(of: #"\d{1,3}(?:[ ,]\d{3})+"#, options: .regularExpression) != nil
+            if !hasMoneyShape && digitsOnly.count > 6 { return nil }
             working = working.replacingCharacters(in: Range(amountMatch.range, in: working)!, with: " ")
 
             var title = working

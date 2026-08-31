@@ -53,6 +53,7 @@ final class ReaderContractTests: XCTestCase {
         BBVA México, Institución de Banca Múltiple
         Fecha Descripcion
         03/08/2026 Ciudad de México No. de Serie del Certificado 2026070840014 123,456.78
+        05/08/2026 SPEI RECIBIDO 1234567
         04/08/2026 OXXO 95.00 1,200.00
         """
 
