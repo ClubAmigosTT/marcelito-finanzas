@@ -306,8 +306,8 @@ struct ImportSummary {
     let ocrConfidence: Double?
     let ocrPageConfidences: [Double]?
     let ocrColumnsCalibrated: Bool?
-    let fileSizeBytes: Int? = nil
-    let pageCount: Int? = nil
+    var fileSizeBytes: Int? = nil
+    var pageCount: Int? = nil
 }
 
 /// Deterministic reader output used by the iOS contract tests. Keeping this
@@ -2421,7 +2421,7 @@ final class FinanceStore {
         let netForeignCharges = foreignCharges - foreignCredits
         let payments = validRows.filter { movementKind($0) == .cardPayment }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let movementCount = validRows.count
-        let expectedMovementCount = summary.flatMap { value in
+        let expectedMovementCount: Int? = summary.flatMap { value -> Int? in
             guard let deposits = value.depositCount, let withdrawals = value.withdrawalCount else { return nil }
             return deposits + withdrawals
         }
@@ -2836,11 +2836,11 @@ final class FinanceStore {
             reconciliation: gatedReconciliation,
             sourceDetection: sourceDetection,
             issuerConfirmedByUser: preservedIssuerConfirmation,
-            sourceFingerprint: sourceFingerprint,
-            readerVersion: Self.readerVersion,
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences,
             ocrColumnsCalibrated: ocrColumnsCalibrated,
+            sourceFingerprint: sourceFingerprint,
+            readerVersion: Self.readerVersion,
             fileSizeBytes: documentData.count,
             pageCount: extraction.pageCount
         )
@@ -3095,10 +3095,10 @@ final class FinanceStore {
 
             return (request.results ?? []).compactMap { result -> OCRObservation? in
                 guard let candidate = result.topCandidates(1).first,
-                      let text = candidate.string,
-                      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                      !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     return nil
                 }
+                let text = candidate.string
                 return OCRObservation(
                     page: page,
                     text: text,
@@ -4626,7 +4626,7 @@ final class FinanceStore {
                 let raw = String(normalized[valueRange])
                 if !allowBareBankAmount,
                    raw.range(of: #"^\s*\d{7,}\s*$"#, options: .regularExpression) != nil { return nil }
-                let parsed = parseAmount(raw)
+                guard let parsed = parseAmount(raw) else { return nil }
                 return allowBareBankAmount ? normalizeBareBankAmount(raw, parsed) : parsed
             }
         }
@@ -4675,10 +4675,11 @@ final class FinanceStore {
                 let lineRange = NSRange(line.startIndex..<line.endIndex, in: line)
                 let matches = amountRegex.matches(in: line, range: lineRange)
                 if let match = matches.last,
-                   let valueRange = Range(match.range, in: line),
-                   let raw = String(line[valueRange]),
-                   let value = parseAmount(raw) {
-                    return normalizeBareBankAmount(raw, value)
+                   let valueRange = Range(match.range, in: line) {
+                    let raw = String(line[valueRange])
+                    if let value = parseAmount(raw) {
+                        return normalizeBareBankAmount(raw, value)
+                    }
                 }
             }
             return nil
