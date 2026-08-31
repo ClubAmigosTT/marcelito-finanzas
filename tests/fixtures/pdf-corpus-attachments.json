@@ -12,7 +12,13 @@
       "status": "valid",
       "rows": 92,
       "summary": {
-        "extractedChargeTotal": 28034.19
+        "extractedChargeTotal": 28034.19,
+        "creditLimit": 108000,
+        "creditAvailable": 79965.81,
+        "debtBalance": 28034.19,
+        "paymentForNoInterest": 9675.73,
+        "minimumPlusMsi": 10529.23,
+        "msiPending": 18358.46
       }
     },
     {
@@ -24,7 +30,13 @@
       "rows": 145,
       "summary": {
         "extractedChargeTotal": 46711.63,
-        "extractedPaymentTotal": 34405.21
+        "extractedPaymentTotal": 34405.21,
+        "creditLimit": 108000,
+        "creditAvailable": 67659.39,
+        "debtBalance": 40340.61,
+        "paymentForNoInterest": 23150.88,
+        "minimumPlusMsi": 15036.56,
+        "msiPending": 17189.73
       }
     },
     {
@@ -75,7 +87,13 @@
       "rows": 105,
       "summary": {
         "extractedChargeTotal": 33177.48,
-        "extractedPaymentTotal": 23150.88
+        "extractedPaymentTotal": 23150.88,
+        "creditLimit": 150000,
+        "creditAvailable": 99632.79,
+        "debtBalance": 50367.21,
+        "paymentForNoInterest": 39966.15,
+        "minimumPlusMsi": 19579.69,
+        "msiPending": 10401.06
       }
     },
     {

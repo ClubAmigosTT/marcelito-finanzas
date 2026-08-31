@@ -138,6 +138,11 @@ que Vision confirme emisor, filas y totales. Para esos cuatro cortes el
 manifiesto también conserva los controles de saldo anterior, saldo final,
 depósitos y retiros; el evaluador los expone como `statementControls` para
 comparar una corrida OCR aunque todavía no se acepten sus filas.
+En los tres estados Amex con texto también se fijan límite de crédito,
+crédito disponible, deuda comprometida (`límite - disponible`), pago para no
+generar intereses, mínimo más MSI y principal MSI pendiente. Esos controles
+se comparan por separado de cargos y pagos para que un estado pueda conciliar
+sus filas y, aun así, quedar bloqueado si su deuda está mal leída.
 
 Cada corrida puede conservarse como evidencia auditable pasando `--out` al
 evaluador. El archivo incluye la versión exacta del lector, huellas SHA-256,

@@ -66,6 +66,9 @@ async function evaluate(file: string) {
   const kind = kindFor(sourceDetection.source);
   const transactions = kind === "unknown" ? [] : extractTransactions(text, sourceDetection.source, fileName, kind);
   const summary = kind === "unknown" ? undefined : parseStatementSummary(text, kind);
+  const creditUsed = summary?.creditLimit !== undefined && summary.creditAvailable !== undefined
+    ? Math.max(0, summary.creditLimit - summary.creditAvailable)
+    : summary?.debtBalance;
   const statementControls = summary ? {
     previousBalance: summary.previousBalance,
     cashBalance: summary.cashBalance,
@@ -73,6 +76,13 @@ async function evaluate(file: string) {
     withdrawalTotal: summary.withdrawalTotal,
     depositCount: summary.depositCount,
     withdrawalCount: summary.withdrawalCount,
+    statementBalance: summary.statementBalance,
+    creditLimit: summary.creditLimit,
+    creditAvailable: summary.creditAvailable,
+    debtBalance: creditUsed,
+    paymentForNoInterest: summary.paymentForNoInterest,
+    minimumPlusMsi: summary.minimumPlusMsi,
+    msiPending: summary.msiPending,
   } : {};
   const reconciliation = kind === "unknown"
     ? { status: "pending" as const, tolerance: 0.05, extractedMovementCount: 0, reason: "Emisor no identificado" }

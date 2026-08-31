@@ -190,6 +190,10 @@ El runner nativo ya contrasta los controles de saldo inicial, saldo final,
 depósitos y retiros del resumen incluso cuando una lectura escaneada permanece
 `pending`; solo difiere la aserción de sumas de filas hasta que Vision
 reconstruye movimientos válidos.
+El evaluador web también contrasta en los estados Amex de texto el límite,
+crédito disponible, deuda comprometida, pago para no generar intereses, mínimo
+más MSI y principal MSI pendiente; estos controles son independientes de las
+filas para evitar que una deuda mal extraída pase por una conciliación parcial.
 La ejecución está encapsulada en `apps/ios/scripts/run-native-corpus.sh`, que
 conserva el `.xcresult` y el log para que cada calibración sea reproducible.
 En Santander, si Vision no identifica los tres anclajes de columna, el lector
