@@ -67,9 +67,24 @@ de cambiar la visibilidad.
 Con la aprobación final y después de rotar secretos:
 
 ```bash
-git push origin public-clean-history:main --force-with-lease
+# No ejecutar hasta que las puertas de Fase 0–4 estén marcadas.
+git fetch origin --prune
+git show-ref --verify refs/remotes/origin/public-clean-history
+git ls-remote --heads origin
+
+# Primero cerrar la PR abierta y borrar su rama desde GitHub.
+# Después borrar todos los tags ios-v* históricos.
 git push origin --delete ios-v1.0.0 ios-v1.0.1  # repetir para todos los tags viejos
+
+# Solo al final reemplazar main por la historia limpia.
+git push origin public-clean-history:main --force-with-lease
 ```
+
+La orden de reemplazo se ejecuta antes de borrar `public-clean-history` y solo
+después de comprobar que el backup espejo existe y que la huella de
+`public-clean-history` coincide local y remotamente. La eliminación de runs y
+artefactos se hace desde Actions antes de este bloque; así los logs y
+artefactos no sobreviven al cambio de visibilidad.
 
 Crear un tag nuevo desde la historia limpia solo después de que CI pase y los
 secretos del entorno estén verificados. El backup espejo conserva la historia
