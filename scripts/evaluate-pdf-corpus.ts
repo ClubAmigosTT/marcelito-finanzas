@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
-import { detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, PDF_READER_VERSION, rebuildPdfText, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
+import { detectAccountKey, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, PDF_READER_VERSION, rebuildPdfText, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import type { StatementKind, StatementSource } from "../src/types.ts";
 
 const execFile = promisify(execFileCallback);
@@ -13,6 +13,8 @@ const execFile = promisify(execFileCallback);
 type ExpectedFile = {
   file: string;
   sourceFingerprint?: string;
+  /** Issuer-scoped masked identity; the full account number is never stored. */
+  accountKey?: string;
   source?: StatementSource;
   kind?: StatementKind;
   status?: "valid" | "invalid" | "pending";
@@ -123,6 +125,7 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
     ocrPageConfidences = ocr.pageConfidences;
   }
   const sourceDetection = detectSourceEvidence(text, fileName);
+  const accountKey = detectAccountKey(text, sourceDetection.source);
   const kind = kindFor(sourceDetection.source);
   const transactions = kind === "unknown" ? [] : mode === "ocr"
     ? parseImportedTransactions(text, sourceDetection.source, fileName, kind, "ocr", ocrPageConfidences)
@@ -182,6 +185,7 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
       statusAfter: reconciliation.status,
     },
     source: sourceDetection.source,
+    accountKey,
     sourceStatus: sourceDetection.status,
     sourceConfidence: Number(sourceDetection.confidence.toFixed(4)),
     sourceEvidence: sourceDetection.evidence,
@@ -273,6 +277,7 @@ if (!directory) {
         sourceFingerprint: undefined,
         mode: "parse-error",
         source: "Desconocido",
+        accountKey: undefined,
         sourceStatus: "unknown",
         sourceConfidence: 0,
         sourceEvidence: [],
@@ -306,6 +311,12 @@ if (!directory) {
       mismatches.push(`emisor no verificado (estado ${result.sourceStatus})`);
     }
     if (expected?.kind && expected.kind !== result.kind) mismatches.push(`tipo esperado ${expected.kind}, obtenido ${result.kind}`);
+    // A scan without OCR has no reliable header, so defer this assertion to
+    // the native/diagnostic OCR run. Text-layer documents are checked here.
+    if (expected?.accountKey && (result.mode !== "ocr-required" || useOCR)
+      && expected.accountKey !== result.accountKey) {
+      mismatches.push(`cuenta esperada ${expected.accountKey}, obtenida ${result.accountKey ?? "ausente"}`);
+    }
     if (expected?.sourceFingerprint && expected.sourceFingerprint !== result.sourceFingerprint) mismatches.push("huella SHA-256 del archivo no coincide");
     const expectedOCRPromotion = useOCR && expected?.status === "pending";
     if (expected?.status && !expectedOCRPromotion && expected.status !== result.reconciliation.status) mismatches.push(`estado esperado ${expected.status}, obtenido ${result.reconciliation.status}`);

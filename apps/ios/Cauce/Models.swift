@@ -288,6 +288,9 @@ struct StatementRecord: Identifiable, Codable {
 
 struct ImportSummary {
     let source: String
+    /// Issuer-scoped masked identity (last four digits only); full account
+    /// numbers never leave the PDF reader.
+    let accountKey: String?
     let kind: StatementKind
     let period: String
     let fileName: String
@@ -525,7 +528,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.08.31.13"
+    static let readerVersion = "ios-reader-2026.08.31.14"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -2683,6 +2686,7 @@ final class FinanceStore {
 
         return ImportSummary(
             source: source,
+            accountKey: accountKey,
             kind: detectedKind,
             period: period,
             fileName: url.lastPathComponent,

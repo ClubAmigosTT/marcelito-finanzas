@@ -12,6 +12,7 @@ final class NativeCorpusContractTests: XCTestCase {
     private struct Expectation {
         let sourceFingerprint: String
         let source: String
+        let accountKey: String
         let kind: StatementKind
         let status: StatementReconciliationStatus
         let rows: Int
@@ -31,6 +32,7 @@ final class NativeCorpusContractTests: XCTestCase {
         init(
             sourceFingerprint: String,
             source: String,
+            accountKey: String = "",
             kind: StatementKind,
             status: StatementReconciliationStatus,
             rows: Int,
@@ -49,6 +51,7 @@ final class NativeCorpusContractTests: XCTestCase {
         ) {
             self.sourceFingerprint = sourceFingerprint
             self.source = source
+            self.accountKey = accountKey
             self.kind = kind
             self.status = status
             self.rows = rows
@@ -68,14 +71,14 @@ final class NativeCorpusContractTests: XCTestCase {
     }
 
     private let expectations: [String: Expectation] = [
-        "1-28_may_2026_-_27_jun_2026.pdf": Expectation(sourceFingerprint: "e1a59460b86cab81f298cfa42e4cc1f738bf932bf5ccdb543cb49d623eb69abc", source: "Amex", kind: .card, status: .valid, rows: 92, chargeTotal: 28_034.19, creditLimit: 108_000, creditAvailable: 79_965.81, debtBalance: 28_034.19, paymentForNoInterest: 9_675.73, minimumPlusMsi: 10_529.23, msiPending: 18_358.46),
-        "2-28_jun_2026_-_27_jul_2026.pdf": Expectation(sourceFingerprint: "83dc1e0b60c2edd56aa14330c7d001109cdc600af83a66e8e87243fdf86cfcc8", source: "Amex", kind: .card, status: .valid, rows: 145, chargeTotal: 46_711.63, paymentTotal: 34_405.21, creditLimit: 108_000, creditAvailable: 67_659.39, debtBalance: 40_340.61, paymentForNoInterest: 23_150.88, minimumPlusMsi: 15_036.56, msiPending: 17_189.73),
-        "3-Estado-de-cuenta-mayo-2026.pdf": Expectation(sourceFingerprint: "f6940102b000539c733632727909dafbd8d97bca313d8c959ac5798d0611d6e4", source: "Santander", kind: .bank, status: .pending, rows: 0, previousBalance: 37_075.03, cashBalance: 24_621.48, depositTotal: 49_222.45, withdrawalTotal: 61_676.00),
-        "4-Estado-de-cuenta-julio-2026.pdf": Expectation(sourceFingerprint: "747aba6d4453c0b7173c450a5a125d94cfb38a0940cb1776dd059f0d0e6e78a9", source: "Santander", kind: .bank, status: .pending, rows: 0, previousBalance: 87_801.76, cashBalance: 55_627.93, depositTotal: 40_833.38, withdrawalTotal: 73_007.21),
-        "5-Estado-de-cuenta-agosto-2026.pdf": Expectation(sourceFingerprint: "30ccfc7fc31a128bbfd9f1d6c7c84e6840dbdc20c9cad9d90cac0807a845b8c0", source: "Santander", kind: .bank, status: .pending, rows: 0, previousBalance: 55_627.93, cashBalance: 27_654.24, depositTotal: 36_187.42, withdrawalTotal: 64_161.11),
-        "6-28_jul_2026_-_27_ago_2026.pdf": Expectation(sourceFingerprint: "f2518086b1f4767c72c9e5d6d02ec27576576b8cfee5014d8b2eb0a635989b06", source: "Amex", kind: .card, status: .valid, rows: 105, chargeTotal: 33_177.48, paymentTotal: 23_150.88, creditLimit: 150_000, creditAvailable: 99_632.79, debtBalance: 50_367.21, paymentForNoInterest: 39_966.15, minimumPlusMsi: 19_579.69, msiPending: 10_401.06),
-        "7-Estado-de-cuenta-junio-2026.pdf": Expectation(sourceFingerprint: "72b13daa0b9009017ce3d5d9c4951070a70da5f2888e8bbcb83ef4f1231455fb", source: "Santander", kind: .bank, status: .pending, rows: 0, previousBalance: 24_621.48, cashBalance: 87_801.76, depositTotal: 98_629.30, withdrawalTotal: 35_449.02),
-        "8-BBVA-agosto-.pdf": Expectation(sourceFingerprint: "1c6c6e5a9aa96afa46bdfcd606c0c184f2ef0a964a9e51e4202be17b1ea4e558", source: "BBVA", kind: .bank, status: .valid, rows: 11, depositTotal: 19_500.00, withdrawalTotal: 22_058.69),
+        "1-28_may_2026_-_27_jun_2026.pdf": Expectation(sourceFingerprint: "e1a59460b86cab81f298cfa42e4cc1f738bf932bf5ccdb543cb49d623eb69abc", source: "Amex", accountKey: "amex:1003", kind: .card, status: .valid, rows: 92, chargeTotal: 28_034.19, creditLimit: 108_000, creditAvailable: 79_965.81, debtBalance: 28_034.19, paymentForNoInterest: 9_675.73, minimumPlusMsi: 10_529.23, msiPending: 18_358.46),
+        "2-28_jun_2026_-_27_jul_2026.pdf": Expectation(sourceFingerprint: "83dc1e0b60c2edd56aa14330c7d001109cdc600af83a66e8e87243fdf86cfcc8", source: "Amex", accountKey: "amex:1003", kind: .card, status: .valid, rows: 145, chargeTotal: 46_711.63, paymentTotal: 34_405.21, creditLimit: 108_000, creditAvailable: 67_659.39, debtBalance: 40_340.61, paymentForNoInterest: 23_150.88, minimumPlusMsi: 15_036.56, msiPending: 17_189.73),
+        "3-Estado-de-cuenta-mayo-2026.pdf": Expectation(sourceFingerprint: "f6940102b000539c733632727909dafbd8d97bca313d8c959ac5798d0611d6e4", source: "Santander", accountKey: "santander:7079", kind: .bank, status: .pending, rows: 0, previousBalance: 37_075.03, cashBalance: 24_621.48, depositTotal: 49_222.45, withdrawalTotal: 61_676.00),
+        "4-Estado-de-cuenta-julio-2026.pdf": Expectation(sourceFingerprint: "747aba6d4453c0b7173c450a5a125d94cfb38a0940cb1776dd059f0d0e6e78a9", source: "Santander", accountKey: "santander:7079", kind: .bank, status: .pending, rows: 0, previousBalance: 87_801.76, cashBalance: 55_627.93, depositTotal: 40_833.38, withdrawalTotal: 73_007.21),
+        "5-Estado-de-cuenta-agosto-2026.pdf": Expectation(sourceFingerprint: "30ccfc7fc31a128bbfd9f1d6c7c84e6840dbdc20c9cad9d90cac0807a845b8c0", source: "Santander", accountKey: "santander:7079", kind: .bank, status: .pending, rows: 0, previousBalance: 55_627.93, cashBalance: 27_654.24, depositTotal: 36_187.42, withdrawalTotal: 64_161.11),
+        "6-28_jul_2026_-_27_ago_2026.pdf": Expectation(sourceFingerprint: "f2518086b1f4767c72c9e5d6d02ec27576576b8cfee5014d8b2eb0a635989b06", source: "Amex", accountKey: "amex:1003", kind: .card, status: .valid, rows: 105, chargeTotal: 33_177.48, paymentTotal: 23_150.88, creditLimit: 150_000, creditAvailable: 99_632.79, debtBalance: 50_367.21, paymentForNoInterest: 39_966.15, minimumPlusMsi: 19_579.69, msiPending: 10_401.06),
+        "7-Estado-de-cuenta-junio-2026.pdf": Expectation(sourceFingerprint: "72b13daa0b9009017ce3d5d9c4951070a70da5f2888e8bbcb83ef4f1231455fb", source: "Santander", accountKey: "santander:7079", kind: .bank, status: .pending, rows: 0, previousBalance: 24_621.48, cashBalance: 87_801.76, depositTotal: 98_629.30, withdrawalTotal: 35_449.02),
+        "8-BBVA-agosto-.pdf": Expectation(sourceFingerprint: "1c6c6e5a9aa96afa46bdfcd606c0c184f2ef0a964a9e51e4202be17b1ea4e558", source: "BBVA", accountKey: "bbva:4922", kind: .bank, status: .valid, rows: 11, depositTotal: 19_500.00, withdrawalTotal: 22_058.69),
     ]
 
     private func fingerprint(_ file: URL) throws -> String {
@@ -138,6 +141,9 @@ final class NativeCorpusContractTests: XCTestCase {
                 requireValidReconciliation: false
             )
             XCTAssertEqual(result.source, expected.source, file.lastPathComponent)
+            if !expected.accountKey.isEmpty {
+                XCTAssertEqual(result.accountKey, expected.accountKey, file.lastPathComponent + " identidad de cuenta")
+            }
             XCTAssertEqual(result.kind, expected.kind, file.lastPathComponent)
             XCTAssertEqual(result.sourceDetection.status, .verified, file.lastPathComponent)
             XCTAssertLessThanOrEqual(result.imported, 1_000, file.lastPathComponent + " produjo un volumen de filas absurdo")
@@ -241,6 +247,7 @@ final class NativeCorpusContractTests: XCTestCase {
                 "fileSizeBytes": String(result.fileSizeBytes ?? fileSizeBytes),
                 "pageCount": String(result.pageCount ?? 0),
                 "source": result.source,
+                "accountKey": result.accountKey ?? "",
                 "kind": result.kind.rawValue,
                 "mode": result.usedOCR ? "vision-ocr" : "pdf-text",
                 "sourceStatus": result.sourceDetection.status.rawValue,

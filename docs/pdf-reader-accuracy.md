@@ -155,6 +155,9 @@ Los valores de control sin datos personales están en `tests/fixtures/pdf-golden
 El manifiesto `tests/fixtures/pdf-corpus-attachments.json` fija los ocho
 adjuntos de prueba disponibles mediante SHA-256. No incluye los PDFs: deben
 montarse desde la carpeta local de adjuntos al ejecutar la certificación. Los
+campos `accountKey` del manifiesto solo contienen `emisor:últimos4` y permiten
+detectar que un reimport no mezcle dos cuentas del mismo banco; nunca se
+persisten números completos.
 cuatro escaneos Santander permanecen intencionalmente como `pending` hasta
 que Vision confirme emisor, filas y totales. Para esos cuatro cortes el
 manifiesto también conserva los controles de saldo anterior, saldo final,

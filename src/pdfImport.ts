@@ -3,7 +3,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-2026.08.31.7";
+export const PDF_READER_VERSION = "web-reader-2026.08.31.8";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";

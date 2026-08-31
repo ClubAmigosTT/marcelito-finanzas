@@ -44,7 +44,7 @@ hay falsos positivos o la precisión cae por debajo de 99%:
 ```bash
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
-  --reader-version ios-reader-2026.08.31.13 \
+  --reader-version ios-reader-2026.08.31.14 \
   --require-certified
 ```
 
