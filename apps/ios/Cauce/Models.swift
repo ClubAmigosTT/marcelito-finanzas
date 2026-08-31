@@ -439,7 +439,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.08.31.1"
+    static let readerVersion = "ios-reader-2026.08.31.2"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -497,6 +497,53 @@ final class FinanceStore {
     ) -> Bool {
         guard hasSources else { return false }
         return !completed || completedReaderVersion != currentReaderVersion
+    }
+
+    /// Reconciles one OCR bank amount against the running-balance delta. It is
+    /// intentionally conservative: only a small OCR drift (≤ $2) or a clearly
+    /// malformed magnitude may be repaired. Missing/ambiguous balances keep
+    /// the selected visual amount and let the statement reconciliation gate
+    /// decide whether the import is safe.
+    static func repairedBankOCRAmountForTesting(
+        selected: Decimal,
+        selectedText: String,
+        previousBalance: Decimal?,
+        runningBalance: Decimal?
+    ) -> Decimal {
+        repairedBankOCRAmount(
+            selected: selected,
+            selectedText: selectedText,
+            previousBalance: previousBalance,
+            runningBalance: runningBalance
+        )
+    }
+
+    private static func repairedBankOCRAmount(
+        selected: Decimal,
+        selectedText: String,
+        previousBalance: Decimal?,
+        runningBalance: Decimal?
+    ) -> Decimal {
+        let selectedMagnitude = absoluteDecimal(selected)
+        guard let previousBalance, let runningBalance else { return selectedMagnitude }
+        let delta = runningBalance - previousBalance
+        let deltaMagnitude = absoluteDecimal(delta)
+        guard deltaMagnitude > 0 else { return selectedMagnitude }
+        let difference = absoluteDecimal(deltaMagnitude - selectedMagnitude)
+        let tolerance = Decimal(string: "2", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(2)
+        let scale = max(max(absoluteDecimal(runningBalance), absoluteDecimal(previousBalance)), Decimal(1))
+        let hasDecimalCents = selectedText.range(of: #"[.,]\d{1,2}$"#, options: .regularExpression) != nil
+        let malformedMagnitude = selectedMagnitude > scale * Decimal(2)
+            || (!hasDecimalCents && selectedMagnitude > scale)
+        let deltaWithinBalanceScale = deltaMagnitude <= scale * Decimal(string: "1.25", locale: Locale(identifier: "en_US_POSIX"))! + Decimal(string: "0.05", locale: Locale(identifier: "en_US_POSIX"))!
+        guard difference <= tolerance || (malformedMagnitude && deltaWithinBalanceScale) else {
+            return selectedMagnitude
+        }
+        return deltaMagnitude
+    }
+
+    private static func absoluteDecimal(_ value: Decimal) -> Decimal {
+        value < 0 ? -value : value
     }
 
     var movements: [Movement]
@@ -2337,6 +2384,11 @@ final class FinanceStore {
         let order: Int
     }
 
+    private struct SantanderRowResult {
+        let movement: Movement
+        let runningBalance: Decimal?
+    }
+
     private static func extractionBounds(for row: [OCRObservation]) -> MovementExtractionBounds? {
         guard let first = row.first else { return nil }
         let rect = row.dropFirst().reduce(first.boundingBox) { $0.union($1.boundingBox) }
@@ -3085,6 +3137,7 @@ final class FinanceStore {
 
         let observationsByPage = Dictionary(grouping: observations, by: \.page)
         var parsed: [Movement] = []
+        var previousRunningBalance: Decimal?
 
         for page in observationsByPage.keys.sorted() {
             let pageObservations = (observationsByPage[page] ?? []).sorted {
@@ -3118,8 +3171,19 @@ final class FinanceStore {
             if !pendingRow.isEmpty { rows.append(pendingRow) }
 
             for row in rows {
-                if let movement = parseSantanderRow(row, dateRegex: dateRegex, amountRegex: amountRegex, defaultYear: defaultYear) {
-                    parsed.append(movement)
+                if let result = parseSantanderRow(
+                    row,
+                    dateRegex: dateRegex,
+                    amountRegex: amountRegex,
+                    defaultYear: defaultYear,
+                    previousRunningBalance: previousRunningBalance
+                ) {
+                    parsed.append(result.movement)
+                    previousRunningBalance = result.runningBalance
+                } else {
+                    // A row without a trustworthy running balance must not
+                    // contaminate the next row's delta-based repair.
+                    previousRunningBalance = nil
                 }
             }
         }
@@ -3131,8 +3195,9 @@ final class FinanceStore {
         _ row: [OCRObservation],
         dateRegex: NSRegularExpression,
         amountRegex: NSRegularExpression,
-        defaultYear: Int
-    ) -> Movement? {
+        defaultYear: Int,
+        previousRunningBalance: Decimal?
+    ) -> SantanderRowResult? {
         guard let dateObservation = row.first(where: {
             $0.boundingBox.minX < 0.24 && firstMatch(in: $0.text, regex: dateRegex) != nil
         }), let dateMatch = firstMatch(in: dateObservation.text, regex: dateRegex),
@@ -3190,6 +3255,16 @@ final class FinanceStore {
                 return fallbackCandidates.first
             }()
         guard let selected else { return nil }
+        let runningBalance = amountCandidates
+            .filter { $0.x >= 0.86 }
+            .sorted { $0.order < $1.order }
+            .first?.value
+        let selectedValue = repairedBankOCRAmount(
+            selected: selected.value,
+            selectedText: selected.text,
+            previousBalance: previousRunningBalance,
+            runningBalance: runningBalance
+        )
 
         let titleParts = row
             .filter { $0.centerX >= 0.18 && $0.centerX < 0.62 }
@@ -3244,7 +3319,7 @@ final class FinanceStore {
             flow = .expense
         }
 
-        let signedAmount = flow == .income ? abs(selected.value) : -abs(selected.value)
+        let signedAmount = flow == .income ? selectedValue : -selectedValue
         let displayAccount = flow == .transfer && titleNormalized.contains("amex")
             ? "Santander a Amex"
             : "Santander"
@@ -3270,7 +3345,7 @@ final class FinanceStore {
             "transporte", "uber", "taxi", "metro", "renta de auto", "destino", "equipaje"
         ].contains { titleNormalized.contains($0) }
 
-        return Movement(
+        let movement = Movement(
             date: date,
             title: title,
             account: displayAccount,
@@ -3288,6 +3363,7 @@ final class FinanceStore {
                 bounds: extractionBounds(for: row)
             )
         )
+        return SantanderRowResult(movement: movement, runningBalance: runningBalance)
     }
 
     /// Amex statements use a date/description block followed by the amount;

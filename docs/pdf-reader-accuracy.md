@@ -38,6 +38,11 @@ gasto real sin separar esas secciones.
   claves de rastreo posteriores no pueden convertirse en importes. Si OCR
   fusiona los separadores decimales, el importe solo se recupera mediante el
   delta del saldo y siempre se vuelve a comparar contra el total declarado.
+- En Santander, cuando Vision entrega un saldo corrido por fila, el lector
+  compara el importe con la variación entre saldos consecutivos. Solo repara
+  un desvío menor o igual a $2, o una magnitud claramente mal escalada que
+  siga dentro del rango del saldo; si no existe saldo anterior/final confiable
+  conserva el importe visual y deja que la conciliación bloquee el estado.
 - Ningún movimiento individual puede superar el total declarado de depósitos
   o retiros de su estado; esa fila bloquea la conciliación aunque el resto de
   las sumas parezca correcto.

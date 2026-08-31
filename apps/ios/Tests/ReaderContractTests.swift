@@ -306,4 +306,22 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: true))
         XCTAssertFalse(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: false))
     }
+
+    func testSantanderOCRAmountUsesSmallRunningBalanceDriftOnly() {
+        let repaired = FinanceStore.repairedBankOCRAmountForTesting(
+            selected: 30.01,
+            selectedText: "30.01",
+            previousBalance: 55_627.93,
+            runningBalance: 55_597.93
+        )
+        XCTAssertEqual(NSDecimalNumber(decimal: repaired).doubleValue, 30, accuracy: 0.001)
+
+        let unchanged = FinanceStore.repairedBankOCRAmountForTesting(
+            selected: 500,
+            selectedText: "500.00",
+            previousBalance: 1_000,
+            runningBalance: 200
+        )
+        XCTAssertEqual(NSDecimalNumber(decimal: unchanged).doubleValue, 500, accuracy: 0.001)
+    }
 }

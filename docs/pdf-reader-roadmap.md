@@ -156,3 +156,10 @@ La certificación final del 99% queda pendiente de ejecutar el corpus completo
 en macOS/Xcode con Vision; el entorno Windows no dispone de `xcodebuild` ni del
 framework Vision. Hasta completar esa corrida, los estados OCR no deben
 alimentar KPI productivos.
+
+La última revisión nativa añade una reparación conservadora para Santander:
+cuando Vision conserva el saldo corrido de dos filas consecutivas, un importe
+con separador decimal perdido solo se corrige si coincide con el delta del
+saldo (o con un desvío menor o igual a $2). Sin saldos confiables, la fila no
+se adivina y la conciliación mantiene el estado bloqueado. Esta regla ya tiene
+prueba de contrato; falta ejecutarla contra los cuatro escaneos en macOS/Xcode.
