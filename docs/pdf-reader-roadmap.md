@@ -42,6 +42,9 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
    tabla de movimientos conciliados; nunca el texto crudo ni estados parciales.
 10. **Puerta de calidad**: estados `pending`, `invalid` o con OCR débil no
     alimentan KPI; se muestran en diagnóstico con el motivo exacto.
+    Un estado `ready` también exige evidencia institucional del emisor con
+    estado `verified`; si falta (incluidos registros heredados), la migración
+    lo devuelve a revisión y retira sus filas del ledger canónico.
 
 ## Fases y criterios de salida
 
@@ -151,6 +154,13 @@ Las actualizaciones del lector también invalidan de forma segura los estados
 persistidos con una revisión anterior: quedan visibles en auditoría, pero en
 cuarentena hasta que se vuelvan a importar. Esto evita que una corrección de
 extracción se mezcle con filas heredadas de una versión defectuosa.
+
+La frontera de seguridad también valida el emisor: un estado guardado como
+`ready` sin evidencia institucional verificada (por ejemplo, una etiqueta
+inferida solo por el nombre del archivo) se marca `pending` y sus movimientos
+se retiran de los KPI hasta reimportarlo. El filtro del libro canónico repite
+esta comprobación para protegerse de datos programáticos o migraciones
+antiguas que hubieran persistido un estado incorrectamente listo.
 
 La certificación final del 99% queda pendiente de ejecutar el corpus completo
 en macOS/Xcode con Vision; el entorno Windows no dispone de `xcodebuild` ni del

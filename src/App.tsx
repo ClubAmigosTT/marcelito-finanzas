@@ -319,7 +319,12 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
     // Reconciliation is necessary but not sufficient for scanned/uncertain
     // imports. A statement marked for review stays out of every KPI until the
     // user confirms it from Cuentas > Documentos importados.
-    return statement?.reconciliationStatus === "valid" && statement.status !== "review";
+    return statement?.reconciliationStatus === "valid"
+      && statement.status !== "review"
+      // Defense in depth: a legacy/programmatic statement without verified
+      // issuer evidence must never feed executive KPIs, even if its status
+      // was incorrectly persisted as ready.
+      && statement.sourceDetection?.status === "verified";
   }), [pipeline, statements]);
   // All screens receive the same post-pipeline ledger. Raw extracted rows are
   // retained only for audit/reprocessing and are never an aggregate source.

@@ -997,6 +997,7 @@ test("una versión anterior del lector queda en cuarentena al abrir el libro", (
     status: "ready" as const,
     reconciliationStatus: "valid" as const,
     reconciliation: { status: "valid" as const, tolerance: 0.05 },
+    sourceDetection: { source: "BBVA" as const, confidence: 1, status: "verified" as const, evidence: ["BBVA"], ignoredBodyMentions: [] },
   };
   const previous = {
     ...bank("bbva-previous", "BBVA", "julio 2026"),
@@ -1012,6 +1013,31 @@ test("una versión anterior del lector queda en cuarentena al abrir el libro", (
   assert.equal(prepared[1]?.status, "review");
   assert.equal(prepared[1]?.reconciliationStatus, "pending");
   assert.match(prepared[1]?.reconciliation?.reason ?? "", /web-reader-legacy/);
+});
+
+test("un estado listo sin emisor verificado queda en cuarentena aunque concilie", () => {
+  const statement = {
+    ...bank("bbva-unverified", "BBVA", "agosto 2026"),
+    readerVersion: "web-reader-current",
+    status: "ready" as const,
+    reconciliationStatus: "valid" as const,
+    reconciliation: { status: "valid" as const, tolerance: 0.05 },
+  };
+  const [prepared] = prepareStoredStatements([statement], "web-reader-current");
+  assert.equal(prepared?.status, "review");
+  assert.equal(prepared?.reconciliationStatus, "pending");
+  assert.match(prepared?.reconciliation?.reason ?? "", /evidencia institucional/);
+  const ledger = prepareStoredLedger([statement], [movement({
+    id: "unverified-row",
+    date: "10 ago 2026",
+    description: "COMPRA",
+    account: "BBVA",
+    amount: -100,
+    flow: "expense",
+    statementId: statement.id,
+  })], "web-reader-current");
+  assert.equal(ledger.quarantinedMovementCount, 1);
+  assert.equal(ledger.transactions.length, 0);
 });
 
 test("la cuarentena de versión también bloquea las cifras del estado antiguo", () => {

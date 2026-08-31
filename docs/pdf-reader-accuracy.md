@@ -104,6 +104,10 @@ gasto real sin separar esas secciones.
   media baja de 88% o alguna página baja de 78%; una coincidencia accidental no
   puede convertir una lectura visual débil en un KPI.
 - Un estado inválido, pendiente o provisional no alimenta Resumen, Gastos, Patrimonio ni gráficas.
+- Un estado `ready` solo alimenta el libro canónico si `sourceDetection.status`
+  es `verified`. Estados antiguos o inferidos por nombre de archivo se
+  migran a `pending`, se muestran en auditoría y sus filas quedan en
+  cuarentena hasta confirmar el PDF.
 
 ## Corpus dorado
 

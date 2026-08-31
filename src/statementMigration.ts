@@ -18,12 +18,21 @@ export function prepareStoredStatements(
   return statements.map((statement) => {
     const hasReconciliation = Boolean(statement.reconciliationStatus && statement.reconciliation);
     const isCurrentReader = statement.readerVersion === readerVersion;
-    if (hasReconciliation && isCurrentReader) return statement;
+    // A statement that is already ready must also carry verified issuer
+    // evidence.  Earlier reader versions could mark a file ready from a
+    // filename-only guess (or leave the field absent entirely); allowing that
+    // row into the canonical ledger would let a BBVA PDF masquerade as a
+    // Santander account even when its totals happen to reconcile.
+    const sourceNeedsReview = statement.status === "ready"
+      && statement.sourceDetection?.status !== "verified";
+    if (hasReconciliation && isCurrentReader && !sourceNeedsReview) return statement;
 
     const reason = !statement.readerVersion
       ? "Estado importado antes de la conciliación automática; vuelve a importarlo para usarlo en los KPI."
       : !isCurrentReader
         ? `Estado generado con el lector ${statement.readerVersion}; vuelve a importar el PDF con ${readerVersion}.`
+        : sourceNeedsReview
+          ? "Estado sin evidencia institucional verificada del emisor; vuelve a importarlo para confirmar el banco antes de usarlo en los KPI."
         : "Estado sin evidencia de conciliación completa; vuelve a importarlo para usarlo en los KPI.";
 
     return {
@@ -57,11 +66,17 @@ export function prepareStoredLedger(
   const preparedStatements = prepareStoredStatements(statements, readerVersion);
   const quarantinedStatementIds = new Set(
     statements
-      .filter((statement) => (
-        statement.readerVersion !== readerVersion
-        || !statement.reconciliationStatus
-        || !statement.reconciliation
-      ))
+      .filter((statement) => {
+        const currentPending = statement.readerVersion === readerVersion
+          && statement.status === "review"
+          && statement.reconciliationStatus !== "valid";
+        return !currentPending && (
+          statement.readerVersion !== readerVersion
+          || !statement.reconciliationStatus
+          || !statement.reconciliation
+          || (statement.status === "ready" && statement.sourceDetection?.status !== "verified")
+        );
+      })
       .map((statement) => statement.id),
   );
   const retainedTransactions = transactions.filter((transaction) => (
