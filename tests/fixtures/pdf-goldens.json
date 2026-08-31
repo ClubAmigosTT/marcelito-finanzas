@@ -4,6 +4,28 @@
   "automaticAcceptanceTarget": 0.99,
   "statements": [
     {
+      "id": "santander-2026-05-15",
+      "issuer": "Santander",
+      "kind": "bank",
+      "cutoff": "2026-05-15",
+      "expected": {
+        "cashBalance": 24621.48,
+        "depositTotal": 49222.45,
+        "withdrawalTotal": 61676.00
+      }
+    },
+    {
+      "id": "santander-2026-07-15",
+      "issuer": "Santander",
+      "kind": "bank",
+      "cutoff": "2026-07-15",
+      "expected": {
+        "cashBalance": 55627.93,
+        "depositTotal": 40833.38,
+        "withdrawalTotal": 73007.21
+      }
+    },
+    {
       "id": "santander-2026-08-15",
       "issuer": "Santander",
       "kind": "bank",
@@ -25,6 +47,24 @@
         "withdrawalTotal": 22058.69,
         "depositCount": 2,
         "withdrawalCount": 9
+      }
+    },
+    {
+      "id": "amex-2026-06-27",
+      "issuer": "Amex",
+      "kind": "card",
+      "cutoff": "2026-06-27",
+      "expected": {
+        "newCharges": 28034.19
+      }
+    },
+    {
+      "id": "amex-2026-07-27",
+      "issuer": "Amex",
+      "kind": "card",
+      "cutoff": "2026-07-27",
+      "expected": {
+        "newCharges": 46711.63
       }
     },
     {

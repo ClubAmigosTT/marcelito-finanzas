@@ -55,7 +55,7 @@ gasto real sin separar esas secciones.
 
 ## Corpus dorado
 
-Los valores de control sin datos personales están en `tests/fixtures/pdf-goldens.json`. El corpus completo debe conservarse fuera del repositorio y evaluarse por emisor, plantilla y tipo de extracción (texto/OCR). Cada nueva variante de PDF se añade como fixture antes de activar su parser.
+Los valores de control sin datos personales están en `tests/fixtures/pdf-goldens.json` e incluyen los cortes Santander de mayo, julio y agosto, BBVA agosto y los tres cortes Amex. El corpus completo debe conservarse fuera del repositorio y evaluarse por emisor, plantilla y tipo de extracción (texto/OCR). Cada nueva variante de PDF se añade como fixture antes de activar su parser.
 
 Métricas mínimas por versión:
 
