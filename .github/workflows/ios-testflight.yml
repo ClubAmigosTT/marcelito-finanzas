@@ -134,7 +134,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${NATIVE_CORPUS_CERTIFIED,,}" != "true" ]]; then
+          # macOS runners still ship Bash 3.2, which does not support the
+          # `${var,,}` lowercase expansion. Normalize portably with `tr` so
+          # the certification gate fails for the intended reason instead of a
+          # shell syntax error.
+          native_corpus_certified_normalized="$(printf '%s' "${NATIVE_CORPUS_CERTIFIED:-}" | tr '[:upper:]' '[:lower:]')"
+          if [[ "$native_corpus_certified_normalized" != "true" ]]; then
             echo "::error title=Corpus nativo sin certificar::Ejecuta el runner privado con Vision y registra MARCELITO_NATIVE_CORPUS_CERTIFIED=true antes de publicar."
             exit 1
           fi
