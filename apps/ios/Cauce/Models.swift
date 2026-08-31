@@ -572,7 +572,7 @@ final class FinanceStore {
             statementCount: quality.statementCount,
             canonicalMovementCount: quality.movementCount,
             reconciledPercent: quality.reconciledPercent,
-            issueCount: quality.invalidStatementCount + quality.pendingStatementCount + quality.absurdMovementCount + quality.reviewMovementCount,
+            issueCount: quality.invalidStatementCount + quality.pendingStatementCount + quality.absurdMovementCount + quality.missingEvidenceCount + quality.reviewMovementCount,
             message: quality.message
         )
         lastAuditRun = run
@@ -583,7 +583,7 @@ final class FinanceStore {
         DiagnosticsRecorder.record(
             level: quality.isBlocking ? "error" : "info",
             stage: "audit.\(trigger)",
-            message: "Auditoría \(run.id.uuidString.prefix(8)): \(status.rawValue), \(quality.reconciledPercent.rounded())% conciliado, \(quality.movementCount) movimiento(s) canónico(s)."
+            message: "Auditoría \(run.id.uuidString.prefix(8)): \(status.rawValue), \(quality.reconciledPercent.rounded())% conciliado, \(quality.evidencePercent.rounded())% con evidencia, \(quality.movementCount) movimiento(s) canónico(s)."
         )
         return run
     }
