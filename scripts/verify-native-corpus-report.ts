@@ -22,6 +22,12 @@ type Verification = {
 
 type NativeCorpusReportRow = {
   file?: string;
+  sourceFingerprint?: string;
+  expectedSourceFingerprint?: string;
+  source?: string;
+  kind?: string;
+  status?: string;
+  rows?: string | number;
   accountKey?: string;
   expectedAccountKey?: string;
 };
@@ -35,6 +41,9 @@ type ReportVerification = {
 type ExpectedReportEntry = {
   file: string;
   accountKey?: string;
+  sourceFingerprint?: string;
+  source?: string;
+  kind?: string;
 };
 
 function numberField(summary: NativeCorpusSummary, key: keyof NativeCorpusSummary) {
@@ -130,6 +139,26 @@ export function verifyNativeCorpusReport(
   if (new Set(files).size !== files.length) errors.push("el reporte contiene archivos duplicados");
   rows.forEach((row, index) => {
     const label = files[index] || `fila ${index + 1}`;
+    const fingerprint = typeof row.sourceFingerprint === "string" ? row.sourceFingerprint.trim() : "";
+    if (!fingerprint || !/^[a-f0-9]{64}$/i.test(fingerprint)) {
+      errors.push(`${label}: sourceFingerprint no es un SHA-256 válido`);
+    }
+    const source = typeof row.source === "string" ? row.source.trim() : "";
+    if (!source || source === "Desconocido") {
+      errors.push(`${label}: falta un emisor identificado`);
+    }
+    const kind = typeof row.kind === "string" ? row.kind.trim() : "";
+    if (!["bank", "card", "unknown"].includes(kind)) {
+      errors.push(`${label}: kind no es bank/card/unknown`);
+    }
+    const status = typeof row.status === "string" ? row.status.trim() : "";
+    if (!["valid", "pending", "invalid"].includes(status)) {
+      errors.push(`${label}: status no es valid/pending/invalid`);
+    }
+    const rowCount = Number(row.rows);
+    if (!Number.isInteger(rowCount) || rowCount < 0) {
+      errors.push(`${label}: rows no es un entero no negativo`);
+    }
     const actual = typeof row.accountKey === "string" ? row.accountKey.trim() : "";
     const expected = typeof row.expectedAccountKey === "string" ? row.expectedAccountKey.trim() : "";
     if (!actual || !/^[a-z0-9]+:\d{4}$/i.test(actual)) {
@@ -159,6 +188,19 @@ export function verifyNativeCorpusReport(
       const actual = typeof row?.accountKey === "string" ? row.accountKey.trim() : "";
       if (actual !== entry.accountKey) {
         errors.push(`${expectedFile}: accountKey ${actual || "ausente"} no coincide con el manifiesto (${entry.accountKey})`);
+      }
+      if (!row) return;
+      const actualFingerprint = typeof row.sourceFingerprint === "string" ? row.sourceFingerprint.trim() : "";
+      if (entry.sourceFingerprint && actualFingerprint !== entry.sourceFingerprint) {
+        errors.push(`${expectedFile}: sourceFingerprint no coincide con el manifiesto`);
+      }
+      const actualSource = typeof row.source === "string" ? row.source.trim() : "";
+      if (entry.source && actualSource !== entry.source) {
+        errors.push(`${expectedFile}: source ${actualSource || "ausente"} no coincide con el manifiesto (${entry.source})`);
+      }
+      const actualKind = typeof row.kind === "string" ? row.kind.trim() : "";
+      if (entry.kind && actualKind !== entry.kind) {
+        errors.push(`${expectedFile}: kind ${actualKind || "ausente"} no coincide con el manifiesto (${entry.kind})`);
       }
     });
   }
@@ -202,10 +244,30 @@ async function main() {
   const manifestErrors: string[] = [];
   if (manifestPath) {
     try {
-      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { files?: Array<{ file?: string; accountKey?: string }> };
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+        files?: Array<{
+          file?: string;
+          accountKey?: string;
+          sourceFingerprint?: string;
+          source?: string;
+          kind?: string;
+        }>;
+      };
       expectedEntries = (manifest.files ?? [])
-        .filter((entry): entry is { file: string; accountKey?: string } => typeof entry?.file === "string")
-        .map((entry) => ({ file: entry.file, accountKey: entry.accountKey }));
+        .filter((entry): entry is {
+          file: string;
+          accountKey?: string;
+          sourceFingerprint?: string;
+          source?: string;
+          kind?: string;
+        } => typeof entry?.file === "string")
+        .map((entry) => ({
+          file: entry.file,
+          accountKey: entry.accountKey,
+          sourceFingerprint: entry.sourceFingerprint,
+          source: entry.source,
+          kind: entry.kind,
+        }));
       if (!expectedEntries.length) manifestErrors.push("el manifiesto no contiene files");
     } catch {
       manifestErrors.push("no se pudo leer el manifiesto del corpus");

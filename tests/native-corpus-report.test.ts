@@ -117,8 +117,26 @@ test("el resumen nativo no permite goldens aceptados fuera de accepted", () => {
 
 test("el reporte nativo exige una identidad enmascarada por PDF", () => {
   const result = verifyNativeCorpusReport([
-    { file: "bbva.pdf", accountKey: "bbva:4922", expectedAccountKey: "bbva:4922" },
-    { file: "amex.pdf", accountKey: "amex:1003", expectedAccountKey: "amex:1003" },
+    {
+      file: "bbva.pdf",
+      sourceFingerprint: "a".repeat(64),
+      source: "BBVA",
+      kind: "bank",
+      status: "valid",
+      rows: "11",
+      accountKey: "bbva:4922",
+      expectedAccountKey: "bbva:4922",
+    },
+    {
+      file: "amex.pdf",
+      sourceFingerprint: "b".repeat(64),
+      source: "Amex",
+      kind: "card",
+      status: "valid",
+      rows: 92,
+      accountKey: "amex:1003",
+      expectedAccountKey: "amex:1003",
+    },
   ], 2);
   assert.equal(result.ok, true);
 });
@@ -143,13 +161,43 @@ test("el reporte nativo rechaza filas inválidas o sin nombre de PDF", () => {
   assert.ok(result.errors.some((error) => error.includes("sin nombre de archivo")));
 });
 
-test("el reporte nativo debe coincidir con el conjunto del manifiesto", () => {
+test("el reporte nativo exige trazabilidad y controles por archivo", () => {
   const result = verifyNativeCorpusReport([
     { file: "bbva.pdf", accountKey: "bbva:4922", expectedAccountKey: "bbva:4922" },
-    { file: "sustituido.pdf", accountKey: "amex:1003", expectedAccountKey: "amex:1003" },
+  ], 1);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("sourceFingerprint")));
+  assert.ok(result.errors.some((error) => error.includes("emisor identificado")));
+  assert.ok(result.errors.some((error) => error.includes("kind")));
+  assert.ok(result.errors.some((error) => error.includes("status")));
+  assert.ok(result.errors.some((error) => error.includes("rows")));
+});
+
+test("el reporte nativo debe coincidir con el conjunto del manifiesto", () => {
+  const result = verifyNativeCorpusReport([
+    {
+      file: "bbva.pdf",
+      sourceFingerprint: "a".repeat(64),
+      source: "BBVA",
+      kind: "bank",
+      status: "valid",
+      rows: 11,
+      accountKey: "bbva:4922",
+      expectedAccountKey: "bbva:4922",
+    },
+    {
+      file: "sustituido.pdf",
+      sourceFingerprint: "b".repeat(64),
+      source: "Amex",
+      kind: "card",
+      status: "valid",
+      rows: 92,
+      accountKey: "amex:1003",
+      expectedAccountKey: "amex:1003",
+    },
   ], 2, [
-    { file: "bbva.pdf", accountKey: "bbva:4922" },
-    { file: "amex.pdf", accountKey: "amex:1003" },
+    { file: "bbva.pdf", accountKey: "bbva:4922", sourceFingerprint: "a".repeat(64), source: "BBVA", kind: "bank" },
+    { file: "amex.pdf", accountKey: "amex:1003", sourceFingerprint: "b".repeat(64), source: "Amex", kind: "card" },
   ]);
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((error) => error.includes("falta amex.pdf")));
