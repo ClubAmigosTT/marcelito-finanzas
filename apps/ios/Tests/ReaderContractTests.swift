@@ -380,4 +380,37 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(rows[0].amount, -30)
         XCTAssertFalse(rows[0].title.contains("55,597.93"))
     }
+
+    func testUnverifiedReadyStatementCannotFeedNativeDashboard() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "estado.pdf",
+            importedAt: .now,
+            transactionCount: 0,
+            requiresReview: false,
+            kind: .bank,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "BBVA",
+                confidence: 0.90,
+                status: .review,
+                evidence: ["nombre de archivo"],
+                ignoredBodyMentions: []
+            ),
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        store.movements = []
+
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+        XCTAssertFalse(store.confirmStatementReviewed(statement))
+    }
 }
