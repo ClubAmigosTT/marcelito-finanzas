@@ -1040,6 +1040,29 @@ test("un estado listo sin emisor verificado queda en cuarentena aunque concilie"
   assert.equal(ledger.transactions.length, 0);
 });
 
+test("una confirmación humana explícita conserva un estado conocido sin evidencia automática", () => {
+  const statement = {
+    ...bank("bbva-confirmed", "BBVA", "agosto 2026"),
+    readerVersion: "web-reader-current",
+    status: "ready" as const,
+    reconciliationStatus: "valid" as const,
+    reconciliation: { status: "valid" as const, tolerance: 0.05 },
+    sourceDetection: { source: "BBVA" as const, confidence: 0.90, status: "review" as const, evidence: ["nombre de archivo"], ignoredBodyMentions: [] },
+    issuerConfirmedByUser: true,
+  };
+  const ledger = prepareStoredLedger([statement], [movement({
+    id: "confirmed-row",
+    date: "10 ago 2026",
+    description: "COMPRA CONFIRMADA",
+    account: "BBVA",
+    amount: -100,
+    flow: "expense",
+    statementId: statement.id,
+  })], "web-reader-current");
+  assert.equal(ledger.quarantinedMovementCount, 0);
+  assert.equal(ledger.statements[0]?.status, "ready");
+});
+
 test("la cuarentena de versión también bloquea las cifras del estado antiguo", () => {
   const legacyStatement = {
     ...bank("bbva-legacy", "BBVA", "agosto 2026"),

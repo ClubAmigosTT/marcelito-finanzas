@@ -193,6 +193,8 @@ export type Statement = {
   reconciliationStatus?: StatementReconciliationStatus;
   reconciliation?: StatementReconciliation;
   sourceDetection?: SourceDetection;
+  /** Explicit human confirmation for a known issuer when automatic evidence is provisional. */
+  issuerConfirmedByUser?: boolean;
   ocrConfidence?: number;
   /** Per-page OCR confidence retained for audit and reproducible review. */
   ocrPageConfidences?: number[];

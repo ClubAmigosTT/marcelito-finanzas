@@ -24,7 +24,8 @@ export function prepareStoredStatements(
     // row into the canonical ledger would let a BBVA PDF masquerade as a
     // Santander account even when its totals happen to reconcile.
     const sourceNeedsReview = statement.status === "ready"
-      && statement.sourceDetection?.status !== "verified";
+      && statement.sourceDetection?.status !== "verified"
+      && statement.issuerConfirmedByUser !== true;
     if (hasReconciliation && isCurrentReader && !sourceNeedsReview) return statement;
 
     const reason = !statement.readerVersion
@@ -74,7 +75,9 @@ export function prepareStoredLedger(
           statement.readerVersion !== readerVersion
           || !statement.reconciliationStatus
           || !statement.reconciliation
-          || (statement.status === "ready" && statement.sourceDetection?.status !== "verified")
+          || (statement.status === "ready"
+            && statement.sourceDetection?.status !== "verified"
+            && statement.issuerConfirmedByUser !== true)
         );
       })
       .map((statement) => statement.id),

@@ -411,6 +411,9 @@ final class ReaderContractTests: XCTestCase {
 
         XCTAssertTrue(store.dashboardIsBlocked)
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
-        XCTAssertFalse(store.confirmStatementReviewed(statement))
+        XCTAssertTrue(store.confirmStatementReviewed(statement))
+        XCTAssertTrue(store.statements[0].issuerConfirmedByUser == true)
+        XCTAssertFalse(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
     }
 }

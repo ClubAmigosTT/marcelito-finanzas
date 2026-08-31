@@ -257,6 +257,11 @@ struct StatementRecord: Identifiable, Codable {
     var summary: StatementSummaryRecord? = nil
     var reconciliation: StatementReconciliationRecord? = nil
     var sourceDetection: SourceDetectionEvidence? = nil
+    /// True only after the user explicitly confirms a known issuer when
+    /// automatic institutional evidence was not sufficient (for example a
+    /// scanned statement). This is deliberately separate from automatic
+    /// verification so corpus precision metrics remain honest.
+    var issuerConfirmedByUser: Bool? = nil
     /// Mean Vision confidence for scanned imports. Text-layer statements keep
     /// this nil because no OCR signal was used.
     var ocrConfidence: Double? = nil
@@ -1007,7 +1012,7 @@ final class FinanceStore {
     private func isEligibleStatement(_ statement: StatementRecord) -> Bool {
         isCurrentReader(statement)
             && statement.reconciliation?.status == .valid
-            && statement.sourceDetection?.status == .verified
+            && (statement.sourceDetection?.status == .verified || statement.issuerConfirmedByUser == true)
             && !statement.requiresReview
     }
 
@@ -1622,13 +1627,14 @@ final class FinanceStore {
             movements: linked
         )
         statements[index].requiresReview = statements[index].reconciliation?.status != .valid
-            || statements[index].sourceDetection?.status != .verified
+            || (statements[index].sourceDetection?.status != .verified && statements[index].issuerConfirmedByUser != true)
         persist()
     }
 
     /// Explicitly releases a reconciled statement from the review quarantine.
-    /// This is a human acknowledgement for OCR/low-confidence rows; it never
-    /// overrides an issuer-total mismatch or an unverified issuer.
+    /// This is a human acknowledgement for OCR/low-confidence rows. It never
+    /// overrides an issuer-total mismatch; for a known issuer it records a
+    /// manual confirmation when automatic evidence is unavailable.
     @discardableResult
     func confirmStatementReviewed(_ statement: StatementRecord) -> Bool {
         guard let index = statements.firstIndex(where: { $0.id == statement.id }) else { return false }
@@ -1640,13 +1646,27 @@ final class FinanceStore {
             )
             return false
         }
-        guard statements[index].sourceDetection?.status == .verified else {
+        let sourceIsVerified = statements[index].sourceDetection?.status == .verified
+        let normalizedSource = statements[index].source
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let sourceIsKnown = !normalizedSource.isEmpty
+            && normalizedSource != "importado"
+            && normalizedSource != "desconocido"
+        guard sourceIsVerified || sourceIsKnown else {
             DiagnosticsRecorder.record(
                 level: "error",
                 stage: "statement.review.blocked",
-                message: "No se puede confirmar (statements[index].fileName): el emisor aún no tiene evidencia institucional verificada."
+                message: "No se puede confirmar \(statements[index].fileName): primero selecciona un emisor conocido."
             )
             return false
+        }
+        if !sourceIsVerified {
+            statements[index].issuerConfirmedByUser = true
+            DiagnosticsRecorder.record(
+                stage: "statement.issuer.manual_confirmation",
+                message: "Emisor confirmado manualmente: \(statements[index].source) · \(statements[index].fileName)."
+            )
         }
         statements[index].requiresReview = false
         persist()
@@ -1670,6 +1690,7 @@ final class FinanceStore {
                 reason: "El origen o tipo del estado cambió; vuelve a conciliar sus filas."
             )
             statements[index].requiresReview = true
+            statements[index].issuerConfirmedByUser = false
         }
         for movementIndex in movements.indices where movements[movementIndex].statementId == statement.id {
             if movements[movementIndex].account == previousSource || movements[movementIndex].account == "Importado" {

@@ -136,6 +136,7 @@ function exportAuditDiagnostics(metrics: ReturnType<typeof buildFinanceMetrics>,
       reconciliationStatus: statement.reconciliationStatus,
       reconciliation: statement.reconciliation,
       sourceDetection: statement.sourceDetection,
+      issuerConfirmedByUser: statement.issuerConfirmedByUser,
       ocrConfidence: statement.ocrConfidence,
       ocrPageConfidences: statement.ocrPageConfidences,
       sourceFingerprint: statement.sourceFingerprint,
@@ -323,8 +324,9 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       && statement.status !== "review"
       // Defense in depth: a legacy/programmatic statement without verified
       // issuer evidence must never feed executive KPIs, even if its status
-      // was incorrectly persisted as ready.
-      && statement.sourceDetection?.status === "verified";
+      // was incorrectly persisted as ready. Human confirmation is explicit
+      // and auditable, but remains distinct from automatic evidence.
+      && (statement.sourceDetection?.status === "verified" || statement.issuerConfirmedByUser === true);
   }), [pipeline, statements]);
   // All screens receive the same post-pipeline ledger. Raw extracted rows are
   // retained only for audit/reprocessing and are never an aggregate source.
@@ -405,6 +407,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       reconciliationStatus: commit.reconciliation?.status,
       reconciliation: commit.reconciliation,
       sourceDetection: commit.sourceDetection,
+      issuerConfirmedByUser: false,
       ocrConfidence: commit.ocrConfidence,
       ocrPageConfidences: commit.ocrPageConfidences,
     };
@@ -440,8 +443,15 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   function markStatementReviewed(statementId: string) {
     setStatements((current) => current.map((item) => item.id === statementId
       && item.reconciliationStatus === "valid"
-      && item.sourceDetection?.status === "verified"
-      ? { ...item, status: "ready" }
+      && item.source !== "Desconocido"
+      && item.kind !== "unknown"
+      ? {
+        ...item,
+        status: "ready",
+        issuerConfirmedByUser: item.sourceDetection?.status === "verified"
+          ? item.issuerConfirmedByUser
+          : true,
+      }
       : item));
   }
 
@@ -1084,6 +1094,7 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
         </article>;
       })}</div> : <EmptyState title="Aún no hay cuentas" body="Importa un estado de cuenta para construir tus saldos reales." />}
     </section>
+    {statements.some((statement) => statement.status === "review" && statement.reconciliationStatus === "valid" && statement.source !== "Desconocido" && statement.kind !== "unknown" && statement.sourceDetection?.status !== "verified") && <div className="provisional-banner" role="status"><Warning size={18} /><span>Hay estados conciliados que requieren confirmar el banco mostrado antes de entrar a los KPI.</span>{statements.filter((statement) => statement.status === "review" && statement.reconciliationStatus === "valid" && statement.source !== "Desconocido" && statement.kind !== "unknown" && statement.sourceDetection?.status !== "verified").map((statement) => <button key={statement.id} className="text-button" onClick={() => onMarkReviewed(statement.id)}>Confirmar {statement.source}</button>)}</div>}
     <details className="documents-panel">
       <summary><div><h2>Documentos importados</h2><span>{statements.length ? `${statements.length} archivos guardados localmente.` : "Aquí aparecerán tus PDFs revisados."}</span></div><strong>{statements.length}</strong></summary>
       <div className="documents-content">

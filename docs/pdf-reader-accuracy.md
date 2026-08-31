@@ -105,9 +105,13 @@ gasto real sin separar esas secciones.
   puede convertir una lectura visual débil en un KPI.
 - Un estado inválido, pendiente o provisional no alimenta Resumen, Gastos, Patrimonio ni gráficas.
 - Un estado `ready` solo alimenta el libro canónico si `sourceDetection.status`
-  es `verified`. Estados antiguos o inferidos por nombre de archivo se
-  migran a `pending`, se muestran en auditoría y sus filas quedan en
-  cuarentena hasta confirmar el PDF.
+  es `verified` o si el usuario confirmó explícitamente un emisor conocido.
+  Estados antiguos o inferidos por nombre de archivo se migran a `pending`, se
+  muestran en auditoría y sus filas quedan en cuarentena hasta confirmar el PDF.
+- Si el banco mostrado es conocido pero la evidencia automática es provisional,
+  el usuario puede confirmarlo de forma explícita. Esa liberación se guarda
+  como `issuerConfirmedByUser` y no se cuenta como aceptación automática del
+  corpus del 99%.
 
 ## Corpus dorado
 
