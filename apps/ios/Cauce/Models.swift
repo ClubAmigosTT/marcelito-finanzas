@@ -3432,6 +3432,21 @@ final class FinanceStore {
 
         let titleParts = row
             .filter { $0.centerX >= 0.18 && $0.centerX < 0.62 }
+            .filter { observation in
+                let normalized = observation.text
+                    .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                // Santander places folio/rastreo metadata on continuation
+                // lines below the actual concept. It is evidence for the
+                // row, but it must not become part of the merchant title or
+                // deduplication key.
+                let administrativePrefixes = [
+                    "enviado a ", "a la cuenta ", "al cliente ",
+                    "dato no verificado", "(1) dato no verificado",
+                    "clave de rastreo ", "ref "
+                ]
+                return !administrativePrefixes.contains(where: { normalized.hasPrefix($0) })
+            }
             .map(\.text)
         var title = titleParts.isEmpty ? fullText : titleParts.joined(separator: " ")
         title = title
@@ -3690,6 +3705,11 @@ final class FinanceStore {
             .replacingOccurrences(
                 of: #"(?i)(?<!\d)[0-9OBI]{1,3}\s*[\/\-.]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*\d{2,4})?(?![A-Za-z])"#,
                 with: " ",
+                options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?i)^\s*\d{4,}\s+(?=(?:pago|cargo|consumo|abono|nomina|transferencia)\b)"#,
+                with: "",
                 options: .regularExpression
             )
             .replacingOccurrences(

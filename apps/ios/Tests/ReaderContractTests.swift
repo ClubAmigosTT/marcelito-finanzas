@@ -387,20 +387,17 @@ final class ReaderContractTests: XCTestCase {
             OCRObservationFixture(text: "RETIRO", x: 0.71, y: 0.94, width: 0.08),
             OCRObservationFixture(text: "SALDO", x: 0.84, y: 0.94, width: 0.08),
 
-            OCRObservationFixture(text: "16-JUL-2026", x: 0.02, y: 0.82, width: 0.10),
-            OCRObservationFixture(text: "4309379 PAGO TRANSFERENCIA SPEI HORA 12:10:44", x: 0.10, y: 0.82, width: 0.45),
+            OCRObservationFixture(text: "16-JUL-2026 4309379 PAGO TRANSFERENCIA SPEI HORA 12:10:44", x: 0.02, y: 0.82, width: 0.55),
             OCRObservationFixture(text: "30.00", x: 0.72, y: 0.82, width: 0.08),
             OCRObservationFixture(text: "55,597.93", x: 0.84, y: 0.82, width: 0.08),
-            OCRObservationFixture(text: "CLAVE DE RASTREO 202607160014BMOVP020443093790", x: 0.10, y: 0.815, width: 0.55),
-            OCRObservationFixture(text: "REF 2603559 DATO NO VERIFICADO POR ESTA INSTITUCION", x: 0.10, y: 0.81, width: 0.55),
+            OCRObservationFixture(text: "CLAVE DE RASTREO 202607160014BMOVP020443093790", x: 0.10, y: 0.805, width: 0.55),
+            OCRObservationFixture(text: "REF 2603559 DATO NO VERIFICADO POR ESTA INSTITUCION", x: 0.10, y: 0.79, width: 0.55),
 
-            OCRObservationFixture(text: "17-JUL-2026", x: 0.02, y: 0.72, width: 0.10),
-            OCRObservationFixture(text: "PAGO TRANSFERENCIA SPEI TRANSFERENCIA A VICTORIA", x: 0.10, y: 0.72, width: 0.45),
+            OCRObservationFixture(text: "17-JUL-2026 1162428 PAGO TRANSFERENCIA SPEI TRANSFERENCIA A VICTORIA", x: 0.02, y: 0.72, width: 0.55),
             OCRObservationFixture(text: "30.00", x: 0.72, y: 0.72, width: 0.08),
             OCRObservationFixture(text: "55,567.93", x: 0.84, y: 0.72, width: 0.08),
 
-            OCRObservationFixture(text: "18-JUL-2026", x: 0.02, y: 0.62, width: 0.10),
-            OCRObservationFixture(text: "NOMINA EMPRESA", x: 0.10, y: 0.62, width: 0.45),
+            OCRObservationFixture(text: "18-JUL-2026 000100 ABONO PAGO DE NOMINA", x: 0.02, y: 0.62, width: 0.55),
             OCRObservationFixture(text: "500.00", x: 0.58, y: 0.62, width: 0.08),
             OCRObservationFixture(text: "56,067.93", x: 0.84, y: 0.62, width: 0.08),
         ], fileName: "Santander agosto 2026.pdf")
@@ -409,7 +406,12 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(rows.map(\.amount), [-30, -30, 500])
         XCTAssertEqual(rows[2].flow, .income)
         XCTAssertTrue(rows[0].title.localizedCaseInsensitiveContains("transferencia"))
-        XCTAssertFalse(rows.contains { $0.title.contains("55,597.93") || $0.title.contains("202607160014") })
+        XCTAssertFalse(rows.contains {
+            $0.title.contains("55,597.93")
+                || $0.title.contains("202607160014")
+                || $0.title.localizedCaseInsensitiveContains("clave de rastreo")
+                || $0.title.localizedCaseInsensitiveContains("a la cuenta")
+        })
     }
 
     func testUnverifiedReadyStatementCannotFeedNativeDashboard() {
