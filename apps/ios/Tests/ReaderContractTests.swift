@@ -65,6 +65,29 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("fecha y detalle") })
     }
 
+    func testAmexLimitAndAvailableProduceCommittedDebt() {
+        let text = """
+        American Express
+        The Platinum Credit Card
+        Saldo Anterior Pagos y Créditos Nuevos Cargos Pago para no Pago
+        23,150.88 - 32,744.61 + 49,559.88 = 39,966.15 3,197.29
+        Límite de Crédito Límite Disponible
+        a Agosto 27,2026 150,000.00 MN 99,632.79 MN
+        Fecha y Detalle de las operaciones Importe en MN.
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "28_jul_2026_-_27_ago_2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.kind, .card)
+        XCTAssertEqual(snapshot.summary?.creditLimit, 150_000)
+        XCTAssertEqual(snapshot.summary?.creditAvailable, 99_632.79)
+        XCTAssertEqual(snapshot.summary?.debtBalance, 39_966.15)
+        XCTAssertEqual(snapshot.summary.map { max(Decimal(0), ($0.creditLimit ?? 0) - ($0.creditAvailable ?? 0)) }, 50_367.21)
+    }
+
     func testReaderRejectsAdministrativeNumericRows() {
         let text = """
         Grupo Financiero BBVA

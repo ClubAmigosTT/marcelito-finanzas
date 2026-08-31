@@ -3732,6 +3732,28 @@ final class FinanceStore {
             amounts(after: labels, allowBareBankAmount: allowBareBankAmount).first
         }
 
+        /// The Amex credit-control row often places a cutoff date between
+        /// “Límite de Crédito / Límite Disponible” and the two amounts. Read
+        /// only decimal monetary tokens from this bounded row so a day or
+        /// year in `27,2026` cannot become the credit limit.
+        func creditControlPair() -> (Decimal, Decimal)? {
+            let markerPattern = #"limite\s+de\s+credito"#
+            guard let markerRegex = try? NSRegularExpression(pattern: markerPattern),
+                  let marker = markerRegex.firstMatch(in: normalized, range: range),
+                  let markerRange = Range(marker.range, in: normalized) else { return nil }
+            let tailStart = markerRange.upperBound
+            let tailEnd = normalized.index(tailStart, offsetBy: min(220, normalized.distance(from: tailStart, to: normalized.endIndex)), limitedBy: normalized.endIndex) ?? normalized.endIndex
+            let tail = String(normalized[tailStart..<tailEnd])
+            guard let moneyRegex = try? NSRegularExpression(pattern: #"(?<![A-Za-z0-9])(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?![A-Za-z0-9])"#) else { return nil }
+            let tailRange = NSRange(tail.startIndex..<tail.endIndex, in: tail)
+            let values = moneyRegex.matches(in: tail, range: tailRange).compactMap { match -> Decimal? in
+                guard let valueRange = Range(match.range, in: tail) else { return nil }
+                return parseAmount(String(tail[valueRange]))
+            }
+            guard values.count >= 2 else { return nil }
+            return (values[0], values[1])
+        }
+
         // Bank summaries commonly print a row count before the monetary
         // total (for example, "Depósitos 9 $36,187.42"). The generic helper
         // above intentionally takes the first token for card labels, so use
@@ -3795,8 +3817,17 @@ final class FinanceStore {
         assign(\.newCharges, amount(after: ["nuevos cargos", "total de cargos"]))
         assign(\.interest, amount(after: ["intereses", "interes del periodo"]))
         assign(\.fees, amount(after: ["comisiones", "comision"]))
-        assign(\.creditLimit, amount(after: ["limite de credito", "linea de credito"]))
-        assign(\.creditAvailable, amount(after: ["credito disponible", "disponible para compras"]))
+        if let creditPair = creditControlPair() {
+            summary.creditLimit = abs(creditPair.0)
+            summary.creditAvailable = abs(creditPair.1)
+            hasValue = true
+        } else {
+            assign(\.creditLimit, amount(after: ["limite de credito", "linea de credito"]))
+            // Amex labels this column “Límite Disponible” rather than
+            // “Crédito Disponible”. Treat both forms as the same control so
+            // committed debt is reconstructed as límite − disponible.
+            assign(\.creditAvailable, amount(after: ["credito disponible", "limite disponible", "linea disponible", "disponible para compras"]))
+        }
         assign(\.minimumPayment, amount(after: ["pago minimo"]))
         assign(\.paymentForNoInterest, amount(after: ["pago para no generar intereses", "pago para no generar interes"]))
         assign(\.msiPending, amount(after: ["msi pendientes", "saldo msi", "principal diferido"]))
