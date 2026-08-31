@@ -3804,7 +3804,7 @@ final class FinanceStore {
         let declaredDeposits = lastAmountOnLabel(["total importe abonos", "total de abonos", "abonos del periodo"])
             ?? lastAmountOnLabel(["depositos", "depositos / abonos"])
         let declaredWithdrawals = lastAmountOnLabel(["total importe cargos", "total de cargos", "cargos del periodo"])
-            ?? lastAmountOnLabel(["retiros", "retiros / cargos"])
+            ?? lastAmountOnLabel(["retiros", "retros", "retiros / cargos", "retros / cargos"])
         assign(\.depositTotal, declaredDeposits)
         assign(\.withdrawalTotal, declaredWithdrawals)
         assign(\.domesticTransactionTotal, lastAmountOnLabel(["total de las transacciones en"]))
@@ -3812,7 +3812,7 @@ final class FinanceStore {
         summary.depositCount = countOnLabel(["total movimientos abonos", "total de abonos"])
             ?? countOnLabel(["depositos", "depositos / abonos"])
         summary.withdrawalCount = countOnLabel(["total movimientos cargos", "total de cargos"])
-            ?? countOnLabel(["retiros", "retiros / cargos"])
+            ?? countOnLabel(["retiros", "retros", "retiros / cargos", "retros / cargos"])
         if source.localizedCaseInsensitiveContains("Amex") {
             summary.debtBalance = summary.statementBalance
         } else {
