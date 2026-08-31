@@ -230,6 +230,27 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.summary?.cashBalance, 24_621.48)
     }
 
+    func testBankSummaryRecoversFusedOcrSeparators() {
+        let text = """
+        Banco Santander México, S.A., Institución de Banca Múltiple
+        Saldo inicial 5562793
+        Depósitos 3618742
+        Retros 6416111
+        Saldo final 2765424
+        Detalle de movimientos
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "santander-agosto-2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.previousBalance, 55_627.93)
+        XCTAssertEqual(snapshot.summary?.depositTotal, 36_187.42)
+        XCTAssertEqual(snapshot.summary?.withdrawalTotal, 64_161.11)
+        XCTAssertEqual(snapshot.summary?.cashBalance, 27_654.24)
+    }
+
     func testHiddenAdministrativeTextLayerFallsBackToOCR() {
         let hiddenLayer = String(repeating: "saldo cuenta metadata ", count: 12)
         XCTAssertTrue(FinanceStore.shouldUseOCR(extractedText: hiddenLayer, allowOCR: true))

@@ -219,11 +219,19 @@ function detectPeriod(text: string, fileName: string) {
   return fileLabel || "Periodo no identificado";
 }
 
-function findSummaryAmount(text: string, labels: string[]) {
-  return findSummaryAmounts(text, labels)[0];
+function normalizeBareBankSummaryAmount(raw: string, parsed: number) {
+  const compact = raw.replace(/\s/g, "");
+  // Santander scans can lose both decimal separators (64,161.11 ->
+  // 6416111). Only rescale the tightly bounded 7–8 digit shape; long account
+  // numbers and ordinary six-digit integer amounts remain untouched.
+  return /^\d{7,8}$/.test(compact) && parsed >= 100_000 ? parsed / 100 : parsed;
 }
 
-function findSummaryAmounts(text: string, labels: string[]) {
+function findSummaryAmount(text: string, labels: string[], allowBareBankAmount = false) {
+  return findSummaryAmounts(text, labels, allowBareBankAmount)[0];
+}
+
+function findSummaryAmounts(text: string, labels: string[], allowBareBankAmount = false) {
   const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   // OCR can collapse the space in labels such as “Saldo inicial”. Treat
   // whitespace in the label as optional while keeping the amount boundary
@@ -233,23 +241,31 @@ function findSummaryAmounts(text: string, labels: string[]) {
   const matches = Array.from(normalized.matchAll(new RegExp(`(?:${label})[^\\d$-]{0,90}${money}`, "gi")));
   return matches
     .map((match) => match[1])
-    .filter((raw) => raw && !(/^\s*\d{7,}\s*$/.test(raw) && !/[.,$]/.test(raw)))
-    .map((raw) => normalizeAmount(raw));
+    .filter((raw) => raw && (allowBareBankAmount || !(/^\s*\d{7,}\s*$/.test(raw) && !/[.,$]/.test(raw))))
+    .map((raw) => {
+      const parsed = normalizeAmount(raw);
+      return allowBareBankAmount ? normalizeBareBankSummaryAmount(raw, parsed) : parsed;
+    });
 }
 
-function findLastSummaryAmount(text: string, labels: string[]) {
+function findLastSummaryAmount(text: string, labels: string[], allowBareBankAmount = false) {
   const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
   const label = labels.join("|");
   const money = "-?\\s*\\$?(?:(?:\\d{1,3}(?:[ ,.\\u00a0]\\d{3})+|\\d+)(?:[.,]\\d{1,2})?)";
   const matches = Array.from(normalized.matchAll(new RegExp(`(?:${label})[^\\d$-]{0,90}(${money})`, "gi")));
   const value = matches.at(-1)?.[1];
-  return value ? normalizeAmount(value) : undefined;
+  if (!value) return undefined;
+  const parsed = normalizeAmount(value);
+  return allowBareBankAmount ? normalizeBareBankSummaryAmount(value, parsed) : parsed;
 }
 
 const summaryMoneyPattern = /(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?)(?![A-Za-z0-9])/g;
 
-function lineMoneyValues(line: string) {
-  return Array.from(line.matchAll(summaryMoneyPattern)).map((match) => ({ raw: match[0], value: normalizeAmount(match[0]) })).filter((item) => item.value !== 0 && Math.abs(item.value) < 100_000_000);
+function lineMoneyValues(line: string, allowBareBankAmount = false) {
+  return Array.from(line.matchAll(summaryMoneyPattern)).map((match) => {
+    const parsed = normalizeAmount(match[0]);
+    return { raw: match[0], value: allowBareBankAmount ? normalizeBareBankSummaryAmount(match[0], parsed) : parsed };
+  }).filter((item) => item.value !== 0 && Math.abs(item.value) < 100_000_000);
 }
 
 function parseStatementSummary(text: string, kind: StatementKind): StatementSummary {
@@ -287,15 +303,15 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
       ["msiPending", findSummaryAmount(cardSummaryText, ["msi pendientes", "saldo msi", "principal diferido"])],
       ["revolvingBalance", findSummaryAmount(cardSummaryText, ["saldo revolvente", "saldo revolvente al corte"])],
     ]
-    : [["previousBalance", findSummaryAmount(text, ["saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"])]];
+    : [["previousBalance", findSummaryAmount(text, ["saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"], true)]];
   values.forEach(([key, value]) => {
     if (value !== undefined) (summary as unknown as Record<string, number | undefined>)[key] = value;
   });
   if (kind !== "card") {
     // Bank summaries usually show the opening balance before the closing
     // balance. Pick the last closing value so an older cutoff cannot win.
-    const closingCandidates = findSummaryAmounts(text, ["saldo disponible", "saldo final", "saldo actual", "saldo al corte"]);
-    const cashBalance = closingCandidates.at(-1) ?? findLastSummaryAmount(text, ["saldo disponible", "saldo actual", "saldo al corte"]);
+    const closingCandidates = findSummaryAmounts(text, ["saldo disponible", "saldo final", "saldo actual", "saldo al corte"], true);
+    const cashBalance = closingCandidates.at(-1) ?? findLastSummaryAmount(text, ["saldo disponible", "saldo actual", "saldo al corte"], true);
     if (cashBalance !== undefined) summary.cashBalance = cashBalance;
 
     const normalizedLines = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").split(/\n+/).map((line) => line.replace(/\s+/g, " ").trim()).filter(Boolean);
@@ -316,7 +332,7 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
       if (/porcentaje|objetados|certificado|vencimiento|inversion|producto/.test(normalizedLine)
         || /otros\s*cargos|otros\s*abonos/.test(normalizedLine)
         || (percentIndex >= 0 && aggregateLabelIndex >= 0 && percentIndex > aggregateLabelIndex)) return;
-      const valuesInLine = lineMoneyValues(line);
+      const valuesInLine = lineMoneyValues(line, true);
       if (!valuesInLine.length) return;
       // Counts are often printed next to the amount (e.g. “2 19,500.00”).
       // Prefer a token with a decimal/thousands separator over a bare count.
@@ -363,7 +379,7 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
     if (summary.cashBalance !== undefined
       && summary.depositTotal !== undefined
       && summary.withdrawalTotal !== undefined) {
-      const openingCandidates = findSummaryAmounts(text, ["saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"]);
+      const openingCandidates = findSummaryAmounts(text, ["saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"], true);
       const reconciledPair = openingCandidates.flatMap((opening) => closingCandidates
         .filter((closing) => Math.abs(opening + summary.depositTotal! - summary.withdrawalTotal! - closing) <= 0.05)
         .map((closing) => ({ opening, closing })))

@@ -504,6 +504,21 @@ test("Santander tolera que OCR lea RETIROS como RETROS sin perder el total", () 
   assert.equal(summary.cashBalance, 24_621.48);
 });
 
+test("Santander recupera separadores fusionados en los controles del resumen", () => {
+  const summary = parseStatementSummary([
+    "Banco Santander México, S.A., Institución de Banca Múltiple",
+    "Saldo inicial 5562793",
+    "+ Depósitos 3618742",
+    "- Retros 6416111",
+    "= Saldo final 2765424",
+    "Detalle de movimientos",
+  ].join("\n"), "bank");
+  assert.equal(summary.previousBalance, 55_627.93);
+  assert.equal(summary.depositTotal, 36_187.42);
+  assert.equal(summary.withdrawalTotal, 64_161.11);
+  assert.equal(summary.cashBalance, 27_654.24);
+});
+
 test("Santander recupera un separador OCR fusionado usando el delta del saldo", () => {
   const rows = extractTransactions([
     "Banco Santander México, S.A., Institución de Banca Múltiple",

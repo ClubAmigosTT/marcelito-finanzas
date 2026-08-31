@@ -196,6 +196,9 @@ En la calibración más reciente también se comprobó que una fila OCR sin sald
 corrido ya no arrastra folios o referencias posteriores como importes. Cuando
 los separadores se pierden, el parser solo intenta recuperarlos con el delta
 del saldo; si las filas no concilian, el documento permanece bloqueado.
+Los controles de resumen de Santander aplican la misma recuperación acotada
+para importes OCR fusionados de 7–8 dígitos (por ejemplo `6416111` →
+`64,161.11`) y vuelven a comprobar la identidad de saldo antes de aceptar.
 
 ## Contrato de lectura en iOS
 

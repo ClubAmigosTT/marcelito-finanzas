@@ -3702,7 +3702,18 @@ final class FinanceStore {
     private static func summary(from text: String, source: String) -> StatementSummaryRecord? {
         let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
-        func amounts(after labels: [String]) -> [Decimal] {
+        func normalizeBareBankAmount(_ raw: String, _ parsed: Decimal) -> Decimal {
+            let compact = raw.replacingOccurrences(of: "\\s", with: "", options: .regularExpression)
+            // OCR can collapse both decimal separators in Santander totals
+            // (64,161.11 -> 6416111). Keep this recovery bounded so account
+            // numbers and ordinary six-digit integer amounts are unaffected.
+            if compact.range(of: #"^\d{7,8}$"#, options: .regularExpression) != nil,
+               parsed >= 100_000 {
+                return parsed / 100
+            }
+            return parsed
+        }
+        func amounts(after labels: [String], allowBareBankAmount: Bool = false) -> [Decimal] {
             let joined = labels
                 .map { $0.replacingOccurrences(of: " ", with: "\\s*") }
                 .joined(separator: "|")
@@ -3711,12 +3722,14 @@ final class FinanceStore {
             return regex.matches(in: normalized, range: range).compactMap { match in
                 guard let valueRange = Range(match.range(at: 1), in: normalized) else { return nil }
                 let raw = String(normalized[valueRange])
-                if raw.range(of: #"^\s*\d{7,}\s*$"#, options: .regularExpression) != nil { return nil }
-                return parseAmount(raw)
+                if !allowBareBankAmount,
+                   raw.range(of: #"^\s*\d{7,}\s*$"#, options: .regularExpression) != nil { return nil }
+                let parsed = parseAmount(raw)
+                return allowBareBankAmount ? normalizeBareBankAmount(raw, parsed) : parsed
             }
         }
-        func amount(after labels: [String]) -> Decimal? {
-            amounts(after: labels).first
+        func amount(after labels: [String], allowBareBankAmount: Bool = false) -> Decimal? {
+            amounts(after: labels, allowBareBankAmount: allowBareBankAmount).first
         }
 
         // Bank summaries commonly print a row count before the monetary
@@ -3739,8 +3752,9 @@ final class FinanceStore {
                 let matches = amountRegex.matches(in: line, range: lineRange)
                 if let match = matches.last,
                    let valueRange = Range(match.range, in: line),
-                   let value = parseAmount(String(line[valueRange])) {
-                    return value
+                   let raw = String(line[valueRange]),
+                   let value = parseAmount(raw) {
+                    return normalizeBareBankAmount(raw, value)
                 }
             }
             return nil
@@ -3772,7 +3786,8 @@ final class FinanceStore {
             summary[keyPath: keyPath] = abs(value)
             hasValue = true
         }
-        assign(\.previousBalance, amount(after: ["saldo anterior", "saldo previo"]))
+        let allowBareBankAmount = !source.localizedCaseInsensitiveContains("Amex")
+        assign(\.previousBalance, amount(after: ["saldo anterior", "saldo previo"], allowBareBankAmount: allowBareBankAmount))
         assign(\.statementBalance, amount(after: ["saldo nuevo", "saldo al corte", "saldo actual", "saldo deudor"]))
         assign(\.newTransactions, amount(after: ["nuevas transacciones", "compras nuevas"]))
         assign(\.payments, amount(after: ["pagos realizados", "pagos efectuados"]))
@@ -3828,15 +3843,15 @@ final class FinanceStore {
             // the actual closing balance. Keep every candidate and resolve the
             // correct one against the bank identity below instead of trusting
             // the first OCR occurrence.
-            summary.cashBalance = amounts(after: ["saldo disponible", "saldo final", "saldo actual", "saldo al corte"]).last.map(abs)
+            summary.cashBalance = amounts(after: ["saldo disponible", "saldo final", "saldo actual", "saldo al corte"], allowBareBankAmount: true).last.map(abs)
             hasValue = hasValue || summary.cashBalance != nil
             if let cash = summary.cashBalance,
                let deposits = summary.depositTotal,
                let withdrawals = summary.withdrawalTotal {
                 let openingCandidates = amounts(after: [
                     "saldo final del periodo anterior", "saldo anterior", "saldo previo", "saldo inicial"
-                ])
-                let cashCandidates = amounts(after: ["saldo disponible", "saldo final", "saldo actual", "saldo al corte"])
+                ], allowBareBankAmount: true)
+                let cashCandidates = amounts(after: ["saldo disponible", "saldo final", "saldo actual", "saldo al corte"], allowBareBankAmount: true)
                 if let pair = openingCandidates.compactMap({ opening in
                     cashCandidates.first(where: { candidate in
                         abs(opening + deposits - withdrawals - candidate) <= 0.05
