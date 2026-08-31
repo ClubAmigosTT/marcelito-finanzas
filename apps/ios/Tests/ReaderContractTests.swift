@@ -362,4 +362,22 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(rows[0].amount, -30)
         XCTAssertEqual(rows[1].amount, 500)
     }
+
+    func testSantanderOCRIgnoresMultilineFolioTraceAndRunningBalance() {
+        let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "16-JUL-2026", x: 0.02, y: 0.80, width: 0.10),
+            OCRObservationFixture(text: "4309379 PAGO TRANSFERENCIA SPEI HORA 12:10:44", x: 0.10, y: 0.80, width: 0.45),
+            OCRObservationFixture(text: "30.00", x: 0.66, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "55,597.93", x: 0.81, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "CLAVE DE RASTREO 202607160014BMOVP020443093790", x: 0.10, y: 0.795, width: 0.55),
+            OCRObservationFixture(text: "REF 2603559 DATO NO VERIFICADO POR ESTA INSTITUCION", x: 0.10, y: 0.790, width: 0.55),
+        ], fileName: "Santander agosto 2026.pdf")
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].amount, -30)
+        XCTAssertFalse(rows[0].title.contains("55,597.93"))
+    }
 }
