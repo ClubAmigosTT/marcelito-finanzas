@@ -1189,10 +1189,29 @@ final class FinanceStore {
         return true
     }
 
+    /// A verified flag is only trustworthy when the evidence is strong enough
+    /// and names the same issuer persisted on the statement. This mirrors the
+    /// web ledger gate and prevents a stale/corrupt record from making a BBVA
+    /// PDF look like Santander (or vice versa).
+    private func hasVerifiedSourceEvidence(_ statement: StatementRecord) -> Bool {
+        guard let evidence = statement.sourceDetection else { return false }
+        let sourceMatches = evidence.source.trimmingCharacters(in: .whitespacesAndNewlines)
+            .caseInsensitiveCompare(statement.source.trimmingCharacters(in: .whitespacesAndNewlines)) == .orderedSame
+        let hasTextEvidence = evidence.evidence.contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        return evidence.status == .verified
+            && sourceMatches
+            && evidence.confidence.isFinite
+            && evidence.confidence >= 0.99
+            && hasTextEvidence
+    }
+
     private func isEligibleStatement(_ statement: StatementRecord) -> Bool {
         isCurrentReader(statement)
             && statement.reconciliation?.status == .valid
-            && (statement.sourceDetection?.status == .verified || statement.issuerConfirmedByUser == true)
+            && statement.source.trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare("Desconocido") != .orderedSame
+            && statement.kind != .unknown
+            && (hasVerifiedSourceEvidence(statement) || statement.issuerConfirmedByUser == true)
             // A Santander scan must have its visual transaction columns
             // calibrated. Keep this as an independent gate instead of
             // trusting only `requiresReview`, so stale/corrupt persisted data

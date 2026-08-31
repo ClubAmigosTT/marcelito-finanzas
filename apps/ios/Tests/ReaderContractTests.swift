@@ -633,6 +633,96 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
     }
 
+    func testWeakVerifiedIssuerEvidenceCannotFeedNativeDashboard() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "estado-bbva.pdf",
+            importedAt: .now,
+            transactionCount: 0,
+            requiresReview: false,
+            kind: .bank,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "BBVA",
+                confidence: 0.98,
+                status: .verified,
+                evidence: [],
+                ignoredBodyMentions: []
+            ),
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+    }
+
+    func testVerifiedEvidenceFromAnotherIssuerCannotFeedNativeDashboard() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "estado-bbva.pdf",
+            importedAt: .now,
+            transactionCount: 0,
+            requiresReview: false,
+            kind: .bank,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "Santander",
+                confidence: 1,
+                status: .verified,
+                evidence: ["encabezado institucional Santander"],
+                ignoredBodyMentions: ["BBVA"]
+            ),
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+    }
+
+    func testUnknownStatementKindCannotFeedNativeDashboard() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "estado-bbva.pdf",
+            importedAt: .now,
+            transactionCount: 0,
+            requiresReview: false,
+            kind: .unknown,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "BBVA",
+                confidence: 1,
+                status: .verified,
+                evidence: ["encabezado institucional BBVA"],
+                ignoredBodyMentions: []
+            ),
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+    }
+
     func testLegacyStatementJSONDecodesWithoutNewOCRFields() throws {
         // A user may upgrade with statements persisted by a previous build.
         // Remove every field introduced by the OCR/source-confirmation work

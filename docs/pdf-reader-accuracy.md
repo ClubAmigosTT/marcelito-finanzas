@@ -127,6 +127,9 @@ gasto real sin separar esas secciones.
   es `verified`, con confianza institucional de al menos 99%, evidencia no
   vacía y el mismo emisor que se guardará en el estado, o si el usuario confirmó
   explícitamente un emisor conocido.
+- El predicado de elegibilidad de iOS aplica las mismas condiciones y además
+  rechaza `Desconocido` y tipos `unknown`; así una actualización nativa no puede
+  reintroducir una ruta de fallback que la capa web ya bloqueó.
   Estados antiguos o inferidos por nombre de archivo se migran a `pending`, se
   muestran en auditoría y sus filas quedan en cuarentena hasta confirmar el PDF.
 - Si el banco mostrado es conocido pero la evidencia automática es provisional,
