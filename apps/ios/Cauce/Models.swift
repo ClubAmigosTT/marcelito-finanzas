@@ -70,6 +70,8 @@ struct StatementSummaryRecord: Codable {
     var creditLimit: Decimal? = nil
     var creditAvailable: Decimal? = nil
     var minimumPayment: Decimal? = nil
+    /// Minimum payment plus active MSI installments, when the issuer prints it.
+    var minimumPlusMsi: Decimal? = nil
     var paymentForNoInterest: Decimal? = nil
     var cashBalance: Decimal? = nil
     var msiOriginalDeferred: Decimal? = nil
@@ -514,7 +516,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.08.31.9"
+    static let readerVersion = "ios-reader-2026.08.31.10"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4361,6 +4363,7 @@ final class FinanceStore {
             assign(\.creditAvailable, amount(after: ["credito disponible", "limite disponible", "linea disponible", "disponible para compras"]))
         }
         assign(\.minimumPayment, amount(after: ["pago minimo"]))
+        assign(\.minimumPlusMsi, amount(after: ["pago minimo mas meses sin intereses", "pago minimo mas msi"]))
         assign(\.paymentForNoInterest, amount(after: ["pago para no generar intereses", "pago para no generar interes"]))
         assign(\.msiPending, amount(after: ["msi pendientes", "saldo msi", "principal diferido"]))
         assign(\.revolvingBalance, amount(after: ["saldo revolvente", "saldo revolvente al corte"]))

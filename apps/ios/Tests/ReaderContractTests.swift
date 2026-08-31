@@ -163,6 +163,21 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.summary.map { max(Decimal(0), ($0.creditLimit ?? 0) - ($0.creditAvailable ?? 0)) }, 50_367.21)
     }
 
+    func testAmexSummaryKeepsMinimumPlusMsiSeparate() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            American Express
+            The Platinum Credit Card
+            Pago mínimo más meses sin intereses 19,579.69
+            Pago para no generar intereses 39,966.15
+            """,
+            fileName: "28_jul_2026_-_27_ago_2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.minimumPlusMsi, 19_579.69)
+        XCTAssertEqual(snapshot.summary?.paymentForNoInterest, 39_966.15)
+    }
+
     func testReaderRejectsAdministrativeNumericRows() {
         let text = """
         Grupo Financiero BBVA
