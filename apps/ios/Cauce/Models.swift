@@ -516,7 +516,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.08.31.12"
+    static let readerVersion = "ios-reader-2026.08.31.13"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -2775,6 +2775,17 @@ final class FinanceStore {
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
             request.recognitionLanguages = ["es-MX", "en-US"]
+            // Keep a small, issuer-specific vocabulary so Vision prefers the
+            // labels that anchor bank columns and issuer detection. Numeric
+            // tokens are intentionally absent: amounts must come from the
+            // visual candidate and reconciliation rules, never a dictionary.
+            request.customWords = [
+                "SANTANDER", "BBVA", "BANCOMER", "AMERICAN EXPRESS", "AMEX",
+                "DEPÓSITOS", "RETIROS", "CARGOS", "ABONOS", "SALDO",
+                "DESCRIPCIÓN", "DETALLE", "MOVIMIENTOS", "FECHA",
+                "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE",
+                "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+            ]
             request.usesLanguageCorrection = true
 
             do {
