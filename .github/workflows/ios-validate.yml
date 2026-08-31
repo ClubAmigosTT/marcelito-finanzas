@@ -51,6 +51,26 @@ jobs:
             CODE_SIGNING_REQUIRED=NO \
             build
 
+      - name: Ejecutar pruebas de contrato del lector
+        working-directory: apps/ios
+        shell: bash
+        run: |
+          set -euo pipefail
+          destination="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/{print "platform=iOS Simulator,id=" $2; exit}')"
+          if [ -z "$destination" ]; then
+            echo "No hay un simulador iPhone disponible para ejecutar las pruebas." >&2
+            exit 1
+          fi
+          xcodebuild \
+            -project Marcelito.xcodeproj \
+            -scheme Marcelito \
+            -configuration Debug \
+            -destination "$destination" \
+            -derivedDataPath "$RUNNER_TEMP/MarcelitoTestsDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            test
+
       - name: Escribir resumen
         if: success()
         shell: bash

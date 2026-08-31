@@ -252,6 +252,17 @@ struct ImportSummary {
     let sourceFingerprint: String
 }
 
+/// Deterministic reader output used by the iOS contract tests. Keeping this
+/// snapshot separate from the persisted ledger lets CI exercise extraction,
+/// issuer detection and statement classification without writing user data.
+struct ReaderParseSnapshot {
+    let sourceDetection: SourceDetectionEvidence
+    let source: String
+    let kind: StatementKind
+    let movements: [Movement]
+    let summary: StatementSummaryRecord?
+}
+
 struct StatementMetric: Identifiable {
     let id: UUID
     let source: String
@@ -394,6 +405,28 @@ final class FinanceStore {
     private let ledgerSchemaVersion = 1
     private let statementFilesDirectoryName = "ImportedStatements"
     private var repairInProgress = false
+
+    /// Runs the same text-layer reader path used during import, without
+    /// touching UserDefaults or the canonical ledger. The test target uses
+    /// this to lock down issuer detection and administrative-row rejection.
+    static func readerParseSnapshotForTesting(
+        text: String,
+        fileName: String,
+        sourceHint: String? = nil
+    ) -> ReaderParseSnapshot {
+        let detection = sourceDetection(from: text, fileName: fileName)
+        let source = sourceHint ?? detection.source
+        let kind = statementKind(from: text, source: source)
+        let movements = parse(text: text, fileName: fileName, sourceHint: source)
+        let summary = summary(from: text, source: source)
+        return ReaderParseSnapshot(
+            sourceDetection: detection,
+            source: source,
+            kind: kind,
+            movements: movements,
+            summary: summary
+        )
+    }
 
     var movements: [Movement]
     var statements: [StatementRecord]

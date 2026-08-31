@@ -9,6 +9,19 @@ Cliente nativo en SwiftUI para iOS 17 o posterior.
 3. Abre `Marcelito.xcodeproj` y selecciona tu equipo de firma.
 4. Ejecuta en un iPhone o en el simulador.
 
+Para ejecutar el contrato del lector en un simulador disponible:
+
+```bash
+xcodegen generate --spec project.yml
+xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
+  -destination "platform=iOS Simulator,name=iPhone 16" test
+```
+
+Las pruebas verifican que el emisor se identifica por el encabezado
+institucional, que las filas administrativas se descartan y que un crédito de
+Amex no termina como gasto. El workflow de GitHub las ejecuta automáticamente
+en macOS.
+
 La autenticación usa Keychain y Face ID. La aplicación inicia sin movimientos de muestra: importa tus PDFs desde Archivos, revisa banco, periodo y movimientos, y los guarda solo en ese dispositivo. Los estados escaneados pueden quedar pendientes de revisión sin inventar filas.
 
 Movimientos y estados de cuenta se persisten localmente, se evita volver a contar el mismo archivo y las categorías se pueden corregir desde el detalle de cada movimiento. El menú de Inicio permite eliminar la cuenta y todos los datos locales.

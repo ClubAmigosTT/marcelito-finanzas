@@ -30,4 +30,15 @@ targets:
         GENERATE_INFOPLIST_FILE: YES
         CODE_SIGN_STYLE: Automatic
     scheme:
-      testTargets: []
+      testTargets:
+        - MarcelitoTests
+  MarcelitoTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - Tests
+    dependencies:
+      - target: Marcelito
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: mx.marcelito.personal.tests

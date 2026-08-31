@@ -78,3 +78,22 @@ La corrida reproducible sobre los 8 adjuntos disponibles encontró
 (Santander mayo/julio/agosto y BBVA junio). Un estado marcado como
 `ocr-required` no se cuenta como aceptación hasta que Vision/Tesseract extraiga
 filas y concilie sus totales.
+
+## Contrato de lectura en iOS
+
+El proyecto nativo incluye `apps/ios/Tests/ReaderContractTests.swift`. Estas
+pruebas se ejecutan en el workflow de macOS después de generar el proyecto con
+XcodeGen:
+
+```bash
+cd apps/ios
+xcodegen generate --spec project.yml
+xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
+  -destination "platform=iOS Simulator,name=iPhone 16" test
+```
+
+El contrato cubre tres regresiones de alto riesgo: evidencia institucional que
+vence a una contraparte (BBVA no se convierte en Santander), créditos Amex que
+no se convierten en compras y encabezados administrativos con números que no
+se convierten en movimientos. Si falla, el workflow no puede avanzar a una
+compilación publicable.
