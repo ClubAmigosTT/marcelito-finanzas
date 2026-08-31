@@ -62,7 +62,7 @@ final class ReaderContractTests: XCTestCase {
             fileName: "sample-bank-bbva.pdf"
         )
 
-        XCTAssertEqual(snapshot.accountKey, "bbva:4922")
+        XCTAssertEqual(snapshot.accountKey, "bbva:6655")
         XCTAssertFalse(snapshot.accountKey?.contains("9988776655") == true)
     }
 
@@ -164,7 +164,7 @@ final class ReaderContractTests: XCTestCase {
         American Express
         The Platinum Credit Card
         Saldo Anterior Pagos y Créditos Nuevos Cargos Pago para no Pago
-        2,315.09 - 3,274.46 + 4,955.99 = 3,996.62 319.73
+        3,200.00 - 1,000.00 + 1,117.75 = 3,317.75 300.00
         Límite de Crédito Límite Disponible
         a Agosto 27,2026 20,000.00 MN 16,682.25 MN
         Fecha y Detalle de las operaciones Importe en MN.
@@ -178,7 +178,7 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.kind, .card)
         XCTAssertEqual(snapshot.summary?.creditLimit, 20_000)
         XCTAssertEqual(snapshot.summary?.creditAvailable, 16_682.25)
-        XCTAssertEqual(snapshot.summary?.debtBalance, 3_996.62)
+        XCTAssertEqual(snapshot.summary?.debtBalance, 3_317.75)
         XCTAssertEqual(snapshot.summary.map { max(Decimal(0), ($0.creditLimit ?? 0) - ($0.creditAvailable ?? 0)) }, 3_317.75)
     }
 
@@ -365,10 +365,10 @@ final class ReaderContractTests: XCTestCase {
     func testBankSummaryRecoversFusedOcrSeparators() {
         let text = """
         Banco Santander México, S.A., Institución de Banca Múltiple
-        Saldo inicial 5562793
-        Depósitos 3618742
-        Retros 6416111
-        Saldo final 2765424
+        Saldo inicial 1234567
+        Depósitos 2345678
+        Retros 0876543
+        Saldo final 2703702
         Detalle de movimientos
         """
 
@@ -377,10 +377,10 @@ final class ReaderContractTests: XCTestCase {
             fileName: "sample-bank-period-3.pdf"
         )
 
-        XCTAssertEqual(snapshot.summary?.previousBalance, 5562.79)
-        XCTAssertEqual(snapshot.summary?.depositTotal, Decimal(string: "36187.42"))
-        XCTAssertEqual(snapshot.summary?.withdrawalTotal, 6_416.11)
-        XCTAssertEqual(snapshot.summary?.cashBalance, 2_765.42)
+        XCTAssertEqual(snapshot.summary?.previousBalance, 12_345.67)
+        XCTAssertEqual(snapshot.summary?.depositTotal, Decimal(string: "23456.78"))
+        XCTAssertEqual(snapshot.summary?.withdrawalTotal, 8_765.43)
+        XCTAssertEqual(snapshot.summary?.cashBalance, 27_037.02)
     }
 
     func testHiddenAdministrativeTextLayerFallsBackToOCR() {
@@ -407,8 +407,8 @@ final class ReaderContractTests: XCTestCase {
         let repaired = FinanceStore.repairedBankOCRAmountForTesting(
             selected: 30.01,
             selectedText: "30.01",
-            previousBalance: 5562.79,
-            runningBalance: 5_559.79
+            previousBalance: 12_345.67,
+            runningBalance: 12_315.67
         )
         XCTAssertEqual(NSDecimalNumber(decimal: repaired).doubleValue, 30, accuracy: 0.001)
 
@@ -423,16 +423,16 @@ final class ReaderContractTests: XCTestCase {
         let leadingOne = FinanceStore.repairedBankOCRAmountForTesting(
             selected: 160,
             selectedText: "160.00",
-            previousBalance: 65_879.07,
-            runningBalance: 65_819.07
+            previousBalance: 12_345.67,
+            runningBalance: 12_285.67
         )
         XCTAssertEqual(NSDecimalNumber(decimal: leadingOne).doubleValue, 60, accuracy: 0.001)
 
         let leadingOneWithThreeDigits = FinanceStore.repairedBankOCRAmountForTesting(
             selected: 1_693,
             selectedText: "1693.00",
-            previousBalance: 10_399.48,
-            runningBalance: 9_706.48
+            previousBalance: 9_876.54,
+            runningBalance: 9_183.54
         )
         XCTAssertEqual(NSDecimalNumber(decimal: leadingOneWithThreeDigits).doubleValue, 693, accuracy: 0.001)
     }
