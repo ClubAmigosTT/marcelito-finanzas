@@ -7,6 +7,7 @@ import type { StatementKind, StatementSource } from "../src/types.ts";
 
 type ExpectedFile = {
   file: string;
+  sourceFingerprint?: string;
   source?: StatementSource;
   kind?: StatementKind;
   status?: "valid" | "invalid" | "pending";
@@ -178,6 +179,7 @@ if (!directory) {
     const mismatches: string[] = [];
     if (expected?.source && expected.source !== result.source) mismatches.push(`emisor esperado ${expected.source}, obtenido ${result.source}`);
     if (expected?.kind && expected.kind !== result.kind) mismatches.push(`tipo esperado ${expected.kind}, obtenido ${result.kind}`);
+    if (expected?.sourceFingerprint && expected.sourceFingerprint !== result.sourceFingerprint) mismatches.push("huella SHA-256 del archivo no coincide");
     if (expected?.status && expected.status !== result.reconciliation.status) mismatches.push(`estado esperado ${expected.status}, obtenido ${result.reconciliation.status}`);
     if (expected?.rows !== undefined && expected.rows !== result.rows) mismatches.push(`filas esperadas ${expected.rows}, obtenidas ${result.rows}`);
     for (const [key, value] of Object.entries(expected?.summary ?? {})) {

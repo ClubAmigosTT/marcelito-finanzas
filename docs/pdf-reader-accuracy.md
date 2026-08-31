@@ -96,8 +96,8 @@ npm run pdf:corpus -- --dir "./estados-validados" --manifest ./corpus.json \
   --require-manifest --target-precision 0.99 > corpus-certification.json
 ```
 
-El manifiesto opcional fija emisor, tipo, estado de conciliación, número de
-filas y totales esperados por archivo. Si falta un archivo declarado o aparece
+El manifiesto opcional fija huella SHA-256, emisor, tipo, estado de
+conciliación, número de filas y totales esperados por archivo. Si falta un archivo declarado o aparece
 duplicado en el manifiesto, la corrida falla. El resultado incluye método
 (`pdf-text` u `ocr-required`), confianza del emisor, filas sospechosas,
 filas sin evidencia, cobertura de evidencia, cobertura de filas y motivo de
