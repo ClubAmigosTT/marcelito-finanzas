@@ -139,7 +139,7 @@ struct DiagnosticsView: View {
                         LabeledContent("Última auditoría", value: auditStatus)
                         LabeledContent("Disparador", value: audit.trigger)
                         LabeledContent("Versión del libro", value: String(audit.ledgerVersion.uuidString.prefix(8)))
-                        Text("Ejecutada (audit.completedAt, style: .relative) · (audit.id.uuidString.prefix(8))")
+                        Text("Ejecutada \(audit.completedAt, style: .relative) · \(audit.id.uuidString.prefix(8))")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }

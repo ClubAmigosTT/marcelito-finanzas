@@ -454,9 +454,9 @@ final class FinanceStore {
     /// historical charts. A statement that has not reconciled is visible in
     /// diagnostics, but cannot silently feed executive figures.
     var ledgerQuality: LedgerQuality {
-        let validated = statements.filter { $0.reconciliation?.status == .valid }
+        let validated = statements.filter { $0.reconciliation?.status == .valid && !$0.requiresReview }
         let invalid = statements.filter { $0.reconciliation?.status == .invalid }
-        let pending = statements.filter { $0.reconciliation?.status != .valid }
+        let pending = statements.filter { $0.reconciliation?.status != .valid || $0.requiresReview }
         let reviewCount = movements.filter { $0.category == "Por revisar" || $0.category == "Sin categoría" }.count
         let absurdCount = movements.filter { abs($0.amount) >= 10_000_000 || !isValidStoredMovement($0) }.count
         let statementCount = statements.count
@@ -465,8 +465,8 @@ final class FinanceStore {
         let missingRebuiltStatements = UserDefaults.standard.bool(forKey: canonicalRebuildKey)
             && expectedRebuildCount > 0
             && validated.count < expectedRebuildCount
-        let canonicalGross = movements.filter(isSpend).reduce(Decimal(0)) { $0 + absolute($1.amount) }
-        let canonicalRefunds = movements.filter { movementKind($0) == .refund }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let canonicalGross = eligibleMovements.filter(isSpend).reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let canonicalRefunds = eligibleMovements.filter { movementKind($0) == .refund }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let canonicalNetSpend = max(Decimal(0), canonicalGross - canonicalRefunds)
         let spendMismatch = consolidatedRealSpend > canonicalNetSpend + max(Decimal(1), canonicalNetSpend * Decimal(string: "0.01")!)
         let failedChecks = consistencyChecks.filter { !$0.passed }
@@ -475,7 +475,10 @@ final class FinanceStore {
         if invalid.count > 0 {
             message = "\(invalid.count) estado(s) no concilian contra sus totales originales."
         } else if pending.count > 0 {
-            message = "\(pending.count) estado(s) aún no tienen conciliación validada."
+            let reviewOnly = pending.filter { $0.reconciliation?.status == .valid && $0.requiresReview }.count
+            message = reviewOnly > 0
+                ? "\(reviewOnly) estado(s) concilian, pero requieren revisión manual antes de alimentar los KPI."
+                : "\(pending.count) estado(s) aún no tienen conciliación validada."
         } else if absurdCount > 0 {
             message = "Hay \(absurdCount) movimiento(s) con importes fuera de rango."
         } else if spendMismatch {
@@ -560,7 +563,7 @@ final class FinanceStore {
         for metric in latestMetricsBySource(periodMetrics.filter { $0.kind == .bank }) {
             guard let opening = statements.first(where: { $0.id == metric.id })?.summary?.previousBalance,
                   let closing = metric.cashBalance else { continue }
-            let delta = movements
+            let delta = eligibleMovements
                 .filter { $0.statementId == metric.id }
                 .reduce(Decimal(0)) { $0 + $1.amount }
             checks.append(check(
@@ -581,7 +584,7 @@ final class FinanceStore {
         // fallbacks. Invalid/pending records remain in `statements` solely so
         // the audit UI can explain why the dashboard is blocked.
         statements
-            .filter { $0.reconciliation?.status == .valid }
+            .filter { $0.reconciliation?.status == .valid && !$0.requiresReview }
             .map { calculateMetric(for: $0) }
             .sorted { left, right in
                 let leftDate = statementEndDate(for: left.id)
@@ -619,27 +622,27 @@ final class FinanceStore {
     }
 
     var totalNewTransactions: Decimal {
-        movements.filter { isCardMovement($0) && movementKind($0) == .purchase }.reduce(0) { $0 + absolute($1.amount) }
+        eligibleMovements.filter { isCardMovement($0) && movementKind($0) == .purchase }.reduce(0) { $0 + absolute($1.amount) }
     }
     var averageMonthlySpend: Decimal { cardPeriodCount == 0 ? 0 : totalNewTransactions / Decimal(cardPeriodCount) }
     var totalNewCharges: Decimal {
-        movements.filter { isCardMovement($0) && isSpend($0) }.reduce(0) { $0 + absolute($1.amount) }
+        eligibleMovements.filter { isCardMovement($0) && isSpend($0) }.reduce(0) { $0 + absolute($1.amount) }
     }
     var totalRealPayments: Decimal {
-        movements.filter { isCardMovement($0) && movementKind($0) == .cardPayment }.reduce(0) { $0 + absolute($1.amount) }
+        eligibleMovements.filter { isCardMovement($0) && movementKind($0) == .cardPayment }.reduce(0) { $0 + absolute($1.amount) }
     }
     var totalCredits: Decimal {
-        movements.filter { isCardMovement($0) && movementKind($0) == .credit }.reduce(0) { $0 + absolute($1.amount) }
+        eligibleMovements.filter { isCardMovement($0) && movementKind($0) == .credit }.reduce(0) { $0 + absolute($1.amount) }
     }
     var totalRefunds: Decimal {
-        movements.filter { isCardMovement($0) && movementKind($0) == .refund }.reduce(0) { $0 + absolute($1.amount) }
+        eligibleMovements.filter { isCardMovement($0) && movementKind($0) == .refund }.reduce(0) { $0 + absolute($1.amount) }
     }
     var accumulatedBalance: Decimal { totalNewCharges - totalRealPayments - totalCredits - totalRefunds }
     var latestDifference: Decimal { cardPeriodMetrics.first?.difference ?? 0 }
     var paidPercent: Decimal? { totalNewCharges == 0 ? nil : totalRealPayments / totalNewCharges }
     var pendingPercent: Decimal? { totalNewCharges == 0 ? nil : max(Decimal(0), accumulatedBalance) / totalNewCharges }
     var travelSpend: Decimal {
-        movements.filter { isSpend($0) && isTravel($0) }.reduce(0) { $0 + absolute($1.amount) }
+        eligibleMovements.filter { isSpend($0) && isTravel($0) }.reduce(0) { $0 + absolute($1.amount) }
     }
     var travelPercent: Decimal? { consolidatedRealSpend == 0 ? nil : travelSpend / consolidatedRealSpend }
     var ordinarySpend: Decimal { max(Decimal(0), consolidatedRealSpend - travelSpend) }
@@ -652,36 +655,36 @@ final class FinanceStore {
     var latestPaymentForNoInterest: Decimal? { cardPeriodMetrics.first?.paymentForNoInterest }
     var cardSpend: Decimal { totalNewCharges }
     var directBankSpend: Decimal {
-        movements.filter { movement in
+        eligibleMovements.filter { movement in
             guard isSpend(movement), let statementId = movement.statementId,
                   let statement = statements.first(where: { $0.id == statementId }) else { return false }
             return statementKind(statement) != .card
         }.reduce(0) { $0 + absolute($1.amount) }
     }
-    var rawExpense: Decimal { movements.filter { $0.flow == .expense }.reduce(0) { $0 + absolute($1.amount) } }
-    var excludedCardPayments: Decimal { movements.filter { movementKind($0) == .cardPayment && isBankMovement($0) }.reduce(0) { $0 + absolute($1.amount) } }
-    var excludedInternalTransfers: Decimal { movements.filter { movementKind($0) == .bankTransfer && $0.amount < 0 }.reduce(0) { $0 + absolute($1.amount) } }
+    var rawExpense: Decimal { eligibleMovements.filter { $0.flow == .expense }.reduce(0) { $0 + absolute($1.amount) } }
+    var excludedCardPayments: Decimal { eligibleMovements.filter { movementKind($0) == .cardPayment && isBankMovement($0) }.reduce(0) { $0 + absolute($1.amount) } }
+    var excludedInternalTransfers: Decimal { eligibleMovements.filter { movementKind($0) == .bankTransfer && $0.amount < 0 }.reduce(0) { $0 + absolute($1.amount) } }
     var consolidatedRealSpend: Decimal {
-        let manualSpend = movements.filter { $0.statementId == nil && isSpend($0) }.reduce(0) { $0 + absolute($1.amount) }
-        let allRefunds = movements.filter { movementKind($0) == .refund }.reduce(0) { $0 + absolute($1.amount) }
+        let manualSpend = eligibleMovements.filter { $0.statementId == nil && isSpend($0) }.reduce(0) { $0 + absolute($1.amount) }
+        let allRefunds = eligibleMovements.filter { movementKind($0) == .refund }.reduce(0) { $0 + absolute($1.amount) }
         return max(Decimal(0), cardSpend + directBankSpend + manualSpend - allRefunds)
     }
     var totalIncome: Decimal { realIncome }
-    var totalTransfers: Decimal { movements.filter { $0.flow == .transfer }.reduce(0) { $0 + absolute($1.amount) } }
+    var totalTransfers: Decimal { eligibleMovements.filter { $0.flow == .transfer }.reduce(0) { $0 + absolute($1.amount) } }
     var totalExpenses: Decimal { consolidatedRealSpend }
-    var realExpenseMovements: [Movement] { movements.filter(isSpend) }
+    var realExpenseMovements: [Movement] { eligibleMovements.filter(isSpend) }
 
     /// Expenses shown in the dashboard are scoped to the newest available
     /// statement period. Keeping the complete ledger above is useful for
     /// audits, but it must not inflate the current-month view.
     var currentPeriodExpenseMovements: [Movement] {
-        movements.filter { movement in
+        eligibleMovements.filter { movement in
             guard let currentPeriodKey else { return true }
             return movementPeriodKey(movement) == currentPeriodKey
         }.filter(isSpend)
     }
     var realIncome: Decimal {
-        movements.filter(isRealIncome).reduce(0) { $0 + absolute($1.amount) }
+        eligibleMovements.filter(isRealIncome).reduce(0) { $0 + absolute($1.amount) }
     }
     var netFlow: Decimal { realIncome - consolidatedRealSpend }
     var savingsRate: Decimal? { realIncome == 0 ? nil : netFlow / realIncome }
@@ -736,7 +739,7 @@ final class FinanceStore {
     }
 
     var monthlyIncome: Decimal {
-        movements
+        eligibleMovements
             .filter { movement in
                 guard let currentPeriodKey else { return isRealIncome(movement) }
                 return movementPeriodKey(movement) == currentPeriodKey && isRealIncome(movement)
@@ -754,7 +757,7 @@ final class FinanceStore {
         var expenseByDay: [Date: Decimal] = [:]
         let calendar = Calendar.current
 
-        for movement in movements {
+        for movement in eligibleMovements {
             let day = calendar.startOfDay(for: movement.date)
             if isRealIncome(movement) {
                 incomeByDay[day, default: 0] += absolute(movement.amount)
@@ -794,6 +797,19 @@ final class FinanceStore {
         guard let statementId = movement.statementId,
               let statement = statements.first(where: { $0.id == statementId }) else { return false }
         return statementKind(statement) == .card
+    }
+
+    /// Only reconciled and confirmed statement rows may feed a financial
+    /// metric. Rows from a pending/review statement remain in `movements` so
+    /// the user can inspect them, but they are quarantined from every total.
+    private func isEligibleMovement(_ movement: Movement) -> Bool {
+        guard let statementId = movement.statementId else { return true }
+        guard let statement = statements.first(where: { $0.id == statementId }) else { return false }
+        return statement.reconciliation?.status == .valid && !statement.requiresReview
+    }
+
+    private var eligibleMovements: [Movement] {
+        movements.filter(isEligibleMovement)
     }
 
     private func movementKind(_ movement: Movement) -> MovementKind {
@@ -1037,7 +1053,11 @@ final class FinanceStore {
             // PDF rows are canonical only after their parent statement has
             // reconciled. Manual rows (statementId == nil) remain available.
             guard let statementId = movement.statementId else { return true }
-            return statements.first(where: { $0.id == statementId })?.reconciliation?.status == .valid
+            guard let statement = statements.first(where: { $0.id == statementId }) else { return false }
+            // Keep rows from a reconciled-but-unconfirmed statement visible
+            // for manual correction; isEligibleMovement quarantines them from
+            // all financial aggregates until confirmation.
+            return statement.reconciliation?.status == .valid
         }
         var seen: [String: (statementId: UUID?, movementId: UUID)] = [:]
         var canonical: [Movement] = []
@@ -1326,6 +1346,26 @@ final class FinanceStore {
         persist()
     }
 
+    /// Explicitly releases a reconciled statement from the review quarantine.
+    /// This is a human acknowledgement for OCR/low-confidence rows; it never
+    /// overrides an issuer-total mismatch or an unknown reconciliation state.
+    @discardableResult
+    func confirmStatementReviewed(_ statement: StatementRecord) -> Bool {
+        guard let index = statements.firstIndex(where: { $0.id == statement.id }) else { return false }
+        guard statements[index].reconciliation?.status == .valid else {
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "statement.review.blocked",
+                message: "No se puede confirmar \(statements[index].fileName): la conciliación aún no es válida."
+            )
+            return false
+        }
+        statements[index].requiresReview = false
+        persist()
+        _ = runAutomaticAudit(trigger: "review")
+        return true
+    }
+
     func updateStatementSource(for statement: StatementRecord, to source: String, kind: StatementKind? = nil) {
         let cleaned = source.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty,
@@ -1542,7 +1582,7 @@ final class FinanceStore {
                     preserveExistingOnEmpty: false,
                     requireValidReconciliation: true
                 )
-                if result.reconciliation?.status == .valid {
+                if result.reconciliation?.status == .valid && !result.requiresReview {
                     importedCount += 1
                     DiagnosticsRecorder.record(
                         stage: "rebuild.statement",

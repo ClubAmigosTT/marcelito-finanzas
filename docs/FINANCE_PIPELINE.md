@@ -17,6 +17,9 @@ este orden, antes de que cualquier cifra llegue al dashboard:
 - Un estado que concilia pero permanece en revisión manual tampoco se considera
   verificado: sus filas quedan fuera de los KPI y el último `AuditRunRecord`
   permanece bloqueado hasta que el usuario lo confirme.
+- iOS conserva esas filas para inspección, ofrece **Confirmar estado revisado**
+  desde las cifras del corte y vuelve a ejecutar la autoauditoría al liberar el
+  estado; una conciliación inválida nunca puede saltarse con esa acción.
 
 El bloque de auditoría del Inicio expone los conteos y montos de cada periodo. También muestra las identidades contables y marca los KPI como provisionales cuando hay filas rechazadas, movimientos relevantes por revisar o una conciliación fuera de tolerancia.
 

@@ -1173,6 +1173,17 @@ private struct StatementSummaryEditor: View {
                     dismiss()
                 }
                 .frame(maxWidth: .infinity)
+                if statement.requiresReview {
+                    Button("Confirmar estado revisado") {
+                        _ = store.confirmStatementReviewed(statement)
+                        dismiss()
+                    }
+                    .frame(maxWidth: .infinity)
+                    .disabled(statement.reconciliation?.status != .valid)
+                    Text("Confirma después de revisar las filas OCR y los importes. Solo los estados conciliados pueden entrar a los KPI.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
         }
         .navigationTitle("Cifras del corte")
