@@ -1,5 +1,5 @@
 import { PDF_READER_VERSION } from "./pdfImport.ts";
-import { hasSufficientOcrQuality } from "./finance.ts";
+import { hasSufficientOcrQuality, hasVerifiedSourceEvidence } from "./finance.ts";
 import type { Statement, Transaction } from "./types.ts";
 
 const MIGRATION_TOLERANCE = 0.05;
@@ -25,8 +25,7 @@ export function prepareStoredStatements(
     // row into the canonical ledger would let a BBVA PDF masquerade as a
     // Santander account even when its totals happen to reconcile.
     const sourceNeedsReview = statement.status === "ready"
-      && (statement.sourceDetection?.status !== "verified"
-        || statement.sourceDetection.source !== statement.source)
+      && !hasVerifiedSourceEvidence(statement)
       && statement.issuerConfirmedByUser !== true;
     const kindNeedsReview = statement.kind === "unknown";
     const ocrNeedsReview = !hasSufficientOcrQuality(statement);
@@ -84,8 +83,7 @@ export function prepareStoredLedger(
           || !statement.reconciliationStatus
           || !statement.reconciliation
           || (statement.status === "ready"
-            && (statement.sourceDetection?.status !== "verified"
-              || statement.sourceDetection.source !== statement.source)
+            && !hasVerifiedSourceEvidence(statement)
             && statement.issuerConfirmedByUser !== true)
             || statement.kind === "unknown"
         );

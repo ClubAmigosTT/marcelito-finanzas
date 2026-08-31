@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { adaptiveOcrScale, detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
-import { buildFinanceMetrics, isStatementEligibleForDashboard } from "../src/finance.ts";
+import { buildFinanceMetrics, hasVerifiedSourceEvidence, isStatementEligibleForDashboard } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
 import { prepareStoredLedger, prepareStoredStatements } from "../src/statementMigration.ts";
 import type { Statement, Transaction } from "../src/types.ts";
@@ -1114,6 +1114,24 @@ test("la evidencia verificada de otro banco no puede cambiar el emisor guardado"
   assert.equal(prepared?.status, "review");
   const ledger = prepareStoredLedger([statement], [transaction], "web-reader-current");
   assert.equal(ledger.quarantinedMovementCount, 1);
+});
+
+test("un emisor verificado sin confianza y evidencia suficiente queda bloqueado", () => {
+  const statement: Statement = {
+    ...bank("bbva-weak-source", "BBVA", "agosto 2026"),
+    sourceDetection: {
+      source: "BBVA",
+      confidence: 0.98,
+      status: "verified",
+      evidence: [],
+      ignoredBodyMentions: [],
+    },
+  };
+  assert.equal(hasVerifiedSourceEvidence(statement), false);
+  assert.equal(isStatementEligibleForDashboard(statement), false);
+  const metrics = buildFinanceMetrics([], [statement]);
+  assert.equal(metrics.isProvisional, true);
+  assert.match(metrics.audit.criticalIssues.join(" "), /emisor no verificado/);
 });
 
 test("un estado de tipo desconocido no puede caer en el valor predeterminado bancario", () => {

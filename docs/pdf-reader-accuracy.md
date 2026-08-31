@@ -124,7 +124,9 @@ gasto real sin separar esas secciones.
   editable.
 - Un estado inválido, pendiente o provisional no alimenta Resumen, Gastos, Patrimonio ni gráficas.
 - Un estado `ready` solo alimenta el libro canónico si `sourceDetection.status`
-  es `verified` o si el usuario confirmó explícitamente un emisor conocido.
+  es `verified`, con confianza institucional de al menos 99%, evidencia no
+  vacía y el mismo emisor que se guardará en el estado, o si el usuario confirmó
+  explícitamente un emisor conocido.
   Estados antiguos o inferidos por nombre de archivo se migran a `pending`, se
   muestran en auditoría y sus filas quedan en cuarentena hasta confirmar el PDF.
 - Si el banco mostrado es conocido pero la evidencia automática es provisional,

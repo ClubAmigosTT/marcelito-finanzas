@@ -28,6 +28,17 @@ export function hasSufficientOcrQuality(statement: Statement) {
   return true;
 }
 
+/** Institutional evidence must be both strong and self-consistent. */
+export function hasVerifiedSourceEvidence(statement: Statement) {
+  const evidence = statement.sourceDetection;
+  return Boolean(evidence
+    && evidence.status === "verified"
+    && evidence.source === statement.source
+    && Number.isFinite(evidence.confidence)
+    && evidence.confidence >= 0.99
+    && evidence.evidence.some((item) => item.trim().length > 0));
+}
+
 /**
  * Single eligibility boundary for dashboard data.
  *
@@ -45,14 +56,10 @@ export function isStatementEligibleForDashboard(statement: Statement) {
   if (!hasSufficientOcrQuality(statement)) return false;
   if (statement.source === "Desconocido") return false;
   if (statement.kind === "unknown") return false;
-  const sourceEvidence = statement.sourceDetection;
-  // A missing evidence record is not equivalent to a verified issuer. Legacy
-  // records are migrated to review, but keep this direct boundary strict too
-  // so programmatic callers cannot feed an unlabeled PDF into the dashboard.
-  if ((!sourceEvidence
-    || sourceEvidence.status !== "verified"
-    || sourceEvidence.source !== statement.source)
-    && statement.issuerConfirmedByUser !== true) return false;
+  // Missing, weak, or mismatched evidence is not equivalent to a verified
+  // issuer. Legacy records are migrated to review, but keep this direct
+  // boundary strict too so programmatic callers cannot feed an unlabeled PDF.
+  if (!hasVerifiedSourceEvidence(statement) && statement.issuerConfirmedByUser !== true) return false;
   return true;
 }
 
@@ -702,11 +709,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   const blockedForSourceEvidence = statements
     .filter((statement) => {
       if (statement.source === "Desconocido") return true;
-      const sourceEvidence = statement.sourceDetection;
-      return Boolean((!sourceEvidence
-        || sourceEvidence.status !== "verified"
-        || sourceEvidence.source !== statement.source)
-        && statement.issuerConfirmedByUser !== true);
+      return Boolean(!hasVerifiedSourceEvidence(statement) && statement.issuerConfirmedByUser !== true);
     })
     .map((statement) => statement.id);
   const blockedForStatementKind = statements
