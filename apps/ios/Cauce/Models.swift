@@ -539,6 +539,29 @@ final class FinanceStore {
         return parseSantanderOCR(observations, fileName: fileName)
     }
 
+    /// Reports whether the OCR fixture contains a geometrically valid
+    /// DEPÓSITO/RETIRO/SALDO header. Production imports use this signal to
+    /// keep a fallback-column read provisional until a person reviews it.
+    static func santanderOCRColumnsCalibratedForTesting(
+        _ fixtures: [OCRObservationFixture],
+        fileName: String
+    ) -> Bool {
+        let observations = fixtures.map { fixture in
+            OCRObservation(
+                page: fixture.page,
+                text: fixture.text,
+                boundingBox: CGRect(
+                    x: fixture.x,
+                    y: fixture.y,
+                    width: fixture.width,
+                    height: fixture.height
+                ),
+                confidence: fixture.confidence
+            )
+        }
+        return parseSantanderOCRResult(observations, fileName: fileName).columnsCalibrated
+    }
+
     /// Decides whether a PDF's selectable text is structurally usable. Kept
     /// internal so the contract tests can cover the OCR boundary without
     /// opening a PDF or invoking Vision in a unit-test fixture.
@@ -2277,12 +2300,14 @@ final class FinanceStore {
         } ?? detectedSourceEvidence
         let source = sourceDetection.source
         let detectedKind = kindOverride ?? Self.statementKind(from: text, source: source)
+        var santanderColumnsCalibrated = true
         let parsedCandidates: [Movement]
         if usedOCR, source == "Santander" {
-            let santanderCandidates = Self.parseSantanderOCR(ocrObservations, fileName: url.lastPathComponent)
-            parsedCandidates = santanderCandidates.isEmpty
+            let santanderResult = Self.parseSantanderOCRResult(ocrObservations, fileName: url.lastPathComponent)
+            santanderColumnsCalibrated = santanderResult.columnsCalibrated
+            parsedCandidates = santanderResult.movements.isEmpty
                 ? Self.parse(text: text, fileName: url.lastPathComponent, sourceHint: source)
-                : santanderCandidates
+                : santanderResult.movements
         } else if usedOCR, source == "Amex" {
             let amexCandidates = Self.parseAmexOCR(Self.ocrLines(from: ocrObservations), fileName: url.lastPathComponent)
             parsedCandidates = amexCandidates.isEmpty
@@ -2338,6 +2363,9 @@ final class FinanceStore {
             guard let evidence = $0.extractionEvidence else { return true }
             return evidence.method != "vision-ocr" || evidence.confidence < 0.88
         }
+        let ocrColumnCalibrationNeedsReview = usedOCR
+            && source == "Santander"
+            && !santanderColumnsCalibrated
         let weakestOCRPage = ocrPageConfidences?.min()
         let ocrConfidenceNeedsReview = usedOCR
             && ((ocrConfidence ?? 0) < 0.88 || (weakestOCRPage ?? 0) < 0.78)
@@ -2345,6 +2373,12 @@ final class FinanceStore {
             DiagnosticsRecorder.record(
                 stage: "import.ocr.review",
                 message: "\(url.lastPathComponent): se requiere revisión porque alguna fila OCR no conserva evidencia visual suficiente."
+            )
+        }
+        if ocrColumnCalibrationNeedsReview {
+            DiagnosticsRecorder.record(
+                stage: "import.ocr.columns",
+                message: "\(url.lastPathComponent): no se pudieron calibrar las columnas DEPÓSITO/RETIRO/SALDO; el estado queda provisional."
             )
         }
         if ocrConfidenceNeedsReview {
@@ -2359,6 +2393,7 @@ final class FinanceStore {
             || reconciliation.status != .valid
             || sourceDetection.status != .verified
             || ocrFallbackNeedsReview
+            || ocrColumnCalibrationNeedsReview
             || ocrConfidenceNeedsReview
             || fresh.contains { $0.category == "Por revisar" }
 
@@ -2494,17 +2529,24 @@ final class FinanceStore {
         let movementMinX: CGFloat
         let balanceMinX: CGFloat
         let depositMaxX: CGFloat
+        let calibratedFromHeader: Bool
 
         static let fallback = SantanderOCRColumns(
             movementMinX: 0.59,
             balanceMinX: 0.86,
-            depositMaxX: 0.73
+            depositMaxX: 0.73,
+            calibratedFromHeader: false
         )
     }
 
     private struct SantanderRowResult {
         let movement: Movement
         let runningBalance: Decimal?
+    }
+
+    private struct SantanderOCRParseResult {
+        let movements: [Movement]
+        let columnsCalibrated: Bool
     }
 
     private static func extractionBounds(for row: [OCRObservation]) -> MovementExtractionBounds? {
@@ -3233,6 +3275,13 @@ final class FinanceStore {
         _ observations: [OCRObservation],
         fileName: String
     ) -> [Movement] {
+        parseSantanderOCRResult(observations, fileName: fileName).movements
+    }
+
+    private static func parseSantanderOCRResult(
+        _ observations: [OCRObservation],
+        fileName: String
+    ) -> SantanderOCRParseResult {
         guard let dateRegex = try? NSRegularExpression(
             // Full dates (16-JUL-2026) and short bank dates (23/JUL) are
             // both common in Santander scans. OCR glyph repairs remain
@@ -3242,7 +3291,7 @@ final class FinanceStore {
         ), let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
         ) else {
-            return []
+            return SantanderOCRParseResult(movements: [], columnsCalibrated: false)
         }
 
         let defaultYear: Int = {
@@ -3308,7 +3357,10 @@ final class FinanceStore {
             }
         }
 
-        return parsed
+        return SantanderOCRParseResult(
+            movements: parsed,
+            columnsCalibrated: columns.calibratedFromHeader
+        )
     }
 
     private static func santanderOCRColumns(from observations: [OCRObservation]) -> SantanderOCRColumns {
@@ -3350,7 +3402,8 @@ final class FinanceStore {
         return SantanderOCRColumns(
             movementMinX: movementMinX,
             balanceMinX: balanceMinX,
-            depositMaxX: depositMaxX
+            depositMaxX: depositMaxX,
+            calibratedFromHeader: true
         )
     }
 

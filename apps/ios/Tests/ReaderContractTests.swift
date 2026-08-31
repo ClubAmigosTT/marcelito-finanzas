@@ -363,6 +363,21 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(rows[1].amount, 500)
     }
 
+    func testSantanderOCRRequiresACompleteColumnHeaderForAutomaticAcceptance() {
+        let calibrated = [
+            OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+        ]
+        XCTAssertTrue(FinanceStore.santanderOCRColumnsCalibratedForTesting(calibrated, fileName: "Santander agosto 2026.pdf"))
+
+        let missingAnchor = [
+            OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+        ]
+        XCTAssertFalse(FinanceStore.santanderOCRColumnsCalibratedForTesting(missingAnchor, fileName: "Santander agosto 2026.pdf"))
+    }
+
     func testSantanderOCRIgnoresMultilineFolioTraceAndRunningBalance() {
         let rows = FinanceStore.santanderOCRRowsForTesting([
             OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
