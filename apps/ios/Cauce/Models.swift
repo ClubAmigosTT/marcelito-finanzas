@@ -2709,12 +2709,24 @@ final class FinanceStore {
         fileName: String
     ) -> [Movement] {
         guard let dateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-.]\s*(\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*(\d{2,4})(?!\d)"#
+            // Full dates (16-JUL-2026) and short bank dates (23/JUL) are
+            // both common in Santander scans. OCR glyph repairs remain
+            // scoped to this date token; parseDate supplies the filename
+            // year when the short form has no explicit year.
+            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-.]\s*(\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*(\d{2,4}))?(?![A-Za-z])"#
         ), let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
         ) else {
             return []
         }
+
+        let defaultYear: Int = {
+            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+               let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
+                return year
+            }
+            return Calendar.current.component(.year, from: .now)
+        }()
 
         let observationsByPage = Dictionary(grouping: observations, by: \.page)
         var parsed: [Movement] = []
@@ -2751,7 +2763,7 @@ final class FinanceStore {
             if !pendingRow.isEmpty { rows.append(pendingRow) }
 
             for row in rows {
-                if let movement = parseSantanderRow(row, dateRegex: dateRegex, amountRegex: amountRegex) {
+                if let movement = parseSantanderRow(row, dateRegex: dateRegex, amountRegex: amountRegex, defaultYear: defaultYear) {
                     parsed.append(movement)
                 }
             }
@@ -2763,12 +2775,13 @@ final class FinanceStore {
     private static func parseSantanderRow(
         _ row: [OCRObservation],
         dateRegex: NSRegularExpression,
-        amountRegex: NSRegularExpression
+        amountRegex: NSRegularExpression,
+        defaultYear: Int
     ) -> Movement? {
         guard let dateObservation = row.first(where: {
             $0.boundingBox.minX < 0.24 && firstMatch(in: $0.text, regex: dateRegex) != nil
         }), let dateMatch = firstMatch(in: dateObservation.text, regex: dateRegex),
-        let date = parseDate(dateMatch.text) else {
+        let date = parseDate(dateMatch.text, defaultYear: defaultYear) else {
             return nil
         }
 
@@ -2829,7 +2842,7 @@ final class FinanceStore {
         var title = titleParts.isEmpty ? fullText : titleParts.joined(separator: " ")
         title = title
             .replacingOccurrences(
-                of: #"(?i)(?<!\d)\d{1,2}\s*[\/\-.]\s*(?:\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*\d{2,4}(?!\d)"#,
+                of: #"(?i)(?<!\d)[0-9OBI]{1,3}\s*[\/\-.]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*\d{2,4})?(?![A-Za-z])"#,
                 with: " ",
                 options: .regularExpression
             )
@@ -2928,7 +2941,10 @@ final class FinanceStore {
         fileName: String
     ) -> [Movement] {
         guard let dateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(\d{1,2})\s*[\/\-.]\s*(\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*(\d{2,4})(?!\d)"#
+            // Amex OCR can emit full dates or short bank-style dates. OCR
+            // repairs remain scoped to this date token; parseDate supplies the
+            // filename year when the short form has no explicit year.
+            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-.]\s*(\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*(\d{2,4}))?(?![A-Za-z])"#
         ), let shortMonthDateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
         ), let textDateRegex = try? NSRegularExpression(
@@ -3075,7 +3091,7 @@ final class FinanceStore {
 
         var title = fullText
             .replacingOccurrences(
-                of: #"(?i)(?<!\d)\d{1,2}\s*[\/\-.]\s*(?:\d{1,2}|[A-Za-z]{3,})\s*[\/\-.]\s*\d{2,4}(?!\d)"#,
+                of: #"(?i)(?<!\d)[0-9OBI]{1,3}\s*[\/\-.]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*\d{2,4})?(?![A-Za-z])"#,
                 with: " ",
                 options: .regularExpression
             )
