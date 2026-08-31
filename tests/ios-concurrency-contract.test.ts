@@ -23,5 +23,6 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
 
   assert.match(models, /func importPDFAsync\(/);
   assert.match(models, /Task\.detached\(priority: \.userInitiated\)/);
+  assert.match(models, /func importPDFAsync[\s\S]*?try Task\.checkCancellation\(\)[\s\S]*?try Task\.checkCancellation\(\)/);
   assert.match(models, /func rebuildCanonicalLedgerIfNeededAsync\(/);
 });

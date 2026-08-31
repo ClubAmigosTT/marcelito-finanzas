@@ -2943,6 +2943,7 @@ final class FinanceStore {
         }
         let fileName = url.lastPathComponent
         let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
+        try Task.checkCancellation()
         let extraction = try await Task.detached(priority: .userInitiated) {
             try autoreleasepool {
                 try Self.extractPDF(
@@ -2955,6 +2956,7 @@ final class FinanceStore {
                 )
             }
         }.value
+        try Task.checkCancellation()
         return try applyPDFExtraction(
             extraction,
             url: url,
