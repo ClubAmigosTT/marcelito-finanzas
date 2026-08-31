@@ -542,9 +542,15 @@ function Home({ transactions, statements, metrics, goals, setGoals, auditRun, on
 function CFOBrief({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
   const current = metrics.analyticsPeriods[0];
   const risk = metrics.executiveAlerts[0];
-  const situation = current ? `Gastaste ${displayMoney(current.spend)} y tu flujo neto fue ${displayMoney(current.netFlow)}.` : "Todavía no hay suficiente historial para explicar tu situación.";
-  const riskText = risk?.title ?? "No hay un riesgo ejecutivo relevante detectado";
-  const action = risk?.action ?? "Mantén el ritmo y revisa tu proyección de 90 días.";
+  const situation = metrics.isProvisional
+    ? "La lectura ejecutiva está en pausa porque uno o más estados aún no tienen calidad suficiente."
+    : current ? `Gastaste ${displayMoney(current.spend)} y tu flujo neto fue ${displayMoney(current.netFlow)}.` : "Todavía no hay suficiente historial para explicar tu situación.";
+  const riskText = metrics.isProvisional
+    ? "usar cifras parciales antes de completar la conciliación"
+    : risk?.title ?? "No hay un riesgo ejecutivo relevante detectado";
+  const action = metrics.isProvisional
+    ? "revisar los estados señalados en Calidad de datos / conciliación"
+    : risk?.action ?? "Mantén el ritmo y revisa tu proyección de 90 días.";
   return <section className="cfo-brief" aria-labelledby="cfo-brief-title"><div className="cfo-brief-label"><span className="cfo-brief-mark">CFO</span><div><h2 id="cfo-brief-title">CFO Brief</h2><small>La decisión financiera más importante del momento.</small></div></div><p><strong>Situación:</strong> {situation} <strong>Riesgo:</strong> {riskText}. <strong>Acción:</strong> {action}</p></section>;
 }
 
