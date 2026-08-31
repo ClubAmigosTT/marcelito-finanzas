@@ -61,9 +61,11 @@ npm run pdf:corpus -- --dir "./estados-validados" --manifest ./corpus.json > cor
 El manifiesto opcional fija emisor, tipo, estado de conciliación y totales
 esperados por archivo. El resultado incluye método (`pdf-text` u
 `ocr-required`), confianza del emisor, filas sospechosas y motivo de cada
-bloqueo. Un archivo no descrito en el manifiesto se reporta, pero no se cuenta
-como una aceptación certificada; así se evita confundir cobertura con
-precisión.
+bloqueo. Cuando existe manifiesto, también calcula `automaticAcceptancePrecision`:
+aceptaciones correctas divididas entre todas las aceptaciones automáticas
+doradas, incluyendo cualquier aceptación falsa. Un archivo no descrito en el
+manifiesto se reporta, pero no se cuenta como una aceptación certificada; así
+se evita confundir cobertura con precisión.
 
 ## Última corrida del corpus visual
 

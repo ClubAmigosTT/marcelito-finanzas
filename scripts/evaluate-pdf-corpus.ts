@@ -93,6 +93,8 @@ if (!directory) {
   const names = (await readdir(root)).filter((name) => name.toLowerCase().endsWith(".pdf")).sort();
   const results = [];
   let failures = 0;
+  let goldenAutoAccepted = 0;
+  let goldenFalseAccepted = 0;
 
   for (const name of names) {
     const result = await evaluate(resolve(root, name));
@@ -107,6 +109,13 @@ if (!directory) {
     }
     const checked = expected ? mismatches.length === 0 : undefined;
     if (mismatches.length) failures += 1;
+    const autoAccepted = result.reconciliation.status === "valid"
+      && result.sourceStatus === "verified"
+      && result.suspiciousRows === 0;
+    if (expected && autoAccepted) {
+      if (expected.status === "valid" && mismatches.length === 0) goldenAutoAccepted += 1;
+      else goldenFalseAccepted += 1;
+    }
     results.push({ ...result, ...(expected ? { expected: { checked, mismatches } } : {}) });
   }
 
@@ -120,6 +129,12 @@ if (!directory) {
     blocked: results.length - accepted,
     manifestChecked: Boolean(manifestPath),
     manifestFailures: failures,
+    goldenExpectedFiles: manifest.files?.length ?? 0,
+    goldenAutoAccepted,
+    goldenFalseAccepted,
+    automaticAcceptancePrecision: goldenAutoAccepted + goldenFalseAccepted > 0
+      ? Number((goldenAutoAccepted / (goldenAutoAccepted + goldenFalseAccepted)).toFixed(4))
+      : null,
     results,
   };
   console.log(JSON.stringify(output, null, 2));
