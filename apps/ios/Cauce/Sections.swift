@@ -29,7 +29,12 @@ func conciseStatementPeriod(_ statement: StatementRecord) -> String {
     let year = source.range(of: "20\\d{2}", options: .regularExpression)
         .map { String(source[$0]) }
     if let first = found.first {
-        let month = found.count > 1 ? "\(first)–\(found.last!)" : first
+        let month: String
+        if found.count > 1, let last = found.last {
+            month = "\(first)–\(last)"
+        } else {
+            month = first
+        }
         return year.map { "\(month) \($0)" } ?? month
     }
     let fallback = statement.period

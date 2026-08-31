@@ -717,7 +717,8 @@ final class FinanceStore {
         let canonicalGross = eligibleMovements.filter(isSpend).reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let canonicalRefunds = eligibleMovements.filter { movementKind($0) == .refund }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let canonicalNetSpend = max(Decimal(0), canonicalGross - canonicalRefunds)
-        let spendMismatch = consolidatedRealSpend > canonicalNetSpend + max(Decimal(1), canonicalNetSpend * Decimal(string: "0.01")!)
+        let onePercent = Decimal(string: "0.01", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(0.01)
+        let spendMismatch = consolidatedRealSpend > canonicalNetSpend + max(Decimal(1), canonicalNetSpend * onePercent)
         let failedChecks = consistencyChecks.filter { !$0.passed }
         let blocking = invalid.count > 0 || pending.count > 0 || absurdCount > 0 || missingEvidenceCount > 0 || spendMismatch || !failedChecks.isEmpty || missingRebuiltStatements
         let uncalibratedOCR = pending.filter { $0.ocrColumnsCalibrated == false }.count

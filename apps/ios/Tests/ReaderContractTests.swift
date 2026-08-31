@@ -711,7 +711,9 @@ final class ReaderContractTests: XCTestCase {
             ),
         ]
 
-        let audit = try! XCTUnwrap(store.statementAudits.first)
+        guard let audit = store.statementAudits.first else {
+            return XCTFail("La auditoría debe crear una fila por estado")
+        }
         XCTAssertEqual(audit.importedRows, 2)
         XCTAssertEqual(audit.canonicalRows, 2)
         XCTAssertEqual(audit.validRows, 2)
