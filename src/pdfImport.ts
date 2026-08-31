@@ -469,12 +469,22 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
     }
     const depositDifference = extractedDepositTotal - expectedDeposit;
     const withdrawalDifference = extractedWithdrawalTotal - expectedWithdrawal;
+    const expectedClosingBalance = summary.previousBalance !== undefined && summary.cashBalance !== undefined
+      ? summary.previousBalance + extractedDepositTotal - extractedWithdrawalTotal
+      : undefined;
+    const closingDifference = expectedClosingBalance !== undefined && summary.cashBalance !== undefined
+      ? expectedClosingBalance - summary.cashBalance
+      : undefined;
     const countMismatch = (summary.depositCount !== undefined && summary.depositCount !== transactions.filter((transaction) => transaction.amount > 0).length)
       || (summary.withdrawalCount !== undefined && summary.withdrawalCount !== transactions.filter((transaction) => transaction.amount < 0).length);
     const invalid = transactions.length === 0 && (expectedDeposit > tolerance || expectedWithdrawal > tolerance)
       || Math.abs(depositDifference) > tolerance
       || Math.abs(withdrawalDifference) > tolerance
+      || (closingDifference !== undefined && Math.abs(closingDifference) > tolerance)
       || countMismatch;
+    const balanceReason = closingDifference !== undefined && Math.abs(closingDifference) > tolerance
+      ? `, saldo final ${closingDifference.toFixed(2)}`
+      : "";
     return {
       status: invalid ? "invalid" : "valid",
       tolerance,
@@ -482,7 +492,7 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       extractedWithdrawalTotal,
       extractedMovementCount: transactions.length,
       expectedMovementCount,
-      reason: invalid ? `Las filas no concilian con el resumen (depósitos ${depositDifference.toFixed(2)}, retiros ${withdrawalDifference.toFixed(2)})` : undefined,
+      reason: invalid ? `Las filas no concilian con el resumen (depósitos ${depositDifference.toFixed(2)}, retiros ${withdrawalDifference.toFixed(2)}${balanceReason})` : undefined,
     };
   }
 

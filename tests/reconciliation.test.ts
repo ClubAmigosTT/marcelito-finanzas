@@ -437,6 +437,22 @@ test("los totales bancarios declarados bloquean una importación que no concilia
   assert.equal(reconciliation.status, "invalid");
 });
 
+test("la conciliación bancaria también valida el saldo inicial contra el saldo final", () => {
+  const summary = parseStatementSummary([
+    "Saldo Anterior 100.00",
+    "Depósitos / Abonos (+) 1 500.00",
+    "Retiros / Cargos (-) 1 200.00",
+    "Saldo Final 999.00",
+  ].join("\n"), "bank");
+  const rows = extractTransactions([
+    "01/08/2026 NOMINA 500.00 600.00",
+    "02/08/2026 COMPRA 200.00 400.00",
+  ].join("\n"), "BBVA", "bbva agosto.pdf", "bank");
+  const reconciliation = reconcileStatementImport("bank", summary, rows);
+  assert.equal(reconciliation.status, "invalid");
+  assert.match(reconciliation.reason ?? "", /saldo final/);
+});
+
 test("los totales BBVA explícitos prevalecen sobre datos de gráficas posteriores", () => {
   const summary = parseStatementSummary([
     "Depósitos 19,500.00",

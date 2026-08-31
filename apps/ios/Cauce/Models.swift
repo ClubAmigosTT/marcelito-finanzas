@@ -1799,6 +1799,13 @@ final class FinanceStore {
             compare("retiros", extracted: withdrawals, expected: summary.withdrawalTotal)
             compareCount("cantidad de depósitos", extracted: validRows.filter { $0.amount > 0 }.count, expected: summary.depositCount)
             compareCount("cantidad de retiros", extracted: validRows.filter { $0.amount < 0 }.count, expected: summary.withdrawalCount)
+            if let opening = summary.previousBalance,
+               let closing = summary.cashBalance {
+                let reconstructedClosing = opening + deposits - withdrawals
+                if absolute(reconstructedClosing - closing) > tolerance {
+                    mismatches.append("saldo final: reconstruido (reconstructedClosing) vs declarado (closing)")
+                }
+            }
             if summary.depositTotal == nil && summary.withdrawalTotal == nil {
                 return StatementReconciliationRecord(
                     status: .pending,
