@@ -144,6 +144,11 @@ transferencias, pagos Amex, MSI, conteos BBVA, confianza por página y fechas
 OCR. En los ocho adjuntos disponibles, cuatro estados de texto concilian y
 cuatro estados escaneados quedan correctamente bloqueados hasta Vision.
 
+Las actualizaciones del lector también invalidan de forma segura los estados
+persistidos con una revisión anterior: quedan visibles en auditoría, pero en
+cuarentena hasta que se vuelvan a importar. Esto evita que una corrección de
+extracción se mezcle con filas heredadas de una versión defectuosa.
+
 La certificación final del 99% queda pendiente de ejecutar el corpus completo
 en macOS/Xcode con Vision; el entorno Windows no dispone de `xcodebuild` ni del
 framework Vision. Hasta completar esa corrida, los estados OCR no deben

@@ -62,6 +62,10 @@ gasto real sin separar esas secciones.
 - La capa web aplica la misma decisión estructural: solo conserva lectura
   directa cuando encuentra señal de fechas y encabezado de tabla; una capa
   larga de texto administrativo vuelve a activar OCR visual.
+- Al abrir una versión nueva, los estados persistidos con otra versión del
+  lector (o sin conciliación registrada) pasan automáticamente a revisión y
+  dejan de alimentar el libro canónico hasta reimportar su PDF. Así una
+  corrección del parser no queda contaminada por filas históricas antiguas.
 - Cada página OCR tiene un límite de 45 segundos; si el motor se atasca, la
   importación termina con un error recuperable y no deja un proceso de OCR
   abierto ni datos parciales.
