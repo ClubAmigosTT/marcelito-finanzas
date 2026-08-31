@@ -83,6 +83,15 @@ test("los encabezados administrativos parametrizados nunca se convierten en movi
   assert.equal(rows[0].amount, -245.9);
 });
 
+test("una fila bancaria sin dirección inequívoca queda fuera de la aceptación", () => {
+  const text = [
+    "Fecha Descripción Cargos Abonos Saldo",
+    "28/08/2026 SUPERMERCADO SIN COLUMNA 245.90",
+  ].join("\n");
+  const rows = extractTransactions(text, "BBVA", "BBVA agosto 2026.pdf", "bank");
+  assert.equal(rows.length, 0);
+});
+
 test("la compuerta OCR se conserva al recalcular la vista de revisión", () => {
   const base = reconcileStatementImport("bank", { depositTotal: 100, withdrawalTotal: 0 }, [
     movement({ id: "ocr-income", date: "01 ago 2026", description: "NOMINA", account: "BBVA", amount: 100, flow: "income" }),
