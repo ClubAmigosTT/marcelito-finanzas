@@ -191,7 +191,15 @@ script.
 
 ## Última corrida del corpus visual
 
-En la corrida de OCR visual sobre los tres estados más recientes (30-ago-2026):
+En la corrida reproducible completa del manifiesto (31-ago-2026) se evaluaron
+los ocho adjuntos: 4 estados aceptados por lectura de texto y 4 escaneos
+Santander bloqueados como `ocr-required`. Los cuatro aceptados concilian y
+coinciden con sus expectativas doradas; no hubo falsos positivos, por lo que
+la precisión de aceptación automática observada fue 100%. La certificación
+global sigue en `false` porque faltan las cuatro corridas Vision nativas.
+
+La corrida de OCR visual sobre los tres estados más recientes (30-ago-2026)
+mostró:
 
 - BBVA: se reconstruyeron 11 filas; depósitos $19,500.00 y cargos $22,058.69 concilian, por lo que el estado puede aceptarse.
 - Amex: el emisor y el resumen se identifican correctamente (pago para no generar intereses $39,966.15 y crédito disponible $99,632.79). En la lectura de texto del PDF, las 105 filas concilian; la lectura OCR visual forzada sigue quedando bloqueada cuando pierde fechas o filas.
