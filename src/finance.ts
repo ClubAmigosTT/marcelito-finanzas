@@ -973,7 +973,14 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     totalCount: pipeline.audit.importedCount,
     reviewCount: reviewItems.length,
     relevantReviewCount: pipeline.audit.relevantReviewCount,
-    reconciledPercent: pipeline.audit.reconciledPercent,
+    // A row-level reconciliation percentage can be 100% even when every row
+    // belongs to an OCR statement that is still provisional. Cap it with the
+    // statement-level eligibility rate so the visible quality indicator cannot
+    // report a healthy book while an entire document is blocked.
+    reconciledPercent: Math.min(
+      pipeline.audit.reconciledPercent,
+      statements.length ? ((statements.length - blockedStatementIds.size) / statements.length) * 100 : 100,
+    ),
     evidencePercent: pipeline.audit.evidencePercent,
     missingEvidenceCount: pipeline.audit.missingEvidenceCount,
     invalidCount: pipeline.audit.invalidCount,

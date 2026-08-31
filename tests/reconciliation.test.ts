@@ -1029,6 +1029,7 @@ test("la confianza OCR baja bloquea estados persistidos aunque status diga listo
   assert.equal(metrics.consolidatedRealSpend, 0);
   assert.equal(metrics.isProvisional, true);
   assert.equal(metrics.dataQuality.critical, true);
+  assert.equal(metrics.dataQuality.reconciledPercent, 0);
   assert.match(metrics.audit.criticalIssues.join(" "), /calidad OCR insuficiente/);
 });
 
