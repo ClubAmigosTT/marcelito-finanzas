@@ -148,6 +148,40 @@ test("matching usa cuenta, fecha e importe aunque el banco no etiquete el traspa
   assert.equal(metrics.realIncome, 0);
 });
 
+test("matching no convierte un crédito de tarjeta en pago sin evidencia", () => {
+  const statements = [
+    bank("bbva", "BBVA", "agosto 2026"),
+    card("amex", "Amex", "agosto 2026", 5000),
+  ];
+  const rows = [
+    movement({
+      id: "bank-charge",
+      date: "10 ago 2026",
+      description: "PAGO A PROVEEDOR",
+      account: "BBVA",
+      amount: -1000,
+      flow: "expense",
+      statementId: "bbva",
+    }),
+    movement({
+      id: "card-adjustment",
+      date: "10 ago 2026",
+      description: "AJUSTE POSITIVO",
+      account: "Amex",
+      amount: 1000,
+      flow: "income",
+      kind: "credit",
+      statementId: "amex",
+    }),
+  ];
+  const result = runTransactionPipeline(rows, statements);
+  assert.equal(result.audit.cardPaymentCount, 0);
+  assert.equal(result.transactions.find((row) => row.id === "card-adjustment")?.kind, "credit");
+  assert.equal(result.transactions.find((row) => row.id === "bank-charge")?.reconciledAs, undefined);
+  const metrics = buildFinanceMetrics(rows, statements, result);
+  assert.equal(metrics.consolidatedRealSpend, 1000);
+});
+
 test("un SPEI saliente sin contraparte propia se conserva como gasto real", () => {
   const statements = [bank("bbva", "BBVA", "agosto 2026")];
   const transactions = [movement({ id: "spei-out", date: "24 ago 2026", description: "SPEI ENVIADO A TERCERO", account: "BBVA", amount: -1800, flow: "expense", statementId: "bbva" })];

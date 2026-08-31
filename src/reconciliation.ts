@@ -531,12 +531,12 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
         && sameAmount(bank, card)
         && withinTwoDays(bank, card, statements)
         // Some issuers label the receiving side only as “pago recibido” or
-        // “abono”. Direction + card account + amount/date is sufficient; the
-        // text hint is helpful but must not be required for a match.
+        // “abono”, so an explicit payment hint or card-payment kind is enough.
+        // A positive card row alone is not sufficient: it may be a credit or
+        // issuer adjustment with the same amount as an unrelated bank charge.
         && (kindFromText(card) === "cardPayment"
           || hasCardPaymentHint(card)
           || hasCardPaymentHint(bank)
-          || isInflow(card)
           || (card.flow === "debt" && /pago|abono|credito|recib/.test(normalizeConcept(card.description)))))
       .sort((left, right) => absolute((parseDate(left.date) ?? 0) - (parseDate(bank.date) ?? 0)) - absolute((parseDate(right.date) ?? 0) - (parseDate(bank.date) ?? 0)))[0];
     if (partner) replacePair(bank, partner, "cardPayment");
