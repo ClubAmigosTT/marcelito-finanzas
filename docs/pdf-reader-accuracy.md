@@ -42,6 +42,22 @@ Métricas mínimas por versión:
 
 Si una métrica falla, el parser queda en revisión y el dashboard se bloquea hasta corregir la causa.
 
+## Corrida reproducible del corpus
+
+La extracción de texto puede auditarse fuera de la interfaz sin copiar los
+PDFs a la aplicación:
+
+```bash
+npm run pdf:corpus -- --dir "./estados-validados" --manifest ./corpus.json > corpus-result.json
+```
+
+El manifiesto opcional fija emisor, tipo, estado de conciliación y totales
+esperados por archivo. El resultado incluye método (`pdf-text` u
+`ocr-required`), confianza del emisor, filas sospechosas y motivo de cada
+bloqueo. Un archivo no descrito en el manifiesto se reporta, pero no se cuenta
+como una aceptación certificada; así se evita confundir cobertura con
+precisión.
+
 ## Última corrida del corpus visual
 
 En la corrida de OCR visual sobre los tres estados más recientes (30-ago-2026):
@@ -52,7 +68,13 @@ En la corrida de OCR visual sobre los tres estados más recientes (30-ago-2026):
 
 Por tanto, esta corrida demuestra el bloqueo seguro de lecturas ambiguas, pero **no certifica todavía una tasa de aceptación automática del 99% para OCR**. La certificación requiere ejecutar el corpus completo de estados en macOS/Xcode con Vision y registrar cada estado aceptado, rechazado y corregido.
 
-La extracción de texto del PDF Amex (sin forzar OCR) ya concilia los cortes
-28-jun→27-jul y 28-jul→27-ago. El corte mayo→27-junio conserva una diferencia
-de $138.96 en moneda extranjera y permanece bloqueado hasta recuperar esa fila;
-esa diferencia no se convierte en gasto provisional.
+La extracción de texto del PDF Amex (sin forzar OCR) ya concilia los tres
+cortes disponibles (mayo→27-junio, junio→27-julio y julio→27-agosto). Las
+lecturas OCR visuales siguen quedando provisionales cuando pierden fechas o
+filas; esas diferencias nunca se convierten en gasto provisional.
+
+La corrida reproducible sobre los 8 adjuntos disponibles encontró
+4 estados aceptables por texto (los 3 Amex y BBVA agosto) y 4 que requieren OCR
+(Santander mayo/julio/agosto y BBVA junio). Un estado marcado como
+`ocr-required` no se cuenta como aceptación hasta que Vision/Tesseract extraiga
+filas y concilie sus totales.

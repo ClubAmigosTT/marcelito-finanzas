@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "test": "node --experimental-strip-types --test tests/reconciliation.test.ts",
+    "pdf:corpus": "node --experimental-strip-types scripts/evaluate-pdf-corpus.ts",
     "preview": "vite preview"
   },
   "dependencies": {

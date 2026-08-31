@@ -7,7 +7,8 @@ const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|sep
 
 type PdfTextItem = { str: string; transform: number[] };
 
-function rebuildLines(items: unknown[]) {
+/** Rebuilds PDF.js text items into visual lines without losing column order. */
+export function rebuildPdfText(items: unknown[]) {
   const rows: { y: number; parts: { x: number; text: string }[] }[] = [];
   (items as PdfTextItem[]).forEach((item) => {
     if (!item.str?.trim() || !Array.isArray(item.transform)) return;
@@ -898,7 +899,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
     const page = await document.getPage(pageNumber);
     const content = await page.getTextContent();
-    pageTexts.push(rebuildLines(content.items));
+    pageTexts.push(rebuildPdfText(content.items));
     onProgress(12 + Math.round((pageNumber / document.numPages) * 58), `Leyendo pagina ${pageNumber} de ${document.numPages}`);
   }
 
