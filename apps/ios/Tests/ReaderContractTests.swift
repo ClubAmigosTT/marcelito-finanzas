@@ -307,6 +307,14 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: false))
     }
 
+    func testTableHeaderWithoutPlausibleRowsFallsBackToOCR() {
+        let text = String(repeating: "RFC DIRECCION CERTIFICADO SALDO ", count: 30)
+            + "Detalle de Movimientos Realizados\n"
+            + "Periodo 16-JUL-2026 AL 15-AGO-2026\n"
+            + "No. de Cuenta 1575694922"
+        XCTAssertTrue(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: true))
+    }
+
     func testSantanderOCRAmountUsesSmallRunningBalanceDriftOnly() {
         let repaired = FinanceStore.repairedBankOCRAmountForTesting(
             selected: 30.01,

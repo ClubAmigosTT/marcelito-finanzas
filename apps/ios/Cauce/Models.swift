@@ -481,7 +481,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.08.31.7"
+    static let readerVersion = "ios-reader-2026.08.31.8"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -574,7 +574,11 @@ final class FinanceStore {
         let compactText = extractedText.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
         let hasDateSignal = extractedText.range(of: #"(?i)\b(?:\d{1,2}\s*[\/-]\s*\d{1,2}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s*[\/-]\s*[a-záéíóú]{3,}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s+(?:de\s+)?[a-záéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?)\b"#, options: .regularExpression) != nil
         let hasTableSignal = extractedText.range(of: #"(?i)detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripci[oó]n|fecha\s+y\s+detalle"#, options: .regularExpression) != nil
-        return allowOCR && (compactText.count < 120 || !hasDateSignal || !hasTableSignal)
+        let hasMovementRowSignal = extractedText.range(of: #"(?i)(?:\b\d{1,2}\s*[\/-]\s*\d{1,2}(?:\s*[\/-]\s*\d{2,4})?|\b\d{1,2}\s*[\/-]\s*[a-záéíóú]{3,}(?:\s*[\/-]\s*\d{2,4})?|\b\d{1,2}\s+(?:de\s+)?[a-záéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?)[^\r\n]{0,180}(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?!\d)"#, options: .regularExpression) != nil
+        // A short hidden metadata layer or a layer with only period/header
+        // text is not a trustworthy movement table. Require a plausible
+        // date+amount row before bypassing Vision.
+        return allowOCR && (compactText.count < 120 || !hasDateSignal || !hasTableSignal || !hasMovementRowSignal)
     }
 
     static func needsCanonicalRebuild(
