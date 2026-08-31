@@ -51,6 +51,38 @@ test("el parser rechaza encabezados administrativos con importes", () => {
   assert.equal(rows[0].amount, -1200);
 });
 
+test("los encabezados administrativos parametrizados nunca se convierten en movimientos", () => {
+  const administrativeLabels = [
+    "Ciudad de México",
+    "No. de Serie del Certificado",
+    "TOTAL IMPORTE CARGOS",
+    "DEL AL",
+    "fecha de corte",
+    "número de cuenta",
+    "RFC ABC123456789",
+    "cuenta CLABE",
+    "saldo disponible",
+    "total del periodo",
+    "periodo de facturación",
+    "estado de cuenta",
+    "saldo final",
+  ];
+  const text = [
+    "Fecha Descripción Cargos Abonos Saldo",
+    ...administrativeLabels.map((label, index) => {
+      const day = String(index + 1).padStart(2, "0");
+      const amount = `${index + 1},${String((index + 1) * 137).padStart(3, "0")}.00`;
+      return `${day}/08/2026 ${label} ${amount}`;
+    }),
+    "28/08/2026 CARGO SUPERMERCADO REAL 245.90",
+  ].join("\n");
+
+  const rows = extractTransactions(text, "BBVA", "BBVA agosto 2026.pdf", "bank");
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].description, "CARGO SUPERMERCADO REAL");
+  assert.equal(rows[0].amount, -245.9);
+});
+
 test("la compuerta OCR se conserva al recalcular la vista de revisión", () => {
   const base = reconcileStatementImport("bank", { depositTotal: 100, withdrawalTotal: 0 }, [
     movement({ id: "ocr-income", date: "01 ago 2026", description: "NOMINA", account: "BBVA", amount: 100, flow: "income" }),
