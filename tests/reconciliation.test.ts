@@ -257,6 +257,14 @@ test("el parser acepta fechas OCR y BBVA usa el primer importe, no el saldo corr
   assert.equal(parseDate("16-JUL-2026"), new Date(2026, 6, 16).getTime());
   assert.equal(parseDate("23/JUL", "DEL 15/07/2026 AL 14/08/2026"), new Date(2026, 6, 23).getTime());
   assert.equal(periodKeyFromLabel("DEL 15/07/2026 AL 14/08/2026"), "2026-08");
+  const repaired = extractTransactions([
+    "05/AG0 TIENDA DE PRUEBA 125.00 1,030.94",
+    "OBIAGO NOMINA EMPRESA 1,000.00 2,030.94",
+  ].join("\n"), "BBVA", "BBVA agosto 2026.pdf", "bank");
+  assert.deepEqual(repaired.map((row) => [row.date, row.amount]), [
+    ["05 ago 2026", -125],
+    ["07 ago 2026", 1000],
+  ]);
 });
 
 test("el estado BBVA completo reconstruye sus 11 filas y concilia los totales", () => {
