@@ -298,7 +298,9 @@ if (!directory) {
     const expectedOCRPromotion = useOCR && expected?.status === "pending";
     if (expected?.status && !expectedOCRPromotion && expected.status !== result.reconciliation.status) mismatches.push(`estado esperado ${expected.status}, obtenido ${result.reconciliation.status}`);
     if (expected?.rows !== undefined && !expectedOCRPromotion && expected.rows !== result.rows) mismatches.push(`filas esperadas ${expected.rows}, obtenidas ${result.rows}`);
-    if (expectedOCRPromotion && result.mode === "ocr" && result.reconciliation.status === "valid" && result.rows === 0) mismatches.push("OCR no produjo movimientos válidos");
+    if (expectedOCRPromotion && result.mode !== "ocr") mismatches.push("el modo OCR no se ejecutó");
+    if (expectedOCRPromotion && result.reconciliation.status === "invalid") mismatches.push("OCR produjo una conciliación inválida");
+    if (expectedOCRPromotion && result.mode === "ocr" && result.rows === 0) mismatches.push("OCR no produjo movimientos");
     for (const [key, value] of Object.entries(expected?.summary ?? {})) {
       const actual = result.reconciliation[key as keyof typeof result.reconciliation]
         ?? result.statementControls[key as keyof typeof result.statementControls];
