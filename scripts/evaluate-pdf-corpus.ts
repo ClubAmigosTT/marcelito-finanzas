@@ -203,6 +203,12 @@ if (!directory) {
     const expected = manifest.files?.find((item) => item.file === name);
     const mismatches: string[] = [];
     if (expected?.source && expected.source !== result.source) mismatches.push(`emisor esperado ${expected.source}, obtenido ${result.source}`);
+    // A golden marked valid must prove the issuer, not merely match the
+    // filename/source string. Filename-only detections remain review-only and
+    // must never look checked or certified in the corpus report.
+    if (expected?.status === "valid" && result.sourceStatus !== "verified") {
+      mismatches.push(`emisor no verificado (estado ${result.sourceStatus})`);
+    }
     if (expected?.kind && expected.kind !== result.kind) mismatches.push(`tipo esperado ${expected.kind}, obtenido ${result.kind}`);
     if (expected?.sourceFingerprint && expected.sourceFingerprint !== result.sourceFingerprint) mismatches.push("huella SHA-256 del archivo no coincide");
     if (expected?.status && expected.status !== result.reconciliation.status) mismatches.push(`estado esperado ${expected.status}, obtenido ${result.reconciliation.status}`);
