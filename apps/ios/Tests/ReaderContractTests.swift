@@ -594,4 +594,43 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertNil(decoded.ocrColumnsCalibrated)
         XCTAssertNil(decoded.readerVersion)
     }
+
+    func testUncalibratedSantanderOCRCannotFeedNativeDashboard() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "Santander",
+            period: "agosto 2026",
+            fileName: "estado-santander.pdf",
+            importedAt: .now,
+            transactionCount: 1,
+            // Deliberately false: the independent OCR gate below must still
+            // block even if a stale persisted record lost its review flag.
+            requiresReview: false,
+            kind: .bank,
+            reconciliation: StatementReconciliationRecord(
+                status: .valid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05)
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "Santander",
+                confidence: 0.999,
+                status: .verified,
+                evidence: ["encabezado institucional Santander"],
+                ignoredBodyMentions: []
+            ),
+            ocrColumnsCalibrated: false,
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+        store.movements = []
+
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
+
+        store.statements[0].ocrColumnsCalibrated = true
+        XCTAssertFalse(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
+    }
 }

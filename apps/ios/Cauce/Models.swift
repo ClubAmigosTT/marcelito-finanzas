@@ -481,7 +481,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.08.31.6"
+    static let readerVersion = "ios-reader-2026.08.31.7"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -1041,6 +1041,11 @@ final class FinanceStore {
         isCurrentReader(statement)
             && statement.reconciliation?.status == .valid
             && (statement.sourceDetection?.status == .verified || statement.issuerConfirmedByUser == true)
+            // A Santander scan must have its visual transaction columns
+            // calibrated. Keep this as an independent gate instead of
+            // trusting only `requiresReview`, so stale/corrupt persisted data
+            // cannot silently promote an OCR row into a KPI.
+            && statement.ocrColumnsCalibrated != false
             && !statement.requiresReview
     }
 
