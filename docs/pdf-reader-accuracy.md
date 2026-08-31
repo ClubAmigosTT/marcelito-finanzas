@@ -51,3 +51,8 @@ En la corrida de OCR visual sobre los tres estados más recientes (30-ago-2026):
 - Santander: el emisor y los totales del resumen se identificaron correctamente, pero el OCR de filas no concilia; el estado queda bloqueado.
 
 Por tanto, esta corrida demuestra el bloqueo seguro de lecturas ambiguas, pero **no certifica todavía una tasa de aceptación automática del 99% para OCR**. La certificación requiere ejecutar el corpus completo de estados en macOS/Xcode con Vision y registrar cada estado aceptado, rechazado y corregido.
+
+La extracción de texto del PDF Amex (sin forzar OCR) ya concilia los cortes
+28-jun→27-jul y 28-jul→27-ago. El corte mayo→27-junio conserva una diferencia
+de $138.96 en moneda extranjera y permanece bloqueado hasta recuperar esa fila;
+esa diferencia no se convierte en gasto provisional.

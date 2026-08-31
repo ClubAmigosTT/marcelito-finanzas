@@ -793,7 +793,7 @@ function StatementSummaryForm({ source, kind, summary, onChange }: { source: Sta
       { key: "withdrawalTotal" as keyof StatementSummary, label: "Retiros / cargos", hint: "Total declarado" },
     ]),
   ];
-  return <details className="statement-summary-form"><summary>Completar datos del corte <span>Opcional, pero necesario para crédito y patrimonio</span></summary><p>Los importes detectados del PDF aparecen aquí para que puedas corregirlos. Si un campo no está en el estado, déjalo vacío.</p><div className="summary-field-grid">{fields.map((field) => <label key={String(field.key)}><span>{field.label}</span><small>{field.hint}</small><input type="number" step="0.01" value={typeof summary[field.key] === "number" ? summary[field.key] : ""} onChange={(event) => onChange(field.key, event.target.value)} placeholder="—" /></label>)}</div></details>;
+  return <details className="statement-summary-form"><summary>Completar datos del corte <span>Opcional, pero necesario para crédito y patrimonio</span></summary><p>Los importes detectados del PDF aparecen aquí para que puedas corregirlos. Si un campo no está en el estado, déjalo vacío.</p><div className="summary-field-grid">{fields.map((field) => <label key={String(field.key)}><span>{field.label}</span><small>{field.hint}</small><input type="number" step="0.01" value={typeof summary[field.key] === "number" ? Number(summary[field.key]) : ""} onChange={(event) => onChange(field.key, event.target.value)} placeholder="—" /></label>)}</div></details>;
 }
 
 function RealDataEmpty({ onImport }: { onImport: () => void }) {
