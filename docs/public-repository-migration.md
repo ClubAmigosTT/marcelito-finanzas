@@ -44,6 +44,10 @@ expone código, historial, ejecuciones, logs, artefactos, issues y forks.
 - [x] Separar TestFlight en el entorno protegido `testflight`.
 - [x] Permitir que TestFlight despliegue únicamente desde tags `ios-v*`.
 - [x] Reducir la retención de artefactos de diagnóstico.
+- [x] Activar dependency graph, alertas y actualizaciones de seguridad de
+  Dependabot en la configuración del repositorio.
+- [ ] Activar secret scanning y push protection al quedar el repositorio
+  público, y revisar sus primeros resultados.
 - [ ] Configurar protección de `main` (pull request, checks obligatorios y sin
   force-push después de la migración).
 
