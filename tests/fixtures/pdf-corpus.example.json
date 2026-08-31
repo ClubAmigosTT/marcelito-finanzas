@@ -7,6 +7,7 @@
       "source": "Amex",
       "kind": "card",
       "status": "valid",
+      "rows": 105,
       "summary": {
         "extractedChargeTotal": 33177.48,
         "extractedPaymentTotal": 23150.88
@@ -17,6 +18,7 @@
       "source": "BBVA",
       "kind": "bank",
       "status": "valid",
+      "rows": 11,
       "summary": {
         "extractedDepositTotal": 19500,
         "extractedWithdrawalTotal": 22058.69
