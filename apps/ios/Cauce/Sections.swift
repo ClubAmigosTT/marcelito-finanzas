@@ -1114,6 +1114,8 @@ private struct StatementSummaryEditor: View {
     @State private var summary: StatementSummaryRecord
     @State private var source: String
     @State private var statementKind: StatementKind
+    @State private var isReimporting = false
+    @State private var reimportError: String?
 
     init(statement: StatementRecord) {
         self.statement = statement
@@ -1187,6 +1189,43 @@ private struct StatementSummaryEditor: View {
                     decimalField("Efectivo disponible", \.cashBalance)
                     decimalField("Depósitos / abonos", \.depositTotal)
                     decimalField("Retiros / cargos", \.withdrawalTotal)
+                }
+            }
+            if let localURL = store.statementFileURL(for: statement) {
+                Section("Releer PDF") {
+                    Button {
+                        isReimporting = true
+                        reimportError = nil
+                        Task { @MainActor in
+                            do {
+                                _ = try store.importPDF(
+                                    from: localURL,
+                                    allowOCR: true,
+                                    preserveExistingOnEmpty: false,
+                                    sourceOverride: source,
+                                    kindOverride: statementKind
+                                )
+                                dismiss()
+                            } catch {
+                                reimportError = error.localizedDescription
+                            }
+                            isReimporting = false
+                        }
+                    } label: {
+                        Label(
+                            isReimporting ? "Releyendo…" : "Releer con esta configuración",
+                            systemImage: isReimporting ? "hourglass" : "arrow.clockwise.doc"
+                        )
+                    }
+                    .disabled(isReimporting || source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Text("Usa el PDF original guardado y vuelve a construir sus filas con el banco y tipo seleccionados. El resultado seguirá sujeto a conciliación y revisión.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let reimportError {
+                        Text(reimportError)
+                            .font(.caption)
+                            .foregroundStyle(Color.marcelitoAmber)
+                    }
                 }
             }
             Section {

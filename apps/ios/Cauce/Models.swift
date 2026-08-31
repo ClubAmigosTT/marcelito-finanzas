@@ -2113,7 +2113,9 @@ final class FinanceStore {
         from url: URL,
         allowOCR: Bool = true,
         preserveExistingOnEmpty: Bool = false,
-        requireValidReconciliation: Bool = false
+        requireValidReconciliation: Bool = false,
+        sourceOverride: String? = nil,
+        kindOverride: StatementKind? = nil
     ) throws -> ImportSummary {
         let didStartAccessing = url.startAccessingSecurityScopedResource()
         defer {
@@ -2173,9 +2175,19 @@ final class FinanceStore {
         // rebuild the stored PDF has a UUID filename, and on a first import a
         // user may have renamed it incorrectly. Transaction counterparties
         // are excluded by sourceDetection's header scope.
-        let sourceDetection = Self.sourceDetection(from: text, fileName: url.lastPathComponent)
+        let detectedSourceEvidence = Self.sourceDetection(from: text, fileName: url.lastPathComponent)
+        let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sourceDetection = cleanedSourceOverride.map { override in
+            SourceDetectionEvidence(
+                source: override,
+                confidence: 0,
+                status: .review,
+                evidence: ["origen corregido por el usuario"],
+                ignoredBodyMentions: detectedSourceEvidence.ignoredBodyMentions
+            )
+        } ?? detectedSourceEvidence
         let source = sourceDetection.source
-        let detectedKind = Self.statementKind(from: text, source: source)
+        let detectedKind = kindOverride ?? Self.statementKind(from: text, source: source)
         let parsedCandidates: [Movement]
         if usedOCR, source == "Santander" {
             let santanderCandidates = Self.parseSantanderOCR(ocrObservations, fileName: url.lastPathComponent)
