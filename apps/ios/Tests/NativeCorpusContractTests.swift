@@ -129,6 +129,7 @@ final class NativeCorpusContractTests: XCTestCase {
         for file in files {
             guard let expected = expectations[file.lastPathComponent] else { continue }
             let actualFingerprint = try fingerprint(file)
+            let fileSizeBytes = file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
             XCTAssertEqual(actualFingerprint, expected.sourceFingerprint, file.lastPathComponent + " no coincide con el PDF dorado")
             let result = try store.importPDF(
                 from: file,
@@ -140,6 +141,8 @@ final class NativeCorpusContractTests: XCTestCase {
             XCTAssertEqual(result.kind, expected.kind, file.lastPathComponent)
             XCTAssertEqual(result.sourceDetection.status, .verified, file.lastPathComponent)
             XCTAssertLessThanOrEqual(result.imported, 1_000, file.lastPathComponent + " produjo un volumen de filas absurdo")
+            XCTAssertEqual(result.fileSizeBytes, fileSizeBytes, file.lastPathComponent + " no conserva el tamaño original")
+            XCTAssertGreaterThan(result.pageCount ?? 0, 0, file.lastPathComponent + " no conserva el número de páginas")
 
             // Summary controls are independent of row acceptance. Assert them
             // even while a scan remains pending so a plausible-looking OCR
@@ -235,6 +238,8 @@ final class NativeCorpusContractTests: XCTestCase {
                 "file": file.lastPathComponent,
                 "sourceFingerprint": actualFingerprint,
                 "expectedSourceFingerprint": expected.sourceFingerprint,
+                "fileSizeBytes": String(result.fileSizeBytes ?? fileSizeBytes),
+                "pageCount": String(result.pageCount ?? 0),
                 "source": result.source,
                 "kind": result.kind.rawValue,
                 "mode": result.usedOCR ? "vision-ocr" : "pdf-text",
