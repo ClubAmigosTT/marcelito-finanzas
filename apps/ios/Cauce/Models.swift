@@ -2209,6 +2209,9 @@ final class FinanceStore {
                 return url
             }
         }.value
+        guard !Task.isCancelled else {
+            return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
+        }
 
         let statementKeys = Set(knownStatements.map { statement in
             "\(normalizedConcept(statement.source))|\(statementKind(statement).rawValue)|\(normalizedConcept(statement.period))"
@@ -2224,6 +2227,16 @@ final class FinanceStore {
         statements = []
         normalizeStoredLedger()
         persist()
+
+        func abortAfterCancellation() -> CanonicalRebuildResult {
+            recoverInterruptedRebuildIfNeeded()
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "rebuild.cancelled",
+                message: "Reconstrucción cancelada; se restauró el último libro completo."
+            )
+            return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: 0, invalidCount: candidates.count)
+        }
 
         guard !candidates.isEmpty else {
             defaults.set(true, forKey: canonicalRebuildKey)
@@ -2242,6 +2255,9 @@ final class FinanceStore {
         var importedCount = 0
         var invalidCount = 0
         for (index, url) in candidates.enumerated() {
+            if Task.isCancelled {
+                return abortAfterCancellation()
+            }
             progress?(index, candidates.count, url.lastPathComponent)
             do {
                 let result = try await importPDFAsync(
@@ -2274,6 +2290,9 @@ final class FinanceStore {
             }
             progress?(index + 1, candidates.count, url.lastPathComponent)
             await Task.yield()
+        }
+        if Task.isCancelled {
+            return abortAfterCancellation()
         }
         defaults.set(true, forKey: canonicalRebuildKey)
         defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
