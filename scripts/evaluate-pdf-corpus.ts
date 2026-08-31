@@ -40,7 +40,7 @@ async function textFromPdf(file: string) {
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
       const content = await page.getTextContent();
-      pages.push(rebuildPdfText(content.items));
+      pages.push(`__PDF_PAGE_${pageNumber}__\n${rebuildPdfText(content.items)}`);
       page.cleanup();
     }
     return pages.join("\n");

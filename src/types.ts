@@ -33,11 +33,23 @@ export type SourceDetectionStatus = "verified" | "review" | "unknown";
 
 export type ExtractionMethod = "pdf-text" | "ocr" | "manual";
 
+/** Normalized coordinates of the source row (0–1 for OCR, document units for text PDFs). */
+export type ExtractionBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+};
+
 /** Provenance retained for each parsed row so an accepted amount is auditable. */
 export type TransactionExtractionEvidence = {
   method: ExtractionMethod;
   page?: number;
   confidence: number;
+  /** Short source fragment used to reconstruct the row; never the full PDF. */
+  sourceText?: string;
+  /** Bounding box when the extraction method provides visual coordinates. */
+  bounds?: ExtractionBounds;
 };
 
 /** Evidence used to identify the issuer without trusting transaction text. */

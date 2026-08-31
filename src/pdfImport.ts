@@ -653,15 +653,18 @@ export function extractTransactions(text: string, source: StatementSource, fileN
 
   // A PDF text layer may put the merchant, RFC/reference and amount on
   // separate lines. Reassemble each date-anchored row before extracting it.
-  const rows: Array<{ text: string; foreignCurrency: boolean }> = [];
+  const rows: Array<{ text: string; foreignCurrency: boolean; page?: number }> = [];
   let pending = "";
   let pendingForeignCurrency = false;
+  let pendingPage: number | undefined;
+  let currentPage: number | undefined;
   let amexForeignSection = false;
   const flushPending = () => {
     if (!pending) return;
-    rows.push({ text: pending, foreignCurrency: pendingForeignCurrency });
+    rows.push({ text: pending, foreignCurrency: pendingForeignCurrency, page: pendingPage });
     pending = "";
     pendingForeignCurrency = false;
+    pendingPage = undefined;
   };
   const breakPhrases = [
     "estado de cuenta", "fecha y detalle", "resumen de cuenta", "paga desde",
@@ -685,8 +688,10 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     // OCR recognition is page-oriented. A page boundary must terminate the
     // previous row; otherwise the first header/summary number on the next
     // page can be appended to a real transaction.
-    if (/^__pdf_page_\d+__$/.test(normalized)) {
+    const pageMarker = normalized.match(/^__pdf_page_(\d+)__$/);
+    if (pageMarker) {
       flushPending();
+      currentPage = Number(pageMarker[1]);
       continue;
     }
     // Amex repeats a date/detail table for regular purchases, then prints
@@ -720,6 +725,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       flushPending();
       pending = dateLine;
       pendingForeignCurrency = amexForeignSection;
+      pendingPage = currentPage;
     } else if (pending && !breaks) {
       pending += ` ${line}`;
     } else if (breaks && pending) {
@@ -728,7 +734,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
   }
   flushPending();
 
-  rows.forEach(({ text: line, foreignCurrency: sectionForeignCurrency }, index) => {
+  rows.forEach(({ text: line, foreignCurrency: sectionForeignCurrency, page: rowPage }, index) => {
     const date = line.match(datePattern);
     if (!date) return;
     const dayToken = date[1] ?? date[4] ?? date[9] ?? date[10];
@@ -860,7 +866,9 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       confidence: category === "Sin categoría" ? 0.62 : 0.92,
       extractionEvidence: {
         method: "pdf-text",
+        page: rowPage,
         confidence: category === "Sin categoría" ? 0.78 : 0.95,
+        sourceText: line.slice(0, 240),
       },
     });
   });
@@ -991,7 +999,11 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
     const page = await document.getPage(pageNumber);
     const content = await page.getTextContent();
-    pageTexts.push(rebuildPdfText(content.items));
+    // Keep a lightweight page sentinel in the shared text stream so every
+    // date-anchored row can retain its source page even when the PDF has a
+    // selectable text layer. The sentinel is consumed by extractTransactions
+    // and never reaches a merchant description.
+    pageTexts.push(`__PDF_PAGE_${pageNumber}__\n${rebuildPdfText(content.items)}`);
     onProgress(12 + Math.round((pageNumber / document.numPages) * 58), `Leyendo pagina ${pageNumber} de ${document.numPages}`);
     page.cleanup();
   }

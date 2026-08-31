@@ -31,6 +31,9 @@ gasto real sin separar esas secciones.
 - Cualquier encabezado, referencia, cuenta, RFC, certificado, saldo o total se descarta como movimiento.
 - OCR web sin coordenadas queda provisional. Vision con coordenadas conserva
   página, método y la confianza real de cada observación en cada fila.
+- Cada fila también conserva un fragmento de origen acotado y, cuando existe
+  OCR visual, sus coordenadas normalizadas. La vista de detalle permite
+  inspeccionar esta evidencia sin guardar el PDF completo dentro del libro.
 - El OCR web conserva confianza media y por página, limita la resolución de cada lienzo para evitar crashes por memoria y rechaza archivos de más de 50 MB con un mensaje recuperable.
 - En páginas con confianza inferior a 88%, el OCR web hace una segunda pasada
   acotada con contraste mejorado y conserva el resultado de mayor confianza;

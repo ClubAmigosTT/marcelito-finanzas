@@ -135,10 +135,31 @@ struct StatementReconciliationRecord: Codable {
 /// Provenance for a single reconstructed row.  Keeping the method and page
 /// with the movement makes an accepted amount traceable without retaining the
 /// whole PDF text in the ledger.
+/// Coordinates and source text that let an auditor locate the exact visual
+/// row that produced a movement. Vision uses normalized coordinates (0–1),
+/// while text-layer imports may leave this nil.
+struct MovementExtractionBounds: Codable {
+    var x: Double
+    var y: Double
+    var width: Double
+    var height: Double
+
+    init(rect: CGRect) {
+        x = Double(rect.minX)
+        y = Double(rect.minY)
+        width = Double(rect.width)
+        height = Double(rect.height)
+    }
+}
+
 struct MovementExtractionEvidence: Codable {
     var method: String
     var page: Int? = nil
     var confidence: Double
+    /// A bounded source fragment, never the complete PDF text.
+    var sourceText: String? = nil
+    /// Normalized Vision bounding box for the reconstructed row.
+    var bounds: MovementExtractionBounds? = nil
 }
 
 struct Movement: Identifiable, Codable {
@@ -2161,6 +2182,12 @@ final class FinanceStore {
         let order: Int
     }
 
+    private static func extractionBounds(for row: [OCRObservation]) -> MovementExtractionBounds? {
+        guard let first = row.first else { return nil }
+        let rect = row.dropFirst().reduce(first.boundingBox) { $0.union($1.boundingBox) }
+        return MovementExtractionBounds(rect: rect)
+    }
+
     private static func ocrObservations(from document: PDFDocument) -> [OCRObservation] {
         var observations: [OCRObservation] = []
         let pageSize = CGSize(width: 1800, height: 2400)
@@ -2271,6 +2298,7 @@ final class FinanceStore {
         let textDateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         )
+        let pageMarkerRegex = try? NSRegularExpression(pattern: #"^__pdf_page_(\d+)__$"#)
         let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?\s*(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)(?:[.,]\d{1,2})?(?![A-Za-z0-9])"#
         )
@@ -2307,27 +2335,50 @@ final class FinanceStore {
         ]
 
         // Amex puts the merchant, RFC and amount on separate PDF text lines.
-        // Group each date-started row before extracting the amount.
-        var rows: [String] = []
+        // Group each date-started row before extracting the amount. Page
+        // sentinels are emitted by the shared reader so a row keeps its
+        // provenance even when the text layer is selectable.
+        struct ParsedTextRow {
+            let text: String
+            let page: Int?
+        }
+        var rows: [ParsedTextRow] = []
         var pendingRow = ""
+        var pendingPage: Int?
+        var currentPage: Int?
+        func flushPending() {
+            guard !pendingRow.isEmpty else { return }
+            rows.append(ParsedTextRow(text: pendingRow, page: pendingPage))
+            pendingRow = ""
+            pendingPage = nil
+        }
         for rawLine in text.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             guard line.count > 1 else { continue }
+            let normalizedLine = line.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            if let pageMarkerRegex,
+               let marker = firstMatch(in: normalizedLine, regex: pageMarkerRegex),
+               let page = Int(marker.text.filter { $0.isNumber }) {
+                flushPending()
+                currentPage = page
+                continue
+            }
             let hasDate = (dateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
                 || (shortMonthDateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
                 || (isoDateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
                 || (textDateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
             if hasDate {
-                if !pendingRow.isEmpty { rows.append(pendingRow) }
+                flushPending()
                 pendingRow = line
+                pendingPage = currentPage
             } else if !pendingRow.isEmpty {
                 pendingRow += " " + line
             }
         }
-        if !pendingRow.isEmpty { rows.append(pendingRow) }
+        flushPending()
 
-        return rows.compactMap { row in
-            let original = row.trimmingCharacters(in: .whitespacesAndNewlines)
+        return rows.compactMap { parsedRow in
+            let original = parsedRow.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard original.count > 3 else { return nil }
 
             let normalized = original.folding(
@@ -2501,7 +2552,9 @@ final class FinanceStore {
                 foreignCurrency: foreignCurrency,
                 extractionEvidence: MovementExtractionEvidence(
                     method: "pdf-text",
-                    confidence: 0.93
+                    page: parsedRow.page,
+                    confidence: 0.93,
+                    sourceText: String(original.prefix(240))
                 )
             )
         }
@@ -2805,7 +2858,9 @@ final class FinanceStore {
             extractionEvidence: MovementExtractionEvidence(
                 method: "vision-ocr",
                 page: row.first.map { $0.page + 1 },
-                confidence: row.map(\.confidence).min() ?? 0
+                confidence: row.map(\.confidence).min() ?? 0,
+                sourceText: String(fullText.prefix(240)),
+                bounds: extractionBounds(for: row)
             )
         )
     }
@@ -3037,7 +3092,9 @@ final class FinanceStore {
             extractionEvidence: MovementExtractionEvidence(
                 method: "vision-ocr",
                 page: row.first.map { $0.page + 1 },
-                confidence: row.map(\.confidence).min() ?? 0
+                confidence: row.map(\.confidence).min() ?? 0,
+                sourceText: String(fullText.prefix(240)),
+                bounds: extractionBounds(for: row)
             )
         )
     }
@@ -3290,7 +3347,9 @@ final class FinanceStore {
             extractionEvidence: MovementExtractionEvidence(
                 method: "vision-ocr",
                 page: row.first.map { $0.page + 1 },
-                confidence: row.map(\.confidence).min() ?? 0
+                confidence: row.map(\.confidence).min() ?? 0,
+                sourceText: String(fullText.prefix(240)),
+                bounds: extractionBounds(for: row)
             )
         )
     }

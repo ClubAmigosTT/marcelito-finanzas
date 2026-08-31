@@ -307,6 +307,17 @@ test("el estado BBVA completo reconstruye sus 11 filas y concilia los totales", 
   assert.equal(rows.every((row) => row.extractionEvidence?.method === "pdf-text"), true);
 });
 
+test("cada fila conserva página y fragmento de evidencia cuando el PDF trae sentinelas", () => {
+  const rows = extractTransactions([
+    "__PDF_PAGE_2__",
+    "01/08/2026 SUPERMERCADO 120.00 880.00",
+    "__PDF_PAGE_3__",
+    "02/08/2026 NOMINA 5,000.00 5,880.00",
+  ].join("\n"), "BBVA", "BBVA agosto.pdf", "bank");
+  assert.deepEqual(rows.map((row) => row.extractionEvidence?.page), [2, 3]);
+  assert.equal(rows.every((row) => (row.extractionEvidence?.sourceText?.length ?? 0) > 0), true);
+});
+
 test("Santander selecciona el cargo o abono y no el saldo corrido", () => {
   const text = [
     "BANCO SANTANDER MEXICO GRUPO FINANCIERO SANTANDER",

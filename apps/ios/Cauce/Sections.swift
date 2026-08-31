@@ -325,6 +325,29 @@ private struct MovementDetailView: View {
                 let method = evidence.method == "vision-ocr" ? "OCR visual" : evidence.method == "pdf-text" ? "Texto del PDF" : evidence.method
                 let page = evidence.page.map { " · página \($0)" } ?? ""
                 LabeledContent("Origen de lectura", value: "\(method)\(page)")
+                if let sourceText = evidence.sourceText, !sourceText.isEmpty {
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Fragmento de origen")
+                            .font(.caption)
+                            .foregroundStyle(Color.marcelitoNavySoft)
+                        Text(sourceText)
+                            .font(.caption2)
+                            .foregroundStyle(Color.marcelitoNavy)
+                            .textSelection(.enabled)
+                    }
+                }
+                if let bounds = evidence.bounds {
+                    LabeledContent(
+                        "Coordenadas",
+                        value: String(
+                            format: "x %.3f · y %.3f · w %.3f · h %.3f",
+                            bounds.x,
+                            bounds.y,
+                            bounds.width,
+                            bounds.height
+                        )
+                    )
+                }
             }
             Picker("Categoría", selection: Binding(
                 get: { selectedCategory },

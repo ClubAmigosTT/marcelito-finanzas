@@ -23,7 +23,8 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
    movimientos no pueden cambiar el banco detectado.
 3. **Extracción por capas**: usar primero la capa de texto del PDF; si es
    insuficiente, ejecutar OCR visual por página con coordenadas y confianza.
-   Mantener cada observación con página, bounding box, método y confianza.
+   Mantener cada observación con página, bounding box, método y confianza, y
+   persistir un fragmento de origen acotado en cada movimiento aceptado.
 4. **Reconstrucción de filas**: anclar por fecha válida, agrupar descripción y
    tomar el importe desde la columna correcta (CARGOS/ABONOS o IMPORTE), nunca
    desde referencias, saldos corridos ni números administrativos.
