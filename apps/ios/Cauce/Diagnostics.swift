@@ -192,6 +192,39 @@ struct DiagnosticsView: View {
                                     .foregroundStyle(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
                             }
+                            if let summary = statement.summary {
+                                let statementKind = statement.kind
+                                    ?? (statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank)
+                                VStack(alignment: .leading, spacing: 2) {
+                                    if statementKind == .card {
+                                        if let limit = summary.creditLimit,
+                                           let available = summary.creditAvailable {
+                                            Text("Deuda comprometida: \(money(max(Decimal(0), limit - available)))")
+                                        }
+                                        if summary.paymentForNoInterest != nil {
+                                            Text("Pago para no generar intereses: \(money(summary.paymentForNoInterest))")
+                                        }
+                                        if summary.msiPending != nil {
+                                            Text("MSI pendientes: \(money(summary.msiPending))")
+                                        }
+                                    } else {
+                                        if summary.previousBalance != nil {
+                                            Text("Saldo inicial: \(money(summary.previousBalance))")
+                                        }
+                                        if summary.depositTotal != nil {
+                                            Text("Depósitos: \(money(summary.depositTotal))")
+                                        }
+                                        if summary.withdrawalTotal != nil {
+                                            Text("Retiros: \(money(summary.withdrawalTotal))")
+                                        }
+                                        if summary.cashBalance != nil {
+                                            Text("Saldo final: \(money(summary.cashBalance))")
+                                        }
+                                    }
+                                }
+                                .font(.caption2.monospacedDigit())
+                                .foregroundStyle(Color.marcelitoNavyMid)
+                            }
                             if let confidence = statement.ocrConfidence {
                                 Text("Confianza OCR: \(Int((confidence * 100).rounded()))%")
                                     .font(.caption2)
@@ -301,5 +334,9 @@ struct DiagnosticsView: View {
         case .invalid: return Color.marcelitoDanger
         case .pending, .none: return Color.marcelitoAmber
         }
+    }
+
+    private func money(_ value: Decimal?) -> String {
+        value?.formatted(.currency(code: "MXN").precision(.fractionLength(2))) ?? "Pendiente"
     }
 }
