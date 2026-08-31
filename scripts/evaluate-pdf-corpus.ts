@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
-import { detectSourceEvidence, extractTransactions, parseStatementSummary, PDF_READER_VERSION, rebuildPdfText, reconcileStatementImport } from "../src/pdfImport.ts";
+import { detectSourceEvidence, extractTransactions, parseStatementSummary, PDF_READER_VERSION, rebuildPdfText, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import type { StatementKind, StatementSource } from "../src/types.ts";
 
 type ExpectedFile = {
@@ -58,7 +58,10 @@ async function evaluate(file: string) {
   const extracted = await textFromPdf(file);
   const text = extracted.text;
   const fileName = file.split(/[\\/]/).at(-1) ?? file;
-  const mode = text.replace(/\s/g, "").length > 500 ? "pdf-text" : "ocr-required";
+  // Keep corpus diagnostics on the exact same text/OCR decision as the app;
+  // otherwise a hidden administrative layer could be certified as text here
+  // while the product correctly falls back to visual OCR (or vice versa).
+  const mode = shouldUseOCR(text) ? "ocr-required" : "pdf-text";
   const sourceDetection = detectSourceEvidence(text, fileName);
   const kind = kindFor(sourceDetection.source);
   const transactions = kind === "unknown" ? [] : extractTransactions(text, sourceDetection.source, fileName, kind);
