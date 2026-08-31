@@ -198,6 +198,15 @@ final class NativeCorpusContractTests: XCTestCase {
             && goldenAutoAccepted == expectedValidCount
             && automaticAcceptancePrecision >= 0.99
             && unresolvedOCR == 0
+        let requireCertified = ["1", "true", "yes"].contains(
+            ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED"]?.lowercased() ?? ""
+        )
+        if requireCertified {
+            XCTAssertTrue(
+                certified,
+                "El corpus nativo no está certificado: promueve todos los goldens, corrige falsos positivos y resuelve OCR antes de publicar."
+            )
+        }
         let summary: [String: String] = [
             "files": String(files.count),
             "accepted": String(automaticAcceptances),
@@ -208,6 +217,7 @@ final class NativeCorpusContractTests: XCTestCase {
             "goldenFalseAccepted": String(goldenFalseAccepted),
             "automaticAcceptancePrecision": String(format: "%.4f", automaticAcceptancePrecision),
             "unresolvedOCR": String(unresolvedOCR),
+            "requireCertified": String(requireCertified),
             "certified": String(certified)
         ]
         let summaryData = try JSONSerialization.data(withJSONObject: summary, options: [.sortedKeys])

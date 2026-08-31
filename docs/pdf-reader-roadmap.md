@@ -128,6 +128,10 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
   el PDF, página o regla que rompió la certificación.
 - El workflow `web-validate.yml` ejecuta en paralelo tipos, lint, pruebas y
   build del parser web en cada `push` y `pull_request`.
+- La corrida nativa admite un modo de publicación explícito mediante
+  `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`: la calibración puede dejar
+  goldens `pending`, pero una certificación no puede pasar mientras exista
+  alguno, haya OCR sin resolver o la precisión automática sea menor a 99%.
 
 ## Umbrales y respuesta
 
