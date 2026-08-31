@@ -106,6 +106,9 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
   pasan.
 - Mantener canary: nuevas plantillas empiezan en `pending`, se miden durante
   una versión y solo después se habilita su aceptación automática.
+- El workflow de iOS se ejecuta en `push`, `pull_request` y manualmente para
+  evitar que cambios del lector lleguen a distribución sin compilar y correr
+  las pruebas de contrato en macOS.
 
 ## Umbrales y respuesta
 
