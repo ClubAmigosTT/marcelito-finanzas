@@ -335,9 +335,14 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
     // programmatic callers cannot bypass the quality gate.
     if (commit.reconciliation && commit.reconciliation.status !== "valid") return;
     // The same PDF may have been imported before with a wrong bank label.
-    // Match by filename first so a corrected detection replaces that record
-    // instead of leaving a stale duplicate in the account ledger.
-    const previous = statements.find((item) => item.fileName === commit.fileName);
+    // Prefer the immutable SHA-256 identity so monthly exports that reuse a
+    // generic name (for example, "Estado de cuenta.pdf") never overwrite a
+    // different period. Filename matching remains a compatibility fallback
+    // for statements saved before fingerprints were introduced.
+    const previous = commit.sourceFingerprint
+      ? statements.find((item) => item.sourceFingerprint === commit.sourceFingerprint)
+        ?? statements.find((item) => !item.sourceFingerprint && item.fileName === commit.fileName)
+      : statements.find((item) => item.fileName === commit.fileName);
     const statementId = previous?.id ?? createId("statement");
     const importedAt = new Date().toISOString();
     const importedTransactions = commit.transactions
