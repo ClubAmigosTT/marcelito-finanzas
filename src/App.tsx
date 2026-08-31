@@ -281,7 +281,10 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   const ledgerTransactions = useMemo(() => pipeline.transactions.filter((transaction) => {
     if (!transaction.statementId) return true;
     const statement = statements.find((item) => item.id === transaction.statementId);
-    return statement?.reconciliationStatus === "valid";
+    // Reconciliation is necessary but not sufficient for scanned/uncertain
+    // imports. A statement marked for review stays out of every KPI until the
+    // user confirms it from Cuentas > Documentos importados.
+    return statement?.reconciliationStatus === "valid" && statement.status !== "review";
   }), [pipeline, statements]);
   // All screens receive the same post-pipeline ledger. Raw extracted rows are
   // retained only for audit/reprocessing and are never an aggregate source.
@@ -353,6 +356,9 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       || commit.source === "Desconocido"
       || commit.kind === "unknown"
       || commit.sourceDetection?.status !== "verified"
+      // Browser OCR currently returns flattened text without coordinates;
+      // keep scanned imports provisional until the user confirms their rows.
+      || commit.mode === "ocr"
       || importedPipeline.audit.criticalIssues.length > 0;
     statement.status = importedTransactions.length && !needsReview ? "ready" : "review";
     statement.transactionCount = importedPipeline.transactions.filter((item) => item.statementId === statementId).length;
