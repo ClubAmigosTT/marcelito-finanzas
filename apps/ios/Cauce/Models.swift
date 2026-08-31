@@ -2925,14 +2925,16 @@ final class FinanceStore {
         let fileName = url.lastPathComponent
         let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
         let extraction = try await Task.detached(priority: .userInitiated) {
-            try Self.extractPDF(
-                data: documentData,
-                fileName: fileName,
-                allowOCR: allowOCR,
-                sourceOverride: sourceOverride,
-                kindOverride: kindOverride,
-                learnedRules: learnedRules
-            )
+            try autoreleasepool {
+                try Self.extractPDF(
+                    data: documentData,
+                    fileName: fileName,
+                    allowOCR: allowOCR,
+                    sourceOverride: sourceOverride,
+                    kindOverride: kindOverride,
+                    learnedRules: learnedRules
+                )
+            }
         }.value
         return try applyPDFExtraction(
             extraction,
