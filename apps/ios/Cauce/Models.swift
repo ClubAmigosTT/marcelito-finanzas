@@ -2001,7 +2001,13 @@ final class FinanceStore {
 
     @discardableResult
     func repairStoredImportsIfNeeded() -> Int {
-        guard !UserDefaults.standard.bool(forKey: numericRepairKey), !repairInProgress else { return 0 }
+        // A full canonical rebuild has priority over this bounded legacy
+        // repair. Never mark the numeric-repair flag first, otherwise a
+        // caller that invokes this compatibility path early could leave an
+        // outdated PDF row alive while the rebuild is still pending.
+        guard !hasCanonicalRebuildPending,
+              !UserDefaults.standard.bool(forKey: numericRepairKey),
+              !repairInProgress else { return 0 }
         repairInProgress = true
         defer { repairInProgress = false }
         let candidates = storedImportRepairCandidates
