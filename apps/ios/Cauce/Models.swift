@@ -2177,8 +2177,9 @@ final class FinanceStore {
         // are excluded by sourceDetection's header scope.
         let detectedSourceEvidence = Self.sourceDetection(from: text, fileName: url.lastPathComponent)
         let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let sourceDetection = cleanedSourceOverride.map { override in
-            SourceDetectionEvidence(
+        let sourceDetection = cleanedSourceOverride.flatMap { override -> SourceDetectionEvidence? in
+            guard !override.isEmpty else { return nil }
+            return SourceDetectionEvidence(
                 source: override,
                 confidence: 0,
                 status: .review,
