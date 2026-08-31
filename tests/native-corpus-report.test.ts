@@ -123,6 +123,9 @@ test("el reporte nativo exige una identidad enmascarada por PDF", () => {
       source: "BBVA",
       kind: "bank",
       status: "valid",
+      sourceStatus: "verified",
+      sourceConfidence: "0.9990",
+      requiresReview: "false",
       rows: "11",
       accountKey: "bbva:4922",
       expectedAccountKey: "bbva:4922",
@@ -133,6 +136,9 @@ test("el reporte nativo exige una identidad enmascarada por PDF", () => {
       source: "Amex",
       kind: "card",
       status: "valid",
+      sourceStatus: "verified",
+      sourceConfidence: 0.998,
+      requiresReview: false,
       rows: 92,
       accountKey: "amex:1003",
       expectedAccountKey: "amex:1003",
@@ -170,6 +176,9 @@ test("el reporte nativo exige trazabilidad y controles por archivo", () => {
   assert.ok(result.errors.some((error) => error.includes("emisor identificado")));
   assert.ok(result.errors.some((error) => error.includes("kind")));
   assert.ok(result.errors.some((error) => error.includes("status")));
+  assert.ok(result.errors.some((error) => error.includes("sourceStatus")));
+  assert.ok(result.errors.some((error) => error.includes("sourceConfidence")));
+  assert.ok(result.errors.some((error) => error.includes("requiresReview")));
   assert.ok(result.errors.some((error) => error.includes("rows")));
 });
 
@@ -181,6 +190,9 @@ test("el reporte nativo debe coincidir con el conjunto del manifiesto", () => {
       source: "BBVA",
       kind: "bank",
       status: "valid",
+      sourceStatus: "verified",
+      sourceConfidence: 0.999,
+      requiresReview: false,
       rows: 11,
       accountKey: "bbva:4922",
       expectedAccountKey: "bbva:4922",
@@ -191,6 +203,9 @@ test("el reporte nativo debe coincidir con el conjunto del manifiesto", () => {
       source: "Amex",
       kind: "card",
       status: "valid",
+      sourceStatus: "verified",
+      sourceConfidence: 0.998,
+      requiresReview: false,
       rows: 92,
       accountKey: "amex:1003",
       expectedAccountKey: "amex:1003",
@@ -212,6 +227,9 @@ test("el reporte nativo compara huella, emisor y tipo contra el manifiesto", () 
       source: "Santander",
       kind: "card",
       status: "valid",
+      sourceStatus: "verified",
+      sourceConfidence: 0.998,
+      requiresReview: false,
       rows: 11,
       accountKey: "bbva:4922",
       expectedAccountKey: "bbva:4922",

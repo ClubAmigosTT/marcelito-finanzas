@@ -27,6 +27,9 @@ type NativeCorpusReportRow = {
   source?: string;
   kind?: string;
   status?: string;
+  sourceStatus?: string;
+  sourceConfidence?: string | number;
+  requiresReview?: string | boolean;
   rows?: string | number;
   accountKey?: string;
   expectedAccountKey?: string;
@@ -154,6 +157,28 @@ export function verifyNativeCorpusReport(
     const status = typeof row.status === "string" ? row.status.trim() : "";
     if (!["valid", "pending", "invalid"].includes(status)) {
       errors.push(`${label}: status no es valid/pending/invalid`);
+    }
+    const sourceStatus = typeof row.sourceStatus === "string" ? row.sourceStatus.trim() : "";
+    if (sourceStatus !== "verified") {
+      errors.push(`${label}: sourceStatus no es verified`);
+    }
+    const sourceConfidence = Number(row.sourceConfidence);
+    if (!Number.isFinite(sourceConfidence) || sourceConfidence < 0 || sourceConfidence > 1) {
+      errors.push(`${label}: sourceConfidence fuera de rango 0..1`);
+    }
+    const reviewToken = typeof row.requiresReview === "string"
+      ? row.requiresReview.trim().toLowerCase()
+      : row.requiresReview;
+    const reviewValid = reviewToken === true
+      || reviewToken === false
+      || reviewToken === "true"
+      || reviewToken === "false"
+      || reviewToken === "1"
+      || reviewToken === "0"
+      || reviewToken === "yes"
+      || reviewToken === "no";
+    if (!reviewValid) {
+      errors.push(`${label}: requiresReview no es booleano`);
     }
     const rowCount = Number(row.rows);
     if (!Number.isInteger(rowCount) || rowCount < 0) {
