@@ -2249,6 +2249,7 @@ final class FinanceStore {
     private static func ocrObservations(from document: PDFDocument) -> [OCRObservation] {
         var observations: [OCRObservation] = []
         let pageSize = CGSize(width: 1800, height: 2400)
+        let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
         func recognize(_ cgImage: CGImage, page: Int) -> [OCRObservation] {
             let request = VNRecognizeTextRequest()
@@ -2295,27 +2296,29 @@ final class FinanceStore {
             filter.setValue(1.35, forKey: kCIInputContrastKey)
             filter.setValue(-0.02, forKey: kCIInputBrightnessKey)
             guard let output = filter.outputImage else { return nil }
-            return CIContext(options: [.useSoftwareRenderer: false]).createCGImage(output, from: output.extent)
+            return ciContext.createCGImage(output, from: output.extent)
         }
 
         for pageIndex in 0..<document.pageCount {
-            guard let page = document.page(at: pageIndex) else { continue }
-            let image = page.thumbnail(of: pageSize, for: .mediaBox)
-            guard let cgImage = image.cgImage else { continue }
+            autoreleasepool {
+                guard let page = document.page(at: pageIndex) else { return }
+                let image = page.thumbnail(of: pageSize, for: .mediaBox)
+                guard let cgImage = image.cgImage else { return }
 
-            let baseObservations = recognize(cgImage, page: pageIndex)
-            var selectedObservations = baseObservations
-            // A contrast pass is attempted only for visually weak pages. It
-            // is bounded to one temporary image and the original result wins
-            // whenever the retry does not improve mean confidence.
-            if meanConfidence(baseObservations) < 0.88,
-               let contrastImage = enhancedImage(from: cgImage) {
-                let contrastObservations = recognize(contrastImage, page: pageIndex)
-                if meanConfidence(contrastObservations) > meanConfidence(baseObservations) {
-                    selectedObservations = contrastObservations
+                let baseObservations = recognize(cgImage, page: pageIndex)
+                var selectedObservations = baseObservations
+                // A contrast pass is attempted only for visually weak pages.
+                // It is bounded to one temporary image and the original
+                // result wins whenever the retry does not improve confidence.
+                if meanConfidence(baseObservations) < 0.88,
+                   let contrastImage = enhancedImage(from: cgImage) {
+                    let contrastObservations = recognize(contrastImage, page: pageIndex)
+                    if meanConfidence(contrastObservations) > meanConfidence(baseObservations) {
+                        selectedObservations = contrastObservations
+                    }
                 }
+                observations.append(contentsOf: selectedObservations)
             }
-            observations.append(contentsOf: selectedObservations)
         }
 
         return observations

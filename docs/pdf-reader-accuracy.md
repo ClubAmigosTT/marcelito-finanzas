@@ -58,6 +58,8 @@ gasto real sin separar esas secciones.
 - Vision en iOS aplica la misma estrategia por página: solo genera una imagen
   temporal con contraste cuando la primera pasada es débil y conserva el
   resultado que tenga mayor confianza media.
+- iOS reutiliza el contexto de imagen y libera cada página OCR dentro de un
+  `autoreleasepool`, limitando la memoria temporal en estados de varias páginas.
 - Las páginas sin observaciones Vision se registran explícitamente como 0%
   de confianza; nunca desaparecen del promedio ni de la revisión.
 - En iOS, una fila importada sin página, confianza o fragmento de origen
