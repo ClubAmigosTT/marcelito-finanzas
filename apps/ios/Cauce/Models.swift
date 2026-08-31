@@ -1139,6 +1139,10 @@ final class FinanceStore {
         if ["entre cuentas", "cuenta propia", "mismo titular", "traspaso interno", "autotransferencia"].contains(where: { combined.contains($0) }) {
             return true
         }
+        // A bank name in an otherwise generic payment description is not
+        // enough; one side must also contain transfer semantics (SPEI,
+        // transferencia, traspaso, CLABE, etc.).
+        guard hasTransferHint(outflow) || hasTransferHint(inflow) else { return false }
         let outAccount = normalizedConcept(outflow.account)
         let inAccount = normalizedConcept(inflow.account)
         guard !outAccount.isEmpty, !inAccount.isEmpty, outAccount != inAccount else { return false }

@@ -134,8 +134,8 @@ test("matching excluye traspaso propio y pago de Amex del gasto e ingreso", () =
 test("matching exige evidencia de cuenta propia además de cuenta, fecha e importe", () => {
   const statements = [bank("santander", "Santander", "agosto 2026"), bank("bbva", "BBVA", "agosto 2026"), card("amex", "Amex", "agosto 2026", 3000)];
   const transactions = [
-    movement({ id: "bank-out", date: "20 ago 2026", description: "OPERACION A BBVA", account: "Santander", amount: -700, flow: "expense", statementId: "santander" }),
-    movement({ id: "bank-in", date: "21 ago 2026", description: "ABONO SANTANDER", account: "BBVA", amount: 700, flow: "income", statementId: "bbva" }),
+    movement({ id: "bank-out", date: "20 ago 2026", description: "SPEI A BBVA", account: "Santander", amount: -700, flow: "expense", statementId: "santander" }),
+    movement({ id: "bank-in", date: "21 ago 2026", description: "ABONO SPEI SANTANDER", account: "BBVA", amount: 700, flow: "income", statementId: "bbva" }),
     movement({ id: "card-in", date: "22 ago 2026", description: "PAGO RECIBIDO", account: "Amex", amount: 1200, flow: "income", statementId: "amex" }),
     movement({ id: "bank-card-out", date: "22 ago 2026", description: "OPERACION", account: "Santander", amount: -1200, flow: "expense", statementId: "santander" }),
     movement({ id: "real", date: "23 ago 2026", description: "SUPERMERCADO", account: "Amex", amount: -250, flow: "expense", statementId: "amex", category: "Alimentos" }),

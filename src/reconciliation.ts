@@ -166,6 +166,10 @@ function hasTransferHint(transaction: Transaction) {
 function hasOwnAccountTransferEvidence(outflow: Transaction, inflow: Transaction, statements: Statement[]) {
   const combined = normalizeConcept(`${outflow.description} ${inflow.description}`);
   if (/entre cuentas|cuenta propia|mismo titular|traspaso interno|autotransferencia/.test(combined)) return true;
+  // A bank name appearing in a generic merchant/payment description is not
+  // sufficient by itself. At least one side must also carry transfer
+  // semantics (SPEI, traspaso, transferencia, CLABE, ...).
+  if (!hasTransferHint(outflow) && !hasTransferHint(inflow)) return false;
   const outAccount = normalizeConcept(outflow.account);
   const inAccount = normalizeConcept(inflow.account);
   if (!outAccount || !inAccount || outAccount === inAccount) return false;
