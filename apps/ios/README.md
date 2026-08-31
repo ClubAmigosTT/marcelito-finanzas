@@ -29,7 +29,8 @@ xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
 ```
 
 El reporte incluye controles esperados y extraídos de depósitos, retiros,
-cargos y pagos. Los cuatro estados de texto los validan como aserciones duras;
+cargos y pagos, además de confianza del emisor, confianza OCR media y página
+OCR más débil. Los cuatro estados de texto los validan como aserciones duras;
 los escaneos Santander se reportan para calibración mientras permanezcan en
 `pending`.
 
