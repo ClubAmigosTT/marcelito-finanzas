@@ -205,7 +205,7 @@ struct HomeView: View {
                 importProgress = 0
                 importStatus = "Reconstruyendo el libro canónico…"
                 await Task.yield()
-                let result = store.rebuildCanonicalLedgerIfNeeded { completed, total, fileName in
+                let result = await store.rebuildCanonicalLedgerIfNeededAsync { completed, total, fileName in
                     let denominator = max(total, 1)
                     importProgress = Int((Double(completed) / Double(denominator) * 100).rounded())
                     importStatus = "Validando \(fileName)…"

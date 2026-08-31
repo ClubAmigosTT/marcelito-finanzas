@@ -52,7 +52,8 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
 11. **Aislamiento de ejecución**: la extracción PDFKit/Vision se ejecuta en
     una tarea asíncrona fuera del hilo de interfaz; solo el snapshot validado
     vuelve al store para hacer un commit atómico. El indicador de carga cubre
-    cada archivo y una cancelación o error no deja filas parciales.
+    cada archivo; la reconstrucción automática de arranque usa la misma ruta
+    y una cancelación o error no deja filas parciales.
 
 ## Fases y criterios de salida
 

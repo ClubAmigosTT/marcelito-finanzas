@@ -2184,6 +2184,110 @@ final class FinanceStore {
         return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount)
     }
 
+    /// Async counterpart used by the launch UI. File hashing, PDFKit and
+    /// Vision all stay off the main actor; only the guarded ledger mutations
+    /// happen as the async task resumes on its caller's actor.
+    @discardableResult
+    func rebuildCanonicalLedgerIfNeededAsync(
+        progress: ((Int, Int, String) -> Void)? = nil
+    ) async -> CanonicalRebuildResult {
+        let defaults = UserDefaults.standard
+        guard hasCanonicalRebuildPending, !repairInProgress else {
+            return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
+        }
+        repairInProgress = true
+        defer { repairInProgress = false }
+
+        let storedURLs = storedPDFURLs
+        let knownStatements = statements
+        let candidates = await Task.detached(priority: .utility) {
+            var seenFingerprints = Set<String>()
+            return storedURLs.compactMap { url -> URL? in
+                guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
+                let fingerprint = Self.pdfFingerprint(data)
+                guard seenFingerprints.insert(fingerprint).inserted else { return nil }
+                return url
+            }
+        }.value
+
+        let statementKeys = Set(knownStatements.map { statement in
+            "\(normalizedConcept(statement.source))|\(statementKind(statement).rawValue)|\(normalizedConcept(statement.period))"
+        })
+        defaults.set(max(candidates.count, statementKeys.count), forKey: canonicalRebuildExpectedCountKey)
+
+        if let backupData = try? JSONEncoder().encode(currentEnvelope()) {
+            defaults.set(backupData, forKey: ledgerBackupKey)
+        }
+        defaults.set("inProgress", forKey: rebuildStateKey)
+
+        movements = movements.filter { $0.statementId == nil }
+        statements = []
+        normalizeStoredLedger()
+        persist()
+
+        guard !candidates.isEmpty else {
+            defaults.set(true, forKey: canonicalRebuildKey)
+            defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
+            defaults.set(true, forKey: numericRepairKey)
+            defaults.set("complete", forKey: rebuildStateKey)
+            defaults.removeObject(forKey: ledgerBackupKey)
+            DiagnosticsRecorder.record(stage: "rebuild.done", message: "No había PDFs locales para reconstruir; el libro quedó limpio.")
+            return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
+        }
+
+        DiagnosticsRecorder.record(
+            stage: "rebuild.start",
+            message: "Reconstrucción canónica asíncrona iniciada con \(candidates.count) PDF(s) únicos."
+        )
+        var importedCount = 0
+        var invalidCount = 0
+        for (index, url) in candidates.enumerated() {
+            progress?(index, candidates.count, url.lastPathComponent)
+            do {
+                let result = try await importPDFAsync(
+                    from: url,
+                    allowOCR: true,
+                    preserveExistingOnEmpty: false,
+                    requireValidReconciliation: true
+                )
+                if result.reconciliation?.status == .valid && !result.requiresReview {
+                    importedCount += 1
+                    DiagnosticsRecorder.record(
+                        stage: "rebuild.statement",
+                        message: "Estado válido: \(result.source) · \(result.period) · \(result.imported) movimiento(s)."
+                    )
+                } else {
+                    invalidCount += 1
+                    DiagnosticsRecorder.record(
+                        level: "error",
+                        stage: "rebuild.invalid",
+                        message: "Estado fuera del libro canónico: \(result.fileName) · \(result.reconciliation?.reason ?? "sin conciliación")"
+                    )
+                }
+            } catch {
+                invalidCount += 1
+                DiagnosticsRecorder.record(
+                    level: "error",
+                    stage: "rebuild.error",
+                    message: "No se pudo reconstruir \(url.lastPathComponent): \(error.localizedDescription)"
+                )
+            }
+            progress?(index + 1, candidates.count, url.lastPathComponent)
+            await Task.yield()
+        }
+        defaults.set(true, forKey: canonicalRebuildKey)
+        defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
+        defaults.set(true, forKey: numericRepairKey)
+        defaults.set("complete", forKey: rebuildStateKey)
+        defaults.removeObject(forKey: ledgerBackupKey)
+        persist()
+        DiagnosticsRecorder.record(
+            stage: "rebuild.done",
+            message: "Reconstrucción asíncrona terminada: \(importedCount) válido(s), \(invalidCount) bloqueado(s), \(movements.count) movimiento(s) canónicos."
+        )
+        return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount)
+    }
+
     /// Older TestFlight builds persisted rows produced by the former parser.
     /// Re-read those local PDFs once with the current extraction/reconciliation
     /// pipeline so an app update does not require the user to upload every
