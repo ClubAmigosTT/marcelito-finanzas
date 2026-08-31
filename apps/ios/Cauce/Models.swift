@@ -1005,7 +1005,10 @@ final class FinanceStore {
     }
 
     private func isEligibleStatement(_ statement: StatementRecord) -> Bool {
-        isCurrentReader(statement) && statement.reconciliation?.status == .valid && !statement.requiresReview
+        isCurrentReader(statement)
+            && statement.reconciliation?.status == .valid
+            && statement.sourceDetection?.status == .verified
+            && !statement.requiresReview
     }
 
     /// Only reconciled and confirmed statement rows may feed a financial
@@ -1619,12 +1622,13 @@ final class FinanceStore {
             movements: linked
         )
         statements[index].requiresReview = statements[index].reconciliation?.status != .valid
+            || statements[index].sourceDetection?.status != .verified
         persist()
     }
 
     /// Explicitly releases a reconciled statement from the review quarantine.
     /// This is a human acknowledgement for OCR/low-confidence rows; it never
-    /// overrides an issuer-total mismatch or an unknown reconciliation state.
+    /// overrides an issuer-total mismatch or an unverified issuer.
     @discardableResult
     func confirmStatementReviewed(_ statement: StatementRecord) -> Bool {
         guard let index = statements.firstIndex(where: { $0.id == statement.id }) else { return false }
@@ -1633,6 +1637,14 @@ final class FinanceStore {
                 level: "error",
                 stage: "statement.review.blocked",
                 message: "No se puede confirmar \(statements[index].fileName): la conciliación aún no es válida."
+            )
+            return false
+        }
+        guard statements[index].sourceDetection?.status == .verified else {
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "statement.review.blocked",
+                message: "No se puede confirmar (statements[index].fileName): el emisor aún no tiene evidencia institucional verificada."
             )
             return false
         }
