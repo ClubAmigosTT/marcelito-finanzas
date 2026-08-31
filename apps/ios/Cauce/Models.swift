@@ -696,9 +696,11 @@ final class FinanceStore {
 
     /// Returns the newest statement for an account, independent of the order
     /// in which PDFs were imported.
-    func latestStatement(for source: String) -> StatementRecord? {
+    func latestStatement(for source: String, kind: StatementKind? = nil) -> StatementRecord? {
         statements
-            .filter { $0.source == source }
+            .filter { statement in
+                statement.source == source && (kind == nil || statementKind(statement) == kind)
+            }
             .max { left, right in
                 let leftDate = statementEndDate(for: left.id)
                 let rightDate = statementEndDate(for: right.id)

@@ -737,17 +737,17 @@ private struct AccountSummaryRow: View {
 
     let source: String
 
+    private var kind: StatementKind {
+        source.localizedCaseInsensitiveContains("Amex") ? .card : .bank
+    }
+
     private var statement: StatementRecord? {
-        store.latestStatement(for: source)
+        store.latestStatement(for: source, kind: kind)
     }
 
     private var metric: StatementMetric? {
         guard let statementID = statement?.id else { return nil }
         return store.metric(for: statementID)
-    }
-
-    private var kind: StatementKind {
-        statement?.kind ?? (source == "Amex" ? .card : .bank)
     }
 
     private var balanceText: String {
