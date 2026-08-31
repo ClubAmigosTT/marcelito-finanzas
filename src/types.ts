@@ -140,6 +140,10 @@ export type ImportResult = {
   transactions: Transaction[];
   summary?: StatementSummary;
   reconciliation?: StatementReconciliation;
+  /** Average OCR confidence (0–1) when the PDF had no usable text layer. */
+  ocrConfidence?: number;
+  /** Per-page OCR confidence, retained for diagnostics and review UX. */
+  ocrPageConfidences?: number[];
 };
 
 export type Statement = {
@@ -157,6 +161,7 @@ export type Statement = {
   reconciliationStatus?: StatementReconciliationStatus;
   reconciliation?: StatementReconciliation;
   sourceDetection?: SourceDetection;
+  ocrConfidence?: number;
 };
 
 export type ImportCommit = {
@@ -169,6 +174,7 @@ export type ImportCommit = {
   summary?: StatementSummary;
   reconciliation?: StatementReconciliation;
   sourceDetection?: SourceDetection;
+  ocrConfidence?: number;
   /** User corrections learned from this review, keyed by normalized merchant. */
   categoryRules?: Record<string, string>;
 };

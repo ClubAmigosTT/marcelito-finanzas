@@ -25,6 +25,7 @@ gasto real sin separar esas secciones.
 - Estado de tarjeta válido solo si cargos y pagos reconocidos concilian con el resumen disponible.
 - Cualquier encabezado, referencia, cuenta, RFC, certificado, saldo o total se descarta como movimiento.
 - OCR web sin coordenadas queda provisional. Vision con coordenadas conserva página y método en cada fila.
+- El OCR web conserva confianza media y por página, limita la resolución de cada lienzo para evitar crashes por memoria y rechaza archivos de más de 50 MB con un mensaje recuperable.
 - Un estado inválido, pendiente o provisional no alimenta Resumen, Gastos, Patrimonio ni gráficas.
 
 ## Corpus dorado

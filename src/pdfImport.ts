@@ -582,8 +582,16 @@ export function extractTransactions(text: string, source: StatementSource, fileN
 
   // A PDF text layer may put the merchant, RFC/reference and amount on
   // separate lines. Reassemble each date-anchored row before extracting it.
-  const rows: string[] = [];
+  const rows: Array<{ text: string; foreignCurrency: boolean }> = [];
   let pending = "";
+  let pendingForeignCurrency = false;
+  let amexForeignSection = false;
+  const flushPending = () => {
+    if (!pending) return;
+    rows.push({ text: pending, foreignCurrency: pendingForeignCurrency });
+    pending = "";
+    pendingForeignCurrency = false;
+  };
   const breakPhrases = [
     "estado de cuenta", "fecha y detalle", "resumen de cuenta", "paga desde",
     "este no es un documento", "total de las transacciones", "total de transacciones",
@@ -595,20 +603,26 @@ export function extractTransactions(text: string, source: StatementSource, fileN
   let skipCardSection = false;
   for (const line of lines) {
     const normalized = normalizeText(line);
+    // Amex prints the domestic subtotal immediately before the foreign
+    // currency table. Keep that structural boundary even when OCR splits a
+    // currency metadata line across two PDF pages.
+    if (kind === "card" && /total\s+de\s+las\s+transacciones\s+en\s+\$/.test(normalized)) {
+      amexForeignSection = true;
+    } else if (kind === "card" && /total\s+de\s+transacciones\s+en\s+moneda\s+extranjera/.test(normalized)) {
+      amexForeignSection = false;
+    }
     // OCR recognition is page-oriented. A page boundary must terminate the
     // previous row; otherwise the first header/summary number on the next
     // page can be appended to a real transaction.
     if (/^__pdf_page_\d+__$/.test(normalized)) {
-      if (pending) rows.push(pending);
-      pending = "";
+      flushPending();
       continue;
     }
     // Amex repeats a date/detail table for regular purchases, then prints
     // separate MSI tables. MSI installments are future obligations and must
     // never become new spend rows. Resume only at the next movement header.
     if (kind === "card" && /transacciones de meses sin intereses|resumen de meses sin intereses|consolidado de compras en meses sin intereses|descripcion de compras en meses sin intereses/.test(normalized)) {
-      if (pending) rows.push(pending);
-      pending = "";
+      flushPending();
       skipCardSection = true;
       continue;
     }
@@ -628,18 +642,18 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     const breaks = breakPhrases.some((phrase) => normalized.includes(phrase))
       || /^(?:del\s+al|total\b|saldo\b|periodo\b|fecha\s+de\s+corte|rfc\b|clabe\b)/.test(normalized);
     if (startsWithDate) {
-      if (pending) rows.push(pending);
+      flushPending();
       pending = dateLine;
+      pendingForeignCurrency = amexForeignSection;
     } else if (pending && !breaks) {
       pending += ` ${line}`;
     } else if (breaks && pending) {
-      rows.push(pending);
-      pending = "";
+      flushPending();
     }
   }
-  if (pending) rows.push(pending);
+  flushPending();
 
-  rows.forEach((line, index) => {
+  rows.forEach(({ text: line, foreignCurrency: sectionForeignCurrency }, index) => {
     const date = line.match(datePattern);
     if (!date) return;
     const dayToken = date[1] ?? date[4] ?? date[9] ?? date[10];
@@ -665,7 +679,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     if (!usableCandidates.length) return;
     const normalizedLine = normalizeText(line);
     const bankLike = kind === "bank" || /deposito|retiro|saldo|cuenta de cheques|cuenta de ahorro|abono|cargo/.test(normalizedLine);
-    const foreignCurrency = /dolar|euro|peso colombiano|tipo de cambio|\btc\b/.test(normalizedLine);
+    const foreignCurrency = sectionForeignCurrency || /dolar|euro|peso colombiano|tipo de cambio|\btc\b/.test(normalizedLine);
     // Bank rows often finish with a running balance. Select the preceding
     // amount so the balance is not recorded as a purchase.
     const amount = foreignCurrency
@@ -780,11 +794,20 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
     },
   });
   const pages: string[] = [];
+  const pageConfidences: number[] = [];
 
   try {
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
-      const viewport = page.getViewport({ scale: 2 });
+      // A fixed scale of 2 can allocate hundreds of megabytes for a scanned
+      // poster or a high-DPI export. Adapt the scale to keep OCR within a
+      // predictable browser memory envelope while retaining the normal 2x
+      // resolution for bank-sized pages.
+      const baseViewport = page.getViewport({ scale: 1 });
+      const baseDimension = Math.max(baseViewport.width, baseViewport.height, 1);
+      const baseArea = Math.max(baseViewport.width * baseViewport.height, 1);
+      const scale = Math.max(0.75, Math.min(2, 2400 / baseDimension, Math.sqrt(9_000_000 / baseArea)));
+      const viewport = page.getViewport({ scale });
       const canvas = window.document.createElement("canvas");
       canvas.width = Math.ceil(viewport.width);
       canvas.height = Math.ceil(viewport.height);
@@ -793,22 +816,35 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
 
       await page.render({ canvas: null, canvasContext: context, viewport }).promise;
       const result = await worker.recognize(canvas);
+      const confidence = Number(result.data.confidence);
+      pageConfidences.push(Number.isFinite(confidence) ? Math.max(0, Math.min(1, confidence / 100)) : 0);
       // Keep explicit page sentinels so row reconstruction cannot cross page
       // boundaries or blend a movement with the following page's summary.
       pages.push(`__PDF_PAGE_${pageNumber}__\n${result.data.text}`);
       onProgress(88 + Math.round((pageNumber / document.numPages) * 10), `Reconociendo página ${pageNumber} de ${document.numPages}`);
       canvas.width = 0;
       canvas.height = 0;
+      page.cleanup();
     }
   } finally {
     await worker.terminate();
   }
 
-  return pages.join("\n");
+  return {
+    text: pages.join("\n"),
+    pageConfidences,
+    confidence: pageConfidences.length
+      ? pageConfidences.reduce((sum, value) => sum + value, 0) / pageConfidences.length
+      : 0,
+  };
 }
 
 export async function inspectPdf(file: File, onProgress: (value: number, label: string) => void): Promise<ImportResult> {
   onProgress(12, "Abriendo el estado de cuenta");
+  const maxPdfBytes = 50 * 1024 * 1024;
+  if (file.size > maxPdfBytes) {
+    throw new Error("El PDF supera 50 MB. Exporta el estado con menor resolución o divide sus páginas e inténtalo de nuevo.");
+  }
   const [pdfjs, workerModule] = await Promise.all([
     import("pdfjs-dist"),
     import("pdfjs-dist/build/pdf.worker.min.mjs?url"),
@@ -827,9 +863,8 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
 
   const extractedText = pageTexts.join("\n");
   const mode = extractedText.replace(/\s/g, "").length > 500 ? "text" : "ocr";
-  const text = mode === "ocr"
-    ? await recognizePdfText(document, onProgress)
-    : extractedText;
+  const ocrResult = mode === "ocr" ? await recognizePdfText(document, onProgress) : undefined;
+  const text = ocrResult?.text ?? extractedText;
   const sourceDetection = detectSourceEvidence(text, file.name);
   const source = sourceDetection.source;
   const kind = detectStatementKind(text, source);
@@ -858,5 +893,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
     transactions: parsed,
     summary,
     reconciliation,
+    ocrConfidence: ocrResult?.confidence,
+    ocrPageConfidences: ocrResult?.pageConfidences,
   };
 }

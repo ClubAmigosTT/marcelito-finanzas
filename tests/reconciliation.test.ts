@@ -457,6 +457,17 @@ test("la conciliación Amex usa subtotales nacional y extranjero como gasto real
   assert.equal(reconcileStatementImport("card", summary, rows).status, "valid");
 });
 
+test("la frontera de secciones Amex conserva como extranjeras las filas posteriores al subtotal", () => {
+  const rows = extractTransactions([
+    "01/08/2026 COMPRA NACIONAL 100.00",
+    "Total de las transacciones en $ de CLIENTE 100.00",
+    "02/08/2026 COMPRA EN EL EXTRANJERO 50.00",
+    "Peso Colombiano 9,000.00 TC:0.00555",
+    "Total de Transacciones en Moneda Extranjera de CLIENTE 50.00",
+  ].join("\n"), "Amex", "Amex agosto 2026.pdf", "card");
+  assert.deepEqual(rows.map((row) => row.foreignCurrency), [false, true]);
+});
+
 test("las secciones Amex de MSI no se convierten en compras del periodo", () => {
   const rows = extractTransactions([
     "__PDF_PAGE_1__",
