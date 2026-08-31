@@ -461,7 +461,11 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
     const payments = transactions.filter((transaction) => transactionKindForReconciliation(transaction) === "cardPayment");
     const extractedChargeTotal = sumAbsolute(charges.map((transaction) => transaction.amount));
     const extractedPaymentTotal = sumAbsolute(payments.map((transaction) => transaction.amount));
-    const declaredCharges = summary.newCharges ?? summary.newTransactions;
+    // “Nuevos cargos” may include MSI installments/foreign conversions in
+    // addition to the real transaction table. Prefer the issuer's explicit
+    // “Nuevas transacciones” total when present; use newCharges only as a
+    // fallback for card formats that omit the former.
+    const declaredCharges = summary.newTransactions ?? summary.newCharges;
     if (declaredCharges === undefined) return { status: "pending", tolerance, extractedChargeTotal, extractedPaymentTotal, extractedMovementCount: transactions.length, reason: "El estado no contiene total de cargos" };
     const chargeDifference = extractedChargeTotal - declaredCharges;
     const paymentDifference = summary.payments !== undefined ? extractedPaymentTotal - summary.payments : 0;
@@ -586,12 +590,19 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       continue;
     }
     if (skipCardSection) continue;
-    const startsWithDate = datePattern.test(line);
+    // Tesseract frequently confuses a leading zero with O/B/I in compact
+    // bank dates (O5/AGO, O7/AGO, OBIAGO). Repair only this tightly bounded
+    // prefix; never rewrite numbers inside merchant descriptions.
+    const dateLine = line
+      .replace(/^(\d{1,2})HUL\b/i, "$1/JUL")
+      .replace(/^O(?=\d\s*\/)/i, "0")
+      .replace(/^O[B8](?:I)?(?=\s*\/?\s*AGO\b)/i, "07/");
+    const startsWithDate = datePattern.test(dateLine);
     const breaks = breakPhrases.some((phrase) => normalized.includes(phrase))
       || /^(?:del\s+al|total\b|saldo\b|periodo\b|fecha\s+de\s+corte|rfc\b|clabe\b)/.test(normalized);
     if (startsWithDate) {
       if (pending) rows.push(pending);
-      pending = line;
+      pending = dateLine;
     } else if (pending && !breaks) {
       pending += ` ${line}`;
     } else if (breaks && pending) {
@@ -604,6 +615,9 @@ export function extractTransactions(text: string, source: StatementSource, fileN
   rows.forEach((line, index) => {
     const date = line.match(datePattern);
     if (!date) return;
+    const dayToken = date[1] ?? date[4] ?? date[9] ?? date[10];
+    const dayNumber = Number(dayToken);
+    if (!Number.isInteger(dayNumber) || dayNumber < 1 || dayNumber > 31) return;
     const tail = line.slice(date[0].length).trim();
     const allCandidates = Array.from(tail.matchAll(amountPattern)).map((match) => {
       const index = match.index ?? 0;
@@ -645,7 +659,11 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       if (runningBalance && previousRunningBalance !== undefined) {
         const delta = runningBalance.value - previousRunningBalance;
         if (Number.isFinite(delta) && Math.abs(delta) > 0 && Math.abs(delta) < 100_000_000
-          && Math.abs(Math.abs(delta) - Math.abs(amountValue)) > 0.05) {
+          // A running-balance delta can repair a one- or two-cent OCR typo,
+          // but must not replace a valid amount when the OCR balance itself
+          // drifted (common on scanned BBVA statements).
+          && Math.abs(Math.abs(delta) - Math.abs(amountValue)) > 0.05
+          && Math.abs(Math.abs(delta) - Math.abs(amountValue)) <= 2) {
           amountValue = Math.abs(delta);
         }
         previousRunningBalance = runningBalance.value;
@@ -664,6 +682,11 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       .replace(/\s+/g, " ")
       .trim();
     if (!description || description.length < 3 || isAdministrativeDescription(description)) return;
+    // Amex transaction amounts are always printed with cents. A bare integer
+    // in a merchant name (for example “7 ELEVEN ... 2514”) is an OCR/store
+    // identifier, not a charge; reject it instead of creating a large false
+    // expense. Bank rows retain integer amounts when their direction is clear.
+    if (kind === "card" && !/[.,$]/.test(amount.raw) && !/\bcr\b/i.test(amount.raw)) return;
     const normalizedDescription = normalizeConcept(description);
     const isRefund = /devolucion|reembolso|bonificacion/.test(normalizedDescription);
     const isCardPayment = /gracias por su pago|pago de tarjeta|pago.*(?:tarjeta|credito|recibido)|tarjeta.*pago|abono.*(?:tarjeta|credito|recibido)/.test(normalizedDescription);

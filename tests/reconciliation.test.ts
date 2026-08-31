@@ -359,6 +359,11 @@ test("un prefijo numérico del comercio no se convierte en año", () => {
   assert.match(row.description, /125TH FINEST/);
 });
 
+test("el OCR con días imposibles no crea movimientos", () => {
+  const rows = extractTransactions("75 de Agosto COMERCIO 48.00\n15 de Agosto COMERCIO 50.00", "Amex", "Amex agosto 2026.pdf", "card");
+  assert.deepEqual(rows.map((row) => row.amount), [-50]);
+});
+
 test("monto a diferir CR se registra como crédito y no como gasto", () => {
   const [row] = extractTransactions("27 de Junio MONTO A DIFERIR MESES EN AUTOMÁTICO 27,537.69 CR", "Amex", "amex junio 2026.pdf", "card");
   assert.equal(row.kind, "credit");
@@ -427,6 +432,15 @@ test("la zona de resumen Amex ignora el identificador de cuenta y conserva la ec
   assert.equal(summary.paymentForNoInterest, 39966.15);
   assert.equal(summary.minimumPayment, 3197.29);
   assert.equal(summary.interest, 0);
+});
+
+test("la conciliación de tarjeta usa nuevas transacciones antes que el total con MSI", () => {
+  const summary = parseStatementSummary([
+    "Nuevas transacciones: 100.00",
+    "Total Nuevos Cargos: 500.00",
+  ].join("\n"), "card");
+  const rows = extractTransactions("01/08/2026 COMPRA 100.00", "Amex", "Amex agosto 2026.pdf", "card");
+  assert.equal(reconcileStatementImport("card", summary, rows).status, "valid");
 });
 
 test("las secciones Amex de MSI no se convierten en compras del periodo", () => {

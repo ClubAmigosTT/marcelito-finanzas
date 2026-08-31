@@ -35,3 +35,13 @@ Métricas mínimas por versión:
 - 100% de pagos de tarjeta y transferencias propias emparejados cuando existe la contraparte.
 
 Si una métrica falla, el parser queda en revisión y el dashboard se bloquea hasta corregir la causa.
+
+## Última corrida del corpus visual
+
+En la corrida de OCR visual sobre los tres estados más recientes (30-ago-2026):
+
+- BBVA: se reconstruyeron 11 filas; depósitos $19,500.00 y cargos $22,058.69 concilian, por lo que el estado puede aceptarse.
+- Amex: el emisor y el resumen se identificaron correctamente (pago para no generar intereses $39,966.15 y crédito disponible $99,632.79), pero la suma de filas aún no concilia; el estado queda bloqueado.
+- Santander: el emisor y los totales del resumen se identificaron correctamente, pero el OCR de filas no concilia; el estado queda bloqueado.
+
+Por tanto, esta corrida demuestra el bloqueo seguro de lecturas ambiguas, pero **no certifica todavía una tasa de aceptación automática del 99% para OCR**. La certificación requiere ejecutar el corpus completo de estados en macOS/Xcode con Vision y registrar cada estado aceptado, rechazado y corregido.
