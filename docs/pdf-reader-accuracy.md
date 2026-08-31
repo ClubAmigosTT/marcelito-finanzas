@@ -77,6 +77,10 @@ cortes disponibles (mayo→27-junio, junio→27-julio y julio→27-agosto). Las
 lecturas OCR visuales siguen quedando provisionales cuando pierden fechas o
 filas; esas diferencias nunca se convierten en gasto provisional.
 
+Las variantes bancarias con fecha corta (`23/JUL`, sin año) también se
+normalizan usando el año del periodo del estado, y la lectura OCR de bancos
+prefiere las columnas CARGOS/ABONOS antes que el saldo corrido.
+
 La corrida reproducible sobre los 8 adjuntos disponibles encontró
 4 estados aceptables por texto (los 3 Amex y BBVA agosto) y 4 que requieren OCR
 (Santander mayo/julio/agosto y BBVA junio). Un estado marcado como
