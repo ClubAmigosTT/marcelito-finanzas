@@ -442,7 +442,7 @@ function guessCategory(description: string) {
   return "Sin categoría";
 }
 
-function inferImportedKind(description: string, amount: number, isCredit: boolean, statementKind: StatementKind): TransactionKind {
+function inferImportedKind(description: string, amount: number, isCredit: boolean, statementKind: StatementKind, explicitOwnTransfer = false): TransactionKind {
   const value = normalizeText(description);
   if (/monto a diferir/.test(value) && amount > 0) return "credit";
   if (/msi|meses sin intereses|meses en automatico|diferir|diferid/.test(value)) return "msi";
@@ -450,7 +450,7 @@ function inferImportedKind(description: string, amount: number, isCredit: boolea
   if (/comision|anualidad/.test(value)) return "fee";
   if (/devolucion|reembolso|bonificacion/.test(value) && amount > 0) return "refund";
   if (/gracias por su pago|pago en linea|pago.*(tarjeta|amex|credito|recibido)|tarjeta.*pago|abono.*(tarjeta|credito|recibido)|american express/.test(value)) return "cardPayment";
-  if (/transfer|traspaso/.test(value)) return "bankTransfer";
+  if (/transfer|traspaso/.test(value)) return explicitOwnTransfer ? "bankTransfer" : amount > 0 ? "income" : "purchase";
   // Positive bank rows are real income (deposit, payroll or external SPEI),
   // whereas positive card rows are issuer-side credits and must not inflate
   // income. Keep the two ledgers semantically separate from import time.
@@ -587,6 +587,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     const isCardPayment = /gracias por su pago|pago de tarjeta|pago.*(?:tarjeta|credito|recibido)|tarjeta.*pago|abono.*(?:tarjeta|credito|recibido)/.test(normalizedDescription);
     const isIncome = /nomina|sueldo|salario|deposito|abono|ingreso|recibid|transferencia recibida|spei recibido/.test(normalizedDescription);
     const isTransfer = /transfer|traspaso|spei|entre cuentas|clabe/.test(normalizedDescription);
+    const explicitOwnTransfer = /entre cuentas|cuenta propia|mismo titular|traspaso interno/.test(normalizedDescription);
     // In text-layer PDFs the issuer sometimes places “CR” on the next line;
     // the explicit Amex “monto a diferir” concept is already an issuer-side
     // credit, so do not make recognition depend on that line break.
@@ -607,9 +608,9 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     // heading into a financial event, so send it to review by rejecting it.
     if (!directionSignal) return;
     const cardCredit = kind === "card" && isCredit && !isCardPayment;
-    const flow: Transaction["flow"] = isRefund || isIncome || isDeferredCredit || cardCredit ? "income" : isCardPayment ? "debt" : isTransfer ? "transfer" : "expense";
+    const flow: Transaction["flow"] = isRefund || isIncome || isDeferredCredit || cardCredit ? "income" : isCardPayment ? "debt" : explicitOwnTransfer ? "transfer" : "expense";
     const value = Math.round(amountValue * 100) / 100 * (flow === "income" ? 1 : -1);
-    const importedKind = inferImportedKind(description, value, isCredit, kind);
+    const importedKind = inferImportedKind(description, value, isCredit, kind, explicitOwnTransfer);
     const category = importedKind === "cardPayment" || importedKind === "bankTransfer" ? "Transferencia" : guessCategory(description);
     const travelRelated = /viaje|hotel|hospedaje|aerolinea|vuelo|avion|transporte|uber|taxi|metro|renta de auto|destino|equipaje|airbnb|aeropuerto/i.test(normalizedDescription);
     results.push({

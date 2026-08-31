@@ -136,6 +136,19 @@ test("un SPEI saliente sin contraparte propia se conserva como gasto real", () =
   assert.equal(buildFinanceMetrics(transactions, statements, result).consolidatedRealSpend, 1800);
 });
 
+test("el parser no excluye un SPEI saliente a tercero como si fuera interno", () => {
+  const [row] = extractTransactions("24/08/2026 SPEI ENVIADO A TERCERO 1,800.00 5,000.00", "BBVA", "BBVA agosto 2026.pdf", "bank");
+  assert.equal(row.kind, "purchase");
+  assert.equal(row.flow, "expense");
+  assert.equal(row.amount, -1800);
+});
+
+test("un traspaso textual a tercero queda como egreso hasta encontrar una contraparte propia", () => {
+  const [row] = extractTransactions("24/08/2026 TRASPASO A TERCERO 1,800.00 5,000.00", "Santander", "Santander agosto 2026.pdf", "bank");
+  assert.equal(row.kind, "purchase");
+  assert.equal(row.flow, "expense");
+});
+
 test("un depósito bancario positivo se reconoce como ingreso real", () => {
   const statements = [bank("bbva", "BBVA", "agosto 2026")];
   const transactions = extractTransactions("24/08/2026 DEPÓSITO NÓMINA 8,000.00 10,000.00", "BBVA", "BBVA agosto 2026.pdf", "bank");

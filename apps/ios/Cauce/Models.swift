@@ -1803,11 +1803,22 @@ final class FinanceStore {
                 message: "\(url.lastPathComponent): \(reconciliation.reason ?? "estado pendiente")"
             )
         }
+        let ocrFallbackNeedsReview = usedOCR && fresh.contains {
+            guard let evidence = $0.extractionEvidence else { return true }
+            return evidence.method != "vision-ocr" || evidence.confidence < 0.88
+        }
+        if ocrFallbackNeedsReview {
+            DiagnosticsRecorder.record(
+                stage: "import.ocr.review",
+                message: "\(url.lastPathComponent): se requiere revisión porque alguna fila OCR no conserva evidencia visual suficiente."
+            )
+        }
         let needsReview = fresh.isEmpty
             || summary == nil
             || detectedKind == .unknown
             || reconciliation.status != .valid
             || sourceDetection.status != .verified
+            || ocrFallbackNeedsReview
             || fresh.contains { $0.category == "Por revisar" }
 
         // Invalid/pending rows are quarantined by omission: the statement and
@@ -2167,6 +2178,10 @@ final class FinanceStore {
                 || titleNormalized.contains("spei")
                 || titleNormalized.contains("entre cuentas")
                 || titleNormalized.contains("clabe")
+            let explicitOwnTransfer = titleNormalized.contains("entre cuentas")
+                || titleNormalized.contains("cuenta propia")
+                || titleNormalized.contains("mismo titular")
+                || titleNormalized.contains("traspaso interno")
             let directionSignal = documentKind == .card
                 || (bankLikeRow && usableAmountMatches.count > 1)
                 || isRefund
@@ -2184,10 +2199,10 @@ final class FinanceStore {
                 flow = .income
             } else if isCardPayment {
                 flow = .debt
+            } else if explicitOwnTransfer {
+                flow = .transfer
             } else if isIncome {
                 flow = .income
-            } else if isTransfer {
-                flow = .transfer
             } else {
                 flow = .expense
             }
@@ -2214,7 +2229,7 @@ final class FinanceStore {
                 kind = .refund
             } else if isCardPayment {
                 kind = .cardPayment
-            } else if isTransfer {
+            } else if isTransfer && explicitOwnTransfer {
                 kind = .bankTransfer
             } else if isIncome {
                 kind = .income
@@ -2449,6 +2464,10 @@ final class FinanceStore {
             || titleNormalized.contains("spei")
             || titleNormalized.contains("entre cuentas")
             || titleNormalized.contains("clabe")
+        let explicitOwnTransfer = titleNormalized.contains("entre cuentas")
+            || titleNormalized.contains("cuenta propia")
+            || titleNormalized.contains("mismo titular")
+            || titleNormalized.contains("traspaso interno")
         let isStatementCredit = hasCreditMarker && !isCardPayment && !isRefund && !isIncome
 
         let flow: FlowKind
@@ -2456,10 +2475,10 @@ final class FinanceStore {
             flow = .income
         } else if isCardPayment {
             flow = .debt
+        } else if explicitOwnTransfer {
+            flow = .transfer
         } else if isIncome {
             flow = .income
-        } else if isTransfer {
-            flow = .transfer
         } else {
             flow = .expense
         }
@@ -2484,7 +2503,7 @@ final class FinanceStore {
             movementKind = .refund
         } else if isCardPayment {
             movementKind = .cardPayment
-        } else if isTransfer {
+        } else if isTransfer && explicitOwnTransfer {
             movementKind = .bankTransfer
         } else if isIncome {
             movementKind = .income
@@ -2669,13 +2688,22 @@ final class FinanceStore {
             || titleNormalized.contains("deposito")
             || titleNormalized.contains("abono")
             || titleNormalized.contains("transferencia recibida")
+        let isCardPayment = titleNormalized.contains("pago de tarjeta")
+            || (titleNormalized.contains("pago") && (titleNormalized.contains("amex") || titleNormalized.contains("credito")))
+        let isTransfer = titleNormalized.contains("transfer")
+            || titleNormalized.contains("traspaso")
+            || titleNormalized.contains("spei")
+        let explicitOwnTransfer = titleNormalized.contains("entre cuentas")
+            || titleNormalized.contains("cuenta propia")
+            || titleNormalized.contains("mismo titular")
+            || titleNormalized.contains("traspaso interno")
         let flow: FlowKind
-        if depositColumn || semanticDeposit {
-            flow = .income
-        } else if titleNormalized.contains("transfer")
-                    || titleNormalized.contains("traspaso")
-                    || titleNormalized.contains("pago de tarjeta") {
+        if isCardPayment {
+            flow = .debt
+        } else if explicitOwnTransfer {
             flow = .transfer
+        } else if depositColumn || semanticDeposit {
+            flow = .income
         } else {
             flow = .expense
         }
@@ -2692,9 +2720,9 @@ final class FinanceStore {
             kind = .interest
         } else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") {
             kind = .fee
-        } else if titleNormalized.contains("pago") && (titleNormalized.contains("tarjeta") || titleNormalized.contains("amex") || titleNormalized.contains("credito")) {
+        } else if isCardPayment {
             kind = .cardPayment
-        } else if titleNormalized.contains("transfer") || titleNormalized.contains("traspaso") {
+        } else if isTransfer && explicitOwnTransfer {
             kind = .bankTransfer
         } else if flow == .income {
             kind = titleNormalized.contains("credito") || titleNormalized.contains("abono") ? .credit : .income
