@@ -155,6 +155,11 @@ capa web: el matching de transferencias y pagos compara la magnitud del
 importe (la salida y la entrada tienen signos opuestos), exige una señal
 explícita de pago en la tarjeta y usa un ordinal por estado para no borrar una
 segunda compra idéntica legítima durante un solapamiento.
+Para transferencias entre bancos, el importe/fecha y la cuenta distinta solo
+generan un candidato: la aceptación exige semántica de transferencia y una
+mención explícita de la cuenta contraparte o del mismo titular. Si esa señal
+falta, ambas filas quedan en revisión (y un importe relevante vuelve
+provisionales los KPI) en vez de ocultar un ingreso externo coincidente.
 También aplica la compuerta OCR por confianza media (88%) y página (78%);
 una página débil mantiene el estado en revisión aunque las sumas coincidan.
 En OCR visual se corrigen únicamente dentro del token de fecha errores
