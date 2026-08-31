@@ -166,7 +166,7 @@ conserva confianza media y confianza de cada página, pero nunca convierte esa
 corrida en certificación nativa:
 
 ```bash
-npm run pdf:corpus -- --ocr --ocr-dpi 150 \
+npm run pdf:corpus -- --ocr --ocr-dpi 220 \
   --dir <carpeta> --manifest tests/fixtures/pdf-corpus-attachments.json \
   --out artifacts/pdf-corpus-ocr.json
 ```
@@ -178,6 +178,12 @@ no guarda el texto completo del estado. En modo `--ocr`, un estado marcado como
 concilia sus controles y supera la compuerta de confianza. La bandera
 `certified` sigue siendo `false` hasta ejecutar Vision y el corpus real en
 macOS/Xcode.
+
+Las promociones logradas por Tesseract local se reportan como
+`diagnosticOcrAccepted`, pero se excluyen de `automaticAcceptancePrecision`:
+la métrica del 99% solo cuenta aceptaciones automáticas del lector de texto o
+de Vision nativa. Así una corrida diagnóstica no convierte OCR local en una
+certificación ni lo cuenta erróneamente como falso positivo.
 
 El reporte diferencia `nativeVisionRequired` de `nativeOCRPending`: el primero
 también cuenta los PDFs procesados por OCR local, porque ese diagnóstico no

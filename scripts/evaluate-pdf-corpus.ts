@@ -216,13 +216,13 @@ const manifestPath = argument("--manifest");
 const outputPath = argument("--out");
 const useOCR = process.argv.includes("--ocr");
 const ocrDpiRaw = argument("--ocr-dpi");
-const ocrDpi = ocrDpiRaw === undefined ? 150 : Number(ocrDpiRaw);
+const ocrDpi = ocrDpiRaw === undefined ? 220 : Number(ocrDpiRaw);
 const pdftoppmPath = argument("--pdftoppm") ?? process.env.MARCELITO_PDFTOPPM ?? "pdftoppm";
 const requireManifest = process.argv.includes("--require-manifest");
 const targetPrecisionRaw = argument("--target-precision");
 const targetPrecision = targetPrecisionRaw === undefined ? 0.99 : Number(targetPrecisionRaw);
 if (!directory) {
-  console.error("Uso: npm run pdf:corpus -- --dir <carpeta> [--manifest <archivo.json>] [--out <reporte.json>] [--require-manifest] [--target-precision 0.99] [--ocr --ocr-dpi 150 --pdftoppm <ruta>]");
+  console.error("Uso: npm run pdf:corpus -- --dir <carpeta> [--manifest <archivo.json>] [--out <reporte.json>] [--require-manifest] [--target-precision 0.99] [--ocr --ocr-dpi 220 --pdftoppm <ruta>]");
   process.exitCode = 2;
 } else if (requireManifest && !manifestPath) {
   console.error("La certificación requiere --manifest con expectativas doradas para cada PDF.");
@@ -243,6 +243,7 @@ if (!directory) {
   let parseErrors = 0;
   let goldenAutoAccepted = 0;
   let goldenFalseAccepted = 0;
+  let diagnosticOcrAccepted = 0;
   const expectedFiles = manifest.files ?? [];
   const expectedNames = expectedFiles.map((item) => item.file);
   const duplicateManifestFiles = [...new Set(expectedNames.filter((name, index) => expectedNames.indexOf(name) !== index))].sort();
@@ -319,10 +320,16 @@ if (!directory) {
     }
     const checked = expected ? mismatches.length === 0 : undefined;
     if (mismatches.length) failures += 1;
-    const autoAccepted = result.reconciliation.status === "valid"
+    const qualityAccepted = result.reconciliation.status === "valid"
       && result.sourceStatus === "verified"
       && result.suspiciousRows === 0
       && result.missingEvidenceRows === 0;
+    // Local Tesseract is a diagnostic aid, not the production acceptance
+    // path. Keep its successful promotions visible, but do not call them
+    // automatic acceptances or count them as false positives against the
+    // 99% metric reserved for text extraction/Vision-native output.
+    const autoAccepted = qualityAccepted && result.mode !== "ocr";
+    if (expected && result.mode === "ocr" && qualityAccepted) diagnosticOcrAccepted += 1;
     if (expected && autoAccepted) {
       if (expected.status === "valid" && mismatches.length === 0) goldenAutoAccepted += 1;
       else goldenFalseAccepted += 1;
@@ -396,6 +403,7 @@ if (!directory) {
     goldenExpectedFiles: expectedFiles.length,
     goldenAutoAccepted,
     goldenFalseAccepted,
+    diagnosticOcrAccepted,
     automaticAcceptancePrecision,
     results,
   };
