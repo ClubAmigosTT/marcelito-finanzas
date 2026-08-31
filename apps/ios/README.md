@@ -28,6 +28,14 @@ xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
   -destination "platform=iOS Simulator,name=iPhone 16" test
 ```
 
+También puedes usar el runner reproducible desde esta carpeta; conserva el
+`.xcresult` y el log en un directorio temporal para adjuntarlos a la auditoría:
+
+```bash
+MARCELITO_PDF_CORPUS_DIR="/ruta/a/estados-validados" \
+  ./scripts/run-native-corpus.sh
+```
+
 El reporte incluye controles esperados y extraídos de depósitos, retiros,
 cargos y pagos, además de confianza del emisor, confianza OCR media y página
 OCR más débil. Todos los archivos deben identificar el emisor con estado
