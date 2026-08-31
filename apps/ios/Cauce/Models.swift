@@ -343,6 +343,8 @@ struct CashFlowPoint: Identifiable {
 enum FinanceImportError: LocalizedError {
     case unreadableDocument
     case emptyDocument
+    case documentTooLarge
+    case documentTooManyPages
     case invalidReconciliation(String)
 
     var errorDescription: String? {
@@ -351,6 +353,10 @@ enum FinanceImportError: LocalizedError {
             "No pudimos leer este PDF. Verifica que sea un estado de cuenta válido."
         case .emptyDocument:
             "Este PDF no contiene texto ni movimientos reconocibles. Revisa que sea un estado de cuenta y, si es un escaneo, confirma los importes en Movimientos después de importarlo."
+        case .documentTooLarge:
+            "Este PDF supera 50 MB. Exporta el estado con menor resolución o divídelo en estados mensuales e inténtalo de nuevo."
+        case .documentTooManyPages:
+            "Este PDF contiene más de 80 páginas. Importa un estado mensual a la vez para mantener estable el reconocimiento."
         case .invalidReconciliation(let reason):
             "El estado no concilia contra los totales declarados por el banco. \(reason) No se incorporó al libro canónico."
         }
@@ -1980,8 +1986,14 @@ final class FinanceStore {
         } catch {
             throw FinanceImportError.unreadableDocument
         }
+        guard documentData.count <= 50 * 1024 * 1024 else {
+            throw FinanceImportError.documentTooLarge
+        }
         guard let document = PDFDocument(data: documentData) else {
             throw FinanceImportError.unreadableDocument
+        }
+        guard document.pageCount <= 80 else {
+            throw FinanceImportError.documentTooManyPages
         }
 
         let extractedText = (0..<document.pageCount)
