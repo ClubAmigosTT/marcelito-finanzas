@@ -248,6 +248,38 @@ test("el reporte nativo compara huella, emisor y tipo contra el manifiesto", () 
   assert.ok(result.errors.some((error) => error.includes("kind card")));
 });
 
+test("el reporte nativo compara estado y filas contra el golden", () => {
+  const result = verifyNativeCorpusReport([
+    {
+      file: "bbva.pdf",
+      sourceFingerprint: "a".repeat(64),
+      source: "BBVA",
+      kind: "bank",
+      status: "pending",
+      mode: "pdf-text",
+      sourceStatus: "verified",
+      sourceConfidence: 0.999,
+      requiresReview: false,
+      rows: 10,
+      accountKey: "bbva:4922",
+      expectedAccountKey: "bbva:4922",
+    },
+  ], 1, [
+    {
+      file: "bbva.pdf",
+      sourceFingerprint: "a".repeat(64),
+      source: "BBVA",
+      kind: "bank",
+      status: "valid",
+      rows: 11,
+      accountKey: "bbva:4922",
+    },
+  ]);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("status pending")));
+  assert.ok(result.errors.some((error) => error.includes("rows 10")));
+});
+
 test("el reporte nativo aplica umbrales OCR a estados promovidos", () => {
   const valid = verifyNativeCorpusReport([
     {

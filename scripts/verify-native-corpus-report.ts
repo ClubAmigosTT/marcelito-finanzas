@@ -51,6 +51,8 @@ type ExpectedReportEntry = {
   sourceFingerprint?: string;
   source?: string;
   kind?: string;
+  status?: string;
+  rows?: number;
 };
 
 function numberField(summary: NativeCorpusSummary, key: keyof NativeCorpusSummary) {
@@ -273,6 +275,16 @@ export function verifyNativeCorpusReport(
       if (entry.kind && actualKind !== entry.kind) {
         errors.push(`${expectedFile}: kind ${actualKind || "ausente"} no coincide con el manifiesto (${entry.kind})`);
       }
+      const actualStatus = typeof row.status === "string" ? row.status.trim() : "";
+      if (entry.status && actualStatus !== entry.status) {
+        errors.push(`${expectedFile}: status ${actualStatus || "ausente"} no coincide con el manifiesto (${entry.status})`);
+      }
+      if (entry.rows !== undefined) {
+        const actualRows = Number(row.rows);
+        if (!Number.isInteger(actualRows) || actualRows !== entry.rows) {
+          errors.push(`${expectedFile}: rows ${Number.isFinite(actualRows) ? actualRows : "ausentes"} no coincide con el manifiesto (${entry.rows})`);
+        }
+      }
     });
   }
   return { ok: errors.length === 0, errors, rows };
@@ -315,15 +327,18 @@ async function main() {
   const manifestErrors: string[] = [];
   if (manifestPath) {
     try {
-      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
-        files?: Array<{
-          file?: string;
-          accountKey?: string;
-          sourceFingerprint?: string;
-          source?: string;
-          kind?: string;
-        }>;
-      };
+        const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+          readerVersion?: string;
+          files?: Array<{
+            file?: string;
+            accountKey?: string;
+            sourceFingerprint?: string;
+            source?: string;
+            kind?: string;
+            status?: string;
+            rows?: number;
+          }>;
+        };
       expectedEntries = (manifest.files ?? [])
         .filter((entry): entry is {
           file: string;
@@ -331,6 +346,8 @@ async function main() {
           sourceFingerprint?: string;
           source?: string;
           kind?: string;
+          status?: string;
+          rows?: number;
         } => typeof entry?.file === "string")
         .map((entry) => ({
           file: entry.file,
@@ -338,8 +355,31 @@ async function main() {
           sourceFingerprint: entry.sourceFingerprint,
           source: entry.source,
           kind: entry.kind,
+          status: entry.status,
+          rows: entry.rows,
         }));
       if (!expectedEntries.length) manifestErrors.push("el manifiesto no contiene files");
+      expectedEntries.forEach((entry) => {
+        const label = entry.file.trim() || "archivo sin nombre";
+        if (!entry.sourceFingerprint || !/^[a-f0-9]{64}$/i.test(entry.sourceFingerprint.trim())) {
+          manifestErrors.push(`${label}: el manifiesto necesita sourceFingerprint SHA-256`);
+        }
+        if (!entry.accountKey || !/^[a-z0-9]+:\d{4}$/i.test(entry.accountKey.trim())) {
+          manifestErrors.push(`${label}: el manifiesto necesita accountKey emisor:últimos4`);
+        }
+        if (!entry.source || entry.source.trim() === "Desconocido") {
+          manifestErrors.push(`${label}: el manifiesto necesita source identificado`);
+        }
+        if (!entry.kind || !["bank", "card", "unknown"].includes(entry.kind.trim())) {
+          manifestErrors.push(`${label}: el manifiesto necesita kind válido`);
+        }
+        if (!entry.status || !["valid", "pending", "invalid"].includes(entry.status.trim())) {
+          manifestErrors.push(`${label}: el manifiesto necesita status valid/pending/invalid`);
+        }
+        if (entry.status === "valid" && (!Number.isInteger(entry.rows) || (entry.rows ?? -1) < 0)) {
+          manifestErrors.push(`${label}: un golden valid necesita rows entero no negativo`);
+        }
+      });
     } catch {
       manifestErrors.push("no se pudo leer el manifiesto del corpus");
     }
