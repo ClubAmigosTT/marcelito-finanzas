@@ -1121,6 +1121,14 @@ final class FinanceStore {
               movement.title.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3,
               movement.title.rangeOfCharacter(from: .letters) != nil,
               !Self.isAdministrativeTitle(movement.title) else { return false }
+        switch movement.flow {
+        case .income:
+            guard movement.amount > 0 else { return false }
+        case .expense, .debt:
+            guard movement.amount < 0 else { return false }
+        case .transfer:
+            break
+        }
         let year = Calendar(identifier: .gregorian).component(.year, from: movement.date)
         return (1900...2_200).contains(year)
     }

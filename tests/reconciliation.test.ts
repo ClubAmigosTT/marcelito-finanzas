@@ -79,6 +79,16 @@ test("el pipeline rechaza importes absurdos de encabezados o identificadores", (
   assert.equal(result.audit.invalidCount, 1);
 });
 
+test("el pipeline rechaza una dirección incompatible con el signo del importe", () => {
+  const statements = [bank("bbva", "BBVA", "agosto 2026")];
+  const result = runTransactionPipeline([
+    movement({ id: "wrong-sign-expense", date: "10 ago 2026", description: "SUPERMERCADO", account: "BBVA", amount: 100, flow: "expense", statementId: "bbva" }),
+    movement({ id: "wrong-sign-income", date: "11 ago 2026", description: "NOMINA", account: "BBVA", amount: -100, flow: "income", statementId: "bbva" }),
+  ], statements);
+  assert.equal(result.transactions.length, 0);
+  assert.equal(result.audit.invalidCount, 2);
+});
+
 test("la llave dedup conserva compras idénticas del mismo estado y elimina el solapamiento", () => {
   const statements = [bank("bbva-jul", "BBVA", "julio 2026"), bank("bbva-ago", "BBVA", "agosto 2026")];
   const first = movement({ id: "a", date: "10 ago 2026", description: "SUPERMERCADO", account: "BBVA", amount: -100, flow: "expense", statementId: "bbva-jul" });

@@ -278,11 +278,13 @@ function isValidDirection(transaction: Transaction, statement: Statement | undef
   // JSON cannot enter the canonical ledger as an unclassified event.
   const supportedFlow = ["income", "expense", "transfer", "debt"].includes(transaction.flow);
   if (!supportedFlow || !Number.isFinite(transaction.amount) || transaction.amount === 0) return false;
-  // Card rows may use `debt` for issuer-side payments, while bank rows use
-  // income/expense/transfer; both are valid when the signed amount is known.
-  return statementKind(statement) === "card"
-    ? transaction.amount < 0 || transaction.amount > 0
-    : transaction.amount < 0 || transaction.amount > 0;
+  // A signed amount is part of the direction contract. Card rows may use
+  // `debt` for issuer-side payments, while bank rows use income/expense;
+  // transfers are the only flow allowed to have either sign because both
+  // counterpart rows are retained.
+  if (transaction.flow === "income") return transaction.amount > 0;
+  if (transaction.flow === "expense" || transaction.flow === "debt") return transaction.amount < 0;
+  return statementKind(statement) === "card" || transaction.flow === "transfer";
 }
 
 function validateTransaction(transaction: Transaction, statements: Statement[]) {
