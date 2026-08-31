@@ -456,6 +456,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
             <button className="primary-button" onClick={() => setImportOpen(true)}><UploadSimple size={18} />Importar estado</button>
           </div>
         </header>
+        {initialLedger.quarantinedMovementCount > 0 && <div className="provisional-banner migration-notice" role="status"><Warning size={18} /><span>Se retiraron {initialLedger.quarantinedMovementCount} movimiento{initialLedger.quarantinedMovementCount === 1 ? "" : "s"} generado{initialLedger.quarantinedMovementCount === 1 ? "" : "s"} por una versión anterior del lector. Vuelve a importar esos estados para reconstruirlos con las reglas actuales.</span></div>}
         <AnimatePresence mode="wait">
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
             {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => setImportOpen(true)} />}

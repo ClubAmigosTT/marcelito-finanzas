@@ -419,6 +419,7 @@ body { background: var(--bg); color: var(--ink); }
   .accounts-tabs button { flex: 1; padding-inline: 7px; }
   .documents-panel > summary { padding: 16px; }
   .documents-panel > summary span { max-width: 23ch; line-height: 1.35; }
+  .migration-notice { margin: 12px 18px 0; }
 }
 
 /* Executive analytics: answer what happened, how it moved, and why. */
@@ -494,6 +495,7 @@ body { background: var(--bg); color: var(--ink); }
 .data-quality .quality-ok { color: var(--navy-mid); }
 .audit-diagnostics { margin-top: 12px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); overflow: hidden; }
 .provisional-banner { display: flex; align-items: center; gap: 9px; margin-top: 16px; padding: 10px 13px; border: 1px solid color-mix(in srgb, var(--expense) 45%, var(--line)); border-radius: var(--radius-control); background: color-mix(in srgb, var(--expense) 8%, var(--surface)); color: var(--expense); font-size: 12px; font-weight: 700; }
+.migration-notice { margin: 16px 34px 0; }
 .audit-diagnostics summary { cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 14px 17px; color: var(--navy); list-style: none; }
 .audit-diagnostics summary::-webkit-details-marker { display: none; }
 .audit-run-meta { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0 17px 12px; padding: 8px 10px; border-radius: 8px; background: var(--surface-raised); color: var(--muted); font-size: 10px; }
