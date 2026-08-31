@@ -1,8 +1,8 @@
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { execFile as execFileCallback } from "node:child_process";
 import { promisify } from "node:util";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
 import { detectAccountKey, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, PDF_READER_VERSION, rebuildPdfText, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
@@ -421,7 +421,13 @@ if (!directory) {
   const serialized = JSON.stringify(output, null, 2);
   console.log(serialized);
   if (outputPath) {
-    await writeFile(resolve(outputPath), `${serialized}\n`, "utf8");
+    const resolvedOutputPath = resolve(outputPath);
+    // The documented commands commonly write to an `artifacts/` directory
+    // that is intentionally not tracked. Create it on the first run so a
+    // clean checkout produces the same report instead of failing after the
+    // expensive PDF/OCR pass.
+    await mkdir(dirname(resolvedOutputPath), { recursive: true });
+    await writeFile(resolvedOutputPath, `${serialized}\n`, "utf8");
   }
   if (failures > 0) process.exitCode = 1;
 }
