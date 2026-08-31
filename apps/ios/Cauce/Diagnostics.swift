@@ -139,6 +139,9 @@ struct DiagnosticsView: View {
                         LabeledContent("Última auditoría", value: auditStatus)
                         LabeledContent("Disparador", value: audit.trigger)
                         LabeledContent("Versión del libro", value: String(audit.ledgerVersion.uuidString.prefix(8)))
+                        if let readerVersion = audit.readerVersion {
+                            LabeledContent("Versión del lector", value: readerVersion)
+                        }
                         Text("Ejecutada \(audit.completedAt, style: .relative) · \(audit.id.uuidString.prefix(8))")
                             .font(.caption2)
                             .foregroundStyle(.secondary)

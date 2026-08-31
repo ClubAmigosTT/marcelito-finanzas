@@ -265,6 +265,8 @@ struct StatementRecord: Identifiable, Codable {
     /// SHA-256 of the original PDF bytes. This is the stable document identity
     /// used to reprocess a UUID-named stored file without relying on its name.
     var sourceFingerprint: String? = nil
+    /// Exact native reader revision that produced this statement.
+    var readerVersion: String? = nil
 }
 
 struct ImportSummary {
@@ -279,6 +281,7 @@ struct ImportSummary {
     let reconciliation: StatementReconciliationRecord?
     let sourceDetection: SourceDetectionEvidence
     let sourceFingerprint: String
+    let readerVersion: String
     let ocrConfidence: Double?
     let ocrPageConfidences: [Double]?
 }
@@ -416,6 +419,8 @@ struct LedgerAuditRun: Codable, Identifiable {
     let statementCount: Int
     let canonicalMovementCount: Int
     let reconciledPercent: Double
+    /// Native reader revision represented by the audited ledger.
+    let readerVersion: String?
     let issueCount: Int
     let message: String?
 }
@@ -433,6 +438,9 @@ private struct LedgerEnvelope: Codable {
 
 @Observable
 final class FinanceStore {
+    /// Bump when native extraction, OCR or reconciliation rules change.
+    static let readerVersion = "ios-reader-2026.08.31"
+
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
     private let importKey = "marcelito.lastImport"
@@ -601,6 +609,7 @@ final class FinanceStore {
             statementCount: quality.statementCount,
             canonicalMovementCount: quality.movementCount,
             reconciledPercent: quality.reconciledPercent,
+            readerVersion: Self.readerVersion,
             issueCount: quality.invalidStatementCount
                 + quality.pendingStatementCount
                 + quality.absurdMovementCount
@@ -2160,6 +2169,7 @@ final class FinanceStore {
             reconciliation: reconciliation,
             sourceDetection: sourceDetection,
             sourceFingerprint: sourceFingerprint,
+            readerVersion: Self.readerVersion,
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences
         )
@@ -2187,6 +2197,7 @@ final class FinanceStore {
             reconciliation: reconciliation,
             sourceDetection: sourceDetection,
             sourceFingerprint: sourceFingerprint,
+            readerVersion: Self.readerVersion,
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences
         )
