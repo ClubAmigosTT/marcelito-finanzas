@@ -1,0 +1,43 @@
+name: Web Reader Validate
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-reader-validate
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Validar parser y libro canónico web
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Verificar tipos
+        run: npm exec -- tsc -b --pretty false
+
+      - name: Ejecutar lint
+        run: npm exec -- eslint src scripts tests --max-warnings=0
+
+      - name: Ejecutar pruebas de conciliación
+        run: npm test
+
+      - name: Compilar aplicación web
+        run: npm run build

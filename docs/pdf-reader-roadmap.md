@@ -114,6 +114,8 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
   las pruebas de contrato en macOS. Cada corrida conserva el `.xcresult` de
   Xcode como artefacto, incluso si una prueba falla, para poder diagnosticar
   el PDF, página o regla que rompió la certificación.
+- El workflow `web-validate.yml` ejecuta en paralelo tipos, lint, pruebas y
+  build del parser web en cada `push` y `pull_request`.
 
 ## Umbrales y respuesta
 
