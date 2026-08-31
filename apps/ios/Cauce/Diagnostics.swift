@@ -173,6 +173,11 @@ struct DiagnosticsView: View {
                                     .font(.caption2)
                                     .foregroundStyle(confidence >= 0.88 ? Color.marcelitoSuccess : Color.marcelitoAmber)
                             }
+                            if let weakestPage = statement.ocrPageConfidences?.min() {
+                                Text("Página más débil: \(Int((weakestPage * 100).rounded()))%")
+                                    .font(.caption2)
+                                    .foregroundStyle(weakestPage >= 0.78 ? Color.marcelitoSuccess : Color.marcelitoAmber)
+                            }
                             if let reconciliation = statement.reconciliation,
                                let extracted = reconciliation.extractedMovementCount,
                                let expected = reconciliation.expectedMovementCount {

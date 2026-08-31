@@ -238,6 +238,8 @@ struct StatementRecord: Identifiable, Codable {
     /// Mean Vision confidence for scanned imports. Text-layer statements keep
     /// this nil because no OCR signal was used.
     var ocrConfidence: Double? = nil
+    /// Mean Vision confidence grouped by page for targeted review.
+    var ocrPageConfidences: [Double]? = nil
     /// SHA-256 of the original PDF bytes. This is the stable document identity
     /// used to reprocess a UUID-named stored file without relying on its name.
     var sourceFingerprint: String? = nil
@@ -256,6 +258,7 @@ struct ImportSummary {
     let sourceDetection: SourceDetectionEvidence
     let sourceFingerprint: String
     let ocrConfidence: Double?
+    let ocrPageConfidences: [Double]?
 }
 
 /// Deterministic reader output used by the iOS contract tests. Keeping this
@@ -1850,9 +1853,18 @@ final class FinanceStore {
             throw FinanceImportError.emptyDocument
         }
         let sourceFingerprint = pdfFingerprint(documentData)
-        let ocrConfidence = usedOCR && !ocrObservations.isEmpty
-            ? ocrObservations.map(\.confidence).reduce(0, +) / Double(ocrObservations.count)
-            : nil
+        let ocrPageConfidences: [Double]? = {
+            guard usedOCR else { return nil }
+            let grouped = Dictionary(grouping: ocrObservations, by: \.page)
+            let values = grouped.keys.sorted().compactMap { page -> Double? in
+                guard let observations = grouped[page], !observations.isEmpty else { return nil }
+                return observations.map(\.confidence).reduce(0, +) / Double(observations.count)
+            }
+            return values.isEmpty ? nil : values
+        }()
+        let ocrConfidence = ocrPageConfidences.map { pages in
+            pages.reduce(0, +) / Double(pages.count)
+        }
         // Institutional text wins over the filename. During a canonical
         // rebuild the stored PDF has a UUID filename, and on a first import a
         // user may have renamed it incorrectly. Transaction counterparties
@@ -1953,7 +1965,8 @@ final class FinanceStore {
             reconciliation: reconciliation,
             sourceDetection: sourceDetection,
             sourceFingerprint: sourceFingerprint,
-            ocrConfidence: ocrConfidence
+            ocrConfidence: ocrConfidence,
+            ocrPageConfidences: ocrPageConfidences
         )
         if let index = statements.firstIndex(where: { $0.id == statementId }) {
             statements[index] = statement
@@ -1979,7 +1992,8 @@ final class FinanceStore {
             reconciliation: reconciliation,
             sourceDetection: sourceDetection,
             sourceFingerprint: sourceFingerprint,
-            ocrConfidence: ocrConfidence
+            ocrConfidence: ocrConfidence,
+            ocrPageConfidences: ocrPageConfidences
         )
     }
 

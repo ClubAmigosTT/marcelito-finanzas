@@ -303,6 +303,7 @@ private struct ImportReportItem: Identifiable {
     let errorMessage: String?
     let sourceDetection: SourceDetectionEvidence?
     let ocrConfidence: Double?
+    let ocrPageConfidences: [Double]?
 
     init(summary: ImportSummary) {
         fileName = summary.fileName
@@ -315,6 +316,7 @@ private struct ImportReportItem: Identifiable {
         errorMessage = nil
         sourceDetection = summary.sourceDetection
         ocrConfidence = summary.ocrConfidence
+        ocrPageConfidences = summary.ocrPageConfidences
     }
 
     init(fileName: String, errorMessage: String) {
@@ -328,6 +330,7 @@ private struct ImportReportItem: Identifiable {
         self.errorMessage = errorMessage
         sourceDetection = nil
         ocrConfidence = nil
+        ocrPageConfidences = nil
     }
 
     var state: State {
