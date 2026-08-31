@@ -119,6 +119,7 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
 | Confianza OCR media | < 88% | Provisional |
 | Confianza mínima de página | < 78% | Provisional |
 | Cobertura de filas | < 100% cuando el estado declara conteo | Bloquear estado |
+| Cobertura de evidencia | < 100% en filas importadas aceptables | Bloquear aceptación automática |
 | Identidad contable | Fuera de tolerancia | Marcar periodo inconsistente |
 | Precisión automática del corpus | < 99% | Detener publicación |
 
