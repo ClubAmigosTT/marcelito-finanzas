@@ -110,7 +110,8 @@ final class NativeCorpusContractTests: XCTestCase {
 
         for file in files {
             guard let expected = expectations[file.lastPathComponent] else { continue }
-            XCTAssertEqual(try fingerprint(file), expected.sourceFingerprint, file.lastPathComponent + " no coincide con el PDF dorado")
+            let actualFingerprint = try fingerprint(file)
+            XCTAssertEqual(actualFingerprint, expected.sourceFingerprint, file.lastPathComponent + " no coincide con el PDF dorado")
             let result = try store.importPDF(
                 from: file,
                 allowOCR: true,
@@ -192,6 +193,8 @@ final class NativeCorpusContractTests: XCTestCase {
 
             report.append([
                 "file": file.lastPathComponent,
+                "sourceFingerprint": actualFingerprint,
+                "expectedSourceFingerprint": expected.sourceFingerprint,
                 "source": result.source,
                 "kind": result.kind.rawValue,
                 "mode": result.usedOCR ? "vision-ocr" : "pdf-text",
