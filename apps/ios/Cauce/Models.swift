@@ -374,6 +374,9 @@ struct LedgerQuality {
     let reconciledPercent: Double
     let evidencePercent: Double
     let missingEvidenceCount: Int
+    let failedConsistencyCheckCount: Int
+    let spendMismatch: Bool
+    let missingRebuiltStatements: Bool
     let isBlocking: Bool
     let message: String?
 }
@@ -558,6 +561,9 @@ final class FinanceStore {
             reconciledPercent: reconciledPercent,
             evidencePercent: evidencePercent,
             missingEvidenceCount: missingEvidenceCount,
+            failedConsistencyCheckCount: failedChecks.count,
+            spendMismatch: spendMismatch,
+            missingRebuiltStatements: missingRebuiltStatements,
             isBlocking: blocking,
             message: message
         )
@@ -578,6 +584,13 @@ final class FinanceStore {
             : quality.reviewMovementCount > 0
                 ? .warning
                 : .passed
+        // Keep the persisted issue count aligned with the same gates that
+        // block the dashboard. Previously a failed accounting identity (or a
+        // spend/rebuild mismatch) could make the audit `blocked` while the
+        // counter misleadingly reported zero extra issues.
+        let gateIssueCount = quality.failedConsistencyCheckCount
+            + (quality.spendMismatch ? 1 : 0)
+            + (quality.missingRebuiltStatements ? 1 : 0)
         let run = LedgerAuditRun(
             id: UUID(),
             startedAt: startedAt,
@@ -588,7 +601,12 @@ final class FinanceStore {
             statementCount: quality.statementCount,
             canonicalMovementCount: quality.movementCount,
             reconciledPercent: quality.reconciledPercent,
-            issueCount: quality.invalidStatementCount + quality.pendingStatementCount + quality.absurdMovementCount + quality.missingEvidenceCount + quality.reviewMovementCount,
+            issueCount: quality.invalidStatementCount
+                + quality.pendingStatementCount
+                + quality.absurdMovementCount
+                + quality.missingEvidenceCount
+                + quality.reviewMovementCount
+                + gateIssueCount,
             message: quality.message
         )
         lastAuditRun = run
