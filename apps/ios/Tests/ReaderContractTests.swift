@@ -324,4 +324,22 @@ final class ReaderContractTests: XCTestCase {
         )
         XCTAssertEqual(NSDecimalNumber(decimal: unchanged).doubleValue, 500, accuracy: 0.001)
     }
+
+    func testSantanderOCRUsesMovementColumnInsteadOfRunningBalance() {
+        let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "16-JUL-2026", x: 0.05, y: 0.80, width: 0.10),
+            OCRObservationFixture(text: "PAGO TRANSFERENCIA SPEI", x: 0.18, y: 0.80, width: 0.40),
+            OCRObservationFixture(text: "30.00", x: 0.76, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "55,597.93", x: 0.92, y: 0.80, width: 0.08),
+            OCRObservationFixture(text: "17-JUL-2026", x: 0.05, y: 0.70, width: 0.10),
+            OCRObservationFixture(text: "NOMINA EMPRESA", x: 0.18, y: 0.70, width: 0.40),
+            OCRObservationFixture(text: "500.00", x: 0.64, y: 0.70, width: 0.08),
+            OCRObservationFixture(text: "56,097.93", x: 0.92, y: 0.70, width: 0.08),
+        ], fileName: "Santander agosto 2026.pdf")
+
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].amount, -30)
+        XCTAssertEqual(rows[1].amount, 500)
+        XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 1_000 })
+    }
 }

@@ -245,6 +245,11 @@ xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
   -destination "platform=iOS Simulator,name=iPhone 16" test
 ```
 
+El contrato nativo también incluye un fixture de observaciones Vision con
+coordenadas normalizadas. Verifica que Santander tome el retiro/depósito de
+las columnas de movimiento y no el saldo corrido; así una modificación de los
+umbrales de columnas falla en CI antes de tocar el corpus de estados reales.
+
 El contrato cubre tres regresiones de alto riesgo: evidencia institucional que
 vence a una contraparte (BBVA no se convierte en Santander), créditos Amex que
 no se convierten en compras y encabezados administrativos con números que no

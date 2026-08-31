@@ -297,6 +297,37 @@ struct ReaderParseSnapshot {
     let summary: StatementSummaryRecord?
 }
 
+/// Small coordinate fixture used by the native reader contract tests. It
+/// mirrors Vision's normalized page coordinates without shipping a user's PDF
+/// or image in the repository.
+struct OCRObservationFixture {
+    let page: Int
+    let text: String
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+    let confidence: Double
+
+    init(
+        page: Int = 0,
+        text: String,
+        x: Double,
+        y: Double,
+        width: Double = 0.12,
+        height: Double = 0.02,
+        confidence: Double = 0.99
+    ) {
+        self.page = page
+        self.text = text
+        self.x = x
+        self.y = y
+        self.width = width
+        self.height = height
+        self.confidence = confidence
+    }
+}
+
 struct StatementMetric: Identifiable {
     let id: UUID
     let source: String
@@ -477,6 +508,29 @@ final class FinanceStore {
             movements: movements,
             summary: summary
         )
+    }
+
+    /// Runs the Santander visual row reader against normalized Vision-like
+    /// observations. This keeps the column contract testable without invoking
+    /// Vision or persisting any PDF data.
+    static func santanderOCRRowsForTesting(
+        _ fixtures: [OCRObservationFixture],
+        fileName: String
+    ) -> [Movement] {
+        let observations = fixtures.map { fixture in
+            OCRObservation(
+                page: fixture.page,
+                text: fixture.text,
+                boundingBox: CGRect(
+                    x: fixture.x,
+                    y: fixture.y,
+                    width: fixture.width,
+                    height: fixture.height
+                ),
+                confidence: fixture.confidence
+            )
+        }
+        return parseSantanderOCR(observations, fileName: fileName)
     }
 
     /// Decides whether a PDF's selectable text is structurally usable. Kept
