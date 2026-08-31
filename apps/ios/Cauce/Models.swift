@@ -267,6 +267,10 @@ struct StatementRecord: Identifiable, Codable {
     var ocrConfidence: Double? = nil
     /// Mean Vision confidence grouped by page for targeted review.
     var ocrPageConfidences: [Double]? = nil
+    /// Santander OCR only: true when DEPÓSITO/RETIRO/SALDO were calibrated
+    /// from a co-located visual header. A false value keeps the state
+    /// provisional even if its totals happen to reconcile.
+    var ocrColumnsCalibrated: Bool? = nil
     /// SHA-256 of the original PDF bytes. This is the stable document identity
     /// used to reprocess a UUID-named stored file without relying on its name.
     var sourceFingerprint: String? = nil
@@ -290,6 +294,7 @@ struct ImportSummary {
     let readerVersion: String
     let ocrConfidence: Double?
     let ocrPageConfidences: [Double]?
+    let ocrColumnsCalibrated: Bool?
 }
 
 /// Deterministic reader output used by the iOS contract tests. Keeping this
@@ -2372,6 +2377,9 @@ final class FinanceStore {
         let ocrColumnCalibrationNeedsReview = usedOCR
             && source == "Santander"
             && !santanderColumnsCalibrated
+        let ocrColumnsCalibrated: Bool? = usedOCR && source == "Santander"
+            ? santanderColumnsCalibrated
+            : nil
         let weakestOCRPage = ocrPageConfidences?.min()
         let ocrConfidenceNeedsReview = usedOCR
             && ((ocrConfidence ?? 0) < 0.88 || (weakestOCRPage ?? 0) < 0.78)
@@ -2441,7 +2449,8 @@ final class FinanceStore {
             sourceFingerprint: sourceFingerprint,
             readerVersion: Self.readerVersion,
             ocrConfidence: ocrConfidence,
-            ocrPageConfidences: ocrPageConfidences
+            ocrPageConfidences: ocrPageConfidences,
+            ocrColumnsCalibrated: ocrColumnsCalibrated
         )
         if let index = statements.firstIndex(where: { $0.id == statementId }) {
             statements[index] = statement
@@ -2470,7 +2479,8 @@ final class FinanceStore {
             sourceFingerprint: sourceFingerprint,
             readerVersion: Self.readerVersion,
             ocrConfidence: ocrConfidence,
-            ocrPageConfidences: ocrPageConfidences
+            ocrPageConfidences: ocrPageConfidences,
+            ocrColumnsCalibrated: ocrColumnsCalibrated
         )
     }
 

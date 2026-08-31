@@ -192,6 +192,7 @@ final class NativeCorpusContractTests: XCTestCase {
                 "requiresReview": String(result.requiresReview),
                 "ocrConfidence": percentText(result.ocrConfidence),
                 "weakestOCRPage": percentText(result.ocrPageConfidences?.min()),
+                "ocrColumnsCalibrated": result.ocrColumnsCalibrated.map { $0 ? "true" : "false" } ?? "",
                 "expectedPreviousBalance": decimalText(expected.previousBalance),
                 "extractedPreviousBalance": decimalText(result.summary?.previousBalance),
                 "expectedCashBalance": decimalText(expected.cashBalance),

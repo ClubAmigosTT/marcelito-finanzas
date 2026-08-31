@@ -304,6 +304,7 @@ private struct ImportReportItem: Identifiable {
     let sourceDetection: SourceDetectionEvidence?
     let ocrConfidence: Double?
     let ocrPageConfidences: [Double]?
+    let ocrColumnsCalibrated: Bool?
 
     init(summary: ImportSummary) {
         fileName = summary.fileName
@@ -317,6 +318,7 @@ private struct ImportReportItem: Identifiable {
         sourceDetection = summary.sourceDetection
         ocrConfidence = summary.ocrConfidence
         ocrPageConfidences = summary.ocrPageConfidences
+        ocrColumnsCalibrated = summary.ocrColumnsCalibrated
     }
 
     init(fileName: String, errorMessage: String) {
@@ -331,6 +333,7 @@ private struct ImportReportItem: Identifiable {
         sourceDetection = nil
         ocrConfidence = nil
         ocrPageConfidences = nil
+        ocrColumnsCalibrated = nil
     }
 
     var state: State {
@@ -454,6 +457,12 @@ private struct ImportReportRow: View {
                             .padding(.vertical, 3)
                             .background(Color.marcelitoNavy.opacity(0.08), in: Capsule())
                     }
+                }
+
+                if item.ocrColumnsCalibrated == false {
+                    Label("Columnas de movimientos provisionales", systemImage: "ruler")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.marcelitoAmber)
                 }
 
                 Text(item.statusText)

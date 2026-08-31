@@ -49,6 +49,9 @@ gasto real sin separar esas secciones.
   saldo corrido queda fuera de la columna de movimientos. Los tres anclajes
   deben pertenecer a la misma página y línea visual; nunca se mezclan etiquetas
   de un resumen o de otra página para fabricar una calibración.
+- El resultado de esa calibración se persiste como `ocrColumnsCalibrated` y se
+  incluye en el reporte de importación; `false` siempre mantiene el estado en
+  revisión aunque los totales coincidan.
 - Ningún movimiento individual puede superar el total declarado de depósitos
   o retiros de su estado; esa fila bloquea la conciliación aunque el resto de
   las sumas parezca correcto.
