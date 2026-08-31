@@ -2532,6 +2532,16 @@ final class FinanceStore {
         let selected: OCRAmountCandidate
         if hasForeignCurrency {
             selected = candidates[0]
+        } else if bankLikeRow,
+                  let columnAmount = candidates
+                    .filter({ $0.x >= 0.52 && $0.x < 0.88 })
+                    .sorted(by: { $0.order < $1.order })
+                    .first {
+            // BBVA and similar bank layouts place CARGOS/ABONOS in the
+            // middle-right columns and the running balance farther right.
+            // Prefer the column evidence whenever Vision returned separate
+            // words; this avoids turning a balance into a transaction.
+            selected = columnAmount
         } else if bankLikeRow, candidates.count > 1 {
             selected = candidates[max(0, candidates.count - 2)]
         } else {
