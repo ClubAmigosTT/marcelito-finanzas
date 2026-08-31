@@ -69,6 +69,11 @@ gasto real sin separar esas secciones.
   finita y fragmento de origen no vacío. Si falta uno de estos campos, la fila
   puede permanecer visible para revisión, pero el estado no cuenta como
   aceptación automática ni como evidencia del 99%.
+- La frontera de cálculo aplica la misma regla fuera de la interfaz: si una
+  fila vinculada a un estado carece de esa trazabilidad, el estado completo se
+  excluye del libro canónico y ningún KPI puede agregarlo, incluso si un
+  llamador entrega un pipeline preconstruido. Las filas manuales sin estado
+  asociado no entran en ese denominador.
 - El evaluador distingue entre `automaticAcceptancePrecision` (precisión de los
   estados que sí fueron aceptados) y `certified` (certificación completa). Esta
   última solo es verdadera cuando el manifiesto está completo, no quedan PDFs
