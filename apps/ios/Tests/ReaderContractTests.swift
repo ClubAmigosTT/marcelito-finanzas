@@ -539,6 +539,13 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: false))
     }
 
+    func testAmexTextRowsWithContinuationAmountsDoNotForceOCR() {
+        let text = "American Express\nFecha y Detalle de las operaciones Importe en MN.\n"
+            + String(repeating: "5 de Agosto AMAZON MX\nRFC123456789 /REFABC123\n123.45\n", count: 4)
+
+        XCTAssertFalse(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: true))
+    }
+
     func testTableHeaderWithoutPlausibleRowsFallsBackToOCR() {
         let text = String(repeating: "RFC DIRECCION CERTIFICADO SALDO ", count: 30)
             + "Detalle de Movimientos Realizados\n"
