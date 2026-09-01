@@ -304,6 +304,35 @@ test("el proxy permite configurar un endpoint compatible sin exponer la clave", 
   }
 });
 
+test("el proxy bloquea modelos no gratuitos cuando el proveedor es Zen", async () => {
+  let providerCalled = false;
+  const server = createStatementReaderServer({
+    env: {
+      STATEMENT_READER_API_KEY: "provider-secret",
+      STATEMENT_READER_MODEL: "muse-spark-1.2",
+      STATEMENT_READER_PROVIDER_URL: "https://opencode.ai/zen/v1/responses",
+      STATEMENT_READER_TOKEN: "reader-token",
+    },
+    fetchImpl: async () => {
+      providerCalled = true;
+      return new Response(JSON.stringify({ output_text: JSON.stringify(extraction) }), { status: 200 });
+    },
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/statement-reader`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer reader-token" },
+      body: JSON.stringify({ fileName: "estado.pdf", pdfBase64: "JVBERi0xLjQ=" }),
+    });
+    assert.equal(response.status, 503);
+    assert.equal(providerCalled, false);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("acepta el envoltorio choices de un gateway compatible", async () => {
   const server = createStatementReaderServer({
     env: {

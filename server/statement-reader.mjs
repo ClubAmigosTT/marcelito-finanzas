@@ -14,6 +14,12 @@ const DEFAULT_RATE_LIMIT_PER_MINUTE = 10;
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 2;
 const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
+const ZEN_HOSTS = new Set(["opencode.ai", "www.opencode.ai"]);
+const ZEN_FREE_MODEL_PATTERN = /(?:^|-)free$/i;
+
+function isZenFreeModel(model) {
+  return model === "big-pickle" || ZEN_FREE_MODEL_PATTERN.test(model);
+}
 
 const READER_PROMPT = `Eres un extractor documental financiero. Lee el PDF completo, incluyendo las páginas renderizadas cuando el texto esté desordenado. Devuelve exclusivamente el JSON que cumple el esquema indicado.
 
@@ -369,6 +375,12 @@ async function callProvider({ pdf, fileName, env, fetchImpl, schema, prompt = RE
   }
   if (providerUrl.protocol !== "https:") throw new Error("provider_not_configured");
   if (!apiKey || !model) throw new Error("provider_not_configured");
+  // The production deployment uses Zen's free catalog. Refuse an accidental
+  // paid model when the endpoint is Zen; other explicitly configured
+  // OpenAI-compatible providers keep their own billing policy.
+  if (ZEN_HOSTS.has(providerUrl.hostname.toLowerCase()) && !isZenFreeModel(model)) {
+    throw new Error("provider_not_configured");
+  }
   const requestBody = (includeStructuredOutput) => ({
     model,
     store: false,

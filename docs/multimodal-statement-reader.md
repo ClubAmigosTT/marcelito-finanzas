@@ -84,7 +84,11 @@ valor inicial de Render usa el modelo gratuito
 `muse-spark-1.2-contributor-free` de Zen porque es uno de los modelos que Zen
 publica en el endpoint `/v1/responses`; aun así, se debe hacer una prueba con
 un PDF anonimizado y comprobar que el modelo realmente acepta archivos y
-salida estructurada antes de enviar estados reales.
+salida estructurada antes de enviar estados reales. El proxy rechaza por
+configuración cualquier modelo de Zen que no termine en `-free` (además de
+`big-pickle`), de modo que una variable de entorno mal escrita no puede activar
+accidentalmente un modelo de pago. Los demás proveedores compatibles conservan
+su propia política de facturación.
 
 ## Activación progresiva
 
