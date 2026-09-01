@@ -610,10 +610,17 @@ final class ReaderContractTests: XCTestCase {
         """
         let flattened = structured.replacingOccurrences(of: "\n", with: " ")
 
-        XCTAssertTrue(FinanceStore.selectableTextLayerReconcilesForTesting(
+        let reconciles = FinanceStore.selectableTextLayerReconcilesForTesting(
             text: flattened,
             fileName: "28_jul_2026_-_27_ago_2026.pdf"
-        ))
+        )
+        XCTAssertTrue(
+            reconciles,
+            FinanceStore.selectableTextLayerDebugForTesting(
+                text: flattened,
+                fileName: "28_jul_2026_-_27_ago_2026.pdf"
+            )
+        )
     }
 
     func testTableHeaderWithoutPlausibleRowsFallsBackToOCR() {

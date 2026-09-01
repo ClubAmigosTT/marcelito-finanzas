@@ -614,6 +614,41 @@ final class FinanceStore {
         )
     }
 
+#if DEBUG
+    /// Compact probe used by the native contract when a text-layer fixture
+    /// fails. It is compiled only for tests/debug builds and never persisted
+    /// or shown in the application; keeping it here makes a boolean gate
+    /// diagnosable without logging a user's PDF contents.
+    static func selectableTextLayerDebugForTesting(
+        text: String,
+        fileName: String,
+        sourceOverride: String? = nil,
+        kindOverride: StatementKind? = nil
+    ) -> String {
+        let evidence = sourceDetection(from: text, fileName: fileName)
+        let source = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines).flatMap { $0.isEmpty ? nil : $0 } ?? evidence.source
+        let kind = kindOverride ?? statementKind(from: text, source: source)
+        let repaired = rebuildAmexSelectableLines(text)
+        let rows = parse(text: repaired, fileName: fileName, sourceHint: source)
+        let statementSummary = summary(from: repaired, source: source)
+        let reconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
+            kind: kind,
+            summary: statementSummary,
+            movements: rows
+        )
+        let probeStore = FinanceStore(reconciliationOnly: true)
+        let rowText = rows.map { movement in
+            "\(movement.title)=\(NSDecimalNumber(decimal: movement.amount).stringValue)/\(probeStore.movementKind(movement).rawValue)/\(movement.foreignCurrency)"
+        }.joined(separator: " || ")
+        let summaryText = [
+            "domestic=\(statementSummary?.domesticTransactionTotal.map { NSDecimalNumber(decimal: $0).stringValue } ?? "nil")",
+            "foreign=\(statementSummary?.foreignTransactionTotal.map { NSDecimalNumber(decimal: $0).stringValue } ?? "nil")",
+            "charges=\(statementSummary?.newCharges.map { NSDecimalNumber(decimal: $0).stringValue } ?? "nil")"
+        ].joined(separator: ",")
+        return "source=\(source), kind=\(kind.rawValue), rows=\(rows.count), reconciliation=\(reconciliation.status.rawValue), reason=\(reconciliation.reason ?? "nil"), \(summaryText), parsed=\(rowText), repaired=\(repaired.replacingOccurrences(of: "\\n", with: "|"))"
+    }
+#endif
+
     /// Exposes the issuer-total control to the native reader contract tests
     /// without making the reconciliation implementation part of the app API.
     static func reconcileStatementForTesting(
