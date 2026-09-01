@@ -95,6 +95,20 @@ export type MultimodalReaderRequest = {
 
 export const STATEMENT_EXTRACTION_SCHEMA = statementExtractionSchema;
 
+/**
+ * Keeps account grouping stable when a reader returns the institution's full
+ * legal name (for example, "BBVA México, S.A.") instead of the short label
+ * used by the rest of the ledger. Unknown issuers remain human-readable and
+ * are still marked for review by the import UI.
+ */
+export function normalizeIssuerLabel(value: string) {
+  const normalized = normalizeConcept(value);
+  if (/american express|\bamex\b/.test(normalized)) return "Amex" as const;
+  if (/\bbbva\b/.test(normalized)) return "BBVA" as const;
+  if (/\bsantander\b/.test(normalized)) return "Santander" as const;
+  return value.trim().replace(/\s+/g, " ").slice(0, 80);
+}
+
 const summaryKeys: Array<keyof MultimodalStatementSummary> = [
   "previous_balance_cents",
   "statement_balance_cents",
@@ -256,6 +270,7 @@ function normalizeRow(input: unknown, index: number, pageCount: number): Multimo
 export function validateMultimodalExtraction(input: unknown): MultimodalStatementExtraction {
   if (!isRecord(input)) throw new MultimodalReaderError("invalid_payload", "La respuesta del lector no es un objeto");
   const source = stringField(input.source, "source", 1, 80);
+  if (isAdministrativeDescription(source)) fail("source", "parece texto administrativo, no un emisor");
   const kind = input.kind === "bank" || input.kind === "card" || input.kind === "unknown"
     ? input.kind
     : fail("kind", "tipo de estado no permitido");
@@ -349,13 +364,13 @@ export function extractionToImportResult(
   options: { sourceFingerprint?: string; model?: string } = {},
 ): ImportResult {
   const extraction = validateMultimodalExtraction(extractionInput);
-  const transactions = mapRows(extraction, file.name);
+  const source = normalizeIssuerLabel(extraction.source) as StatementSource;
+  const transactions = mapRows({ ...extraction, source }, file.name);
   const kind: StatementKind = extraction.kind;
   const summary = mapSummary(extraction.summary);
   const reconciliation = reconcileStatementImport(kind, summary, transactions);
   const dates = [extraction.period_start, extraction.period_end, extraction.cutoff_date].filter(Boolean) as string[];
   const period = dates.length >= 2 ? `${dates[0]} – ${dates[1]}` : dates[0] ?? file.name;
-  const source = extraction.source as StatementSource;
   const averageConfidence = transactions.length
     ? transactions.reduce((sum, transaction) => sum + (transaction.confidence ?? 0), 0) / transactions.length
     : 0;
@@ -366,7 +381,10 @@ export function extractionToImportResult(
       source,
       confidence: 0.85,
       status: "review",
-      evidence: ["emisor declarado por lector multimodal; pendiente de contraste institucional"],
+      evidence: [
+        `emisor declarado por lector multimodal: ${extraction.source}`,
+        "pendiente de contraste institucional por el usuario",
+      ],
       ignoredBodyMentions: [],
     },
     kind,
@@ -407,6 +425,16 @@ function unwrapExtraction(body: unknown): unknown {
   return body;
 }
 
+function validSha256(value: unknown) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : undefined;
+}
+
+function optionalModel(value: unknown) {
+  return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 120
+    ? value.trim()
+    : undefined;
+}
+
 /**
  * Calls a backend proxy that owns the provider credential. The browser sends
  * the original PDF only after an explicit opt-in; no API key is ever bundled
@@ -421,6 +449,11 @@ export async function requestMultimodalExtraction(file: File, options: Multimoda
   const fetchImpl = options.fetchImpl ?? fetch;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 120_000);
+  const externalAbort = () => controller.abort(options.signal?.reason);
+  if (options.signal) {
+    if (options.signal.aborted) externalAbort();
+    else options.signal.addEventListener("abort", externalAbort, { once: true });
+  }
   try {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (options.authorization) headers.authorization = options.authorization;
@@ -433,7 +466,7 @@ export async function requestMultimodalExtraction(file: File, options: Multimoda
         readerVersion: MULTIMODAL_READER_VERSION,
         promptVersion: MULTIMODAL_READER_PROMPT_VERSION,
       }),
-      signal: options.signal ?? controller.signal,
+      signal: controller.signal,
     });
     let body: unknown;
     try {
@@ -448,9 +481,9 @@ export async function requestMultimodalExtraction(file: File, options: Multimoda
     const extraction = validateMultimodalExtraction(unwrapExtraction(body));
     return {
       fileName: file.name,
-      sourceFingerprint: isRecord(body) && typeof body.sourceFingerprint === "string" ? body.sourceFingerprint : undefined,
+      sourceFingerprint: isRecord(body) ? validSha256(body.sourceFingerprint) : undefined,
       extraction,
-      model: options.model,
+      model: options.model ?? (isRecord(body) ? optionalModel(body.model) : undefined),
       readerVersion: MULTIMODAL_READER_VERSION,
       promptVersion: MULTIMODAL_READER_PROMPT_VERSION,
     };
@@ -460,5 +493,6 @@ export async function requestMultimodalExtraction(file: File, options: Multimoda
     throw new MultimodalReaderError("request_failed", error instanceof Error ? error.message : "Falló la lectura avanzada");
   } finally {
     clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", externalAbort);
   }
 }

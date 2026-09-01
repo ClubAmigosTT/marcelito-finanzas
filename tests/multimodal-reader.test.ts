@@ -73,7 +73,7 @@ test("valida contrato multimodal y rechaza encabezados como movimientos", () => 
 });
 
 test("convierte centavos, conserva evidencia y reconcilia antes de entregar el resultado", () => {
-  const result = extractionToImportResult(bankExtraction(), { name: "BBVA agosto.pdf", size: 1200 });
+  const result = extractionToImportResult({ ...bankExtraction(), source: "BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE" }, { name: "BBVA agosto.pdf", size: 1200 });
   assert.equal(result.source, "BBVA");
   assert.equal(result.accountKey, "BBVA:0941");
   assert.equal(result.extractionProvider, "multimodal");
@@ -81,6 +81,13 @@ test("convierte centavos, conserva evidencia y reconcilia antes de entregar el r
   assert.equal(result.transactions[1].amount, -700);
   assert.equal(result.transactions[0].extractionEvidence?.method, "multimodal");
   assert.equal(result.reconciliation?.status, "valid");
+});
+
+test("rechaza un emisor que en realidad es texto administrativo", () => {
+  assert.throws(
+    () => validateMultimodalExtraction({ ...bankExtraction(), source: "Ciudad de México" }),
+    (error: unknown) => error instanceof MultimodalReaderError && error.code === "invalid_payload",
+  );
 });
 
 test("la extracción de tarjeta conserva deuda y separa un pago de tarjeta del gasto", () => {
@@ -131,10 +138,12 @@ test("no envía el PDF sin opt-in y acepta únicamente respuestas JSON válidas 
     enabled: true,
     fetchImpl: async (_input, init) => {
       requestBody = String(init?.body ?? "");
-      return new Response(JSON.stringify({ extraction: bankExtraction() }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ extraction: bankExtraction(), model: "vision-statement-v1", sourceFingerprint: "A".repeat(64) }), { status: 200, headers: { "content-type": "application/json" } });
     },
   });
   assert.equal(response.extraction.rows.length, 2);
+  assert.equal(response.model, "vision-statement-v1");
+  assert.equal(response.sourceFingerprint, "a".repeat(64));
   assert.match(requestBody, /pdfBase64/);
   assert.doesNotMatch(requestBody, /api[_-]?key/i);
 });
