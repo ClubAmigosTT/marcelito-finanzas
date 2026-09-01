@@ -708,6 +708,32 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 1_000 })
     }
 
+    func testSantanderOCRUsesLastTwoTokensWhenVisionBoxesCollapse() {
+        // Vision can split a row into two unusually wide boxes instead of
+        // returning one box for the complete line. Their estimated token
+        // coordinates overlap, so column filtering alone would be ambiguous;
+        // the parser must still keep the penultimate token as the movement and
+        // the final token as the running balance.
+        let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+            OCRObservationFixture(
+                text: "16-JUL-2026 4309379 PAGO TRANSFERENCIA SPEI HORA 12:10:44 30.00",
+                x: 0.02,
+                y: 0.80,
+                width: 0.80
+            ),
+            OCRObservationFixture(text: "5,559.79", x: 0.30, y: 0.80, width: 0.55),
+        ], fileName: "sample-bank-period-3.pdf")
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].amount, Decimal(string: "-30.00")!)
+        XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 1_000 })
+    }
+
     func testAmexOCRUsesLocalAmountAfterForeignCurrencyConversion() {
         let rows = FinanceStore.amexOCRRowsForTesting([
             // Cover/header content must not become a movement merely because

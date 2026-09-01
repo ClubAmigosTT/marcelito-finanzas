@@ -553,7 +553,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.09.01.25"
+    static let readerVersion = "ios-reader-2026.09.01.26"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4605,8 +4605,24 @@ final class FinanceStore {
         let orderedAmountCandidates = amountCandidates.sorted { $0.order < $1.order }
         let isWholeRowObservation = orderedAmountCandidates.count >= 2
             && Set(orderedAmountCandidates.map(\.observationIndex)).count == 1
-        let wholeRowMovement = isWholeRowObservation ? orderedAmountCandidates.dropLast().last : nil
-        let wholeRowBalance = isWholeRowObservation ? orderedAmountCandidates.last : nil
+        // A second failure mode seen on-device is a row split into two very
+        // wide boxes (for example, description+movement and balance). The
+        // estimated token coordinates then overlap even though the OCR
+        // observations are technically different. Treat that geometry as a
+        // collapsed whole-row observation too; Santander rows contain one
+        // movement amount followed by one running balance, so the penultimate
+        // and final monetary tokens are the only safe pair. Without this
+        // guard a balance can still win the fallback column filter and become
+        // a false expense when Vision returns broad boxes.
+        let amountXs = orderedAmountCandidates.map(\.x)
+        let geometrySpan = (amountXs.max() ?? 0) - (amountXs.min() ?? 0)
+        let hasWideObservation = row.contains { $0.boundingBox.width >= 0.42 }
+        let isCollapsedRowGeometry = orderedAmountCandidates.count >= 2
+            && hasWideObservation
+            && geometrySpan < 0.14
+        let useWholeRowPair = isWholeRowObservation || isCollapsedRowGeometry
+        let wholeRowMovement = useWholeRowPair ? orderedAmountCandidates.dropLast().last : nil
+        let wholeRowBalance = useWholeRowPair ? orderedAmountCandidates.last : nil
         let columnCandidates = amountCandidates.filter { $0.x >= columns.movementMinX && $0.x < columns.balanceMinX }
         let selected = wholeRowMovement
             ?? columnCandidates.sorted { $0.order < $1.order }.first
