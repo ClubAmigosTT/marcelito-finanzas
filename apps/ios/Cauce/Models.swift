@@ -3579,7 +3579,7 @@ final class FinanceStore {
                 || isCardPayment
                 || isIncome
                 || isTransfer
-                || titleNormalized.range(of: #"\b(cargo|retiro|compra|pago|deposito|abono|nomina|sueldo|salario|credito|devolucion|reembolso)\b"#, options: .regularExpression) != nil
+                || titleNormalized.range(of: #"\b(cargo|retiro|compra|pago|deposito|abono|nomina|sueldo|salario|credito|devolucion|reembolso|comision|iva|interes|anualidad|cuota)\b"#, options: .regularExpression) != nil
                 || amountMatch.text.contains("-")
                 || amountMatch.text.contains("+")
                 || hasCreditMarker
