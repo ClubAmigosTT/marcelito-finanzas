@@ -142,6 +142,17 @@ test("una tabla estructurada larga conserva la lectura directa", () => {
   assert.equal(shouldUseOCR(table), false);
 });
 
+test("una tabla Amex multilinea conserva la lectura directa", () => {
+  const table = [
+    "Información del estado ".repeat(30),
+    "Fecha y Detalle de las operaciones Importe en MN.",
+    "5 de Agosto AMAZON MX",
+    "RFC123456789 /REFABC123",
+    "123.45",
+  ].join("\n");
+  assert.equal(shouldUseOCR(table), false);
+});
+
 test("un encabezado de tabla sin filas plausibles fuerza OCR", () => {
   const administrative = `${"RFC DIRECCION CERTIFICADO SALDO ".repeat(30)}\nDetalle de Movimientos Realizados\nPeriodo 16-JUL-2026 AL 15-AGO-2026\nNo. de Cuenta 9988776655`;
   assert.equal(shouldUseOCR(administrative), true);

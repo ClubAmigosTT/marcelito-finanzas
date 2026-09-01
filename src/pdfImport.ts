@@ -279,7 +279,28 @@ export function shouldUseOCR(extractedText: string) {
   // a date followed on the same visual/text line by a plausible decimal
   // amount before trusting the selectable layer; otherwise Vision must inspect
   // the rendered page.
-  const hasMovementRowSignal = /(?:\b\d{1,2}[-/.]\d{1,2}[-/.](?:20)?\d{2}\b|\b\d{1,2}[-/]\w{3,}(?:[-/](?:20)?\d{2})?\b|\b\d{1,2}\s+(?:de\s+)?(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|ago|sep|set|oct|nov|dic)\b)[^\r\n]{0,180}(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?!\d)/i.test(extractedText);
+  const sameLineMovementRowSignal = /(?:\b\d{1,2}[-/.]\d{1,2}[-/.](?:20)?\d{2}\b|\b\d{1,2}[-/]\w{3,}(?:[-/](?:20)?\d{2})?\b|\b\d{1,2}\s+(?:de\s+)?(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\b)[^\r\n]{0,180}(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?!\d)/i.test(extractedText);
+  // Amex selectable PDFs commonly place the RFC/reference between the
+  // merchant and amount. This is still a trustworthy text table: route it
+  // through the positional parser instead of OCR, which can turn references
+  // and balances into transactions. Look ahead only a few lines from a
+  // date-anchored row and reject administrative windows.
+  const dateAtLineStart = /^\s*(?:\d{1,2}[-/.]\d{1,2}(?:[-/.](?:20)?\d{2})?|\d{1,2}[-/]\w{3,}(?:[-/](?:20)?\d{2})?|\d{1,2}\s+(?:de\s+)?(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic))(?:\b|\s)/i;
+  const amountOnLine = /(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])/i;
+  const administrativeWindows = [
+    "saldo anterior", "saldo inicial", "saldo final", "saldo disponible",
+    "fecha de corte", "fecha limite", "periodo de facturacion",
+    "numero de cuenta", "no. de cuenta", "total importe",
+    "total de las transacciones", "resumen de meses",
+  ];
+  const continuationMovementRowSignal = extractedText.split(/\r?\n/).some((rawLine, index, lines) => {
+    const line = rawLine.trim();
+    if (!line || !dateAtLineStart.test(line)) return false;
+    const window = lines.slice(index, index + 4).join(" ");
+    const folded = normalizeText(window);
+    return amountOnLine.test(window) && !administrativeWindows.some((phrase) => folded.includes(phrase));
+  });
+  const hasMovementRowSignal = sameLineMovementRowSignal || continuationMovementRowSignal;
   return !hasDateSignal || !hasTableSignal || !hasMovementRowSignal;
 }
 
