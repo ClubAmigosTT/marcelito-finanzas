@@ -179,7 +179,7 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(snapshot.movements.first?.title.contains("19.05") == true)
     }
 
-    func testBBVAStatementRebuildsAllMovementRowsAndExcludesBalances() {
+    func testZZBBVAStatementRebuildsAllMovementRowsAndExcludesBalances() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
             text: """
             BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE, GRUPO FINANCIERO BBVA MEXICO
