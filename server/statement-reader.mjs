@@ -320,6 +320,30 @@ function evidenceContainsDescriptionAnchor(description, evidence) {
   return anchors.some((token) => evidenceText.includes(token));
 }
 
+function parseEvidenceMoney(raw) {
+  let clean = String(raw).replace(/[$\s\u00a0]/g, "").replace(/cr$/i, "");
+  const comma = clean.lastIndexOf(",");
+  const dot = clean.lastIndexOf(".");
+  if (comma >= 0 && dot >= 0) {
+    clean = comma > dot
+      ? clean.replace(/\./g, "").replace(",", ".")
+      : clean.replace(/,/g, "");
+  } else if (comma >= 0) {
+    const decimals = clean.length - comma - 1;
+    clean = decimals === 1 || decimals === 2 ? clean.replace(",", ".") : clean.replace(/,/g, "");
+  }
+  const value = Number.parseFloat(clean);
+  return Number.isFinite(value) ? Math.round(Math.abs(value) * 100) : undefined;
+}
+
+function evidenceContainsAmountAnchor(amountCents, evidence) {
+  const moneyTokens = /(?<![A-Za-z0-9])\$?\s*-?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)(?:[.,]\d{1,2})?\s*(?:CR)?(?![A-Za-z0-9])/gi;
+  const expected = Math.abs(amountCents);
+  return Array.from(String(evidence).matchAll(moneyTokens))
+    .map((match) => parseEvidenceMoney(match[0]))
+    .some((value) => value === expected);
+}
+
 function shouldRetryWithoutStructuredOutput(response, body) {
   // A few OpenAI-compatible gateways implement PDF input but reject the
   // optional Structured Outputs envelope. Retry once without that envelope;
@@ -367,6 +391,7 @@ function validateModelShape(value) {
     if (["purchase", "msi", "interest", "fee"].includes(row.kind) && row.direction !== "out") throw new Error("model_invalid_shape");
     if (typeof row.foreign_currency !== "boolean" || typeof row.evidence !== "string" || row.evidence.trim().length < 3 || row.evidence.length > 500 || typeof row.confidence !== "number" || !Number.isFinite(row.confidence) || row.confidence < 0 || row.confidence > 1) throw new Error("model_invalid_shape");
     if (!evidenceContainsDescriptionAnchor(row.description, row.evidence)) throw new Error("model_invalid_shape");
+    if (!evidenceContainsAmountAnchor(row.amount_cents, row.evidence)) throw new Error("model_invalid_shape");
   }
   return value;
 }

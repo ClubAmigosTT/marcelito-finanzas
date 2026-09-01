@@ -1313,6 +1313,9 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
       const inspected = extractionToImportResult(response.extraction, file, {
         sourceFingerprint: response.sourceFingerprint,
         model: response.model,
+        sourceHint: result?.sourceDetection && result.sourceDetection.status === "verified"
+          ? result.sourceDetection
+          : undefined,
       });
       void saveImportedPdf(inspected.sourceFingerprint, file);
       const withLearnedCategories = inspected.transactions.map((item) => {

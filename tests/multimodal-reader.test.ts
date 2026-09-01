@@ -82,6 +82,15 @@ test("rechaza evidencia que no se puede vincular con el comercio", () => {
   );
 });
 
+test("rechaza evidencia que contiene el comercio pero otro importe", () => {
+  assert.throws(
+    () => validateMultimodalExtraction(bankExtraction({
+      rows: [{ ...bankExtraction().rows[0], evidence: "05/AGO NOMINA ACME 9,999.99" }],
+    })),
+    (error: unknown) => error instanceof MultimodalReaderError && error.code === "invalid_payload",
+  );
+});
+
 test("conserva comercios cortos cuando la evidencia contiene su nombre", () => {
   const valid = bankExtraction();
   const result = validateMultimodalExtraction({
@@ -100,6 +109,24 @@ test("convierte centavos, conserva evidencia y reconcilia antes de entregar el r
   assert.equal(result.transactions[1].amount, -700);
   assert.equal(result.transactions[0].extractionEvidence?.method, "multimodal");
   assert.equal(result.reconciliation?.status, "valid");
+});
+
+test("conserva el emisor institucional local cuando el lector multimodal confunde una contraparte", () => {
+  const result = extractionToImportResult({
+    ...bankExtraction(),
+    source: "Santander", // counterparty mentioned by the model, not the issuer
+  }, { name: "BBVA agosto.pdf", size: 1200 }, {
+    sourceHint: {
+      source: "BBVA",
+      status: "verified",
+      confidence: 0.999,
+      evidence: ["razón social/dominio del emisor BBVA"],
+    },
+  });
+  assert.equal(result.source, "BBVA");
+  assert.equal(result.sourceDetection?.status, "verified");
+  assert.match(result.sourceDetection?.evidence.join(" ") ?? "", /lector multimodal devolvi[oó]/i);
+  assert.deepEqual(result.sourceDetection?.ignoredBodyMentions, ["Santander"]);
 });
 
 test("rechaza un emisor que en realidad es texto administrativo", () => {

@@ -84,6 +84,18 @@ export type MultimodalReaderClientOptions = {
   model?: string;
 };
 
+/**
+ * Institutional evidence already obtained locally, when a multimodal retry
+ * is requested from the review screen. It is a hint for resolving issuer
+ * disagreements, never a way to bypass the PDF hash or reconciliation gates.
+ */
+export type MultimodalSourceHint = {
+  source: StatementSource;
+  status: "verified" | "review" | "unknown";
+  confidence?: number;
+  evidence?: string[];
+};
+
 export type MultimodalReaderRequest = {
   fileName: string;
   sourceFingerprint: string;
@@ -237,6 +249,37 @@ function evidenceContainsDescriptionAnchor(description: string, evidence: string
   return anchors.some((token) => evidenceText.includes(token));
 }
 
+function parseEvidenceMoney(raw: string) {
+  let clean = raw.replace(/[$\s\u00a0]/g, "").replace(/cr$/i, "");
+  const comma = clean.lastIndexOf(",");
+  const dot = clean.lastIndexOf(".");
+  if (comma >= 0 && dot >= 0) {
+    clean = comma > dot
+      ? clean.replace(/\./g, "").replace(",", ".")
+      : clean.replace(/,/g, "");
+  } else if (comma >= 0) {
+    const decimals = clean.length - comma - 1;
+    clean = decimals === 1 || decimals === 2 ? clean.replace(",", ".") : clean.replace(/,/g, "");
+  }
+  const value = Number.parseFloat(clean);
+  return Number.isFinite(value) ? Math.round(Math.abs(value) * 100) : undefined;
+}
+
+/**
+ * A description anchor alone is not enough: the provider could copy the
+ * merchant correctly while selecting a reference, saldo or foreign-currency
+ * number. Require the literal evidence fragment to contain the same amount
+ * in currency precision. Foreign rows may contain two amounts, so matching
+ * any token is intentional; the local MXN amount still has to be present.
+ */
+function evidenceContainsAmountAnchor(amountCents: number, evidence: string) {
+  const moneyTokens = /(?<![A-Za-z0-9])\$?\s*-?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)(?:[.,]\d{1,2})?\s*(?:CR)?(?![A-Za-z0-9])/gi;
+  const expected = Math.abs(amountCents);
+  return Array.from(evidence.matchAll(moneyTokens))
+    .map((match) => parseEvidenceMoney(match[0]))
+    .some((value) => value === expected);
+}
+
 function isoDateField(value: unknown, path: string, required: boolean) {
   if (value === null && !required) return null;
   const result = stringField(value, path, 10, 10);
@@ -281,6 +324,9 @@ function normalizeRow(input: unknown, index: number, pageCount: number): Multimo
   const evidence = stringField(input.evidence, `rows[${index}].evidence`, 3, 500);
   if (!evidenceContainsDescriptionAnchor(description, evidence)) {
     fail(`rows[${index}].evidence`, "debe contener un fragmento reconocible de la descripción");
+  }
+  if (!evidenceContainsAmountAnchor(amount_cents, evidence)) {
+    fail(`rows[${index}].evidence`, "debe contener el importe literal de la fila");
   }
   const confidence = confidenceField(input.confidence, `rows[${index}].confidence`);
   return { date, description, amount_cents, direction, kind, foreign_currency, page, evidence, confidence };
@@ -394,10 +440,18 @@ function mapRows(extraction: MultimodalStatementExtraction, fileName: string): T
 export function extractionToImportResult(
   extractionInput: unknown,
   file: Pick<File, "name" | "size">,
-  options: { sourceFingerprint?: string; model?: string } = {},
+  options: { sourceFingerprint?: string; model?: string; sourceHint?: MultimodalSourceHint } = {},
 ): ImportResult {
   const extraction = validateMultimodalExtraction(extractionInput);
-  const source = normalizeIssuerLabel(extraction.source) as StatementSource;
+  const modelSource = normalizeIssuerLabel(extraction.source) as StatementSource;
+  const hintedSource = options.sourceHint?.status === "verified"
+    ? normalizeIssuerLabel(options.sourceHint.source)
+    : undefined;
+  // If the local PDF layer already proved the issuer institutionally, prefer
+  // it over a model's conflicting brand guess (often caused by a Santander
+  // counterparty inside a BBVA SPEI row). Keep the disagreement visible in
+  // provenance while allowing the rows to continue through reconciliation.
+  const source = (hintedSource && hintedSource !== "Desconocido" ? hintedSource : modelSource) as StatementSource;
   const transactions = mapRows({ ...extraction, source }, file.name);
   const kind: StatementKind = extraction.kind;
   const summary = mapSummary(extraction.summary);
@@ -410,7 +464,18 @@ export function extractionToImportResult(
   return {
     source,
     accountKey: extraction.account_last4 ? `${source}:${extraction.account_last4}` : undefined,
-    sourceDetection: {
+    sourceDetection: options.sourceHint?.status === "verified" && hintedSource
+      ? {
+        source,
+        confidence: options.sourceHint.confidence ?? 0.99,
+        status: "verified" as const,
+        evidence: [
+          ...(options.sourceHint.evidence ?? [`encabezado institucional ${source}`]),
+          ...(modelSource !== source ? [`lector multimodal devolvió ${modelSource}; se conservó el emisor institucional`] : []),
+        ],
+        ignoredBodyMentions: modelSource !== source ? [modelSource] : [],
+      }
+      : {
       source,
       confidence: 0.85,
       status: "review",
@@ -419,7 +484,7 @@ export function extractionToImportResult(
         "pendiente de contraste institucional por el usuario",
       ],
       ignoredBodyMentions: [],
-    },
+      },
     kind,
     period,
     fileName: file.name,
