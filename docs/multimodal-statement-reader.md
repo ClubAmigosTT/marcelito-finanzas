@@ -52,6 +52,9 @@ proxy:
 - limita el PDF a 20 MB y no lo persiste;
 - envía el PDF como `input_file` a la Responses API, con `store:false` y
   salida `json_schema` estricta;
+- si un gateway compatible rechaza únicamente `json_schema`, reintenta una
+  sola vez solicitando JSON directo; el mismo validador estricto del servidor
+  sigue siendo obligatorio antes de entregar el resultado;
 - no devuelve el PDF ni texto bruto, solo la extracción y su huella SHA-256;
 - no registra nombres, filas, importes ni respuestas del proveedor.
 
@@ -65,6 +68,8 @@ vacío generado en memoria y exige una respuesta válida del contrato; el
 resultado solo indica `status: "ready"`, el modelo y la versión del contrato.
 Este control no sube ningún estado del usuario y permite detectar si el modelo
 configurado realmente admite entrada PDF y salida JSON estructurada.
+La interfaz espera hasta 120 segundos para contemplar el arranque en frío del
+servicio gratuito; un timeout no desbloquea ni modifica los KPI.
 
 El `render.yaml` de este repositorio deja preparado el patrón de dos servicios:
 la web estática expone solo `VITE_STATEMENT_READER_URL` y el servicio Node

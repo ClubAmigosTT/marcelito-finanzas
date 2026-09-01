@@ -22,6 +22,12 @@ si ese modelo no acepta PDF/visión o salida estructurada, cambia únicamente
 
 El endpoint `/health` debe responder `configured: true`. Si responde `false`,
 la aplicación conserva el lector local y no envía ningún PDF.
+En la primera comprobación la app tolera hasta 120 segundos para permitir el
+arranque en frío del servicio gratuito. El botón **Probar lector avanzado**
+debe mostrar `Lector listo · <modelo>` antes de releer un estado real.
+Si el gateway rechaza el formato `json_schema`, el proxy hace un único
+reintento en JSON directo y vuelve a aplicar la validación completa; ninguna
+respuesta que no concilie llega al libro canónico.
 
 ## Datos reales
 
