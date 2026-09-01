@@ -118,9 +118,11 @@ gasto real sin separar esas secciones.
 - En páginas con confianza inferior a 88%, el OCR web hace una segunda pasada
   acotada con contraste mejorado y conserva el resultado de mayor confianza;
   si la conciliación o el conteo no cuadran, el estado sigue bloqueado.
-- Vision en iOS aplica la misma estrategia por página: solo genera una imagen
-  temporal con contraste cuando la primera pasada es débil y conserva el
-  resultado que tenga mayor confianza media.
+- Vision en iOS aplica la misma estrategia por página: conserva la proporción
+  real del documento, limita cada bitmap a 5 millones de píxeles y, cuando la
+  primera pasada queda por debajo de 88%, prueba una renderización de detalle
+  antes de aplicar contraste. Solo conserva el resultado con mayor confianza
+  media; ninguna de esas pasadas salta la conciliación o la compuerta OCR.
 - iOS reutiliza el contexto de imagen y libera cada página OCR dentro de un
   `autoreleasepool`, limitando la memoria temporal en estados de varias páginas.
 - Las páginas sin observaciones Vision se registran explícitamente como 0%
