@@ -2699,7 +2699,8 @@ final class FinanceStore {
               kind == .card,
               (normalized.contains("fecha y detalle de las operaciones")
                 || layoutNormalized.contains("fecha y detalle de las operaciones")) else { return false }
-        let candidates = parse(text: text, fileName: fileName, sourceHint: source)
+        let structuredText = Self.rebuildAmexSelectableLines(text)
+        let candidates = parse(text: structuredText, fileName: fileName, sourceHint: source)
         guard !candidates.isEmpty else { return false }
         // This probe runs from the detached PDF/OCR task. Constructing the
         // normal store here would read and rewrite UserDefaults (and could
@@ -2708,7 +2709,7 @@ final class FinanceStore {
         // the probe therefore stays a pure validation of parser output.
         return FinanceStore(reconciliationOnly: true).reconcileStatement(
             kind: kind,
-            summary: summary(from: text, source: source),
+            summary: summary(from: structuredText, source: source),
             movements: candidates
         ).status == .valid
     }
@@ -2841,7 +2842,14 @@ final class FinanceStore {
             return corrected
         }
         let period = Self.periodLabel(from: text, fileName: fileName)
-        let summary = Self.summary(from: text, source: source)
+        // Keep summary extraction on the same repaired Amex layout used for
+        // rows. When PDFKit flattens the page, a single line containing every
+        // section would otherwise make `lastAmountOnLabel` pick the final MSI
+        // total for both domestic and foreign controls.
+        let summaryText = source.localizedCaseInsensitiveContains("Amex") && kind == .card
+            ? Self.rebuildAmexSelectableLines(text)
+            : text
+        let summary = Self.summary(from: summaryText, source: source)
         let ocrFallbackNeedsReview = usedOCR && candidates.contains {
             guard let evidence = $0.extractionEvidence else { return true }
             return evidence.method != "vision-ocr" || evidence.confidence < 0.88
