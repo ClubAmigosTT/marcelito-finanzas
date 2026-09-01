@@ -117,6 +117,7 @@ test("convierte centavos, conserva evidencia y reconcilia antes de entregar el r
   assert.equal(result.transactions[0].amount, 1000);
   assert.equal(result.transactions[1].amount, -700);
   assert.equal(result.transactions[0].extractionEvidence?.method, "multimodal");
+  assert.deepEqual(result.ocrPageConfidences, [0.99]);
   assert.equal(result.reconciliation?.status, "valid");
 });
 

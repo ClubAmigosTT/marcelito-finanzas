@@ -446,6 +446,25 @@ function mapRows(extraction: MultimodalStatementExtraction, fileName: string): T
 }
 
 /**
+ * The provider reports confidence per row, not per page. Preserve a bounded
+ * page-level signal so the dashboard gate cannot treat a low-confidence
+ * visual extraction as ordinary selectable text. Pages without rows are not
+ * penalized here because cover pages are expected in many statements; the
+ * row-level evidence and issuer reconciliation remain mandatory.
+ */
+function pageConfidences(extraction: MultimodalStatementExtraction) {
+  const byPage = new Map<number, number[]>();
+  for (const row of extraction.rows) {
+    const values = byPage.get(row.page) ?? [];
+    values.push(row.confidence);
+    byPage.set(row.page, values);
+  }
+  return [...byPage.entries()]
+    .sort(([left], [right]) => left - right)
+    .map(([, values]) => values.reduce((total, value) => total + value, 0) / values.length);
+}
+
+/**
  * Converts an accepted contract into the app's ImportResult, but deliberately
  * runs the issuer totals through the existing reconciliation gate first.
  * A “valid” model response therefore remains provisional until the same
@@ -475,6 +494,7 @@ export function extractionToImportResult(
   const averageConfidence = transactions.length
     ? transactions.reduce((sum, transaction) => sum + (transaction.confidence ?? 0), 0) / transactions.length
     : 0;
+  const ocrPageConfidences = pageConfidences(extraction);
   return {
     source,
     accountKey: extraction.account_last4 ? `${source}:${extraction.account_last4}` : undefined,
@@ -516,7 +536,7 @@ export function extractionToImportResult(
     summary,
     reconciliation,
     ocrConfidence: averageConfidence,
-    ocrPageConfidences: [],
+    ocrPageConfidences,
   };
 }
 

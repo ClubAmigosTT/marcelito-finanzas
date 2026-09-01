@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { adaptiveOcrScale, detectAccountKey, detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
-import { buildFinanceMetrics, hasVerifiedSourceEvidence, isStatementEligibleForDashboard } from "../src/finance.ts";
+import { buildFinanceMetrics, hasSufficientOcrQuality, hasVerifiedSourceEvidence, isStatementEligibleForDashboard } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
 import { prepareStoredLedger, prepareStoredStatements } from "../src/statementMigration.ts";
 import { MULTIMODAL_READER_VERSION } from "../src/multimodalReader.ts";
@@ -124,6 +124,19 @@ test("la compuerta OCR se conserva al recalcular la vista de revisión", () => {
   assert.equal(gated.status, "pending");
   assert.match(gated.reason ?? "", /OCR provisional/);
   assert.equal(gateOcrReconciliation(base, "text", 0.1).status, "valid");
+});
+
+test("la extracción multimodal no puede saltarse el umbral visual usando modo texto", () => {
+  const statement: Statement = {
+    ...bank("bbva-multimodal-quality", "BBVA", "agosto 2026"),
+    extractionProvider: "multimodal",
+    // A remote reader can preserve mode=text for compatibility; its own
+    // confidence and page evidence must still pass the visual gate.
+    ocrConfidence: 0.87,
+    ocrPageConfidences: [0.99],
+  };
+  assert.equal(hasSufficientOcrQuality(statement), false);
+  assert.equal(hasSufficientOcrQuality({ ...statement, ocrConfidence: 0.90, ocrPageConfidences: [0.80] }), true);
 });
 
 test("la escala OCR adaptativa mejora páginas bancarias sin desbordar memoria", () => {
@@ -1611,6 +1624,7 @@ test("la migración conserva estados del lector multimodal actual", () => {
   const statement = {
     ...bank("bbva-multimodal", "BBVA", "agosto 2026"),
     readerVersion: MULTIMODAL_READER_VERSION,
+    extractionProvider: "multimodal" as const,
     mode: "text" as const,
     status: "ready" as const,
     reconciliationStatus: "valid" as const,
@@ -1622,6 +1636,8 @@ test("la migración conserva estados del lector multimodal actual", () => {
       evidence: ["encabezado institucional BBVA"],
       ignoredBodyMentions: [],
     },
+    ocrConfidence: 0.99,
+    ocrPageConfidences: [0.99],
   };
   const row = movement({
     id: "multimodal-row",
