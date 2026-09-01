@@ -29,6 +29,16 @@ Si el gateway rechaza el formato `json_schema`, el proxy hace un único
 reintento en JSON directo y vuelve a aplicar la validación completa; ninguna
 respuesta que no concilie llega al libro canónico.
 
+Para verificar el servicio sin subir un estado, ejecuta desde una máquina con
+acceso al endpoint:
+
+```text
+$env:STATEMENT_READER_URL="https://marcelito-statement-reader.onrender.com/api/statement-reader"; $env:STATEMENT_READER_TOKEN="<token-temporal>"; npm run reader:verify
+```
+
+El comando solo consulta `/health` y `/preflight`; no requiere ni acepta una
+ruta a PDFs reales.
+
 ## Datos reales
 
 La aplicación inicia vacía. El usuario importa cada PDF desde **Importar estado** y revisa banco, periodo, archivo, método y movimientos antes de guardarlo. Los estados quedan en el navegador o dispositivo que los importó.
