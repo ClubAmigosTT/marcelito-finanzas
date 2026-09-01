@@ -2677,7 +2677,13 @@ final class FinanceStore {
         let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
         let source = cleanedSourceOverride.flatMap { $0.isEmpty ? nil : $0 } ?? detectedSourceEvidence.source
         let kind = kindOverride ?? statementKind(from: text, source: source)
-        guard source != "Desconocido", kind != .unknown else { return false }
+        // Only the known Amex text layout gets this escape hatch. Bank scans
+        // need Vision's calibrated columns even when an accidental hidden
+        // text layer happens to contain a set of numbers that reconciles.
+        let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        guard source.localizedCaseInsensitiveContains("Amex"),
+              kind == .card,
+              normalized.contains("fecha y detalle de las operaciones") else { return false }
         let candidates = parse(text: text, fileName: fileName, sourceHint: source)
         guard !candidates.isEmpty else { return false }
         return FinanceStore().reconcileStatement(
