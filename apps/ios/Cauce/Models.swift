@@ -597,6 +597,23 @@ final class FinanceStore {
         )
     }
 
+    /// Proves a selectable PDF text layer against the same issuer controls
+    /// used by the import path. This seam lets the contract suite verify that
+    /// a multiline Amex table avoids OCR when its rows are already auditable.
+    static func selectableTextLayerReconcilesForTesting(
+        text: String,
+        fileName: String,
+        sourceOverride: String? = nil,
+        kindOverride: StatementKind? = nil
+    ) -> Bool {
+        textLayerReconciles(
+            text: text,
+            fileName: fileName,
+            sourceOverride: sourceOverride,
+            kindOverride: kindOverride
+        )
+    }
+
     /// Exposes the issuer-total control to the native reader contract tests
     /// without making the reconciliation implementation part of the app API.
     static func reconcileStatementForTesting(
@@ -2649,6 +2666,27 @@ final class FinanceStore {
         )
     }
 
+    private static func textLayerReconciles(
+        text: String,
+        fileName: String,
+        sourceOverride: String?,
+        kindOverride: StatementKind?
+    ) -> Bool {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        let detectedSourceEvidence = sourceDetection(from: text, fileName: fileName)
+        let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = cleanedSourceOverride.flatMap { $0.isEmpty ? nil : $0 } ?? detectedSourceEvidence.source
+        let kind = kindOverride ?? statementKind(from: text, source: source)
+        guard source != "Desconocido", kind != .unknown else { return false }
+        let candidates = parse(text: text, fileName: fileName, sourceHint: source)
+        guard !candidates.isEmpty else { return false }
+        return FinanceStore().reconcileStatement(
+            kind: kind,
+            summary: summary(from: text, source: source),
+            movements: candidates
+        ).status == .valid
+    }
+
     private static func extractPDF(
         data: Data,
         fileName: String,
@@ -2671,11 +2709,6 @@ final class FinanceStore {
             .compactMap { document.page(at: $0)?.string }
             .joined(separator: "\n")
         let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let extractedSourceEvidence = Self.sourceDetection(from: extractedText, fileName: fileName)
-        let extractedSource = cleanedSourceOverride.flatMap { override -> String? in
-            override.isEmpty ? nil : override
-        } ?? extractedSourceEvidence.source
-        let extractedKind = kindOverride ?? Self.statementKind(from: extractedText, source: extractedSource)
 
         // A PDF can expose a perfectly usable text layer even when its line
         // breaks are unusual enough to trip the generic OCR heuristic. Before
@@ -2683,23 +2716,12 @@ final class FinanceStore {
         // reconcile with the issuer controls. This is the same safety rule
         // used at commit time, so a hidden administrative layer cannot win by
         // accident; an exact Amex table simply avoids a lossy OCR round-trip.
-        let textLayerReconciles: Bool = {
-            guard !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                  extractedSource != "Desconocido",
-                  extractedKind != .unknown else { return false }
-            let textCandidates = Self.parse(
-                text: extractedText,
-                fileName: fileName,
-                sourceHint: extractedSource
-            )
-            guard !textCandidates.isEmpty else { return false }
-            let textSummary = Self.summary(from: extractedText, source: extractedSource)
-            return Self().reconcileStatement(
-                kind: extractedKind,
-                summary: textSummary,
-                movements: textCandidates
-            ).status == .valid
-        }()
+        let textLayerReconciles = Self.textLayerReconciles(
+            text: extractedText,
+            fileName: fileName,
+            sourceOverride: cleanedSourceOverride,
+            kindOverride: kindOverride
+        )
 
         // A short administrative text layer is not a trustworthy movement
         // table; send it through Vision rather than parsing header numbers.

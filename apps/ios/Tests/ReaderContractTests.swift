@@ -546,6 +546,33 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: true))
     }
 
+    func testProvenAmexTextLayerWinsOverOCRHeuristic() {
+        let text = """
+        American Express
+        The Platinum Credit Card
+        Límite de Crédito Límite Disponible
+        a Agosto 27,2026 10,000.00 MN 9,000.00 MN
+        23,150.88 - 32,744.61 + 950.00 = 950.00 300.00
+        Nuevas transacciones: 900.00
+        Total Nuevos Cargos: 950.00
+        Fecha y Detalle de las operaciones Importe en MN.
+        05 de Agosto SUPERMERCADO 700.00
+        27 de Agosto MONTO A DIFERIR MESES EN AUTOMÁTICO 100.00 CR
+        Total de las transacciones en $ de MARCELO ANDRES DIAZ SANCHEZ 600.00
+        Fecha y Detalle de las operaciones Importe en MN.
+        6 de Agosto HOLAFLY DUBLIN Euro 15,50 TC:20.00 200.00
+        Total de Transacciones en Moneda Extranjera de MARCELO ANDRES DIAZ SANCHEZ 200.00
+        Transacciones de Meses sin Intereses
+        27 de Agosto MESES EN AUTOMÁTICO EXTRANJERO CARGO 01 DE 03 50.00
+        Total de Meses sin Intereses 50.00
+        """
+
+        XCTAssertTrue(FinanceStore.selectableTextLayerReconcilesForTesting(
+            text: text,
+            fileName: "28_jul_2026_-_27_ago_2026.pdf"
+        ))
+    }
+
     func testTableHeaderWithoutPlausibleRowsFallsBackToOCR() {
         let text = String(repeating: "RFC DIRECCION CERTIFICADO SALDO ", count: 30)
             + "Detalle de Movimientos Realizados\n"
