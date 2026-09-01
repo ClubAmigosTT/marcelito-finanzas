@@ -709,11 +709,22 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       const difference = netForeignChargeTotal - summary.foreignTransactionTotal;
       if (Math.abs(difference) > tolerance) sectionDifferences.push(`moneda extranjera ${difference.toFixed(2)}`);
     }
-    const creditIdentityDifference = summary.creditLimit !== undefined
+    const rawCreditIdentityDifference = summary.creditLimit !== undefined
       && summary.creditAvailable !== undefined
       && summary.debtBalance !== undefined
       ? summary.creditLimit - summary.creditAvailable - summary.debtBalance
       : undefined;
+    // Keep the public audit value in currency precision. The source amounts
+    // are cent-based, but converting them to JS numbers can leave a tiny
+    // binary floating-point residue (for example 7e-12 instead of 0).
+    const creditIdentityDifference = rawCreditIdentityDifference === undefined
+      ? undefined
+      : Number(rawCreditIdentityDifference.toFixed(2));
+    if (summary.creditLimit !== undefined
+        && summary.creditAvailable !== undefined
+        && summary.creditAvailable - summary.creditLimit > tolerance) {
+      sectionDifferences.push(`crédito disponible supera límite ${(summary.creditAvailable - summary.creditLimit).toFixed(2)}`);
+    }
     if (creditIdentityDifference !== undefined && Math.abs(creditIdentityDifference) > tolerance) {
       sectionDifferences.push(`identidad de crédito ${creditIdentityDifference.toFixed(2)}`);
     }

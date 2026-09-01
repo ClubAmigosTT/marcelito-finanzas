@@ -140,6 +140,55 @@ test("la extracción de tarjeta conserva deuda y separa un pago de tarjeta del g
   assert.equal(result.reconciliation?.status, "valid");
 });
 
+test("deriva deuda de tarjeta desde límite y disponible y conserva la identidad", () => {
+  const result = extractionToImportResult({
+    source: "Amex",
+    kind: "card",
+    account_last4: "1234",
+    period_start: "2026-08-01",
+    period_end: "2026-08-31",
+    cutoff_date: "2026-08-31",
+    page_count: 1,
+    summary: summary({
+      debt_balance_cents: null,
+      credit_limit_cents: 15_000_000,
+      credit_available_cents: 9_963_279,
+      domestic_transaction_total_cents: 120_000,
+      foreign_transaction_total_cents: 0,
+    }),
+    rows: [
+      { date: "2026-08-02", description: "HOTEL EJEMPLO", amount_cents: 120_000, direction: "out", kind: "purchase", foreign_currency: false, page: 1, evidence: "02/AGO HOTEL EJEMPLO 1,200.00", confidence: 0.99 },
+    ],
+  }, { name: "Amex agosto.pdf", size: 900 });
+
+  assert.equal(result.summary?.debtBalance, 50_367.21);
+  assert.equal(result.reconciliation?.creditIdentityDifference, 0);
+  assert.equal(result.reconciliation?.status, "valid");
+});
+
+test("bloquea una tarjeta cuando el crédito disponible supera el límite", () => {
+  const result = extractionToImportResult({
+    source: "Amex",
+    kind: "card",
+    account_last4: "1234",
+    period_start: "2026-08-01",
+    period_end: "2026-08-31",
+    cutoff_date: "2026-08-31",
+    page_count: 1,
+    summary: summary({
+      debt_balance_cents: 0,
+      credit_limit_cents: 1_000_000,
+      credit_available_cents: 1_100_000,
+      domestic_transaction_total_cents: 0,
+      foreign_transaction_total_cents: 0,
+    }),
+    rows: [],
+  }, { name: "Amex inconsistente.pdf", size: 900 });
+
+  assert.equal(result.reconciliation?.status, "invalid");
+  assert.match(result.reconciliation?.reason ?? "", /disponible supera l[ií]mite/i);
+});
+
 test("no envía el PDF sin opt-in y acepta únicamente respuestas JSON válidas del proxy", async () => {
   const file = {
     name: "BBVA agosto.pdf",

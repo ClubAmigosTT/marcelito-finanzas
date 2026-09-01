@@ -331,6 +331,15 @@ function mapSummary(summary: MultimodalStatementSummary): StatementSummary {
       : centsToAmount(value as number);
     if (amount !== undefined) (mapped as unknown as Record<string, unknown>)[target] = amount;
   }
+  // Some issuers print only the credit limit and the available amount. Keep
+  // the canonical summary complete without asking the model to invent a
+  // third value: the derived debt is still checked by the card reconciliation
+  // identity before the import can be accepted.
+  if (mapped.creditLimit !== undefined
+      && mapped.creditAvailable !== undefined
+      && mapped.debtBalance === undefined) {
+    mapped.debtBalance = Number((mapped.creditLimit - mapped.creditAvailable).toFixed(2));
+  }
   return mapped;
 }
 
