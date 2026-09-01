@@ -3542,23 +3542,34 @@ final class FinanceStore {
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "\u{00A0}", with: " ")
 
+        // Match complete markers/tokens and record their start positions. A
+        // previous zero-width replacement implementation could make Swift's
+        // regex engine revisit an already separated line and change valid
+        // fixtures. Rebuilding from concrete ranges is idempotent and leaves
+        // every original character untouched.
         let boundaries = [
-            // Table starts and section totals must be isolated before date
-            // anchors are inserted; otherwise a marker can be absorbed into
-            // the preceding transaction's description.
-            #"(?i)(?<!\n)(?=fecha\s+y\s+detalle\s+de\s+las\s+operaciones)"#,
-            #"(?i)(?<!\n)(?=total\s+de\s+las\s+transacciones\s+en)"#,
-            #"(?i)(?<!\n)(?=total\s+de\s+transacciones\s+en\s+moneda\s+extranjera)"#,
-            #"(?i)(?<!\n)(?=transacciones\s+de\s+meses\s+sin\s+intereses)"#,
-            #"(?i)(?<!\n)(?=descripcion\s+de\s+compras\s+en\s+meses\s+sin\s+intereses)"#,
-            #"(?i)(?<!\n)(?=total\s+de\s+(?:meses|plan\s+de\s+meses)\s+sin\s+intereses)"#,
-            // Full and short month-name dates used by Amex. The negative
-            // look-behind keeps an existing date token intact and prevents a
-            // split in the middle of an OCR identifier.
-            #"(?i)(?<![A-Za-z0-9\n])(?=(?:[0-9OBI]{1,3}\s*[\/-]\s*[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s*[\/-]\s*(?:20)?\d{2})?|[0-9OBI]{1,3}\s+(?:de\s*)?[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s+(?:de\s+)?\d{4})?))"#,
+            #"(?i)fecha\s+y\s+detalle\s+de\s+las\s+operaciones"#,
+            #"(?i)total\s+de\s+las\s+transacciones\s+en"#,
+            #"(?i)total\s+de\s+transacciones\s+en\s+moneda\s+extranjera"#,
+            #"(?i)transacciones\s+de\s+meses\s+sin\s+intereses"#,
+            #"(?i)descripcion\s+de\s+compras\s+en\s+meses\s+sin\s+intereses"#,
+            #"(?i)total\s+de\s+(?:meses|plan\s+de\s+meses)\s+sin\s+intereses"#,
+            #"(?i)(?<![A-Za-z0-9])(?:[0-9OBI]{1,3}\s*[\/-]\s*[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s*[\/-]\s*(?:20)?\d{2})?|[0-9OBI]{1,3}\s+(?:de\s*)?[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s+(?:de\s+)?\d{4})?)(?![A-Za-z])"#,
         ]
+        var positions = Set<String.Index>()
         for pattern in boundaries {
-            value = value.replacingOccurrences(of: pattern, with: "\n", options: .regularExpression)
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let range = NSRange(value.startIndex..<value.endIndex, in: value)
+            for match in regex.matches(in: value, range: range) {
+                guard let matchRange = Range(match.range, in: value) else { continue }
+                positions.insert(matchRange.lowerBound)
+            }
+        }
+        for position in positions.sorted(by: { $0 < $1 }).reversed() {
+            guard position > value.startIndex else { continue }
+            let previous = value[value.index(before: position)]
+            guard previous != "\n" else { continue }
+            value.insert("\n", at: position)
         }
         return value
     }
