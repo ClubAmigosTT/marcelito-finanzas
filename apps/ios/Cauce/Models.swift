@@ -3420,16 +3420,49 @@ final class FinanceStore {
         struct ParsedTextRow {
             let text: String
             let page: Int?
+            /// Amex repeats a date/description table for domestic, foreign
+            /// and MSI sections. Keep the section on the row so a foreign
+            /// purchase without an explicit currency label still uses the
+            /// local MXN amount and reconciles against the right subtotal.
+            let forcedForeignCurrency: Bool
         }
+        let isAmexText = account.localizedCaseInsensitiveContains("Amex")
+        // A selectable Amex statement has three separate transaction tables.
+        // Restrict row anchors to those tables; dates in page headers,
+        // payment instructions and the MSI summary are not movements.
+        let amexSectionAware = isAmexText
+            && documentNormalized.contains("fecha y detalle de las operaciones")
+        var amexSection = 0 // 0: outside, 1: domestic, 2: foreign, 3: MSI
         var rows: [ParsedTextRow] = []
         var pendingRow = ""
         var pendingPage: Int?
+        var pendingForcedForeignCurrency = false
         var currentPage: Int?
         func flushPending() {
             guard !pendingRow.isEmpty else { return }
-            rows.append(ParsedTextRow(text: pendingRow, page: pendingPage))
+            rows.append(
+                ParsedTextRow(
+                    text: pendingRow,
+                    page: pendingPage,
+                    forcedForeignCurrency: pendingForcedForeignCurrency
+                )
+            )
             pendingRow = ""
             pendingPage = nil
+            pendingForcedForeignCurrency = false
+        }
+        func leadingDateMatch(in value: String) -> TextMatch? {
+            let candidate = value.trimmingCharacters(in: .whitespacesAndNewlines)
+            let matches: [TextMatch?] = [
+                dateRegex.flatMap { firstMatch(in: candidate, regex: $0) },
+                shortMonthDateRegex.flatMap { firstMatch(in: candidate, regex: $0) },
+                isoDateRegex.flatMap { firstMatch(in: candidate, regex: $0) },
+                textDateRegex.flatMap { firstMatch(in: candidate, regex: $0) }
+            ]
+            return matches.compactMap { match in
+                guard let match, match.range.location == 0 else { return nil }
+                return match
+            }.first
         }
         for rawLine in text.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -3442,14 +3475,59 @@ final class FinanceStore {
                 currentPage = page
                 continue
             }
-            let hasDate = (dateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
-                || (shortMonthDateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
-                || (isoDateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
-                || (textDateRegex.flatMap { firstMatch(in: line, regex: $0) } != nil)
-            if hasDate {
+
+            if amexSectionAware {
+                // The section headers are repeated on every page. Flushing
+                // first prevents a page header that was concatenated to the
+                // prior amount by PDFKit from becoming part of that row.
+                if normalizedLine.contains("estado de cuenta pagina")
+                    || normalizedLine.hasPrefix("estado de cuenta")
+                    || normalizedLine.contains("numero de cuenta")
+                    || normalizedLine.contains("tarjetahabiente") {
+                    flushPending()
+                    continue
+                }
+                if normalizedLine.contains("fecha y detalle de las operaciones") {
+                    flushPending()
+                    if amexSection == 0 { amexSection = 1 }
+                    continue
+                }
+                if normalizedLine.contains("total de transacciones en moneda extranjera") {
+                    flushPending()
+                    amexSection = 0
+                    continue
+                }
+                if normalizedLine.contains("total de las transacciones en") {
+                    flushPending()
+                    amexSection = 2
+                    continue
+                }
+                if normalizedLine.contains("transacciones de meses sin intereses")
+                    || normalizedLine.contains("descripcion de compras en meses sin intereses") {
+                    flushPending()
+                    amexSection = 3
+                    continue
+                }
+                if normalizedLine.contains("total de meses sin intereses")
+                    || normalizedLine.contains("total de plan de meses sin intereses")
+                    || normalizedLine.contains("resumen de meses sin intereses")
+                    || normalizedLine.contains("consolidado de compras en meses sin intereses") {
+                    flushPending()
+                    amexSection = 0
+                    continue
+                }
+                // Ignore all text outside an Amex movement table. This is the
+                // key boundary that keeps dates in headers/equations from
+                // being interpreted as transactions.
+                if amexSection == 0 { continue }
+            }
+
+            let leadingDate = leadingDateMatch(in: line)
+            if leadingDate != nil {
                 flushPending()
                 pendingRow = line
                 pendingPage = currentPage
+                pendingForcedForeignCurrency = amexSectionAware && amexSection == 2
             } else if !pendingRow.isEmpty {
                 pendingRow += " " + line
             }
@@ -3466,11 +3544,7 @@ final class FinanceStore {
             )
             guard !ignoredPhrases.contains(where: { normalized.contains($0) }) else { return nil }
 
-            let dateMatch = dateRegex.flatMap { firstMatch(in: original, regex: $0) }
-                ?? shortMonthDateRegex.flatMap { firstMatch(in: original, regex: $0) }
-                ?? isoDateRegex.flatMap { firstMatch(in: original, regex: $0) }
-                ?? textDateRegex.flatMap { firstMatch(in: original, regex: $0) }
-            guard let dateMatch,
+            guard let dateMatch = leadingDateMatch(in: original),
                   let parsedDate = parseDate(dateMatch.text, defaultYear: defaultYear) else { return nil }
             var working = original
             var date = parsedDate
@@ -3483,6 +3557,15 @@ final class FinanceStore {
                 with: " ",
                 options: .regularExpression
             )
+            // PDFKit can concatenate the next page header directly to the
+            // final amount of the previous row (for example
+            // `290.00Estado de Cuenta Página 3`). It is layout metadata, not
+            // part of the merchant description.
+            working = working.replacingOccurrences(
+                of: #"(?i)estado\s+de\s+cuenta\s+p(?:á|a|�)gina\s+\d+"#,
+                with: " ",
+                options: .regularExpression
+            )
 
             guard let amountRegex else { return nil }
             let allAmountMatches = allMatches(in: working, regex: amountRegex)
@@ -3490,7 +3573,7 @@ final class FinanceStore {
                 $0.text.contains("$") || $0.text.range(of: #"[.,]\d{1,2}$"#, options: .regularExpression) != nil
             }
             let usableAmountMatches = moneyMatches.isEmpty ? allAmountMatches : moneyMatches
-            let foreignCurrency = Self.hasForeignCurrency(in: normalized)
+            let foreignCurrency = parsedRow.forcedForeignCurrency || Self.hasForeignCurrency(in: normalized)
             let bankLikeRow = documentKind == .bank
                 || ["deposito", "retiro", "saldo", "cuenta de cheques", "cuenta de ahorro", "abono"]
                     .contains { normalized.contains($0) }
@@ -4893,6 +4976,29 @@ final class FinanceStore {
             return nil
         }
 
+        // PDFKit does not guarantee that a visual label and its amount stay
+        // on the same extracted line. Keep a bounded cross-line fallback for
+        // issuer totals, while still requiring the amount to be immediately
+        // after the known label so account/reference numbers cannot satisfy
+        // the control accidentally.
+        func flexibleAmountOnLabel(_ labels: [String]) -> Decimal? {
+            let amountPattern = #"[-+]?\s*\$?\s*(?:\d{1,3}(?:[,.]\d{3})+|\d+)(?:[,.]\d{1,2})?"#
+            for label in labels {
+                let labelPattern = label
+                    .split(separator: " ")
+                    .map { NSRegularExpression.escapedPattern(for: String($0)) }
+                    .joined(separator: #"\s+"#)
+                let pattern = "(?is)(?:\(labelPattern))[^0-9-]{0,180}(\(amountPattern))"
+                guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+                if let match = regex.firstMatch(in: normalized, range: range),
+                   let valueRange = Range(match.range(at: 1), in: normalized),
+                   let value = parseAmount(String(normalized[valueRange])) {
+                    return value
+                }
+            }
+            return nil
+        }
+
         func countOnLabel(_ labels: [String]) -> Int? {
             let amountToken = #"(?:\$?\s*)?(?:\d{1,3}(?:[,.]\d{3})+|\d+)[.,]\d{2}\b"#
             let pattern = "(?:\(labels.joined(separator: "|")))\\D{0,24}(\\d{1,4})\\s+(?=\(amountToken))"
@@ -4973,8 +5079,16 @@ final class FinanceStore {
             ?? lastAmountOnLabel(["retiros", "retros", "retiros / cargos", "retros / cargos"])
         assign(\.depositTotal, declaredDeposits)
         assign(\.withdrawalTotal, declaredWithdrawals)
-        assign(\.domesticTransactionTotal, lastAmountOnLabel(["total de las transacciones en"]))
-        assign(\.foreignTransactionTotal, lastAmountOnLabel(["total de transacciones en moneda extranjera"]))
+        assign(
+            \.domesticTransactionTotal,
+            lastAmountOnLabel(["total de las transacciones en"])
+                ?? flexibleAmountOnLabel(["total de las transacciones en"])
+        )
+        assign(
+            \.foreignTransactionTotal,
+            lastAmountOnLabel(["total de transacciones en moneda extranjera"])
+                ?? flexibleAmountOnLabel(["total de transacciones en moneda extranjera"])
+        )
         summary.depositCount = countOnLabel(["total movimientos abonos", "total de abonos"])
             ?? countOnLabel(["depositos", "depositos / abonos"])
         summary.withdrawalCount = countOnLabel(["total movimientos cargos", "total de cargos"])
