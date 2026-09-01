@@ -27,7 +27,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
 
     /// Kept only in memory for the local result list. It is deliberately not
     /// part of the Codable payload exported to GitHub.
-    let sourceFileName: String = ""
+    var sourceFileName: String = ""
 
     private enum CodingKeys: String, CodingKey {
         case file, sourceFingerprint, source, accountKey, kind, mode,
