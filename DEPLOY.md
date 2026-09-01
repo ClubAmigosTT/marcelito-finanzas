@@ -38,6 +38,10 @@ $env:STATEMENT_READER_URL="https://marcelito-statement-reader.onrender.com/api/s
 
 El comando solo consulta `/health` y `/preflight`; no requiere ni acepta una
 ruta a PDFs reales.
+También puedes ejecutar el workflow manual **Statement Reader Verify** en
+GitHub Actions. Configura `STATEMENT_READER_TOKEN` como secreto del repositorio
+y deja la URL propuesta por defecto; el workflow instala dependencias, consulta
+salud y ejecuta el mismo preflight sin imprimir el token.
 
 ## Datos reales
 

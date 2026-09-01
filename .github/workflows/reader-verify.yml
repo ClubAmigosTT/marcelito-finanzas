@@ -1,0 +1,38 @@
+name: Statement Reader Verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      reader_url:
+        description: "URL pública del endpoint /api/statement-reader"
+        required: false
+        default: "https://marcelito-statement-reader.onrender.com/api/statement-reader"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verificar lector remoto sin datos reales
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      STATEMENT_READER_URL: ${{ inputs.reader_url }}
+      STATEMENT_READER_TOKEN: ${{ secrets.STATEMENT_READER_TOKEN }}
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Ejecutar health y preflight sintético
+        run: npm run reader:verify
+
