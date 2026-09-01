@@ -50,6 +50,7 @@ const categoryRulesStorageKey = "marcelito-category-rules.v1";
 const goalsStorageKey = "marcelito-goals.v1";
 const auditStorageKey = "marcelito-audit.last.v1";
 const multimodalReaderEndpoint = (import.meta.env.VITE_STATEMENT_READER_URL ?? "").trim();
+const multimodalReaderPreflightTimeoutMs = 120_000;
 type LocalAccount = { username: string; passwordHash: string };
 
 function latestStatementFor(statements: Statement[]) {
@@ -477,6 +478,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
         endpoint: multimodalReaderEndpoint,
         enabled: true,
         authorization: `Bearer ${token}`,
+        timeoutMs: multimodalReaderPreflightTimeoutMs,
       });
       setReaderPreflight(result);
     } catch (error) {
