@@ -26,9 +26,24 @@ const ZEN_FREE_MODELS = new Set([
   "nemotron-3.5-lightning-free",
   "muse-spark-1.2-contributor-free",
 ]);
+const ZEN_RESPONSES_MODELS = new Set(["muse-spark-1.2-contributor-free"]);
+const ZEN_CHAT_MODELS = new Set([
+  "big-pickle",
+  "mimo-v2.5-free",
+  "ling-3.0-flash-fin-free",
+  "nemotron-3-ultra-free",
+  "nemotron-3.5-lightning-free",
+]);
 
 function isZenFreeModel(model) {
   return ZEN_FREE_MODELS.has(model);
+}
+
+function zenTransportMatches(providerUrl, model) {
+  const responsesEndpoint = /\/responses\/?$/i.test(providerUrl.pathname);
+  const chatEndpoint = /\/chat\/completions\/?$/i.test(providerUrl.pathname);
+  return (ZEN_RESPONSES_MODELS.has(model) && responsesEndpoint)
+    || (ZEN_CHAT_MODELS.has(model) && chatEndpoint);
 }
 
 function hasUsableProviderConfig(env) {
@@ -39,7 +54,8 @@ function hasUsableProviderConfig(env) {
   try {
     const parsed = new URL(endpoint);
     return parsed.protocol === "https:"
-      && (!ZEN_HOSTS.has(parsed.hostname.toLowerCase()) || isZenFreeModel(model));
+      && (!ZEN_HOSTS.has(parsed.hostname.toLowerCase())
+        || (isZenFreeModel(model) && zenTransportMatches(parsed, model)));
   } catch {
     return false;
   }
@@ -405,11 +421,17 @@ async function callProvider({ pdf, fileName, env, fetchImpl, schema, prompt = RE
   if (ZEN_HOSTS.has(providerUrl.hostname.toLowerCase()) && !isZenFreeModel(model)) {
     throw new Error("provider_not_configured");
   }
+  if (ZEN_HOSTS.has(providerUrl.hostname.toLowerCase()) && !zenTransportMatches(providerUrl, model)) {
+    throw new Error("provider_not_configured");
+  }
   const maxOutputTokens = positiveInt(env.STATEMENT_READER_MAX_OUTPUT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS, 100_000);
   const pdfData = `data:application/pdf;base64,${pdf.toString("base64")}`;
   const structuredSchema = Object.fromEntries(Object.entries(schema).filter(([key]) => key !== "$schema" && key !== "$id"));
   const chatCompletionsEndpoint = /\/chat\/completions\/?$/i.test(providerUrl.pathname);
-  const plainJsonPrompt = `${prompt}\n\nCompatibilidad: devuelve el objeto JSON directamente, sin Markdown, sin comentarios y sin propiedades fuera del contrato.`;
+  const rootProperties = ["source", "kind", "account_last4", "period_start", "period_end", "cutoff_date", "page_count", "summary", "rows"].join(", ");
+  const summaryProperties = summaryFields.join(", ");
+  const rowProperties = rowFields.join(", ");
+  const plainJsonPrompt = `${prompt}\n\nContrato de compatibilidad: el objeto raíz debe contener exactamente [${rootProperties}]; summary debe contener exactamente [${summaryProperties}]; cada elemento de rows debe contener exactamente [${rowProperties}]. Respeta los tipos, enumeraciones y valores null descritos por las reglas anteriores. Compatibilidad: devuelve el objeto JSON directamente, sin Markdown, sin comentarios y sin propiedades fuera del contrato.`;
   // Zen exposes some free models through Chat Completions while Muse Spark is
   // exposed through Responses. Select the wire format from the configured
   // endpoint so changing between free models does not silently send a request

@@ -92,6 +92,9 @@ configuración cualquier modelo de Zen que no esté en la lista gratuita vigente
 `nemotron-3.5-lightning-free` o `big-pickle`), de modo que una variable de
 entorno mal escrita no puede activar accidentalmente un modelo de pago. Los
 demás proveedores compatibles conservan su propia política de facturación.
+En Zen, Muse Spark usa `/v1/responses`; los otros modelos gratuitos publicados
+para este lector usan `/v1/chat/completions`. El proxy marca la configuración
+como no lista si el modelo y la ruta no corresponden, antes de aceptar archivos.
 Los modelos gratuitos de Zen pueden tener condiciones de uso de datos distintas
 al lector local; por eso la interfaz muestra una advertencia y pide consentimiento
 cada vez que se envía un PDF nuevo. El lector local sigue siendo la opción por
