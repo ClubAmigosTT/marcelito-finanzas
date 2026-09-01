@@ -254,6 +254,11 @@ su huella. La aplicación no la activa por defecto: requiere configurar
 `.env.example` muestra los nombres de variables sin contener secretos; la
 certificación de precisión sigue pendiente de ejecutar el proxy con un modelo
 visual y un corpus privado.
+El proxy aplica además la misma compuerta de confianza visual que el cliente:
+media de filas ≥88% y media mínima por página ≥78%; por eso un modelo no puede
+declarar `mode: "text"` para eludir una lectura multimodal débil. La pantalla
+de revisión conserva ese estado como `review` y el libro canónico lo vuelve a
+comprobar antes de calcular cualquier cifra.
 La ejecución está encapsulada en `apps/ios/scripts/run-native-corpus.sh`, que
 conserva el `.xcresult` y el log para que cada calibración sea reproducible.
 El runner puede ejecutar el verificador automáticamente con

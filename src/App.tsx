@@ -425,6 +425,12 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       || commit.source === "Desconocido"
       || commit.kind === "unknown"
       || commit.sourceDetection?.status !== "verified"
+      // A multimodal reader keeps mode="text" for compatibility with the
+      // existing import contract, but its visual confidence is still a hard
+      // quality gate. Keep the persisted status aligned with the dashboard
+      // eligibility boundary so a weak remote read is never displayed as
+      // ready before the next render/migration pass.
+      || !hasSufficientOcrQuality(statement)
       // Browser OCR currently returns flattened text without coordinates;
       // keep scanned imports provisional until the user confirms their rows.
       || commit.mode === "ocr"

@@ -24,6 +24,13 @@ la versión del contrato/modelo y ejecuta `reconcileStatementImport`. Un
 resultado del proveedor que no concilia queda bloqueado y no puede alimentar
 el libro canónico.
 
+La confianza del proveedor también se trata como una compuerta, aunque la
+respuesta conserve `mode: "text"` para compatibilidad con el importador
+existente: el proxy y el cliente exigen una media mínima de 88% y una media
+por página mínima de 78% sobre las filas visuales. Una respuesta por debajo de
+esos umbrales se rechaza o queda provisional; nunca se presenta como un estado
+`ready` ni llega a los KPI.
+
 ## Proxy seguro
 
 El servidor está en `server/statement-reader.mjs` y se inicia con:

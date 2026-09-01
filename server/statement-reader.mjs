@@ -14,6 +14,8 @@ const DEFAULT_RATE_LIMIT_PER_MINUTE = 10;
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 2;
 const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
+const MIN_MULTIMODAL_AVERAGE_CONFIDENCE = 0.88;
+const MIN_MULTIMODAL_PAGE_CONFIDENCE = 0.78;
 const ZEN_HOSTS = new Set(["opencode.ai", "www.opencode.ai"]);
 // Keep this an explicit allowlist. A model name ending in "-free" is not
 // proof that Zen currently serves it without charge, and accepting arbitrary
@@ -344,6 +346,31 @@ function evidenceContainsAmountAnchor(amountCents, evidence) {
     .some((value) => value === expected);
 }
 
+/**
+ * Keep the provider boundary aligned with the client/dashboard gate. A model
+ * response is not trustworthy merely because every field has the right JSON
+ * type: if it contains visual rows, its row confidence must clear the same
+ * average and per-page thresholds before the proxy returns it. Statements
+ * with no rows are allowed through this check so a zero-activity period can
+ * still be reconciled by the issuer totals.
+ */
+function validateModelConfidence(value) {
+  if (!value.rows.length) return;
+  const average = value.rows.reduce((total, row) => total + row.confidence, 0) / value.rows.length;
+  const byPage = new Map();
+  for (const row of value.rows) {
+    const confidences = byPage.get(row.page) ?? [];
+    confidences.push(row.confidence);
+    byPage.set(row.page, confidences);
+  }
+  const weakestPage = Math.min(...[...byPage.values()].map((confidences) => (
+    confidences.reduce((total, confidence) => total + confidence, 0) / confidences.length
+  )));
+  if (average < MIN_MULTIMODAL_AVERAGE_CONFIDENCE || weakestPage < MIN_MULTIMODAL_PAGE_CONFIDENCE) {
+    throw new Error("model_low_confidence");
+  }
+}
+
 function shouldRetryWithoutStructuredOutput(response, body) {
   // A few OpenAI-compatible gateways implement PDF input but reject the
   // optional Structured Outputs envelope. Retry once without that envelope;
@@ -393,6 +420,7 @@ function validateModelShape(value) {
     if (!evidenceContainsDescriptionAnchor(row.description, row.evidence)) throw new Error("model_invalid_shape");
     if (!evidenceContainsAmountAnchor(row.amount_cents, row.evidence)) throw new Error("model_invalid_shape");
   }
+  validateModelConfidence(value);
   // Prevent the model from pulling a row from an adjacent/overlapping
   // statement. The client repeats this check, but the proxy must enforce the
   // same boundary before returning an extraction to any caller.
