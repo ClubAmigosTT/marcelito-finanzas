@@ -347,6 +347,11 @@ struct NativeCorpusCertificationView: View {
                 } label: {
                     Label("Ejecutar Vision", systemImage: "viewfinder")
                         .frame(maxWidth: .infinity, minHeight: 42)
+                        // The parent card sets a navy foreground style. Keep
+                        // the prominent action legible on its navy fill on
+                        // iOS versions that do not derive a contrasting
+                        // label color from `.tint` automatically.
+                        .foregroundStyle(Color.marcelitoCream)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(Color.marcelitoNavy)
