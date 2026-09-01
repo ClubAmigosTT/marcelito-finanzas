@@ -353,6 +353,20 @@ export function validateMultimodalExtraction(input: unknown): MultimodalStatemen
   const summary = normalizeSummary(input.summary);
   if (!Array.isArray(input.rows) || input.rows.length > MULTIMODAL_READER_MAX_ROWS) fail("rows", `se esperaban hasta ${MULTIMODAL_READER_MAX_ROWS} filas`);
   const rows = input.rows.map((row, index) => normalizeRow(row, index, page_count));
+  // A model can return a perfectly valid date from a neighbouring statement
+  // or from a repeated header. Keep the extraction tied to the declared
+  // accounting period before totals are reconciled; otherwise a coincidental
+  // amount could make an out-of-period row look trustworthy.
+  if (period_start || period_end) {
+    for (const [index, row] of rows.entries()) {
+      if (period_start && row.date < period_start) {
+        fail(`rows[${index}].date`, "el movimiento queda antes del periodo declarado");
+      }
+      if (period_end && row.date > period_end) {
+        fail(`rows[${index}].date`, "el movimiento queda después del periodo declarado");
+      }
+    }
+  }
   return { source, kind, account_last4, period_start, period_end, cutoff_date, page_count, summary, rows };
 }
 

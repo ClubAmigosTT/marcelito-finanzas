@@ -73,6 +73,15 @@ test("valida contrato multimodal y rechaza encabezados como movimientos", () => 
   );
 });
 
+test("rechaza filas que pertenecen a otro periodo aunque la fecha sea válida", () => {
+  assert.throws(
+    () => validateMultimodalExtraction(bankExtraction({
+      rows: [{ ...bankExtraction().rows[0], date: "2026-09-01", evidence: "01/SEP NOMINA ACME 1,000.00" }, bankExtraction().rows[1]],
+    })),
+    (error: unknown) => error instanceof MultimodalReaderError && error.code === "invalid_payload",
+  );
+});
+
 test("rechaza evidencia que no se puede vincular con el comercio", () => {
   assert.throws(
     () => validateMultimodalExtraction(bankExtraction({

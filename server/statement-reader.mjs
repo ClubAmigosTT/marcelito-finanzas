@@ -393,6 +393,13 @@ function validateModelShape(value) {
     if (!evidenceContainsDescriptionAnchor(row.description, row.evidence)) throw new Error("model_invalid_shape");
     if (!evidenceContainsAmountAnchor(row.amount_cents, row.evidence)) throw new Error("model_invalid_shape");
   }
+  // Prevent the model from pulling a row from an adjacent/overlapping
+  // statement. The client repeats this check, but the proxy must enforce the
+  // same boundary before returning an extraction to any caller.
+  for (const row of value.rows) {
+    if (value.period_start && row.date < value.period_start) throw new Error("model_invalid_shape");
+    if (value.period_end && row.date > value.period_end) throw new Error("model_invalid_shape");
+  }
   return value;
 }
 
