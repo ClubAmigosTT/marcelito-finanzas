@@ -160,26 +160,90 @@ function parseModelJson(value) {
 
 const administrativeRowPattern = /(?:ciudad\s+de\s+m[eé]xico|serie\s+del\s+certificado|total\s+(?:importe|de\s+las\s+transacciones|de\s+movimientos)|fecha\s+de\s+corte|n[uú]mero\s+de\s+cuenta|no\.?\s+de\s+cuenta|cuenta\s+clabe|rfc|saldo\s+(?:inicial|anterior|final|disponible)?|periodo\s+de\s+facturaci[oó]n)/i;
 
+const summaryFields = [
+  "previous_balance_cents",
+  "statement_balance_cents",
+  "debt_balance_cents",
+  "new_transactions_cents",
+  "payments_cents",
+  "credits_cents",
+  "payments_credits_cents",
+  "new_charges_cents",
+  "interest_cents",
+  "fees_cents",
+  "credit_limit_cents",
+  "credit_available_cents",
+  "minimum_payment_cents",
+  "minimum_plus_msi_cents",
+  "payment_for_no_interest_cents",
+  "cash_balance_cents",
+  "msi_original_deferred_cents",
+  "msi_pending_cents",
+  "revolving_balance_cents",
+  "msi_installments",
+  "msi_monthly_load_cents",
+  "domestic_transaction_total_cents",
+  "domestic_transaction_total_is_credit",
+  "foreign_transaction_total_cents",
+  "deposit_total_cents",
+  "withdrawal_total_cents",
+  "deposit_count",
+  "withdrawal_count",
+];
+
+const rowFields = ["date", "description", "amount_cents", "direction", "kind", "foreign_currency", "page", "evidence", "confidence"];
+
+function hasOnlyFields(value, fields) {
+  const keys = Object.keys(value);
+  return keys.length === fields.length && fields.every((field) => Object.prototype.hasOwnProperty.call(value, field));
+}
+
+function validIsoDate(value) {
+  if (typeof value !== "string" || !/^20\d{2}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return !Number.isNaN(date.valueOf()) && date.toISOString().slice(0, 10) === value;
+}
+
+function validNullableCents(value) {
+  return value === null || (Number.isInteger(value) && value >= 0 && value <= 1_000_000_000_000);
+}
+
 /** Lightweight server-side guard. The client performs the full canonical
  * validator; this second boundary prevents a direct caller from receiving an
  * obviously malformed or administrative model response. */
 function validateModelShape(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("model_invalid_shape");
-  if (typeof value.source !== "string" || !value.source.trim()) throw new Error("model_invalid_shape");
+  if (!hasOnlyFields(value, ["source", "kind", "account_last4", "period_start", "period_end", "cutoff_date", "page_count", "summary", "rows"])) throw new Error("model_invalid_shape");
+  if (typeof value.source !== "string" || !value.source.trim() || value.source.trim().length > 80 || administrativeRowPattern.test(value.source)) throw new Error("model_invalid_shape");
   if (!(["bank", "card", "unknown"].includes(value.kind))) throw new Error("model_invalid_shape");
+  if (value.account_last4 !== null && (typeof value.account_last4 !== "string" || !/^\d{4}$/.test(value.account_last4))) throw new Error("model_invalid_shape");
+  for (const key of ["period_start", "period_end", "cutoff_date"]) {
+    if (value[key] !== null && !validIsoDate(value[key])) throw new Error("model_invalid_shape");
+  }
+  if (value.period_start && value.period_end && value.period_start > value.period_end) throw new Error("model_invalid_shape");
   if (!Number.isInteger(value.page_count) || value.page_count < 1 || value.page_count > 200) throw new Error("model_invalid_shape");
-  if (!value.summary || typeof value.summary !== "object" || Array.isArray(value.summary)) throw new Error("model_invalid_shape");
+  if (!value.summary || typeof value.summary !== "object" || Array.isArray(value.summary) || !hasOnlyFields(value.summary, summaryFields)) throw new Error("model_invalid_shape");
+  for (const key of summaryFields) {
+    const summaryValue = value.summary[key];
+    if (key === "domestic_transaction_total_is_credit") {
+      if (summaryValue !== null && typeof summaryValue !== "boolean") throw new Error("model_invalid_shape");
+    } else if (["msi_installments", "deposit_count", "withdrawal_count"].includes(key)) {
+      if (summaryValue !== null && (!Number.isInteger(summaryValue) || summaryValue < 0 || summaryValue > 2_500)) throw new Error("model_invalid_shape");
+    } else if (!validNullableCents(summaryValue)) {
+      throw new Error("model_invalid_shape");
+    }
+  }
   if (!Array.isArray(value.rows) || value.rows.length > 2500) throw new Error("model_invalid_shape");
   for (const row of value.rows) {
-    if (!row || typeof row !== "object" || Array.isArray(row)) throw new Error("model_invalid_shape");
-    if (typeof row.date !== "string" || !/^20\d{2}-\d{2}-\d{2}$/.test(row.date)) throw new Error("model_invalid_shape");
+    if (!row || typeof row !== "object" || Array.isArray(row) || !hasOnlyFields(row, rowFields)) throw new Error("model_invalid_shape");
+    if (!validIsoDate(row.date)) throw new Error("model_invalid_shape");
     if (typeof row.description !== "string" || row.description.trim().length < 3 || administrativeRowPattern.test(row.description)) throw new Error("model_invalid_shape");
     if (!Number.isInteger(row.amount_cents) || row.amount_cents < 1 || row.amount_cents > 1_000_000_000_000) throw new Error("model_invalid_shape");
     if (!(["purchase", "cardPayment", "bankTransfer", "income", "credit", "refund", "msi", "interest", "fee", "other"].includes(row.kind))) throw new Error("model_invalid_shape");
     if (!(["in", "out"].includes(row.direction)) || !Number.isInteger(row.page) || row.page < 1 || row.page > value.page_count) throw new Error("model_invalid_shape");
     if (["income", "credit", "refund"].includes(row.kind) && row.direction !== "in") throw new Error("model_invalid_shape");
     if (["purchase", "msi", "interest", "fee"].includes(row.kind) && row.direction !== "out") throw new Error("model_invalid_shape");
-    if (typeof row.evidence !== "string" || row.evidence.trim().length < 3 || typeof row.confidence !== "number" || row.confidence < 0 || row.confidence > 1) throw new Error("model_invalid_shape");
+    if (typeof row.foreign_currency !== "boolean" || typeof row.evidence !== "string" || row.evidence.trim().length < 3 || row.evidence.length > 500 || typeof row.confidence !== "number" || !Number.isFinite(row.confidence) || row.confidence < 0 || row.confidence > 1) throw new Error("model_invalid_shape");
   }
   return value;
 }
