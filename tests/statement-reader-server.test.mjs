@@ -184,3 +184,36 @@ test("el proxy limita solicitudes autenticadas por origen", async () => {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+test("el proxy permite configurar un endpoint compatible sin exponer la clave", async () => {
+  let providerUrl = "";
+  let providerAuthorization = "";
+  const server = createStatementReaderServer({
+    env: {
+      STATEMENT_READER_API_KEY: "provider-secret",
+      STATEMENT_READER_MODEL: "vision-model",
+      STATEMENT_READER_PROVIDER_URL: "https://zen.example/v1/responses",
+      STATEMENT_READER_TOKEN: "reader-token",
+    },
+    fetchImpl: async (url, init) => {
+      providerUrl = String(url);
+      providerAuthorization = init.headers.authorization;
+      return new Response(JSON.stringify({ output_text: JSON.stringify(extraction) }), { status: 200 });
+    },
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/statement-reader`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer reader-token" },
+      body: JSON.stringify({ fileName: "estado.pdf", pdfBase64: "JVBERi0xLjQ=" }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(providerUrl, "https://zen.example/v1/responses");
+    assert.equal(providerAuthorization, "Bearer provider-secret");
+    assert.ok(!JSON.stringify(await response.json()).includes("provider-secret"));
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});

@@ -29,8 +29,9 @@ el libro canónico.
 El servidor está en `server/statement-reader.mjs` y se inicia con:
 
 ```text
-OPENAI_API_KEY=... 
-OPENAI_STATEMENT_MODEL=<modelo-vision-compatible>
+STATEMENT_READER_API_KEY=...
+STATEMENT_READER_MODEL=<modelo-vision-compatible>
+STATEMENT_READER_PROVIDER_URL=https://api.openai.com/v1/responses
 STATEMENT_READER_TOKEN=<token-largo-aleatorio>
 STATEMENT_READER_ALLOWED_ORIGIN=https://<origen-de-la-app>
 STATEMENT_READER_MAX_REQUESTS_PER_MINUTE=10
@@ -39,7 +40,11 @@ STATEMENT_READER_PROVIDER_TIMEOUT_MS=120000
 pnpm reader:server
 ```
 
-La clave del proveedor solo existe en el servidor. El proxy:
+La clave y la URL del proveedor solo existen en el servidor. El proxy acepta
+un endpoint compatible con Responses API para poder probar proveedores como
+Zen sin modificar el cliente; la compatibilidad multimodal y de salida
+estructurada debe verificarse por modelo antes de usarlo en producción. El
+proxy:
 
 - exige `Authorization: Bearer …` (o `x-reader-token`) y origen exacto;
 - limita solicitudes autenticadas por origen y lecturas simultáneas, con un

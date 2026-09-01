@@ -176,8 +176,16 @@ function validateModelShape(value) {
 }
 
 async function callProvider({ pdf, fileName, env, fetchImpl, schema }) {
-  const apiKey = String(env.OPENAI_API_KEY ?? "").trim();
-  const model = String(env.OPENAI_STATEMENT_MODEL ?? "").trim();
+  const apiKey = String(env.STATEMENT_READER_API_KEY ?? env.OPENAI_API_KEY ?? "").trim();
+  const model = String(env.STATEMENT_READER_MODEL ?? env.OPENAI_STATEMENT_MODEL ?? "").trim();
+  const endpoint = String(env.STATEMENT_READER_PROVIDER_URL ?? "https://api.openai.com/v1/responses").trim();
+  let providerUrl;
+  try {
+    providerUrl = new URL(endpoint);
+  } catch {
+    throw new Error("provider_not_configured");
+  }
+  if (providerUrl.protocol !== "https:") throw new Error("provider_not_configured");
   if (!apiKey || !model) throw new Error("provider_not_configured");
   const controller = new AbortController();
   const timeout = setTimeout(
@@ -186,7 +194,7 @@ async function callProvider({ pdf, fileName, env, fetchImpl, schema }) {
   );
   let response;
   try {
-    response = await fetchImpl("https://api.openai.com/v1/responses", {
+    response = await fetchImpl(providerUrl, {
       method: "POST",
       headers: {
         authorization: `Bearer ${apiKey}`,
@@ -257,7 +265,14 @@ export function createStatementReaderServer({ env = process.env, fetchImpl = fet
     }
     const pathname = new URL(req.url ?? "/", "http://localhost").pathname;
     if (req.method === "GET" && pathname === "/health") {
-      json(res, 200, { status: "ok", configured: Boolean(env.OPENAI_API_KEY && env.OPENAI_STATEMENT_MODEL && env.STATEMENT_READER_TOKEN) }, headers);
+      json(res, 200, {
+        status: "ok",
+        configured: Boolean(
+          (env.STATEMENT_READER_API_KEY || env.OPENAI_API_KEY)
+          && (env.STATEMENT_READER_MODEL || env.OPENAI_STATEMENT_MODEL)
+          && env.STATEMENT_READER_TOKEN,
+        ),
+      }, headers);
       return;
     }
     if (req.method !== "POST" || pathname !== "/api/statement-reader") {
