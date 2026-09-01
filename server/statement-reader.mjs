@@ -405,40 +405,79 @@ async function callProvider({ pdf, fileName, env, fetchImpl, schema, prompt = RE
   if (ZEN_HOSTS.has(providerUrl.hostname.toLowerCase()) && !isZenFreeModel(model)) {
     throw new Error("provider_not_configured");
   }
-  const requestBody = (includeStructuredOutput) => ({
-    model,
-    store: false,
-    max_output_tokens: positiveInt(env.STATEMENT_READER_MAX_OUTPUT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS, 100_000),
-    input: [{
-      role: "user",
-      content: [
-        {
-          type: "input_file",
-          filename: fileName,
-          file_data: `data:application/pdf;base64,${pdf.toString("base64")}`,
-        },
-        {
-          type: "input_text",
-          text: includeStructuredOutput
-            ? prompt
-            : `${prompt}\n\nCompatibilidad: devuelve el objeto JSON directamente, sin Markdown, sin comentarios y sin propiedades fuera del contrato.`,
-        },
-      ],
-    }],
-    ...(includeStructuredOutput ? {
-      text: {
-        format: {
+  const maxOutputTokens = positiveInt(env.STATEMENT_READER_MAX_OUTPUT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS, 100_000);
+  const pdfData = `data:application/pdf;base64,${pdf.toString("base64")}`;
+  const structuredSchema = Object.fromEntries(Object.entries(schema).filter(([key]) => key !== "$schema" && key !== "$id"));
+  const chatCompletionsEndpoint = /\/chat\/completions\/?$/i.test(providerUrl.pathname);
+  const plainJsonPrompt = `${prompt}\n\nCompatibilidad: devuelve el objeto JSON directamente, sin Markdown, sin comentarios y sin propiedades fuera del contrato.`;
+  // Zen exposes some free models through Chat Completions while Muse Spark is
+  // exposed through Responses. Select the wire format from the configured
+  // endpoint so changing between free models does not silently send a request
+  // shape the gateway cannot read.
+  const requestBody = (includeStructuredOutput) => chatCompletionsEndpoint
+    ? {
+      model,
+      temperature: 0,
+      max_tokens: maxOutputTokens,
+      messages: [{
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: includeStructuredOutput ? prompt : plainJsonPrompt,
+          },
+          {
+            type: "file",
+            file: {
+              filename: fileName,
+              file_data: pdfData,
+            },
+          },
+        ],
+      }],
+      ...(includeStructuredOutput ? {
+        response_format: {
           type: "json_schema",
-          name: "statement_extraction",
-          strict: true,
-          // `$schema`/`$id` are useful repository metadata but are not part
-          // of the provider's strict response grammar. Keep `$defs`/`$ref`,
-          // which Structured Outputs supports, and strip only those hints.
-          schema: Object.fromEntries(Object.entries(schema).filter(([key]) => key !== "$schema" && key !== "$id")),
+          json_schema: {
+            name: "statement_extraction",
+            strict: true,
+            schema: structuredSchema,
+          },
         },
-      },
-    } : {}),
-  });
+      } : {}),
+    }
+    : {
+      model,
+      store: false,
+      max_output_tokens: maxOutputTokens,
+      input: [{
+        role: "user",
+        content: [
+          {
+            type: "input_file",
+            filename: fileName,
+            file_data: pdfData,
+          },
+          {
+            type: "input_text",
+            text: includeStructuredOutput ? prompt : plainJsonPrompt,
+          },
+        ],
+      }],
+      ...(includeStructuredOutput ? {
+        text: {
+          format: {
+            type: "json_schema",
+            name: "statement_extraction",
+            strict: true,
+            // `$schema`/`$id` are useful repository metadata but are not part
+            // of the provider's strict response grammar. Keep `$defs`/`$ref`,
+            // which Structured Outputs supports, and strip only those hints.
+            schema: structuredSchema,
+          },
+        },
+      } : {}),
+    };
   const requestProvider = async (includeStructuredOutput) => {
     const controller = new AbortController();
     const timeout = setTimeout(

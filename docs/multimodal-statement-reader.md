@@ -42,8 +42,9 @@ pnpm reader:server
 ```
 
 La clave y la URL del proveedor solo existen en el servidor. El proxy acepta
-un endpoint compatible con Responses API para poder probar proveedores como
-Zen sin modificar el cliente; la compatibilidad multimodal y de salida
+un endpoint compatible con Responses API o Chat Completions para poder probar
+proveedores como Zen sin modificar el cliente; el formato de la petición se
+elige según la ruta configurada. La compatibilidad multimodal y de salida
 estructurada debe verificarse por modelo antes de usarlo en producción. El
 proxy:
 
