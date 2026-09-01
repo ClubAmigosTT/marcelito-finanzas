@@ -364,7 +364,7 @@ struct NativeCorpusCertificationView: View {
             }
 
             Text(report.certified
-                ? "Comparte este informe JSON y guárdalo como artifacts/native-corpus-certification.json en GitHub. La siguiente build podrá usarlo sin una Mac."
+                ? "Comparte este informe JSON y guárdalo como docs/native-corpus-certification.json en GitHub. La siguiente build podrá usarlo sin una Mac."
                 : "Corrige los archivos bloqueados y vuelve a ejecutar Vision. El informe no habilita publicación hasta alcanzar 99% y cubrir los 10 estados.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
