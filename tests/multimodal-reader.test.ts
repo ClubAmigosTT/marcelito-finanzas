@@ -82,6 +82,15 @@ test("rechaza evidencia que no se puede vincular con el comercio", () => {
   );
 });
 
+test("conserva comercios cortos cuando la evidencia contiene su nombre", () => {
+  const valid = bankExtraction();
+  const result = validateMultimodalExtraction({
+    ...valid,
+    rows: [{ ...valid.rows[0], description: "KFC", evidence: "05/AGO KFC 1,000.00" }],
+  });
+  assert.equal(result.rows[0].description, "KFC");
+});
+
 test("convierte centavos, conserva evidencia y reconcilia antes de entregar el resultado", () => {
   const result = extractionToImportResult({ ...bankExtraction(), source: "BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE" }, { name: "BBVA agosto.pdf", size: 1200 });
   assert.equal(result.source, "BBVA");

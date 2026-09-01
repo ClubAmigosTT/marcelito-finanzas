@@ -1,4 +1,4 @@
-/* global fetch, Response */
+/* global fetch, Response, Buffer */
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -303,6 +303,32 @@ test("el proxy permite configurar un endpoint compatible sin exponer la clave", 
   }
 });
 
+test("acepta el envoltorio choices de un gateway compatible", async () => {
+  const server = createStatementReaderServer({
+    env: {
+      STATEMENT_READER_API_KEY: "provider-secret",
+      STATEMENT_READER_MODEL: "vision-model",
+      STATEMENT_READER_TOKEN: "reader-token",
+    },
+    fetchImpl: async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(extraction) } }],
+    }), { status: 200 }),
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/statement-reader`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer reader-token" },
+      body: JSON.stringify({ fileName: "estado.pdf", pdfBase64: "JVBERi0xLjQ=" }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).extraction.source, "BBVA");
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("el preflight prueba PDF y JSON sin enviar un estado del usuario", async () => {
   let providerBody;
   const server = createStatementReaderServer({
@@ -331,6 +357,9 @@ test("el preflight prueba PDF y JSON sin enviar un estado del usuario", async ()
     });
     const encoded = providerBody.input[0].content[0].file_data;
     assert.match(encoded, /^data:application\/pdf;base64,/);
+    const syntheticPdf = Buffer.from(encoded.split(",")[1], "base64");
+    assert.equal(syntheticPdf.subarray(0, 5).toString("ascii"), "%PDF-");
+    assert.match(syntheticPdf.toString("utf8"), /xref[\s\S]+startxref[\s\S]+%%EOF/);
     assert.match(providerBody.input[0].content[1].text, /prueba técnica/);
     assert.ok(!JSON.stringify(providerBody).includes("provider-secret"));
   } finally {

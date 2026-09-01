@@ -230,9 +230,10 @@ function confidenceField(value: unknown, path: string) {
  */
 function evidenceContainsDescriptionAnchor(description: string, evidence: string) {
   const evidenceText = normalizeConcept(evidence);
+  const genericTokens = new Set(["pago", "cargo", "compra", "abono", "credito", "debito", "total", "saldo", "movimiento", "transaccion"]);
   const anchors = normalizeConcept(description)
     .split(" ")
-    .filter((token) => token.length >= 4);
+    .filter((token) => token.length >= 3 && !genericTokens.has(token));
   return anchors.some((token) => evidenceText.includes(token));
 }
 

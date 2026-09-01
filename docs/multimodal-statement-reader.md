@@ -55,6 +55,8 @@ proxy:
 - si un gateway compatible rechaza únicamente `json_schema`, reintenta una
   sola vez solicitando JSON directo; el mismo validador estricto del servidor
   sigue siendo obligatorio antes de entregar el resultado;
+- entiende tanto la envoltura Responses (`output_text`/`output`) como la
+  envoltura compatible Chat Completions (`choices`), sin relajar el contrato;
 - no devuelve el PDF ni texto bruto, solo la extracción y su huella SHA-256;
 - no registra nombres, filas, importes ni respuestas del proveedor.
 

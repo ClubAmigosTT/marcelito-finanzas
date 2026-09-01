@@ -180,6 +180,15 @@ function extractOutputText(body) {
       if (typeof content?.text === "string") chunks.push(content.text);
     }
   }
+  // Keep compatibility with OpenAI-compatible gateways that expose the same
+  // multimodal response through Chat Completions' `choices` envelope.
+  for (const choice of Array.isArray(body?.choices) ? body.choices : []) {
+    const content = choice?.message?.content;
+    if (typeof content === "string") chunks.push(content);
+    for (const part of Array.isArray(content) ? content : []) {
+      if (typeof part?.text === "string") chunks.push(part.text);
+    }
+  }
   return chunks.join("\n");
 }
 
@@ -259,7 +268,8 @@ function normalizeEvidenceText(value) {
 
 function evidenceContainsDescriptionAnchor(description, evidence) {
   const evidenceText = normalizeEvidenceText(evidence);
-  const anchors = normalizeEvidenceText(description).split(" ").filter((token) => token.length >= 4);
+  const genericTokens = new Set(["pago", "cargo", "compra", "abono", "credito", "debito", "total", "saldo", "movimiento", "transaccion"]);
+  const anchors = normalizeEvidenceText(description).split(" ").filter((token) => token.length >= 3 && !genericTokens.has(token));
   return anchors.some((token) => evidenceText.includes(token));
 }
 
