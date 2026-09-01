@@ -18,11 +18,15 @@ enum ZenExpenseClassifier {
 
     static let endpoint = URL(string: "https://opencode.ai/zen/v1/chat/completions")!
     static let defaultFreeModel = "mimo-v2.5-free"
+    /// Keep each response comfortably below the output limit. A long list of
+    /// pending movements must be split instead of silently truncating the
+    /// JSON returned by the provider.
+    static let maxBatchSize = 32
     static let freeModels: [FreeModel] = [
         FreeModel(id: "mimo-v2.5-free", name: "MiMo V2.5 Free"),
-        FreeModel(id: "deepseek-v4-flash-free", name: "DeepSeek V4 Flash Free"),
-        FreeModel(id: "north-mini-code-free", name: "North Mini Code Free"),
+        FreeModel(id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin Free"),
         FreeModel(id: "nemotron-3-ultra-free", name: "Nemotron 3 Ultra Free"),
+        FreeModel(id: "nemotron-3.5-lightning-free", name: "Nemotron 3.5 Lightning Free"),
         FreeModel(id: "big-pickle", name: "Big Pickle")
     ]
     static let allowedCategories = [
@@ -109,6 +113,33 @@ enum ZenExpenseClassifier {
         }
         guard !movements.isEmpty else { return [] }
 
+        var classifications: [AIClassification] = []
+        var start = 0
+        while start < movements.count {
+            let end = min(start + maxBatchSize, movements.count)
+            classifications.append(contentsOf: try await classifyBatch(
+                movements: Array(movements[start..<end]),
+                apiKey: apiKey,
+                model: model
+            ))
+            start = end
+        }
+
+        // A provider may repeat an item when a batch contains similar rows.
+        // Keep the first answer for each requested movement and never allow
+        // an unknown ID to mutate the local ledger.
+        var seen = Set<UUID>()
+        let requested = Set(movements.map(\.id))
+        return classifications.filter { requested.contains($0.movementID) && seen.insert($0.movementID).inserted }
+    }
+
+    private static func classifyBatch(
+        movements: [Movement],
+        apiKey: String,
+        model: String
+    ) async throws -> [AIClassification] {
+        guard !movements.isEmpty else { return [] }
+
         let input = movements.map { movement in
             [
                 "id": movement.id.uuidString,
@@ -123,13 +154,13 @@ enum ZenExpenseClassifier {
         let inputJSON = String(data: inputData, encoding: .utf8) ?? "[]"
         let categories = allowedCategories.joined(separator: ", ")
         let system = """
-        Eres el clasificador de gastos de una app financiera. Clasifica cada movimiento usando solo estas categorías: (categories). No clasifiques ingresos ni transferencias: esos movimientos no deben enviarse a esta función. Identifica si pertenece a un viaje. Conserva exactamente cada id. Responde únicamente un arreglo JSON, sin markdown, con objetos de la forma {\"id\":\"UUID\",\"category\":\"Categoría\",\"travelRelated\":true|false}.
+        Eres el clasificador de gastos de una app financiera. Clasifica cada movimiento usando solo estas categorías: \(categories). No clasifiques ingresos ni transferencias: esos movimientos no deben enviarse a esta función. Identifica si pertenece a un viaje. Conserva exactamente cada id. Responde únicamente un arreglo JSON, sin markdown, con objetos de la forma {\"id\":\"UUID\",\"category\":\"Categoría\",\"travelRelated\":true|false}.
         """
-        let user = "Clasifica estos movimientos pendientes:\n(inputJSON)"
+        let user = "Clasifica estos movimientos pendientes:\n\(inputJSON)"
         let requestBody = Request(
             model: model,
             temperature: 0,
-            maxTokens: 1400,
+            maxTokens: 2000,
             messages: [
                 Message(role: "system", content: system),
                 Message(role: "user", content: user)
@@ -162,8 +193,12 @@ enum ZenExpenseClassifier {
             throw ClassificationError.invalidResponse
         }
 
+        let requested = Set(movements.map(\.id))
+        var seen = Set<UUID>()
         return payloads.compactMap { (payload: ClassificationPayload) -> AIClassification? in
             guard let movementID = UUID(uuidString: payload.id),
+                  requested.contains(movementID),
+                  seen.insert(movementID).inserted,
                   let category = canonicalCategory(payload.category) else { return nil }
             return AIClassification(
                 movementID: movementID,

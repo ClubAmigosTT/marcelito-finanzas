@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 const rootTabPath = new URL("../apps/ios/Cauce/RootTabView.swift", import.meta.url);
 const sectionsPath = new URL("../apps/ios/Cauce/Sections.swift", import.meta.url);
 const modelsPath = new URL("../apps/ios/Cauce/Models.swift", import.meta.url);
+const aiClassificationPath = new URL("../apps/ios/Cauce/AIClassification.swift", import.meta.url);
 
 test("la interfaz iOS usa importación y reconstrucción asíncronas", async () => {
   const [rootTab, sections, models] = await Promise.all([
@@ -25,4 +26,34 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
   assert.match(models, /Task\.detached\(priority: \.userInitiated\)/);
   assert.match(models, /func importPDFAsync[\s\S]*?try Task\.checkCancellation\(\)[\s\S]*?try Task\.checkCancellation\(\)/);
   assert.match(models, /func rebuildCanonicalLedgerIfNeededAsync\(/);
+});
+
+test("el clasificador iOS solo ofrece modelos gratuitos vigentes de Zen", async () => {
+  const source = await readFile(aiClassificationPath, "utf8");
+  const freeModels = [
+    "mimo-v2.5-free",
+    "ling-3.0-flash-fin-free",
+    "nemotron-3-ultra-free",
+    "nemotron-3.5-lightning-free",
+    "big-pickle",
+  ];
+  for (const model of freeModels) assert.match(source, new RegExp(`id: "${model.replaceAll(".", "\\.")}"`));
+  assert.doesNotMatch(source, /deepseek-v4-flash-free|north-mini-code-free/);
+});
+
+test("el clasificador iOS interpola categorías y movimientos reales en el prompt", async () => {
+  const source = await readFile(aiClassificationPath, "utf8");
+  assert.match(source, /usando solo estas categor[ií]as: \\\(categories\)/i);
+  assert.match(source, /pendientes:\\n\\\(inputJSON\)/);
+  assert.doesNotMatch(source, /usando solo estas categor[ií]as: \(categories\)/i);
+  assert.doesNotMatch(source, /pendientes:\\n\(inputJSON\)/);
+});
+
+test("el clasificador iOS divide lotes y filtra respuestas fuera de alcance", async () => {
+  const source = await readFile(aiClassificationPath, "utf8");
+  assert.match(source, /static let maxBatchSize = 32/);
+  assert.match(source, /classifyBatch\(/);
+  assert.match(source, /requested\.contains\(movementID\)/);
+  assert.match(source, /seen\.insert\(movementID\)\.inserted/);
+  assert.match(source, /maxTokens: 2000/);
 });
