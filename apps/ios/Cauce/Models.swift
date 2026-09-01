@@ -3554,7 +3554,13 @@ final class FinanceStore {
             #"(?i)transacciones\s+de\s+meses\s+sin\s+intereses"#,
             #"(?i)descripcion\s+de\s+compras\s+en\s+meses\s+sin\s+intereses"#,
             #"(?i)total\s+de\s+(?:meses|plan\s+de\s+meses)\s+sin\s+intereses"#,
-            #"(?i)(?<![A-Za-z0-9])(?:[0-9OBI]{1,3}\s*[\/-]\s*[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s*[\/-]\s*(?:20)?\d{2})?|[0-9OBI]{1,3}\s+(?:de\s*)?[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s+(?:de\s+)?\d{4})?)(?![A-Za-z])"#,
+            // Require a real month token. A broad "digits + whitespace +
+            // letters" pattern can mistake the cents of `950.00` followed
+            // by `Nuevas` or `Total` for a date and split a valid amount.
+            // Restricting the structural repair to known Spanish months
+            // keeps OCR variants such as AG0 while making the operation
+            // idempotent for already structured rows.
+            #"(?i)(?<![A-Za-z0-9.,])(?:[0-9OBI]{1,3}\s*[\/-]\s*(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ag(?:o|0)(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)(?:\s*[\/-]\s*(?:20)?\d{2})?|[0-9OBI]{1,3}\s+(?:de\s*)?(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ag(?:o|0)(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)(?:\s+(?:de\s+)?\d{4})?)(?![A-Za-z])"#,
         ]
         var positions = Set<String.Index>()
         for pattern in boundaries {
