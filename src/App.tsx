@@ -1245,6 +1245,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
   const initialCategories = useRef<Record<string, string>>({});
   const selectedFile = useRef<File | null>(null);
   const readerAuthorization = useRef("");
+  const readerConsent = useRef(false);
 
   if (open && dialog.current && !dialog.current.open) dialog.current.showModal();
   if (!open && dialog.current?.open) dialog.current.close();
@@ -1253,6 +1254,8 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
     if (!file) return;
     if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) { setError("Selecciona un archivo PDF válido."); setStage("error"); return; }
     selectedFile.current = file;
+    readerConsent.current = false;
+    readerAuthorization.current = "";
     setStage("processing"); setProgress(0); setProgressLabel("Cargando estado de cuenta…"); setError("");
     try {
       const inspected = await inspectPdf(file, (value, label) => { setProgress(value); setProgressLabel(label); });
@@ -1277,6 +1280,15 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
   async function retryWithMultimodalReader() {
     const file = selectedFile.current;
     if (!file || !multimodalReaderEndpoint) return;
+    if (!readerConsent.current) {
+      const confirmed = window.confirm("El lector avanzado enviará temporalmente este PDF a un proveedor externo. Los modelos gratuitos de Zen pueden tener políticas de uso de datos distintas al lector local. ¿Quieres continuar?");
+      if (!confirmed) {
+        setError("No se envió el PDF. Puedes continuar con la revisión local.");
+        setStage("error");
+        return;
+      }
+      readerConsent.current = true;
+    }
     const token = readerAuthorization.current || window.prompt("Token temporal del lector seguro (no se guardará en este dispositivo):")?.trim() || "";
     if (!token) {
       setError("Se necesita autorización temporal para enviar este PDF al lector seguro.");
@@ -1353,7 +1365,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
     } : current);
   }
 
-  function resetAndClose() { setStage("pick"); setProgress(0); setProgressLabel(""); setResult(null); setItems([]); setSummary({}); setReviewSource("Desconocido"); setReviewKind("unknown"); setError(""); initialCategories.current = {}; selectedFile.current = null; readerAuthorization.current = ""; onClose(); }
+  function resetAndClose() { setStage("pick"); setProgress(0); setProgressLabel(""); setResult(null); setItems([]); setSummary({}); setReviewSource("Desconocido"); setReviewKind("unknown"); setError(""); initialCategories.current = {}; selectedFile.current = null; readerAuthorization.current = ""; readerConsent.current = false; onClose(); }
 
   function updateSummary(key: keyof StatementSummary, value: string) {
     setSummary((current) => {

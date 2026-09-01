@@ -321,6 +321,8 @@ test("el proxy bloquea modelos no gratuitos cuando el proveedor es Zen", async (
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
   try {
+    const health = await fetch(`http://127.0.0.1:${address.port}/health`);
+    assert.deepEqual(await health.json(), { status: "ok", configured: false });
     const response = await fetch(`http://127.0.0.1:${address.port}/api/statement-reader`, {
       method: "POST",
       headers: { "content-type": "application/json", authorization: "Bearer reader-token" },
@@ -328,6 +330,37 @@ test("el proxy bloquea modelos no gratuitos cuando el proveedor es Zen", async (
     });
     assert.equal(response.status, 503);
     assert.equal(providerCalled, false);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("el proxy acepta el modelo gratuito explícito de Zen", async () => {
+  let providerCalled = false;
+  const server = createStatementReaderServer({
+    env: {
+      STATEMENT_READER_API_KEY: "provider-secret",
+      STATEMENT_READER_MODEL: "muse-spark-1.2-contributor-free",
+      STATEMENT_READER_PROVIDER_URL: "https://opencode.ai/zen/v1/responses",
+      STATEMENT_READER_TOKEN: "reader-token",
+    },
+    fetchImpl: async () => {
+      providerCalled = true;
+      return new Response(JSON.stringify({ output_text: JSON.stringify(extraction) }), { status: 200 });
+    },
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  try {
+    const health = await fetch(`http://127.0.0.1:${address.port}/health`);
+    assert.deepEqual(await health.json(), { status: "ok", configured: true });
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/statement-reader`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer reader-token" },
+      body: JSON.stringify({ fileName: "estado.pdf", pdfBase64: "JVBERi0xLjQ=" }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal(providerCalled, true);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }

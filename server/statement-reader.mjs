@@ -15,10 +15,34 @@ const DEFAULT_MAX_CONCURRENT_REQUESTS = 2;
 const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
 const ZEN_HOSTS = new Set(["opencode.ai", "www.opencode.ai"]);
-const ZEN_FREE_MODEL_PATTERN = /(?:^|-)free$/i;
+// Keep this an explicit allowlist. A model name ending in "-free" is not
+// proof that Zen currently serves it without charge, and accepting arbitrary
+// names could route financial documents to an unreviewed or paid model.
+const ZEN_FREE_MODELS = new Set([
+  "big-pickle",
+  "mimo-v2.5-free",
+  "ling-3.0-flash-fin-free",
+  "nemotron-3-ultra-free",
+  "nemotron-3.5-lightning-free",
+  "muse-spark-1.2-contributor-free",
+]);
 
 function isZenFreeModel(model) {
-  return model === "big-pickle" || ZEN_FREE_MODEL_PATTERN.test(model);
+  return ZEN_FREE_MODELS.has(model);
+}
+
+function hasUsableProviderConfig(env) {
+  const apiKey = String(env.STATEMENT_READER_API_KEY ?? env.OPENAI_API_KEY ?? "").trim();
+  const model = String(env.STATEMENT_READER_MODEL ?? env.OPENAI_STATEMENT_MODEL ?? "").trim();
+  const endpoint = String(env.STATEMENT_READER_PROVIDER_URL ?? "https://api.openai.com/v1/responses").trim();
+  if (!apiKey || !model) return false;
+  try {
+    const parsed = new URL(endpoint);
+    return parsed.protocol === "https:"
+      && (!ZEN_HOSTS.has(parsed.hostname.toLowerCase()) || isZenFreeModel(model));
+  } catch {
+    return false;
+  }
 }
 
 const READER_PROMPT = `Eres un extractor documental financiero. Lee el PDF completo, incluyendo las páginas renderizadas cuando el texto esté desordenado. Devuelve exclusivamente el JSON que cumple el esquema indicado.
@@ -485,8 +509,7 @@ export function createStatementReaderServer({ env = process.env, fetchImpl = fet
       json(res, 200, {
         status: "ok",
         configured: Boolean(
-          (env.STATEMENT_READER_API_KEY || env.OPENAI_API_KEY)
-          && (env.STATEMENT_READER_MODEL || env.OPENAI_STATEMENT_MODEL)
+          hasUsableProviderConfig(env)
           && env.STATEMENT_READER_TOKEN,
         ),
       }, headers);

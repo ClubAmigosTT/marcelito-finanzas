@@ -85,10 +85,16 @@ valor inicial de Render usa el modelo gratuito
 publica en el endpoint `/v1/responses`; aun así, se debe hacer una prueba con
 un PDF anonimizado y comprobar que el modelo realmente acepta archivos y
 salida estructurada antes de enviar estados reales. El proxy rechaza por
-configuración cualquier modelo de Zen que no termine en `-free` (además de
-`big-pickle`), de modo que una variable de entorno mal escrita no puede activar
-accidentalmente un modelo de pago. Los demás proveedores compatibles conservan
-su propia política de facturación.
+configuración cualquier modelo de Zen que no esté en la lista gratuita vigente
+(`muse-spark-1.2-contributor-free`, `mimo-v2.5-free`,
+`ling-3.0-flash-fin-free`, `nemotron-3-ultra-free`,
+`nemotron-3.5-lightning-free` o `big-pickle`), de modo que una variable de
+entorno mal escrita no puede activar accidentalmente un modelo de pago. Los
+demás proveedores compatibles conservan su propia política de facturación.
+Los modelos gratuitos de Zen pueden tener condiciones de uso de datos distintas
+al lector local; por eso la interfaz muestra una advertencia y pide consentimiento
+cada vez que se envía un PDF nuevo. El lector local sigue siendo la opción por
+defecto para mantener los estados en el dispositivo.
 
 ## Activación progresiva
 
