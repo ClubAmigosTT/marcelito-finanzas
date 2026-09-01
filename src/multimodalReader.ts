@@ -93,6 +93,12 @@ export type MultimodalReaderRequest = {
   promptVersion: typeof MULTIMODAL_READER_PROMPT_VERSION;
 };
 
+export type MultimodalReaderPreflightResult = {
+  status: "ready";
+  model: string;
+  contract: "statement-extraction.v1";
+};
+
 export const STATEMENT_EXTRACTION_SCHEMA = statementExtractionSchema;
 
 /**
@@ -444,6 +450,71 @@ function optionalModel(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 && value.trim().length <= 120
     ? value.trim()
     : undefined;
+}
+
+function preflightEndpoint(endpoint: string) {
+  const base = typeof location !== "undefined" ? location.origin : "http://localhost";
+  const parsed = new URL(endpoint, base);
+  parsed.pathname = `${parsed.pathname.replace(/\/+$/, "")}/preflight`;
+  parsed.search = "";
+  parsed.hash = "";
+  return parsed.toString();
+}
+
+/**
+ * Verifies the configured provider with a synthetic, empty PDF. This is an
+ * explicit operator check: no user file is read and no financial data crosses
+ * the network. A successful result proves that the proxy accepted the PDF and
+ * returned the exact contract the client expects.
+ */
+export async function requestMultimodalReaderPreflight(
+  options: Pick<MultimodalReaderClientOptions, "endpoint" | "authorization" | "timeoutMs" | "signal" | "fetchImpl"> & { enabled?: boolean },
+): Promise<MultimodalReaderPreflightResult> {
+  if (!options.enabled) throw new MultimodalReaderError("not_configured", "El preflight requiere confirmación explícita");
+  const endpoint = options.endpoint.trim();
+  if (!endpoint || !isSecureReaderEndpoint(endpoint)) {
+    throw new MultimodalReaderError("not_configured", "El preflight requiere HTTPS o un proxy local");
+  }
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 30_000);
+  const externalAbort = () => controller.abort(options.signal?.reason);
+  if (options.signal) {
+    if (options.signal.aborted) externalAbort();
+    else options.signal.addEventListener("abort", externalAbort, { once: true });
+  }
+  try {
+    const headers: Record<string, string> = { "content-type": "application/json" };
+    if (options.authorization) headers.authorization = options.authorization;
+    const response = await fetchImpl(preflightEndpoint(endpoint), {
+      method: "POST",
+      headers,
+      body: "{}",
+      signal: controller.signal,
+    });
+    let body: unknown;
+    try {
+      body = await response.json();
+    } catch {
+      throw new MultimodalReaderError("request_failed", "El preflight devolvió una respuesta no válida");
+    }
+    if (!response.ok) {
+      const message = isRecord(body) && typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
+      throw new MultimodalReaderError("request_failed", `El lector avanzado no está listo: ${message}`);
+    }
+    const model = isRecord(body) ? optionalModel(body.model) : undefined;
+    if (!isRecord(body) || body.status !== "ready" || body.contract !== "statement-extraction.v1" || !model) {
+      throw new MultimodalReaderError("invalid_payload", "El proveedor no confirmó el contrato del lector");
+    }
+    return { status: "ready", model, contract: "statement-extraction.v1" };
+  } catch (error) {
+    if (error instanceof MultimodalReaderError) throw error;
+    if (error instanceof Error && error.name === "AbortError") throw new MultimodalReaderError("request_failed", "El preflight agotó el tiempo de espera");
+    throw new MultimodalReaderError("request_failed", error instanceof Error ? error.message : "Falló el preflight");
+  } finally {
+    clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", externalAbort);
+  }
 }
 
 /**

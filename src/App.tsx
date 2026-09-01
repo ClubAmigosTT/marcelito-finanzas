@@ -38,7 +38,8 @@ import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, 
 import { prepareStoredLedger } from "./statementMigration";
 import { clearWebErrorDiagnostics, readWebErrorDiagnostics, type WebErrorDiagnostic } from "./WebErrorBoundary";
 import { clearImportedPdfs, openImportedPdf, saveImportedPdf } from "./documentStore";
-import { extractionToImportResult, requestMultimodalExtraction, MultimodalReaderError } from "./multimodalReader";
+import { extractionToImportResult, requestMultimodalExtraction, requestMultimodalReaderPreflight, MultimodalReaderError } from "./multimodalReader";
+import type { MultimodalReaderPreflightResult } from "./multimodalReader";
 import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
@@ -310,6 +311,10 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   const [goals, setGoals] = useState<FinancialGoal[]>(() => readStored(goalsStorageKey, []));
   const [lastAuditRun, setLastAuditRun] = useState<AuditRunRecord | null>(() => readStored<AuditRunRecord | null>(auditStorageKey, null));
   const [importOpen, setImportOpen] = useState(false);
+  const [readerPreflight, setReaderPreflight] = useState<MultimodalReaderPreflightResult | null>(null);
+  const [readerPreflightBusy, setReaderPreflightBusy] = useState(false);
+  const [readerPreflightError, setReaderPreflightError] = useState("");
+  const readerAuthorization = useRef("");
   const reduceMotion = useReducedMotion();
   const latestStatement = latestStatementFor(statements);
   const pipeline = useMemo(() => runTransactionPipeline(transactions, statements), [transactions, statements]);
@@ -455,6 +460,33 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       : item));
   }
 
+  async function runReaderPreflight() {
+    if (!multimodalReaderEndpoint || readerPreflightBusy) return;
+    const token = readerAuthorization.current
+      || window.prompt("Token temporal del lector seguro (no se guardará en este dispositivo):")?.trim()
+      || "";
+    if (!token) {
+      setReaderPreflightError("Se necesita autorización temporal para probar el lector seguro.");
+      return;
+    }
+    readerAuthorization.current = token;
+    setReaderPreflightBusy(true);
+    setReaderPreflightError("");
+    try {
+      const result = await requestMultimodalReaderPreflight({
+        endpoint: multimodalReaderEndpoint,
+        enabled: true,
+        authorization: `Bearer ${token}`,
+      });
+      setReaderPreflight(result);
+    } catch (error) {
+      setReaderPreflight(null);
+      setReaderPreflightError(error instanceof MultimodalReaderError ? error.message : "No se pudo comprobar el lector seguro.");
+    } finally {
+      setReaderPreflightBusy(false);
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -485,7 +517,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
         {initialLedger.quarantinedMovementCount > 0 && <div className="provisional-banner migration-notice" role="status"><Warning size={18} /><span>Se retiraron {initialLedger.quarantinedMovementCount} movimiento{initialLedger.quarantinedMovementCount === 1 ? "" : "s"} generado{initialLedger.quarantinedMovementCount === 1 ? "" : "s"} por una versión anterior del lector. Vuelve a importar esos estados para reconstruirlos con las reglas actuales.</span></div>}
         <AnimatePresence mode="wait">
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
-            {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => setImportOpen(true)} />}
+            {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => setImportOpen(true)} onRunReaderPreflight={multimodalReaderEndpoint ? runReaderPreflight : undefined} readerPreflight={readerPreflight} readerPreflightBusy={readerPreflightBusy} readerPreflightError={readerPreflightError} />}
             {section === "Gastos" && <Expenses transactions={ledgerTransactions} statements={statements} metrics={metrics} onImport={() => setImportOpen(true)} />}
             {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onOpenStatement={(statement) => openImportedPdf(statement.sourceFingerprint)} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
             {section === "Patrimonio" && <NetWorth metrics={metrics} />}
@@ -503,7 +535,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
 type DashboardMetricKey = "patrimony" | "cash" | "debt" | "expense" | "flow";
 type MetricSeriesPoint = { key: string; label: string; value: number };
 
-function Home({ transactions, statements, metrics, goals, setGoals, auditRun, onImport }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; goals: FinancialGoal[]; setGoals: React.Dispatch<React.SetStateAction<FinancialGoal[]>>; auditRun: AuditRunRecord | null; onImport: () => void }) {
+function Home({ transactions, statements, metrics, goals, setGoals, auditRun, onImport, onRunReaderPreflight, readerPreflight, readerPreflightBusy, readerPreflightError }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; goals: FinancialGoal[]; setGoals: React.Dispatch<React.SetStateAction<FinancialGoal[]>>; auditRun: AuditRunRecord | null; onImport: () => void; onRunReaderPreflight?: () => void; readerPreflight: MultimodalReaderPreflightResult | null; readerPreflightBusy: boolean; readerPreflightError: string }) {
   const [selectedMetric, setSelectedMetric] = useState<DashboardMetricKey | null>(null);
   if (!transactions.length && !statements.length) return <RealDataEmpty onImport={onImport} />;
 
@@ -542,7 +574,7 @@ function Home({ transactions, statements, metrics, goals, setGoals, auditRun, on
         <GoalsPanel metrics={metrics} goals={goals} setGoals={setGoals} />
       </>}
       <DataQualityIndicator metrics={metrics} />
-      <AuditDiagnostics metrics={metrics} statements={statements} auditRun={auditRun} />
+      <AuditDiagnostics metrics={metrics} statements={statements} auditRun={auditRun} onRunReaderPreflight={onRunReaderPreflight} readerPreflight={readerPreflight} readerPreflightBusy={readerPreflightBusy} readerPreflightError={readerPreflightError} />
     </>
   );
 }
@@ -828,12 +860,12 @@ function DebtBreakdown({ metrics }: { metrics: ReturnType<typeof buildFinanceMet
   return <section className="debt-breakdown" aria-label="Desglose de deuda"><div><span>Saldo total de deuda</span><strong>{displayMoney(metrics.debtTotal)}</strong><small>Tarjetas y créditos al último corte</small></div><div><span>Pago próximo</span><strong>{displayMoney(metrics.latestPaymentDue)}</strong><small>Mínimo + MSI del estado</small></div><div><span>Pago para no generar intereses</span><strong>{displayMoney(metrics.latestPaymentForNoInterest)}</strong><small>Importe del estado</small></div><div><span>MSI pendientes</span><strong>{displayMoney(metrics.latestMsiPending)}</strong><small>{metrics.latestMsiInstallmentsCount ? `${metrics.latestMsiInstallmentsCount} mensualidades` : "Principal diferido"}</small></div></section>;
 }
 
-function AuditDiagnostics({ metrics, statements, auditRun }: { metrics: ReturnType<typeof buildFinanceMetrics>; statements: Statement[]; auditRun: AuditRunRecord | null }) {
+function AuditDiagnostics({ metrics, statements, auditRun, onRunReaderPreflight, readerPreflight, readerPreflightBusy, readerPreflightError }: { metrics: ReturnType<typeof buildFinanceMetrics>; statements: Statement[]; auditRun: AuditRunRecord | null; onRunReaderPreflight?: () => void; readerPreflight: MultimodalReaderPreflightResult | null; readerPreflightBusy: boolean; readerPreflightError: string }) {
   const audit = metrics.audit;
   const [runtimeErrors, setRuntimeErrors] = useState<WebErrorDiagnostic[]>(() => readWebErrorDiagnostics());
   return <details className="audit-diagnostics">
      <summary><div><strong>Auditoría de importación y conciliación</strong><span>Diagnóstico temporal reproducible · {audit.stages.join(" → ")}</span></div><b>{audit.periods.length} periodos</b></summary>
-    <div className="audit-actions"><button type="button" className="text-button" onClick={() => exportAuditDiagnostics(metrics, statements, auditRun)}><DownloadSimple size={15} /> Descargar diagnóstico JSON</button><span>No incluye descripciones ni importes individuales.</span>{runtimeErrors.length > 0 && <button type="button" className="text-button" onClick={() => { clearWebErrorDiagnostics(); setRuntimeErrors([]); }}>Limpiar errores de interfaz</button>}</div>
+    <div className="audit-actions"><button type="button" className="text-button" onClick={() => exportAuditDiagnostics(metrics, statements, auditRun)}><DownloadSimple size={15} /> Descargar diagnóstico JSON</button><span>No incluye descripciones ni importes individuales.</span>{onRunReaderPreflight && <><button type="button" className="text-button" onClick={onRunReaderPreflight} disabled={readerPreflightBusy}><ShieldCheck size={15} />{readerPreflightBusy ? "Comprobando lector…" : "Probar lector avanzado"}</button>{readerPreflight && <span className="reader-preflight-ok" role="status">Lector listo · {readerPreflight.model}</span>}{readerPreflightError && <span className="reader-preflight-error" role="status">{readerPreflightError}</span>}</>}{runtimeErrors.length > 0 && <button type="button" className="text-button" onClick={() => { clearWebErrorDiagnostics(); setRuntimeErrors([]); }}>Limpiar errores de interfaz</button>}</div>
     {runtimeErrors.length > 0 && <div className="runtime-diagnostics" role="status"><strong>{runtimeErrors.length} error{runtimeErrors.length === 1 ? "" : "es"} de interfaz registrado{runtimeErrors.length === 1 ? "" : "s"}</strong>{runtimeErrors.slice(-3).reverse().map((entry) => <div className="runtime-diagnostic-row" key={entry.eventId}><span>{new Intl.DateTimeFormat("es-MX", { dateStyle: "short", timeStyle: "short" }).format(new Date(entry.recordedAt))}</span><code>{entry.eventId}</code><p>{entry.message || "Error sin mensaje"}</p></div>)}</div>}
     {auditRun && <div className="audit-run-meta"><span>Auditoría {auditRun.id} · {auditRun.trigger} · libro {auditRun.ledgerFingerprint}{auditRun.sourceFingerprints?.length ? ` · PDF${auditRun.sourceFingerprints.length === 1 ? "" : "s"} ${auditRun.sourceFingerprints.map((fingerprint) => fingerprint.slice(0, 8)).join(", ")}` : ""}{auditRun.readerVersions?.length ? ` · lector ${auditRun.readerVersions.join(", ")}` : ""}{auditRun.quarantinedMovementCount ? ` · ${auditRun.quarantinedMovementCount} fila${auditRun.quarantinedMovementCount === 1 ? "" : "s"} heredada${auditRun.quarantinedMovementCount === 1 ? "" : "s"} en cuarentena` : ""}</span><b className={`audit-status-${auditRun.status}`}>{auditRun.status === "passed" ? "Verificado" : auditRun.status === "warning" ? "Advertencias" : "Bloqueado"}</b></div>}
     {audit.criticalIssues.length > 0 && <div className="audit-critical">{audit.criticalIssues.join(" · ")}</div>}

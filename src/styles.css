@@ -534,6 +534,10 @@ body { background: var(--bg); color: var(--ink); }
 .audit-actions { display: flex; align-items: center; gap: 10px; padding: 0 17px 12px; border-bottom: 1px solid var(--line); }
 .audit-actions .text-button { display: inline-flex; align-items: center; gap: 6px; }
 .audit-actions > span { color: var(--muted); font-size: 10px; }
+.audit-actions .reader-preflight-ok,
+.audit-actions .reader-preflight-error { font-size: 10px; font-weight: 700; }
+.audit-actions .reader-preflight-ok { color: var(--income); }
+.audit-actions .reader-preflight-error { color: var(--expense); }
 .audit-critical { margin: 0 17px 12px; padding: 9px 11px; border-radius: 8px; background: color-mix(in srgb, var(--expense) 10%, transparent); color: var(--expense); font-size: 11px; font-weight: 700; }
 .audit-table { overflow-x: auto; padding: 0 17px; }
 .audit-row { display: grid; grid-template-columns: minmax(125px, 1.2fr) repeat(7, minmax(95px, 1fr)); gap: 12px; min-width: 830px; padding: 10px 0; border-top: 1px solid var(--line); color: var(--navy-mid); font-size: 11px; align-items: center; }

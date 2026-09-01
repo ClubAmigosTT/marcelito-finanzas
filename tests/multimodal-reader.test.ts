@@ -4,6 +4,7 @@ import {
   MultimodalReaderError,
   extractionToImportResult,
   requestMultimodalExtraction,
+  requestMultimodalReaderPreflight,
   validateMultimodalExtraction,
 } from "../src/multimodalReader.ts";
 import type { MultimodalStatementSummary } from "../src/multimodalReader.ts";
@@ -157,5 +158,31 @@ test("no envía el PDF a un endpoint HTTP público", async () => {
   await assert.rejects(
     requestMultimodalExtraction(file, { endpoint: "http://reader.example/api/statement-reader", enabled: true }),
     (error: unknown) => error instanceof MultimodalReaderError && error.code === "not_configured",
+  );
+});
+
+test("el preflight comprueba el contrato sin leer un archivo del usuario", async () => {
+  let requestBody = "";
+  const result = await requestMultimodalReaderPreflight({
+    endpoint: "https://reader.example/api/statement-reader",
+    enabled: true,
+    authorization: "Bearer reader-token",
+    fetchImpl: async (_input, init) => {
+      requestBody = String(init?.body ?? "");
+      return new Response(JSON.stringify({ status: "ready", model: "vision-statement-v1", contract: "statement-extraction.v1" }), { status: 200 });
+    },
+  });
+  assert.deepEqual(result, { status: "ready", model: "vision-statement-v1", contract: "statement-extraction.v1" });
+  assert.equal(requestBody, "{}");
+});
+
+test("el preflight no acepta un proveedor que omite el contrato", async () => {
+  await assert.rejects(
+    requestMultimodalReaderPreflight({
+      endpoint: "https://reader.example/api/statement-reader",
+      enabled: true,
+      fetchImpl: async () => new Response(JSON.stringify({ status: "ready", model: "vision-statement-v1" }), { status: 200 }),
+    }),
+    (error: unknown) => error instanceof MultimodalReaderError && error.code === "invalid_payload",
   );
 });
