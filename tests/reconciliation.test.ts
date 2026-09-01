@@ -909,6 +909,20 @@ test("la conciliación de tarjeta usa nuevas transacciones antes que el total co
   assert.equal(reconcileStatementImport("card", summary, rows).status, "valid");
 });
 
+test("la conciliación de tarjeta bloquea una deuda que no cuadra con límite y disponible", () => {
+  const summary = {
+    newTransactions: 100,
+    creditLimit: 10_000,
+    creditAvailable: 9_000,
+    debtBalance: 900,
+  };
+  const rows = extractTransactions("01/08/2026 COMPRA 100.00", "Amex", "sample-card-period-identity.pdf", "card");
+  const reconciliation = reconcileStatementImport("card", summary, rows);
+  assert.equal(reconciliation.status, "invalid");
+  assert.equal(reconciliation.creditIdentityDifference, 100);
+  assert.match(reconciliation.reason ?? "", /identidad de crédito/);
+});
+
 test("la conciliación Amex usa subtotales nacional y extranjero como gasto real", () => {
   const summary = parseStatementSummary([
     "Nuevas transacciones: 3,317.75",

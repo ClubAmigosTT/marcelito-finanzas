@@ -709,6 +709,14 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       const difference = netForeignChargeTotal - summary.foreignTransactionTotal;
       if (Math.abs(difference) > tolerance) sectionDifferences.push(`moneda extranjera ${difference.toFixed(2)}`);
     }
+    const creditIdentityDifference = summary.creditLimit !== undefined
+      && summary.creditAvailable !== undefined
+      && summary.debtBalance !== undefined
+      ? summary.creditLimit - summary.creditAvailable - summary.debtBalance
+      : undefined;
+    if (creditIdentityDifference !== undefined && Math.abs(creditIdentityDifference) > tolerance) {
+      sectionDifferences.push(`identidad de crédito ${creditIdentityDifference.toFixed(2)}`);
+    }
     const invalid = transactions.length === 0 && declaredCharges > tolerance
       || Math.abs(chargeDifference) > tolerance
       || (summary.payments !== undefined && Math.abs(paymentDifference) > tolerance)
@@ -721,6 +729,7 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       extractedForeignChargeTotal,
       extractedCreditTotal,
       extractedPaymentTotal,
+      creditIdentityDifference,
       extractedMovementCount: transactions.length,
       reason: invalid ? `Las filas no concilian con cargos/pagos del estado (cargos ${chargeDifference.toFixed(2)}, pagos ${paymentDifference.toFixed(2)}${sectionDifferences.length ? `, secciones ${sectionDifferences.join("; ")}` : ""})` : undefined,
     };

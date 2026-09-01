@@ -87,6 +87,8 @@ export type StatementReconciliation = {
   /** Créditos del estado (por ejemplo, “monto a diferir”) descontados del gasto neto. */
   extractedCreditTotal?: number;
   extractedPaymentTotal?: number;
+  /** Difference in the card identity: credit limit - available - debt. */
+  creditIdentityDifference?: number;
   extractedMovementCount?: number;
   /** Expected row count when the issuer declares deposit/withdrawal counts. */
   expectedMovementCount?: number;
