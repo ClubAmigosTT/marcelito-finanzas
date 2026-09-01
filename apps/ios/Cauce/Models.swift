@@ -553,7 +553,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.08.31.14"
+    static let readerVersion = "ios-reader-2026.08.31.15"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -2602,9 +2602,25 @@ final class FinanceStore {
         let ocrPageConfidences: [Double]? = {
             guard usedOCR else { return nil }
             let grouped = Dictionary(grouping: ocrObservations, by: \.page)
-            // Preserve a zero-confidence entry for a failed/blank page.
-            let values = (0..<document.pageCount).map { page -> Double in
-                guard let observations = grouped[page], !observations.isEmpty else { return 0 }
+            let relevantPages = grouped.keys.filter { page in
+                let pageText = (grouped[page] ?? []).map(\.text).joined(separator: " ")
+                let normalizedPageText = pageText.folding(
+                    options: [.diacriticInsensitive, .caseInsensitive],
+                    locale: .current
+                )
+                let hasDate = pageText.range(of: #"(?i)(?:\b\d{1,2}\s*[/-]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,})|\b\d{1,2}\s+(?:de\s+)?[A-Za-zÁÉÍÓÚáéíóú]{3,})"#, options: .regularExpression) != nil
+                let hasAmount = pageText.range(of: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#, options: .regularExpression) != nil
+                let hasTableMarker = ["movimientos", "deposito", "depositos", "retiro", "retiros", "cargos", "abonos", "saldo", "descripcion", "detalle"]
+                    .contains { normalizedPageText.contains($0) }
+                // Legal/marketing pages in a scanned statement often have no
+                // table signal and should not lower the quality of the actual
+                // movement pages. If a page has a date, amount, or table
+                // marker it remains part of the quality gate.
+                return hasDate || hasAmount || hasTableMarker
+            }
+            let pages = relevantPages.isEmpty ? grouped.keys : relevantPages
+            let values = pages.sorted().compactMap { page -> Double? in
+                guard let observations = grouped[page], !observations.isEmpty else { return nil }
                 return observations.map(\.confidence).reduce(0, +) / Double(observations.count)
             }
             return values.isEmpty ? nil : values
@@ -3375,7 +3391,7 @@ final class FinanceStore {
             "resumen informativo", "cuenta de cheques", "saldo inicial",
             "saldo final", "saldo promedio", "saldo disponible", "mes anterior",
             "mes actual", "intereses brutos", "comisiones cobradas", "otros cargos",
-            "dias del periodo", "codigo de cliente", "rfc",
+            "dias del periodo", "codigo de cliente",
             "depositos", "retiros", "abonos"
         ]
 
@@ -3462,7 +3478,21 @@ final class FinanceStore {
                     .contains { normalized.contains($0) }
             let amountMatch: TextMatch? = {
                 guard !usableAmountMatches.isEmpty else { return nil }
-                if foreignCurrency { return usableAmountMatches.first }
+                if foreignCurrency {
+                    // Amex prints the source-currency amount and exchange
+                    // rate before the final MXN amount. Select the local
+                    // amount, not the USD value or TC, so reconciliation is
+                    // performed in the same currency as the statement totals.
+                    let currencyPattern = #"(?i)d[óo]lar(?:es)?|euro?s?|peso(?:s)?\s+colombiano?s?|tipo\s+de\s+cambio|\btc\s*:"#
+                    if let markerRange = working.range(of: currencyPattern, options: .regularExpression) {
+                        let marker = NSRange(markerRange, in: working)
+                        let markerEnd = marker.location + marker.length
+                        let afterMarker = usableAmountMatches.filter { $0.range.location >= markerEnd }
+                        let beforeMarker = usableAmountMatches.filter { $0.range.location < marker.location }
+                        return afterMarker.last ?? beforeMarker.last ?? usableAmountMatches.last
+                    }
+                    return usableAmountMatches.last
+                }
                 if bankLikeRow, account == "BBVA" { return usableAmountMatches.first }
                 if bankLikeRow, usableAmountMatches.count > 1 {
                     return usableAmountMatches[usableAmountMatches.count - 2]
@@ -3505,7 +3535,7 @@ final class FinanceStore {
             }
 
             var title = working
-                .replacingOccurrences(of: #"\bRFC[A-Z0-9]+\b"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: #"\bRFC\s*[:#]?\s*[A-Z0-9]+\b"#, with: "", options: .regularExpression)
                 .replacingOccurrences(of: #"/REF[A-Z0-9_]+\b"#, with: "", options: .regularExpression)
                 .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
                 .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
@@ -3822,7 +3852,7 @@ final class FinanceStore {
                 with: " ",
                 options: .regularExpression
             )
-            .replacingOccurrences(of: #"\bRFC[A-Z0-9]+\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\bRFC\s*[:#]?\s*[A-Z0-9]+\b"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"/REF[A-Z0-9_]+\b"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
@@ -4040,12 +4070,19 @@ final class FinanceStore {
         }
         let grouped = Dictionary(grouping: observations, by: \.page)
         let headerYTolerance: CGFloat = 0.05
+        // Santander changes the labels between account products and PDF
+        // templates (DEPÓSITOS/ABONOS and RETIROS/CARGOS). Treat these as
+        // equivalent anchors, while still requiring all three columns on the
+        // same visual header line before automatic acceptance.
+        let depositLabels = ["deposito", "depositos", "abono", "abonos", "entrada", "entradas"]
+        let withdrawalLabels = ["retiro", "retiros", "cargo", "cargos", "salida", "salidas"]
+        let balanceLabels = ["saldo", "balance", "saldoactual"]
         var anchors: (deposit: CGFloat, withdrawal: CGFloat, balance: CGFloat)?
         for page in grouped.keys.sorted() {
             let pageObservations = grouped[page] ?? []
-            let deposits = pageObservations.filter { ["deposito", "depositos"].contains(normalizedLabel($0)) }
-            let withdrawals = pageObservations.filter { ["retiro", "retiros"].contains(normalizedLabel($0)) }
-            let balances = pageObservations.filter { normalizedLabel($0) == "saldo" }
+            let deposits = pageObservations.filter { depositLabels.contains(normalizedLabel($0)) }
+            let withdrawals = pageObservations.filter { withdrawalLabels.contains(normalizedLabel($0)) }
+            let balances = pageObservations.filter { balanceLabels.contains(normalizedLabel($0)) }
             for deposit in deposits {
                 let hasTableRowHeader = pageObservations.contains { observation in
                     let label = normalizedLabel(observation)
@@ -4205,7 +4242,7 @@ final class FinanceStore {
                 with: " ",
                 options: .regularExpression
             )
-            .replacingOccurrences(of: #"\bRFC[A-Z0-9]+\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\bRFC\s*[:#]?\s*[A-Z0-9]+\b"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"/REF[A-Z0-9_]+\b"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
@@ -4457,7 +4494,11 @@ final class FinanceStore {
             }
         }
         let orderedAmounts = amountCandidates.sorted(by: { $0.order < $1.order })
-        guard let selected = (hasForeignCurrency(in: normalizedFullText) ? orderedAmounts.first : orderedAmounts.last) else { return nil }
+        // The card statement's monetary column is the last amount in the OCR
+        // row. For foreign purchases the row can also contain the source
+        // currency and exchange rate; selecting the first token would record
+        // USD (or the TC) as MXN and make the statement fail reconciliation.
+        guard let selected = orderedAmounts.last else { return nil }
 
         var title = fullText
             .replacingOccurrences(

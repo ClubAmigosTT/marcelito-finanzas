@@ -159,6 +159,65 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("fecha y detalle") })
     }
 
+    func testAmexForeignRowUsesTheLocalMXNAmount() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            American Express
+            The Platinum Credit Card
+            Fecha y Detalle de las operaciones Importe en MN.
+            19 de Junio CHIPOTLE 5071 NEW YORK
+            RFC123456789 /REF123456789
+            Dólar U.S.A. 19.05 TC:17.79265
+            338.95
+            """,
+            fileName: "sample-card-period-3.pdf"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 1)
+        XCTAssertEqual(snapshot.movements.first?.amount, -338.95)
+        XCTAssertTrue(snapshot.movements.first?.foreignCurrency == true)
+        XCTAssertFalse(snapshot.movements.first?.title.contains("19.05") == true)
+    }
+
+    func testBBVAStatementRebuildsAllMovementRowsAndExcludesBalances() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE, GRUPO FINANCIERO BBVA MEXICO
+            Comportamiento
+            Saldo Anterior 3,589.63
+            Depósitos / Abonos (+) 2 19,500.00
+            Retiros / Cargos (-) 9 22,058.69
+            Saldo Final 1,030.94
+            Detalle de Movimientos Realizados
+            FECHA SALDO OPER LIQ DESCRIPCION REFERENCIA CARGOS ABONOS OPERACION LIQUIDACION
+            23/JUL 22/JUL FACEBK *XR4NKVVF52 120.00 3,469.63 3,469.63
+            27/JUL 27/JUL SPEI RECIBIDO NVIO 15,000.00 18,469.63 18,469.63
+            29/JUL 29/JUL SPEI ENVIADO STP 13,000.00 5,469.63 5,369.63
+            30/JUL 30/JUL SPEI ENVIADO STP 500.00
+            30/JUL 29/JUL TELEF MOVIS MC INSURGE 100.00 4,869.63 4,869.63
+            03/AGO 04/AGO PAGO CUENTA DE TERCERO 3,253.00 1,616.63 4,869.63
+            05/AGO 05/AGO SPEI RECIBIDO SANTANDER 4,500.00 6,116.63 6,116.63
+            06/AGO 06/AGO RETIRO CAJERO AUTOMATICO 4,515.83 1,600.80 1,530.94
+            07/AGO 06/AGO COMISION CAJERO RED 60.23
+            07/AGO 06/AGO IVA REP TARJ TIT 9.63 1,530.94 1,530.94
+            10/AGO 10/AGO SPEI ENVIADO STP 500.00 1,030.94 1,030.94
+            TOTAL IMPORTE CARGOS 22,058.69 TOTAL MOVIMIENTOS CARGOS 9
+            TOTAL IMPORTE ABONOS 19,500.00 TOTAL MOVIMIENTOS ABONOS 2
+            """,
+            fileName: "sample-bank-bbva.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "BBVA")
+        XCTAssertEqual(snapshot.movements.count, 11)
+        let charges = snapshot.movements.filter { $0.amount < 0 }
+            .reduce(Decimal.zero) { $0 + abs($1.amount) }
+        let deposits = snapshot.movements.filter { $0.amount > 0 }
+            .reduce(Decimal.zero) { $0 + $1.amount }
+        XCTAssertEqual(charges, Decimal(string: "22058.69"))
+        XCTAssertEqual(deposits, Decimal(string: "19500.00"))
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("saldo") })
+    }
+
     func testAmexLimitAndAvailableProduceCommittedDebt() {
         let text = """
         American Express
@@ -495,6 +554,21 @@ final class ReaderContractTests: XCTestCase {
             OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
         ]
         XCTAssertFalse(FinanceStore.santanderOCRColumnsCalibratedForTesting(missingAnchor, fileName: "sample-bank-period-3.pdf"))
+    }
+
+    func testSantanderOCRAcceptsEquivalentAbonosAndCargosColumnLabels() {
+        let labels = [
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
+            OCRObservationFixture(text: "ABONOS", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "CARGOS", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "BALANCE", x: 0.79, y: 0.90, width: 0.08),
+        ]
+
+        XCTAssertTrue(FinanceStore.santanderOCRColumnsCalibratedForTesting(
+            labels,
+            fileName: "sample-bank-period-3.pdf"
+        ))
     }
 
     func testSantanderOCRDoesNotMixColumnAnchorsAcrossPagesOrRows() {
