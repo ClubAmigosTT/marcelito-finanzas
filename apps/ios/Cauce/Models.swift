@@ -5847,7 +5847,17 @@ final class FinanceStore {
         for line in normalized.components(separatedBy: .newlines).prefix(120) {
             let compact = line.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if compact.range(of: #"detalle\s+(?:de\s+)?movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripcion|fecha\s+y\s+detalle"#, options: .regularExpression) != nil {
+            if let markerRange = compact.range(
+                of: #"detalle\s+(?:de\s+)?movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripcion|fecha\s+y\s+detalle"#,
+                options: .regularExpression
+            ) {
+                // PDFKit can flatten the whole first page into one line. Keep
+                // the institutional prefix before the table marker instead
+                // of discarding the entire line, so `American Express` (or a
+                // bank's legal header) remains usable for issuer detection.
+                let prefix = String(compact[..<markerRange.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !prefix.isEmpty { header.append(prefix) }
                 break
             }
             if !compact.isEmpty { header.append(compact) }
@@ -5999,7 +6009,10 @@ final class FinanceStore {
         var headerLines: [String] = []
         for line in normalized.components(separatedBy: .newlines).prefix(120) {
             let compact = line.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
-            if compact.range(of: "detalle de movimientos|movimientos realizados|fecha (?:folio )?descripcion|fecha y detalle", options: .regularExpression) != nil {
+            if let markerRange = compact.range(of: "detalle de movimientos|movimientos realizados|fecha (?:folio )?descripcion|fecha y detalle", options: .regularExpression) {
+                let prefix = String(compact[..<markerRange.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !prefix.isEmpty { headerLines.append(prefix) }
                 break
             }
             if !compact.isEmpty { headerLines.append(compact) }
