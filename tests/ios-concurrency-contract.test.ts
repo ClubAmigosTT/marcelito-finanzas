@@ -38,6 +38,16 @@ test("Vision tiene fallback de idiomas cuando el dispositivo no expone etiquetas
   assert.match(source, /valid date, direction and issuer reconciliation/);
 });
 
+test("Amex Vision selecciona el importe MXN por columna y respeta sus secciones", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  // The local amount is right aligned; source-currency and TC tokens can
+  // appear later in OCR text and must not be selected by string order.
+  assert.match(source, /let localCurrencyCandidates = orderedAmounts\.filter \{ \$0\.x >= 0\.72 \}/);
+  assert.match(source, /forcedForeignCurrency: amexSection == 2/);
+  assert.match(source, /amexSection = 3/);
+  assert.match(source, /foreignCurrency: forcedForeignCurrency \|\| hasForeignCurrency/);
+});
+
 test("el clasificador iOS solo ofrece modelos gratuitos vigentes de Zen", async () => {
   const source = await readFile(aiClassificationPath, "utf8");
   const freeModels = [

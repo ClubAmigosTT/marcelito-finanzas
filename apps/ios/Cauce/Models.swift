@@ -4565,8 +4565,6 @@ final class FinanceStore {
             return Calendar.current.component(.year, from: .now)
         }()
 
-        let linesByPage = Dictionary(grouping: lines, by: \.page)
-        var rows: [[OCRObservation]] = []
         let ignoredHeaderPhrases = [
             "estado de cuenta", "tarjetahabiente", "test user",
             "fecha y detalle", "este no es", "paga desde", "total nuevos cargos",
@@ -4578,6 +4576,14 @@ final class FinanceStore {
             "a partir del", "anualidad de la tarjeta"
         ]
 
+        struct AmexOCRRow {
+            let observations: [OCRObservation]
+            let forcedForeignCurrency: Bool
+        }
+
+        let linesByPage = Dictionary(grouping: lines, by: \.page)
+        var rows: [AmexOCRRow] = []
+        var amexSection = 0 // 0: outside, 1: domestic, 2: foreign, 3: MSI
         for page in linesByPage.keys.sorted() {
             let pageLines = (linesByPage[page] ?? []).sorted {
                 if abs($0.centerY - $1.centerY) > 0.012 {
@@ -4620,6 +4626,7 @@ final class FinanceStore {
                     // amount leak into the first row of the page.
                     pendingRow.removeAll(keepingCapacity: true)
                     inMovementTable = true
+                    if amexSection == 0 { amexSection = 1 }
                     continue
                 }
                 if !inMovementTable { continue }
@@ -4628,10 +4635,14 @@ final class FinanceStore {
                     || normalized.contains("resumen de meses sin intereses")
                     || normalized.contains("consolidado de compras en meses sin intereses") {
                     if !pendingRow.isEmpty {
-                        rows.append(pendingRow)
+                        rows.append(AmexOCRRow(
+                            observations: pendingRow,
+                            forcedForeignCurrency: amexSection == 2
+                        ))
                         pendingRow.removeAll(keepingCapacity: true)
                     }
                     inMSISummary = true
+                    amexSection = 3
                     continue
                 }
                 if inMSISummary { continue }
@@ -4653,8 +4664,17 @@ final class FinanceStore {
                     || normalized.contains("total de meses sin intereses")
                     || normalized.contains("total de plan de meses sin intereses") {
                     if !pendingRow.isEmpty {
-                        rows.append(pendingRow)
+                        rows.append(AmexOCRRow(
+                            observations: pendingRow,
+                            forcedForeignCurrency: amexSection == 2
+                        ))
                         pendingRow.removeAll(keepingCapacity: true)
+                    }
+                    if normalized.contains("total de las transacciones")
+                        && !normalized.contains("moneda extranjera") {
+                        amexSection = 2
+                    } else if normalized.contains("moneda extranjera") || normalized.contains("total de meses") {
+                        amexSection = 0
                     }
                     continue
                 }
@@ -4673,23 +4693,34 @@ final class FinanceStore {
                     && !ignoredHeaderPhrases.contains(where: { normalized.contains($0) })
 
                 if isTransactionDate {
-                    if !pendingRow.isEmpty { rows.append(pendingRow) }
+                    if !pendingRow.isEmpty {
+                        rows.append(AmexOCRRow(
+                            observations: pendingRow,
+                            forcedForeignCurrency: amexSection == 2
+                        ))
+                    }
                     pendingRow = [line]
                 } else if !pendingRow.isEmpty {
                     pendingRow.append(line)
                 }
             }
-            if !pendingRow.isEmpty { rows.append(pendingRow) }
+            if !pendingRow.isEmpty {
+                rows.append(AmexOCRRow(
+                    observations: pendingRow,
+                    forcedForeignCurrency: amexSection == 2
+                ))
+            }
         }
 
         return rows.compactMap {
             parseAmexRow(
-                $0,
+                $0.observations,
                 dateRegex: dateRegex,
                 shortMonthDateRegex: shortMonthDateRegex,
                 textDateRegex: textDateRegex,
                 amountRegex: amountRegex,
-                defaultYear: defaultYear
+                defaultYear: defaultYear,
+                forcedForeignCurrency: $0.forcedForeignCurrency
             )
         }
     }
@@ -4700,7 +4731,8 @@ final class FinanceStore {
         shortMonthDateRegex: NSRegularExpression,
         textDateRegex: NSRegularExpression,
         amountRegex: NSRegularExpression,
-        defaultYear: Int
+        defaultYear: Int,
+        forcedForeignCurrency: Bool = false
     ) -> Movement? {
         let fullText = row.map(\.text).joined(separator: " ")
         let dateMatch = firstMatch(in: fullText, regex: dateRegex)
@@ -4725,26 +4757,36 @@ final class FinanceStore {
                 guard let value = parseAmount(match.text), abs(value) > 0, abs(value) < 10_000_000 else {
                     continue
                 }
+                // Vision normally returns one observation per visual token,
+                // but it can also return the complete merchant row as one
+                // bounding box. Estimate the token's horizontal position in
+                // that fallback case so a source-currency amount cannot win
+                // merely because it appears later in the OCR string.
+                let utfLength = max(observation.text.utf16.count, 1)
+                let matchCenter = CGFloat(match.range.location + (match.range.length / 2))
+                let relativeX = min(max(matchCenter / CGFloat(utfLength), 0), 1)
+                let visualX = min(
+                    max(observation.boundingBox.minX + observation.boundingBox.width * relativeX, 0),
+                    1
+                )
                 amountCandidates.append(
                     OCRAmountCandidate(
                         value: value,
                         text: match.text,
-                        x: observation.boundingBox.minX,
+                        x: visualX,
                         order: observationOrder * 100 + matchOrder
                     )
                 )
             }
         }
         let orderedAmounts = amountCandidates.sorted(by: { $0.order < $1.order })
-        // The card statement's monetary column is the last amount in the OCR
-        // row. For foreign purchases the row also contains the source
-        // currency and sometimes an exchange rate before the final MXN
-        // amount. Do not select by numeric magnitude (a Colombian-peso
-        // amount can be hundreds of thousands); select the token after the
-        // visual currency/conversion anchor and then take the rightmost
-        // candidate. This mirrors the PDF text reader's “local amount after
-        // TC” rule and prevents values such as 183,600.00 from becoming an
-        // MXN charge of 1,031.17.
+        // The card statement's monetary column is right aligned. Foreign
+        // purchases also contain a source-currency amount and an exchange
+        // rate, often on a line *after* the local MXN amount. Do not select
+        // by numeric magnitude (a Colombian-peso amount can be hundreds of
+        // thousands); select by visual column first and use conversion text
+        // only as a fallback. This prevents values such as 183,600.00 from
+        // becoming an MXN charge of 1,031.17.
         let normalizedRowTexts = row.map {
             $0.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         }
@@ -4756,13 +4798,28 @@ final class FinanceStore {
             ) != nil else { return nil }
             return index * 100
         }.min()
-        let localCurrencyCandidates: [OCRAmountCandidate]
+        // The Amex local-MXN amount is right aligned in the statement's
+        // monetary column. Prefer that visual column for both the usual
+        // multi-observation OCR result and the whole-row fallback above.
+        // Conversion text is useful only as a secondary tie-breaker: in the
+        // real Amex layout the local amount appears *before* the USD/COP/TC
+        // line, while some Vision revisions place it after that line.
+        let localCurrencyCandidates = orderedAmounts.filter { $0.x >= 0.72 }
+        let afterConversionCandidates: [OCRAmountCandidate]
         if let conversionAnchorOrder {
-            localCurrencyCandidates = orderedAmounts.filter { $0.order >= conversionAnchorOrder }
+            afterConversionCandidates = orderedAmounts.filter {
+                $0.order >= conversionAnchorOrder && $0.x >= 0.60
+            }
         } else {
-            localCurrencyCandidates = []
+            afterConversionCandidates = []
         }
-        let selected = localCurrencyCandidates.last ?? orderedAmounts.max {
+        let selected = localCurrencyCandidates.max {
+            if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
+            return $0.order < $1.order
+        } ?? afterConversionCandidates.max {
+            if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
+            return $0.order < $1.order
+        } ?? orderedAmounts.max {
             if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
             return $0.order < $1.order
         }
@@ -4862,6 +4919,7 @@ final class FinanceStore {
             flow: flow,
             kind: kind,
             travelRelated: travelRelated,
+            foreignCurrency: forcedForeignCurrency || hasForeignCurrency(in: normalizedFullText),
             extractionEvidence: MovementExtractionEvidence(
                 method: "vision-ocr",
                 page: row.first.map { $0.page + 1 },

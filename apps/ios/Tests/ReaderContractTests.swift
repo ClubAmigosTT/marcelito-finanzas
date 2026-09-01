@@ -631,6 +631,26 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 2_000 })
     }
 
+    func testAmexOCRUsesRightmostLocalAmountWhenVisionReturnsWholeRow() {
+        // A few Vision revisions return the merchant, source currency, TC and
+        // local amount as one observation. The parser must use the visual
+        // right-hand amount rather than the last numeric token in the string.
+        let rows = FinanceStore.amexOCRRowsForTesting([
+            OCRObservationFixture(page: 1, text: "Fecha y Detalle de las operaciones", x: 0.05, y: 0.92, width: 0.40),
+            OCRObservationFixture(
+                page: 1,
+                text: "6 de Agosto BOLD CO S A S MEDELLIN 1,031.17 Peso Colombiano 183,600.00 TC:0.00562",
+                x: 0.02,
+                y: 0.82,
+                width: 0.96
+            ),
+        ], fileName: "28_jul_2026_-_27_ago_2026.pdf")
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].amount, Decimal(string: "-1031.17")!)
+        XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 2_000 })
+    }
+
     func testSantanderOCRCalibratesShiftedColumnsFromHeader() {
         let rows = FinanceStore.santanderOCRRowsForTesting([
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
