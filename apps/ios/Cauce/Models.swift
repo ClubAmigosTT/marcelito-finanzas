@@ -3527,6 +3527,38 @@ final class FinanceStore {
         let text: String
     }
 
+    /// PDFKit may concatenate adjacent text objects into one long string even
+    /// when the source PDF has a visually tabular layout. Amex rows are
+    /// anchored by a date, so restore those boundaries (and the known section
+    /// headers) before the normal parser runs. This is intentionally a
+    /// structural-only repair: no characters or amounts are changed, and the
+    /// issuer-total reconciliation remains the acceptance gate.
+    private static func rebuildAmexSelectableLines(_ text: String) -> String {
+        var value = text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+
+        let boundaries = [
+            // Table starts and section totals must be isolated before date
+            // anchors are inserted; otherwise a marker can be absorbed into
+            // the preceding transaction's description.
+            #"(?i)(?<!\n)(?=fecha\s+y\s+detalle\s+de\s+las\s+operaciones)"#,
+            #"(?i)(?<!\n)(?=total\s+de\s+las\s+transacciones\s+en)"#,
+            #"(?i)(?<!\n)(?=total\s+de\s+transacciones\s+en\s+moneda\s+extranjera)"#,
+            #"(?i)(?<!\n)(?=transacciones\s+de\s+meses\s+sin\s+intereses)"#,
+            #"(?i)(?<!\n)(?=descripcion\s+de\s+compras\s+en\s+meses\s+sin\s+intereses)"#,
+            #"(?i)(?<!\n)(?=total\s+de\s+(?:meses|plan\s+de\s+meses)\s+sin\s+intereses)"#,
+            // Full and short month-name dates used by Amex. The negative
+            // look-behind keeps an existing date token intact and prevents a
+            // split in the middle of an OCR identifier.
+            #"(?i)(?<![A-Za-z0-9\n])(?=(?:[0-9OBI]{1,3}\s*[\/-]\s*[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s*[\/-]\s*(?:20)?\d{2})?|[0-9OBI]{1,3}\s+(?:de\s*)?[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s+(?:de\s+)?\d{4})?))"#,
+        ]
+        for pattern in boundaries {
+            value = value.replacingOccurrences(of: pattern, with: "\n", options: .regularExpression)
+        }
+        return value
+    }
+
     private static func parse(text: String, fileName: String, sourceHint: String? = nil) -> [Movement] {
         let dateRegex = try? NSRegularExpression(
             pattern: #"(?<!\d)(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?!\d)"#
@@ -3562,6 +3594,9 @@ final class FinanceStore {
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: .current
         )
+        let documentLayoutNormalized = documentNormalized
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let account = filenameAccount == "Importado"
             ? accountName(from: documentNormalized)
             : filenameAccount
@@ -3598,7 +3633,8 @@ final class FinanceStore {
         // Restrict row anchors to those tables; dates in page headers,
         // payment instructions and the MSI summary are not movements.
         let amexSectionAware = isAmexText
-            && documentNormalized.contains("fecha y detalle de las operaciones")
+            && (documentNormalized.contains("fecha y detalle de las operaciones")
+                || documentLayoutNormalized.contains("fecha y detalle de las operaciones"))
         var amexSection = 0 // 0: outside, 1: domestic, 2: foreign, 3: MSI
         var rows: [ParsedTextRow] = []
         var pendingRow = ""
@@ -3631,7 +3667,8 @@ final class FinanceStore {
                 return match
             }.first
         }
-        for rawLine in text.components(separatedBy: .newlines) {
+        let textForRows = amexSectionAware ? Self.rebuildAmexSelectableLines(text) : text
+        for rawLine in textForRows.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             guard line.count > 1 else { continue }
             let normalizedLine = line.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)

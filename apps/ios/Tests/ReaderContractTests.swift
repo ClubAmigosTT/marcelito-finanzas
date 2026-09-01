@@ -593,6 +593,29 @@ final class ReaderContractTests: XCTestCase {
         ))
     }
 
+    func testFlattenedAmexTextLayerRebuildsRowsBeforeOCR() {
+        let structured = """
+        American Express
+        Limite de Credito Limite Disponible 150,000.00 99,632.79
+        Fecha y Detalle de las operaciones Importe en MN.
+        5 de Agosto SUPERMERCADO 20,167.50
+        27 de Agosto MONTO A DIFERIR MESES EN AUTOMATICO 13,177.48 CR
+        Total de las transacciones en $ de MARCELO ANDRES DIAZ SANCHEZ 6,990.02
+        Fecha y Detalle de las operaciones Importe en MN.
+        6 de Agosto HOLAFLY DUBLIN Euro 15,50 TC:20.00 2,603.71
+        Total de Transacciones en Moneda Extranjera de MARCELO ANDRES DIAZ SANCHEZ 2,603.71
+        Transacciones de Meses sin Intereses
+        27 de Agosto MSI TIENDA 13 DE 18 1,000.00
+        Total de Meses sin Intereses 1,000.00
+        """
+        let flattened = structured.replacingOccurrences(of: "\n", with: " ")
+
+        XCTAssertTrue(FinanceStore.selectableTextLayerReconcilesForTesting(
+            text: flattened,
+            fileName: "28_jul_2026_-_27_ago_2026.pdf"
+        ))
+    }
+
     func testTableHeaderWithoutPlausibleRowsFallsBackToOCR() {
         let text = String(repeating: "RFC DIRECCION CERTIFICADO SALDO ", count: 30)
             + "Detalle de Movimientos Realizados\n"

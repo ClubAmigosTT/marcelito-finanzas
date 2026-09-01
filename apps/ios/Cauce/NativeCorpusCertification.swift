@@ -396,6 +396,10 @@ struct NativeCorpusCertificationView: View {
                         Text("\(file.source) · \(file.status) · \(file.rows) válidas · \(file.extractedRows) extraídas")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        Text(file.qualityDetail)
+                            .font(.caption2)
+                            .foregroundStyle(file.accepted ? Color.marcelitoSuccess : Color.marcelitoAmber)
+                            .lineLimit(2)
                         if let reason = file.errorCode {
                             Text(reason)
                                 .font(.caption2)
@@ -461,6 +465,30 @@ struct NativeCorpusCertificationView: View {
                 message: "Certificación en dispositivo: \(result.accepted)/\(result.files.count) aceptados; precisión \(Int((result.automaticAcceptancePrecision * 100).rounded()))%."
             )
         }
+    }
+}
+
+private extension NativeCorpusFileReport {
+    /// Compact, actionable diagnostics for the on-device result list. The
+    /// exported JSON keeps the individual numeric fields for automation; the
+    /// UI combines them into one line so a blocked PDF explains whether the
+    /// issue is OCR quality, Santander column calibration or text
+    /// reconciliation without exposing transaction content.
+    var qualityDetail: String {
+        var parts: [String] = [mode == "vision-ocr" ? "Vision" : "PDF de texto"]
+        if let ocrConfidence {
+            parts.append("OCR media \(Int((ocrConfidence * 100).rounded()))%")
+        }
+        if let weakestOCRPage {
+            parts.append("mín. página \(Int((weakestOCRPage * 100).rounded()))%")
+        }
+        if sourceStatus != SourceDetectionStatus.verified.rawValue {
+            parts.append("emisor \(sourceStatus)")
+        }
+        if source == "Santander", let ocrColumnsCalibrated {
+            parts.append(ocrColumnsCalibrated ? "columnas calibradas" : "columnas sin calibrar")
+        }
+        return parts.joined(separator: " · ")
     }
 }
 
