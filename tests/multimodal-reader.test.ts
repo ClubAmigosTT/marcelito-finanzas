@@ -139,6 +139,23 @@ test("conserva el emisor institucional local cuando el lector multimodal confund
   assert.deepEqual(result.sourceDetection?.ignoredBodyMentions, ["Santander"]);
 });
 
+test("conserva un emisor local en revisión frente a una marca conflictiva del modelo", () => {
+  const result = extractionToImportResult({
+    ...bankExtraction(),
+    source: "Santander",
+  }, { name: "BBVA agosto.pdf", size: 1200 }, {
+    sourceHint: {
+      source: "BBVA",
+      status: "review",
+      confidence: 0.9,
+      evidence: ["marca BBVA en encabezado"],
+    },
+  });
+  assert.equal(result.source, "BBVA");
+  assert.equal(result.sourceDetection?.status, "review");
+  assert.deepEqual(result.sourceDetection?.ignoredBodyMentions, ["Santander"]);
+});
+
 test("rechaza un emisor que en realidad es texto administrativo", () => {
   assert.throws(
     () => validateMultimodalExtraction({ ...bankExtraction(), source: "Ciudad de México" }),

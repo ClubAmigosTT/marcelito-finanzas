@@ -477,13 +477,14 @@ export function extractionToImportResult(
 ): ImportResult {
   const extraction = validateMultimodalExtraction(extractionInput);
   const modelSource = normalizeIssuerLabel(extraction.source) as StatementSource;
-  const hintedSource = options.sourceHint?.status === "verified"
+  const hintedSource = options.sourceHint && options.sourceHint.status !== "unknown"
     ? normalizeIssuerLabel(options.sourceHint.source)
     : undefined;
-  // If the local PDF layer already proved the issuer institutionally, prefer
-  // it over a model's conflicting brand guess (often caused by a Santander
-  // counterparty inside a BBVA SPEI row). Keep the disagreement visible in
-  // provenance while allowing the rows to continue through reconciliation.
+  // If the local PDF layer already found a known issuer, prefer it over a
+  // model's conflicting brand guess (often caused by a Santander counterparty
+  // inside a BBVA SPEI row). A review-level local hint is still safer than
+  // replacing the bank with an unverified model guess; the disagreement stays
+  // visible in provenance and the user can confirm/correct it.
   const source = (hintedSource && hintedSource !== "Desconocido" ? hintedSource : modelSource) as StatementSource;
   const transactions = mapRows({ ...extraction, source }, file.name);
   const kind: StatementKind = extraction.kind;
@@ -498,11 +499,13 @@ export function extractionToImportResult(
   return {
     source,
     accountKey: extraction.account_last4 ? `${source}:${extraction.account_last4}` : undefined,
-    sourceDetection: options.sourceHint?.status === "verified" && hintedSource
+    sourceDetection: options.sourceHint && hintedSource && hintedSource !== "Desconocido"
       ? {
         source,
-        confidence: options.sourceHint.confidence ?? 0.99,
-        status: "verified" as const,
+        confidence: options.sourceHint.status === "verified"
+          ? options.sourceHint.confidence ?? 0.99
+          : options.sourceHint.confidence ?? 0.85,
+        status: options.sourceHint.status === "verified" ? "verified" as const : "review" as const,
         evidence: [
           ...(options.sourceHint.evidence ?? [`encabezado institucional ${source}`]),
           ...(modelSource !== source ? [`lector multimodal devolvió ${modelSource}; se conservó el emisor institucional`] : []),

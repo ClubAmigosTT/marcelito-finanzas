@@ -1319,7 +1319,10 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
       const inspected = extractionToImportResult(response.extraction, file, {
         sourceFingerprint: response.sourceFingerprint,
         model: response.model,
-        sourceHint: result?.sourceDetection && result.sourceDetection.status === "verified"
+        // Preserve any known issuer from the local header, even when it is
+        // still review-level. A remote model must not replace a BBVA PDF by
+        // “Santander” just because that brand appears in a transfer row.
+        sourceHint: result?.sourceDetection && result.sourceDetection.source !== "Desconocido"
           ? result.sourceDetection
           : undefined,
       });
