@@ -232,6 +232,15 @@ El evaluador web también contrasta en los estados Amex de texto el límite,
 crédito disponible, deuda comprometida, pago para no generar intereses, mínimo
 más MSI y principal MSI pendiente; estos controles son independientes de las
 filas para evitar que una deuda mal extraída pase por una conciliación parcial.
+
+La capa multimodal opcional ya está implementada en
+`server/statement-reader.mjs`. Recibe el PDF completo en un proxy autenticado,
+exige el contrato JSON estricto y devuelve únicamente la extracción validada y
+su huella. La aplicación no la activa por defecto: requiere configurar
+`VITE_STATEMENT_READER_URL` y una autorización temporal. La plantilla
+`.env.example` muestra los nombres de variables sin contener secretos; la
+certificación de precisión sigue pendiente de ejecutar el proxy con un modelo
+visual y un corpus privado.
 La ejecución está encapsulada en `apps/ios/scripts/run-native-corpus.sh`, que
 conserva el `.xcresult` y el log para que cada calibración sea reproducible.
 El runner puede ejecutar el verificador automáticamente con
