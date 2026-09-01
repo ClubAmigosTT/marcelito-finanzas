@@ -553,7 +553,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.09.01.19"
+    static let readerVersion = "ios-reader-2026.09.01.20"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -3242,6 +3242,12 @@ final class FinanceStore {
         let text: String
         let x: CGFloat
         let order: Int
+        /// Index and UTF-16 offset of the token inside Vision's observation.
+        /// When Vision returns an entire row as one box, this lets the parser
+        /// distinguish a local MXN amount before a foreign-currency marker
+        /// from the source amount that follows it.
+        let observationIndex: Int
+        let characterOffset: Int
     }
 
     /// Visual column anchors for a Santander table. The statement examples
@@ -4002,7 +4008,9 @@ final class FinanceStore {
                     value: value,
                     text: match.text,
                     x: observation.boundingBox.minX,
-                    order: observationOrder * 100 + matchOrder
+                    order: observationOrder * 100 + matchOrder,
+                    observationIndex: observationOrder,
+                    characterOffset: match.range.location
                 )
             }
         }.sorted { $0.order < $1.order }
@@ -4362,7 +4370,9 @@ final class FinanceStore {
                         value: value,
                         text: match.text,
                         x: observation.boundingBox.minX,
-                        order: observationOrder * 100 + matchOrder
+                        order: observationOrder * 100 + matchOrder,
+                        observationIndex: observationOrder,
+                        characterOffset: match.range.location
                     )
                 )
             }
@@ -4774,7 +4784,9 @@ final class FinanceStore {
                         value: value,
                         text: match.text,
                         x: visualX,
-                        order: observationOrder * 100 + matchOrder
+                        order: observationOrder * 100 + matchOrder,
+                        observationIndex: observationOrder,
+                        characterOffset: match.range.location
                     )
                 )
             }
@@ -4790,14 +4802,23 @@ final class FinanceStore {
         let normalizedRowTexts = row.map {
             $0.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         }
-        let conversionAnchorOrder = row.enumerated().compactMap { index, _ -> Int? in
+        let conversionAnchor: (observationIndex: Int, characterOffset: Int)? = row.enumerated().compactMap { index, observation in
             let normalized = normalizedRowTexts[index]
-            guard normalized.range(
+            guard let markerRange = normalized.range(
                 of: #"(?i)d[óo]lar|euro|peso\s+colombiano|tipo\s+de\s+cambio|\btc\s*:"#,
                 options: .regularExpression
-            ) != nil else { return nil }
-            return index * 100
-        }.min()
+            ) else { return nil }
+            // `markerRange` belongs to the folded string; converting it with
+            // the original observation would use indices from another
+            // String and can trap at runtime. Spanish accent folding keeps
+            // the UTF-16 offsets stable for these labels.
+            return (index, NSRange(markerRange, in: normalized).location)
+        }.min { left, right in
+            if left.observationIndex != right.observationIndex {
+                return left.observationIndex < right.observationIndex
+            }
+            return left.characterOffset < right.characterOffset
+        }
         // The Amex local-MXN amount is right aligned in the statement's
         // monetary column. Prefer that visual column for both the usual
         // multi-observation OCR result and the whole-row fallback above.
@@ -4805,24 +4826,39 @@ final class FinanceStore {
         // real Amex layout the local amount appears *before* the USD/COP/TC
         // line, while some Vision revisions place it after that line.
         let localCurrencyCandidates = orderedAmounts.filter { $0.x >= 0.72 }
-        let afterConversionCandidates: [OCRAmountCandidate]
-        if let conversionAnchorOrder {
-            afterConversionCandidates = orderedAmounts.filter {
-                $0.order >= conversionAnchorOrder && $0.x >= 0.60
+        let beforeConversionCandidates = conversionAnchor.map { anchor in
+            orderedAmounts.filter { candidate in
+                candidate.observationIndex < anchor.observationIndex
+                    || (candidate.observationIndex == anchor.observationIndex
+                        && candidate.characterOffset < anchor.characterOffset)
             }
-        } else {
-            afterConversionCandidates = []
-        }
-        let selected = localCurrencyCandidates.max {
+        } ?? []
+        let afterConversionCandidates = conversionAnchor.map { anchor in
+            orderedAmounts.filter { candidate in
+                (candidate.observationIndex > anchor.observationIndex
+                    || (candidate.observationIndex == anchor.observationIndex
+                        && candidate.characterOffset > anchor.characterOffset))
+                    && candidate.x >= 0.60
+            }
+        } ?? []
+        let selected: OCRAmountCandidate? = beforeConversionCandidates.max {
+            // When Vision returns the entire row as one box, the converted
+            // MXN value can be before the `Peso Colombiano`/`Dólar` marker.
+            // Prefer that last pre-marker amount over a later source amount.
+            if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
+            return $0.order < $1.order
+        } ?? localCurrencyCandidates.max {
             if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
             return $0.order < $1.order
         } ?? afterConversionCandidates.max {
             if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
             return $0.order < $1.order
-        } ?? orderedAmounts.max {
-            if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
-            return $0.order < $1.order
-        }
+        } ?? (forcedForeignCurrency || Self.hasForeignCurrency(in: normalizedFullText)
+            ? nil
+            : orderedAmounts.max {
+                if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
+                return $0.order < $1.order
+            })
         guard let selected else { return nil }
 
         var title = fullText

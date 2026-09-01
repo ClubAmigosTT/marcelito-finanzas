@@ -651,6 +651,19 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 2_000 })
     }
 
+    func testAmexOCRDropsForeignRowWhenLocalMXNAmountIsMissing() {
+        // A source-currency amount without its converted MXN value is not a
+        // usable purchase. It must remain unresolved instead of becoming a
+        // six-figure charge in the ledger.
+        let rows = FinanceStore.amexOCRRowsForTesting([
+            OCRObservationFixture(page: 1, text: "Fecha y Detalle de las operaciones", x: 0.05, y: 0.92, width: 0.40),
+            OCRObservationFixture(page: 1, text: "6 de Agosto BOLD CO S A S MEDELLIN", x: 0.02, y: 0.82, width: 0.48),
+            OCRObservationFixture(page: 1, text: "Peso Colombiano 183,600.00 TC:0.00562", x: 0.18, y: 0.78, width: 0.30),
+        ], fileName: "28_jul_2026_-_27_ago_2026.pdf")
+
+        XCTAssertTrue(rows.isEmpty)
+    }
+
     func testSantanderOCRCalibratesShiftedColumnsFromHeader() {
         let rows = FinanceStore.santanderOCRRowsForTesting([
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
