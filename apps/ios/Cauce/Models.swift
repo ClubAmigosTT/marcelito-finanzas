@@ -553,7 +553,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.09.01.20"
+    static let readerVersion = "ios-reader-2026.09.01.21"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4688,9 +4688,12 @@ final class FinanceStore {
                     }
                     continue
                 }
-                let hasDate = firstMatch(in: line.text, regex: dateRegex) != nil
-                    || firstMatch(in: line.text, regex: shortMonthDateRegex) != nil
-                    || firstMatch(in: line.text, regex: textDateRegex) != nil
+                let dateCandidates = [dateRegex, shortMonthDateRegex, textDateRegex]
+                    .flatMap { allMatches(in: line.text, regex: $0) }
+                let hasDate = dateCandidates.contains { candidate in
+                    Self.isPlausibleDateToken(candidate.text)
+                        && Self.parseDate(candidate.text, defaultYear: defaultYear) != nil
+                }
                 let isTransactionDate = hasDate
                     // Vision can return the date together with a small piece
                     // of the merchant column, moving the bounding box to the
@@ -4745,10 +4748,26 @@ final class FinanceStore {
         forcedForeignCurrency: Bool = false
     ) -> Movement? {
         let fullText = row.map(\.text).joined(separator: " ")
-        let dateMatch = firstMatch(in: fullText, regex: dateRegex)
-            ?? firstMatch(in: fullText, regex: shortMonthDateRegex)
-            ?? firstMatch(in: fullText, regex: textDateRegex)
-        guard let dateMatch, let date = parseDate(dateMatch.text, defaultYear: defaultYear) else { return nil }
+        // A numeric amount such as `123.45` can superficially match the
+        // day/month portion of the numeric date regex. Never let that first
+        // (but invalid) match shadow a real textual date later in the row.
+        // Collect every candidate, keep the earliest one in the row, and only
+        // accept candidates that round-trip through the strict date parser.
+        let dateCandidates = [dateRegex, shortMonthDateRegex, textDateRegex]
+            .flatMap { allMatches(in: fullText, regex: $0) }
+            .filter { Self.isPlausibleDateToken($0.text) }
+            .sorted { left, right in
+                if left.range.location != right.range.location {
+                    return left.range.location < right.range.location
+                }
+                return left.range.length > right.range.length
+            }
+        guard let parsedDate = dateCandidates.compactMap({ candidate -> (TextMatch, Date)? in
+            guard let date = parseDate(candidate.text, defaultYear: defaultYear) else { return nil }
+            return (candidate, date)
+        }).first else { return nil }
+        let dateMatch = parsedDate.0
+        let date = parsedDate.1
 
         let normalizedFullText = fullText.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
@@ -5130,6 +5149,23 @@ final class FinanceStore {
         let roundTrip = calendar.dateComponents([.year, .month, .day], from: date)
         guard roundTrip.year == resolvedYear, roundTrip.month == month, roundTrip.day == day else { return nil }
         return date
+    }
+
+    /// Prevents a decimal amount (for example `123.45`) from being treated
+    /// as a date candidate. Numeric dates have at least two separators,
+    /// while Spanish month-name dates carry an explicit month word. The final
+    /// validity check still belongs to `parseDate`, which validates calendar
+    /// ranges and round-trips the components.
+    private static func isPlausibleDateToken(_ value: String) -> Bool {
+        let normalized = value.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: .current
+        )
+        let monthPattern = #"(?i)\b(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)\b"#
+        if normalized.range(of: monthPattern, options: .regularExpression) != nil {
+            return true
+        }
+        return normalized.filter { "/-.".contains($0) }.count >= 2
     }
 
     private static func monthNumber(_ value: String) -> Int? {
