@@ -356,7 +356,9 @@ final class ReaderContractTests: XCTestCase {
         )
 
         XCTAssertEqual(snapshot.summary?.domesticTransactionTotal, 13_990.02)
-        XCTAssertEqual(snapshot.summary?.foreignTransactionTotal, 9_593.73)
+        // Compare the decimal parsed from the PDF with an exact string value;
+        // a Swift floating-point literal can carry a different Decimal scale.
+        XCTAssertEqual(snapshot.summary?.foreignTransactionTotal, Decimal(string: "9593.73"))
     }
 
     func testReaderRejectsAdministrativeNumericRows() {
