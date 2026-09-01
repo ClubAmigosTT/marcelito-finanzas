@@ -36,10 +36,10 @@ El workflow `.github/workflows/ios-testflight.yml` compila Marcelito en un runne
    git push origin ios-v1.0.1
    ```
 
-5. Antes de publicar, certifica todos los estados declarados en el manifiesto con Vision en un Mac siguiendo el procedimiento del README. En **Settings > Secrets and variables > Actions > Variables** registra:
+5. Antes de publicar, certifica todos los estados con Vision. La ruta preferida no requiere Mac: instala una primera build con la opción **Bootstrap: incluir la herramienta de certificación local**, abre **Resumen > Opciones > Diagnóstico > Certificar estados con Vision**, selecciona los estados privados y comparte el informe JSON sanitizado. Guarda ese archivo como `docs/native-corpus-certification.json` en el repositorio. Como alternativa, puedes ejecutar el runner nativo en una Mac siguiendo el procedimiento del README. En **Settings > Secrets and variables > Actions > Variables** registra:
    - `MARCELITO_NATIVE_CORPUS_CERTIFIED=true` solo si `NATIVE_CORPUS_SUMMARY` devuelve `certified=true`.
    - `MARCELITO_NATIVE_CORPUS_READER_VERSION` con la versión del lector que produjo ese informe (por ejemplo, `ios-reader-2026.08.31.14`).
-   El workflow detiene el archivo si falta cualquiera de estas variables; así una build no puede llegar a TestFlight mientras los escaneos sigan pendientes o se haya certificado otra revisión del lector.
+   Si existe `docs/native-corpus-certification.json`, el workflow valida directamente el informe del dispositivo y no necesitas copiar estas dos variables. En ambos casos, la build se detiene mientras haya estados pendientes, duplicados o una revisión diferente del lector.
 6. Cuando finalice el workflow, espera a que App Store Connect procese el build y agrégalo a un grupo de testers en TestFlight.
 
 La firma de distribución se importa en un llavero temporal del runner y se elimina al terminar; no hace falta una Mac local. Si Apple muestra un error de firma, revisa que el Bundle ID exista, que la clave tenga permisos de App Manager y que `APPLE_TEAM_ID` corresponda al equipo que creó la app.

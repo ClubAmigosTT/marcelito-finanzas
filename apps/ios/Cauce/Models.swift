@@ -2965,6 +2965,124 @@ final class FinanceStore {
         )
     }
 
+    /// Inspects a PDF with the production reader without writing anything to
+    /// the canonical ledger. This is the device-side path used by the native
+    /// corpus certifier: Vision, reconciliation and quality gates are exactly
+    /// the same as a normal import, but the temporary result is discarded.
+    func inspectPDFAsync(
+        from url: URL,
+        allowOCR: Bool = true,
+        sourceOverride: String? = nil,
+        kindOverride: StatementKind? = nil
+    ) async throws -> ImportSummary {
+        let didStartAccessing = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStartAccessing {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let documentData: Data
+        do {
+            documentData = try Data(contentsOf: url, options: .mappedIfSafe)
+        } catch {
+            throw FinanceImportError.unreadableDocument
+        }
+
+        let fileName = url.lastPathComponent
+        let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
+        try Task.checkCancellation()
+        let extraction = try await Task.detached(priority: .userInitiated) {
+            try autoreleasepool {
+                try Self.extractPDF(
+                    data: documentData,
+                    fileName: fileName,
+                    allowOCR: allowOCR,
+                    sourceOverride: sourceOverride,
+                    kindOverride: kindOverride,
+                    learnedRules: learnedRules
+                )
+            }
+        }.value
+        try Task.checkCancellation()
+        return inspectionSummary(for: extraction, url: url)
+    }
+
+    private func inspectionSummary(
+        for extraction: PDFImportExtraction,
+        url: URL
+    ) -> ImportSummary {
+        let candidates = extraction.candidates
+        let statementId = UUID()
+        let fresh = candidates.map { candidate -> Movement in
+            var inspected = candidate
+            inspected.statementId = statementId
+            return inspected
+        }
+        let reconciliation = reconcileStatement(
+            kind: extraction.kind,
+            summary: extraction.summary,
+            movements: fresh
+        )
+        let weakestOCRPage = extraction.ocrPageConfidences?.min()
+        let ocrQualityNeedsReview = extraction.ocrFallbackNeedsReview
+            || extraction.ocrColumnCalibrationNeedsReview
+            || extraction.ocrConfidenceNeedsReview
+        let gatedReconciliation: StatementReconciliationRecord = {
+            guard ocrQualityNeedsReview, reconciliation.status == .valid else { return reconciliation }
+            let reason: String
+            if extraction.ocrColumnCalibrationNeedsReview {
+                reason = "OCR provisional: columnas de movimientos sin calibrar; revisa la tabla visual antes de aceptar."
+            } else if extraction.ocrFallbackNeedsReview {
+                reason = "OCR provisional: alguna fila no conserva evidencia visual suficiente; revisa el estado antes de aceptar."
+            } else {
+                reason = "OCR provisional: confianza media \(Int(((extraction.ocrConfidence ?? 0) * 100).rounded()))% y página más débil \(Int(((weakestOCRPage ?? 0) * 100).rounded()))%; revisa las filas antes de aceptar."
+            }
+            return StatementReconciliationRecord(
+                status: .pending,
+                tolerance: reconciliation.tolerance,
+                extractedDepositTotal: reconciliation.extractedDepositTotal,
+                extractedWithdrawalTotal: reconciliation.extractedWithdrawalTotal,
+                extractedChargeTotal: reconciliation.extractedChargeTotal,
+                extractedDomesticChargeTotal: reconciliation.extractedDomesticChargeTotal,
+                extractedForeignChargeTotal: reconciliation.extractedForeignChargeTotal,
+                extractedCreditTotal: reconciliation.extractedCreditTotal,
+                extractedPaymentTotal: reconciliation.extractedPaymentTotal,
+                extractedMovementCount: reconciliation.extractedMovementCount,
+                expectedMovementCount: reconciliation.expectedMovementCount,
+                reason: reason
+            )
+        }()
+        let requiresReview = fresh.isEmpty
+            || extraction.summary == nil
+            || extraction.kind == .unknown
+            || gatedReconciliation.status != .valid
+            || extraction.sourceDetection.status != .verified
+            || fresh.contains { $0.category == "Por revisar" }
+
+        return ImportSummary(
+            source: extraction.source,
+            accountKey: extraction.accountKey,
+            kind: extraction.kind,
+            period: extraction.period,
+            fileName: url.lastPathComponent,
+            imported: gatedReconciliation.status == .valid ? fresh.count : 0,
+            skipped: 0,
+            requiresReview: requiresReview,
+            summary: extraction.summary,
+            usedOCR: extraction.usedOCR,
+            reconciliation: gatedReconciliation,
+            sourceDetection: extraction.sourceDetection,
+            sourceFingerprint: extraction.sourceFingerprint,
+            readerVersion: Self.readerVersion,
+            ocrConfidence: extraction.ocrConfidence,
+            ocrPageConfidences: extraction.ocrPageConfidences,
+            ocrColumnsCalibrated: extraction.ocrColumnsCalibrated,
+            fileSizeBytes: extraction.documentData.count,
+            pageCount: extraction.pageCount
+        )
+    }
+
     private func persist() {
         let defaults = UserDefaults.standard
         guard let envelopeData = try? JSONEncoder().encode(currentEnvelope()) else { return }

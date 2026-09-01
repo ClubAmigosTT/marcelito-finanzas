@@ -103,6 +103,16 @@ en macOS. El corpus real no se incluye en CI porque contiene estados privados:
 la certificación completa debe ejecutarse manualmente con
 `MARCELITO_PDF_CORPUS_DIR` y `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`.
 
+Para no depender de una Mac, los builds recientes incluyen un certificador en
+**Resumen > Opciones > Diagnóstico > Certificar estados con Vision**. Selecciona
+los estados privados directamente en el iPhone, ejecuta el lector nativo y
+comparte el informe JSON sanitizado. El informe no contiene PDFs, descripciones,
+saldos ni importes; solo hashes y señales de calidad. Guárdalo como
+`docs/native-corpus-certification.json` para que el workflow lo valide antes de
+publicar. La primera build que instala esta herramienta se ejecuta con la
+opción de bootstrap del workflow; después la compuerta vuelve a exigir un
+informe certificado de al menos 10 estados únicos.
+
 La autenticación usa Keychain y Face ID. La aplicación inicia sin movimientos de muestra: importa tus PDFs desde Archivos, revisa banco, periodo y movimientos, y los guarda solo en ese dispositivo. Los estados escaneados pueden quedar pendientes de revisión sin inventar filas.
 
 Movimientos y estados de cuenta se persisten localmente, se evita volver a contar el mismo archivo y las categorías se pueden corregir desde el detalle de cada movimiento. El menú de Inicio permite eliminar la cuenta y todos los datos locales.

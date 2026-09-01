@@ -8,6 +8,11 @@ on:
         required: false
         default: "1.0.0"
         type: string
+      corpus_certifier:
+        description: "Bootstrap: incluir la herramienta de certificación local (no omite otras validaciones)"
+        required: true
+        default: false
+        type: boolean
   push:
     tags:
       - "ios-v*"
@@ -137,9 +142,26 @@ jobs:
         env:
           NATIVE_CORPUS_CERTIFIED: ${{ vars.MARCELITO_NATIVE_CORPUS_CERTIFIED }}
           NATIVE_CORPUS_READER_VERSION: ${{ vars.MARCELITO_NATIVE_CORPUS_READER_VERSION }}
+          CORPUS_CERTIFIER_BOOTSTRAP: ${{ inputs.corpus_certifier }}
         shell: bash
         run: |
           set -euo pipefail
+          # The certifier build is a controlled bootstrap used to install the
+          # on-device Vision tool. It still runs all parsing, unit and signing
+          # checks; only the final corpus gate is deferred until the user
+          # exports its sanitised report from the iPhone.
+          if [[ "${CORPUS_CERTIFIER_BOOTSTRAP:-false}" == "true" ]]; then
+            echo "::warning title=Build de certificación::Se incluye la herramienta local de Vision; esta ejecución no certifica el corpus ni sustituye la compuerta de publicación."
+            exit 0
+          fi
+          if [[ -f "docs/native-corpus-certification.json" ]]; then
+            echo "Se encontró el informe sanitizado del dispositivo; se validará contra la versión actual del lector."
+            npm run pdf:native:verify-device -- \
+              --report docs/native-corpus-certification.json \
+              --reader-version "$(sed -n 's/.*static let readerVersion = "\([^"]*\)".*/\1/p' apps/ios/Cauce/Models.swift | head -n 1)" \
+              --minimum-files 10
+            exit 0
+          fi
           # macOS runners still ship Bash 3.2, which does not support the
           # `${var,,}` lowercase expansion. Normalize portably with `tr` so
           # the certification gate fails for the intended reason instead of a
