@@ -597,6 +597,16 @@ final class FinanceStore {
         )
     }
 
+    /// Exposes the issuer-total control to the native reader contract tests
+    /// without making the reconciliation implementation part of the app API.
+    static func reconcileStatementForTesting(
+        kind: StatementKind,
+        summary: StatementSummaryRecord?,
+        movements: [Movement]
+    ) -> StatementReconciliationRecord {
+        FinanceStore().reconcileStatement(kind: kind, summary: summary, movements: movements)
+    }
+
     /// Runs the Santander visual row reader against normalized Vision-like
     /// observations. This keeps the column contract testable without invoking
     /// Vision or persisting any PDF data.
@@ -2412,11 +2422,19 @@ final class FinanceStore {
         let deposits = validRows.filter { $0.amount > 0 }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let withdrawals = validRows.filter { $0.amount < 0 }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let charges = validRows.filter(isSpend).reduce(Decimal(0)) { $0 + absolute($1.amount) }
-        let domesticCharges = validRows.filter { isSpend($0) && !$0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
-        let foreignCharges = validRows.filter { isSpend($0) && $0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        // The issuer's domestic/foreign subtotals describe transactions in
+        // the current statement period. They deliberately exclude future MSI
+        // installments, interest and fees, which are printed in separate
+        // sections. Keep those rows in `charges` so “Total Nuevos Cargos” can
+        // still reconcile, but never let them distort the section subtotals.
+        let sectionRows = validRows.filter { movement in
+            ![.msi, .interest, .fee, .cardPayment, .bankTransfer].contains(movementKind(movement))
+        }
+        let domesticCharges = sectionRows.filter { isSpend($0) && !$0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let foreignCharges = sectionRows.filter { isSpend($0) && $0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let credits = validRows.filter { $0.amount > 0 && [.credit, .refund].contains(movementKind($0)) }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
-        let domesticCredits = validRows.filter { $0.amount > 0 && [.credit, .refund].contains(movementKind($0)) && !$0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
-        let foreignCredits = validRows.filter { $0.amount > 0 && [.credit, .refund].contains(movementKind($0)) && $0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let domesticCredits = sectionRows.filter { $0.amount > 0 && [.credit, .refund].contains(movementKind($0)) && !$0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        let foreignCredits = sectionRows.filter { $0.amount > 0 && [.credit, .refund].contains(movementKind($0)) && $0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let netDomesticCharges = domesticCharges - domesticCredits
         let netForeignCharges = foreignCharges - foreignCredits
         let payments = validRows.filter { movementKind($0) == .cardPayment }.reduce(Decimal(0)) { $0 + absolute($1.amount) }

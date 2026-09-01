@@ -179,6 +179,27 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(snapshot.movements.first?.title.contains("19.05") == true)
     }
 
+    func testAmexSectionTotalsIgnoreFutureMSIInstallments() {
+        let movements = [
+            Movement(date: .now, title: "Compras nacionales", account: "Amex", category: "Comidas", amount: -496.50, flow: .expense, kind: .purchase),
+            Movement(date: .now, title: "Monto a diferir", account: "Amex", category: "Finanzas", amount: 27_537.69, flow: .income, kind: .credit),
+            Movement(date: .now, title: "Compras extranjeras", account: "Amex", category: "Comidas", amount: -27_537.69, flow: .expense, kind: .purchase, foreignCurrency: true),
+            Movement(date: .now, title: "Meses sin intereses", account: "Amex", category: "Finanzas", amount: -9_179.23, flow: .expense, kind: .msi)
+        ]
+        var summary = StatementSummaryRecord()
+        summary.domesticTransactionTotal = 27_041.19
+        summary.foreignTransactionTotal = 27_537.69
+        summary.newCharges = 37_213.42
+
+        let reconciliation = FinanceStore.reconcileStatementForTesting(
+            kind: .card,
+            summary: summary,
+            movements: movements
+        )
+
+        XCTAssertEqual(reconciliation.status, .valid, reconciliation.reason ?? "")
+    }
+
     func testBBVAStatementRebuildsAllMovementRowsAndExcludesBalances() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
             text: """

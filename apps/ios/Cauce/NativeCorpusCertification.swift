@@ -18,12 +18,17 @@ struct NativeCorpusFileReport: Codable, Identifiable {
     let status: String
     let requiresReview: Bool
     let rows: Int
+    /// Number of rows reconstructed before reconciliation quarantined them.
+    /// Keeping this visible makes an invalid statement diagnosable instead of
+    /// looking like an empty PDF.
+    let extractedRows: Int
     let ocrConfidence: Double?
     let weakestOCRPage: Double?
     let ocrColumnsCalibrated: Bool?
     let reconciliationValid: Bool
     let duplicate: Bool
     let errorCode: String?
+    let reconciliationReason: String?
 
     /// Kept only in memory for the local result list. It is deliberately not
     /// part of the Codable payload exported to GitHub.
@@ -32,8 +37,9 @@ struct NativeCorpusFileReport: Codable, Identifiable {
     private enum CodingKeys: String, CodingKey {
         case file, sourceFingerprint, source, accountKey, kind, mode,
              sourceStatus, sourceConfidence, status, requiresReview, rows,
+             extractedRows,
              ocrConfidence, weakestOCRPage, ocrColumnsCalibrated,
-             reconciliationValid, duplicate, errorCode
+             reconciliationValid, duplicate, errorCode, reconciliationReason
     }
 
     var id: String { file }
@@ -66,12 +72,14 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         status = summary.reconciliation?.status.rawValue ?? StatementReconciliationStatus.pending.rawValue
         requiresReview = summary.requiresReview
         rows = summary.imported
+        extractedRows = summary.reconciliation?.extractedMovementCount ?? summary.imported
         ocrConfidence = summary.ocrConfidence
         weakestOCRPage = summary.ocrPageConfidences?.min()
         ocrColumnsCalibrated = summary.ocrColumnsCalibrated
         reconciliationValid = summary.reconciliation?.status == .valid
         duplicate = false
         errorCode = nil
+        reconciliationReason = summary.reconciliation?.reason
         self.sourceFileName = sourceFileName
     }
 
@@ -87,12 +95,14 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         status = StatementReconciliationStatus.invalid.rawValue
         requiresReview = true
         rows = 0
+        extractedRows = 0
         ocrConfidence = nil
         weakestOCRPage = nil
         ocrColumnsCalibrated = nil
         reconciliationValid = false
         duplicate = false
         self.errorCode = errorCode
+        reconciliationReason = nil
         self.sourceFileName = sourceFileName
     }
 
@@ -108,12 +118,14 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         status = StatementReconciliationStatus.invalid.rawValue
         requiresReview = true
         rows = 0
+        extractedRows = 0
         ocrConfidence = summary.ocrConfidence
         weakestOCRPage = summary.ocrPageConfidences?.min()
         ocrColumnsCalibrated = summary.ocrColumnsCalibrated
         reconciliationValid = false
         duplicate = true
         errorCode = "duplicate-pdf"
+        reconciliationReason = "Este PDF ya fue seleccionado anteriormente."
         self.sourceFileName = sourceFileName
     }
 }
@@ -376,9 +388,21 @@ struct NativeCorpusCertificationView: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(file.sourceFileName)
                             .font(.subheadline.weight(.semibold))
-                        Text("\(file.source) · \(file.status) · \(file.rows) filas")
+                        Text("\(file.source) · \(file.status) · \(file.rows) válidas · \(file.extractedRows) extraídas")
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if let reason = file.errorCode {
+                            Text(reason)
+                                .font(.caption2)
+                                .foregroundStyle(Color.marcelitoAmber)
+                        }
+                        if let reason = file.reconciliationReason,
+                           !reason.isEmpty {
+                            Text(reason)
+                                .font(.caption2)
+                                .foregroundStyle(Color.marcelitoAmber)
+                                .lineLimit(3)
+                        }
                     }
                     Spacer()
                 }
