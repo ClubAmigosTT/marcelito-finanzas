@@ -3476,6 +3476,19 @@ final class FinanceStore {
                 continue
             }
 
+            // Bank statements place their authoritative totals immediately
+            // after the last movement. Without an explicit boundary, the
+            // final transaction absorbs the totals line and is rejected as
+            // administrative text, producing the characteristic “N-1 filas”
+            // result (for example BBVA's last SPEI is silently lost).
+            if normalizedLine.contains("total importe cargos")
+                || normalizedLine.contains("total importe abonos")
+                || normalizedLine.contains("total movimientos cargos")
+                || normalizedLine.contains("total movimientos abonos") {
+                flushPending()
+                continue
+            }
+
             if amexSectionAware {
                 // The section headers are repeated on every page. Flushing
                 // first prevents a page header that was concatenated to the
