@@ -553,7 +553,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.09.01.24"
+    static let readerVersion = "ios-reader-2026.09.01.25"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4564,11 +4564,28 @@ final class FinanceStore {
                 guard let value = parseAmount(match.text), abs(value) > 0, abs(value) < 10_000_000 else {
                     continue
                 }
+                // Vision can return the complete Santander row as one
+                // observation (date, description, movement and running
+                // balance in a single bounding box). Using only
+                // `boundingBox.minX` for every token makes the column filter
+                // blind and can select a folio or the saldo corrido. Estimate
+                // the token's horizontal position from its character offset
+                // inside that observation. Separate observations keep their
+                // original geometry, while whole-row observations regain the
+                // same deposit/withdrawal/saldo distinction as the visual
+                // table.
+                let utfLength = max(observation.text.utf16.count, 1)
+                let matchCenter = CGFloat(match.range.location + (match.range.length / 2))
+                let relativeX = min(max(matchCenter / CGFloat(utfLength), 0), 1)
+                let visualX = min(
+                    max(observation.boundingBox.minX + observation.boundingBox.width * relativeX, 0),
+                    1
+                )
                 amountCandidates.append(
                     OCRAmountCandidate(
                         value: value,
                         text: match.text,
-                        x: observation.boundingBox.minX,
+                        x: visualX,
                         order: observationOrder * 100 + matchOrder,
                         observationIndex: observationOrder,
                         characterOffset: match.range.location
@@ -4580,26 +4597,34 @@ final class FinanceStore {
 
         // On Santander's table the deposit and withdrawal columns sit before
         // the running balance. Prefer those columns so the balance is never
-        // mistaken for a purchase.
+        // mistaken for a purchase. When Vision returns the complete row as a
+        // single observation, the estimated x coordinate can drift toward the
+        // balance boundary because the description occupies most of the box;
+        // in that shape the final two monetary tokens are the safest pair:
+        // penultimate = movement, last = running balance.
+        let orderedAmountCandidates = amountCandidates.sorted { $0.order < $1.order }
+        let isWholeRowObservation = orderedAmountCandidates.count >= 2
+            && Set(orderedAmountCandidates.map(\.observationIndex)).count == 1
+        let wholeRowMovement = isWholeRowObservation ? orderedAmountCandidates.dropLast().last : nil
+        let wholeRowBalance = isWholeRowObservation ? orderedAmountCandidates.last : nil
         let columnCandidates = amountCandidates.filter { $0.x >= columns.movementMinX && $0.x < columns.balanceMinX }
-        let selected = columnCandidates.sorted { $0.order < $1.order }.first
+        let selected = wholeRowMovement
+            ?? columnCandidates.sorted { $0.order < $1.order }.first
             ?? { () -> OCRAmountCandidate? in
                 let fallbackCandidates = amountCandidates
                     .filter { $0.x < 0.90 && ($0.text.contains(".") || $0.text.contains(",")) }
                     .sorted { $0.order < $1.order }
-                // If Vision returns the whole row as one observation, the
-                // final amount is usually the running balance. Use the
-                // penultimate amount (the transaction) in that case.
                 if fallbackCandidates.count > 1 {
                     return fallbackCandidates[fallbackCandidates.count - 2]
                 }
                 return fallbackCandidates.first
             }()
         guard let selected else { return nil }
-        let runningBalance = amountCandidates
-            .filter { $0.x >= columns.balanceMinX }
-            .sorted { $0.order < $1.order }
-            .first?.value
+        let runningBalance = wholeRowBalance?.value
+            ?? amountCandidates
+                .filter { $0.x >= columns.balanceMinX }
+                .sorted { $0.order < $1.order }
+                .first?.value
         let selectedValue = repairedBankOCRAmount(
             selected: selected.value,
             selectedText: selected.text,
