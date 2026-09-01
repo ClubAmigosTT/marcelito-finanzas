@@ -27,12 +27,30 @@ Reglas obligatorias:
 - Si un subtotal está impreso como crédito (CR), conserva domestic_transaction_total_is_credit=true. No sumes dos veces subtotales y totales.
 - Devuelve todas las propiedades requeridas por el esquema; usa null cuando un campo no esté impreso o no sea legible. No añadas propiedades adicionales.`;
 
-const PREFLIGHT_PROMPT = `Esta es una prueba técnica sin datos financieros reales. Confirma que puedes leer un PDF, interpretar una página y devolver exclusivamente el JSON que cumple el esquema indicado. Devuelve source="unknown", kind="unknown", account_last4=null, period_start=null, period_end=null, cutoff_date=null, page_count=1, todas las propiedades de summary=null y rows=[]. No inventes movimientos ni importes.`;
+const PREFLIGHT_EXPECTED = {
+  source: "PREFLIGHT BANK",
+  kind: "bank",
+  account_last4: "0000",
+  period_start: "2026-01-01",
+  period_end: "2026-01-31",
+  cutoff_date: "2026-01-31",
+  page_count: 1,
+  description: "PREFLIGHT TEST MOVEMENT",
+  date: "2026-01-15",
+  amount_cents: 1234,
+};
+
+const PREFLIGHT_PROMPT = `Esta es una prueba técnica sin datos financieros reales. El PDF sintético contiene una sola fila de prueba. Lee esa fila y devuelve exclusivamente el JSON que cumple el esquema indicado.
+
+Para que la prueba sea válida, devuelve exactamente estos valores: source="PREFLIGHT BANK", kind="bank", account_last4="0000", period_start="2026-01-01", period_end="2026-01-31", cutoff_date="2026-01-31", page_count=1. Todas las propiedades de summary deben ser null. Devuelve una sola fila: date="2026-01-15", description="PREFLIGHT TEST MOVEMENT", amount_cents=1234, direction="out", kind="purchase", foreign_currency=false, page=1, evidence que contenga "PREFLIGHT TEST MOVEMENT" y confidence mayor o igual a 0.90. No inventes filas ni importes.`;
 
 // A tiny in-memory PDF used only by the authenticated provider preflight. It
-// contains no financial data and is never returned to the caller.
+// contains a synthetic movement (12.34) and is never returned to the caller.
+// Keeping a real text object here proves the provider can ingest a PDF and
+// recover a row, rather than merely echoing the expected empty response.
+const PREFLIGHT_TEXT = "BT\n/F1 12 Tf\n72 720 Td\n(PREFLIGHT BANK) Tj\n0 -20 Td\n(FECHA DESCRIPCION IMPORTE) Tj\n0 -20 Td\n(15/ENE/2026 PREFLIGHT TEST MOVEMENT 12.34) Tj\nET\n";
 const PREFLIGHT_PDF = Buffer.from(
-  "%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length 0 >>\nstream\n\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n",
+  `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length ${Buffer.byteLength(PREFLIGHT_TEXT, "utf8")} >>\nstream\n${PREFLIGHT_TEXT}endstream\nendobj\n5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n`,
   "utf8",
 );
 
@@ -258,6 +276,38 @@ function validateModelShape(value) {
   return value;
 }
 
+function validatePreflightExtraction(value) {
+  validateModelShape(value);
+  const normalizedSource = String(value.source).trim().toUpperCase();
+  const normalizedDescription = String(value.rows[0]?.description ?? "").trim().toUpperCase();
+  const summaryIsEmpty = summaryFields.every((key) => value.summary[key] === null);
+  const row = value.rows.length === 1 ? value.rows[0] : undefined;
+  const evidence = String(row?.evidence ?? "").toUpperCase();
+  if (
+    normalizedSource !== PREFLIGHT_EXPECTED.source
+    || value.kind !== PREFLIGHT_EXPECTED.kind
+    || value.account_last4 !== PREFLIGHT_EXPECTED.account_last4
+    || value.period_start !== PREFLIGHT_EXPECTED.period_start
+    || value.period_end !== PREFLIGHT_EXPECTED.period_end
+    || value.cutoff_date !== PREFLIGHT_EXPECTED.cutoff_date
+    || value.page_count !== PREFLIGHT_EXPECTED.page_count
+    || !summaryIsEmpty
+    || !row
+    || row.date !== PREFLIGHT_EXPECTED.date
+    || normalizedDescription !== PREFLIGHT_EXPECTED.description
+    || row.amount_cents !== PREFLIGHT_EXPECTED.amount_cents
+    || row.direction !== "out"
+    || row.kind !== "purchase"
+    || row.foreign_currency !== false
+    || row.page !== 1
+    || !evidence.includes(PREFLIGHT_EXPECTED.description)
+    || row.confidence < 0.9
+  ) {
+    throw new Error("preflight_contract_not_proven");
+  }
+  return value;
+}
+
 async function callProvider({ pdf, fileName, env, fetchImpl, schema, prompt = READER_PROMPT }) {
   const apiKey = String(env.STATEMENT_READER_API_KEY ?? env.OPENAI_API_KEY ?? "").trim();
   const model = String(env.STATEMENT_READER_MODEL ?? env.OPENAI_STATEMENT_MODEL ?? "").trim();
@@ -426,6 +476,7 @@ export function createStatementReaderServer({ env = process.env, fetchImpl = fet
             schema,
             prompt: PREFLIGHT_PROMPT,
           });
+          validatePreflightExtraction(result.extraction);
           json(res, 200, {
             status: "ready",
             model: result.model,

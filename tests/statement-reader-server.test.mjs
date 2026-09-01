@@ -47,6 +47,28 @@ const extraction = {
   rows: [],
 };
 
+const preflightExtraction = {
+  ...extraction,
+  source: "PREFLIGHT BANK",
+  kind: "bank",
+  account_last4: "0000",
+  period_start: "2026-01-01",
+  period_end: "2026-01-31",
+  cutoff_date: "2026-01-31",
+  summary: emptySummary(),
+  rows: [{
+    date: "2026-01-15",
+    description: "PREFLIGHT TEST MOVEMENT",
+    amount_cents: 1234,
+    direction: "out",
+    kind: "purchase",
+    foreign_currency: false,
+    page: 1,
+    evidence: "15/ENE/2026 PREFLIGHT TEST MOVEMENT 12.34",
+    confidence: 0.99,
+  }],
+};
+
 test("el proxy exige token y nunca devuelve el PDF", async () => {
   let providerBody;
   const server = createStatementReaderServer({
@@ -253,17 +275,7 @@ test("el preflight prueba PDF y JSON sin enviar un estado del usuario", async ()
     },
     fetchImpl: async (_url, init) => {
       providerBody = JSON.parse(init.body);
-      return new Response(JSON.stringify({ output_text: JSON.stringify({
-        ...extraction,
-        source: "unknown",
-        kind: "unknown",
-        account_last4: null,
-        period_start: null,
-        period_end: null,
-        cutoff_date: null,
-        summary: emptySummary(),
-        rows: [],
-      }) }), { status: 200 });
+      return new Response(JSON.stringify({ output_text: JSON.stringify(preflightExtraction) }), { status: 200 });
     },
   });
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -319,6 +331,29 @@ test("reintenta sin Structured Outputs cuando el gateway lo rechaza y conserva l
     assert.equal(providerBodies[0].text.format.type, "json_schema");
     assert.equal(providerBodies[1].text, undefined);
     assert.match(providerBodies[1].input[0].content[1].text, /sin Markdown/);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("el preflight rechaza un proveedor que no demuestra lectura de la fila sintética", async () => {
+  const server = createStatementReaderServer({
+    env: {
+      STATEMENT_READER_API_KEY: "provider-secret",
+      STATEMENT_READER_MODEL: "vision-model",
+      STATEMENT_READER_TOKEN: "reader-token",
+    },
+    fetchImpl: async () => new Response(JSON.stringify({ output_text: JSON.stringify(extraction) }), { status: 200 }),
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/statement-reader/preflight`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer reader-token" },
+      body: "{}",
+    });
+    assert.equal(response.status, 422);
   } finally {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
