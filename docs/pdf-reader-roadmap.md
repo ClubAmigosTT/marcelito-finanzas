@@ -214,6 +214,9 @@ se adivina y la conciliación mantiene el estado bloqueado. Esta regla ya tiene
 prueba de contrato. La misma reparación cubre confusiones OCR con un `1`
 inicial espurio (`160.00`→`60.00` y `1693.00`→`693.00`) únicamente cuando
 los centavos coinciden exactamente con el delta del saldo. También existe un
+fallback de idiomas en Vision: si el dispositivo no admite las etiquetas
+regionales `es-MX`/`en-US`, reintenta con `es`/`en` y finalmente con el catálogo
+predeterminado, sin saltarse las validaciones de filas ni la conciliación.
 runner nativo de corpus (`NativeCorpusContractTests`)
 que recibe `MARCELITO_PDF_CORPUS_DIR`, procesa los ocho PDFs con
 `PDFDocument + Vision`, verifica los estados de texto y emite un informe
