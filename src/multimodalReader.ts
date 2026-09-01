@@ -222,6 +222,20 @@ function confidenceField(value: unknown, path: string) {
   return value;
 }
 
+/**
+ * Evidence is part of the audit trail, not decorative model output. Require
+ * at least one meaningful merchant/concept token to survive in the literal
+ * fragment returned by the provider. This catches responses that happen to
+ * contain plausible dates and amounts but cannot be traced back to a row.
+ */
+function evidenceContainsDescriptionAnchor(description: string, evidence: string) {
+  const evidenceText = normalizeConcept(evidence);
+  const anchors = normalizeConcept(description)
+    .split(" ")
+    .filter((token) => token.length >= 4);
+  return anchors.some((token) => evidenceText.includes(token));
+}
+
 function isoDateField(value: unknown, path: string, required: boolean) {
   if (value === null && !required) return null;
   const result = stringField(value, path, 10, 10);
@@ -264,6 +278,9 @@ function normalizeRow(input: unknown, index: number, pageCount: number): Multimo
   const foreign_currency = booleanField(input.foreign_currency, `rows[${index}].foreign_currency`);
   const page = integerField(input.page, `rows[${index}].page`, 1, pageCount);
   const evidence = stringField(input.evidence, `rows[${index}].evidence`, 3, 500);
+  if (!evidenceContainsDescriptionAnchor(description, evidence)) {
+    fail(`rows[${index}].evidence`, "debe contener un fragmento reconocible de la descripción");
+  }
   const confidence = confidenceField(input.confidence, `rows[${index}].confidence`);
   return { date, description, amount_cents, direction, kind, foreign_currency, page, evidence, confidence };
 }

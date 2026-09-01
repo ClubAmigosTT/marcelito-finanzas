@@ -73,6 +73,15 @@ test("valida contrato multimodal y rechaza encabezados como movimientos", () => 
   );
 });
 
+test("rechaza evidencia que no se puede vincular con el comercio", () => {
+  assert.throws(
+    () => validateMultimodalExtraction(bankExtraction({
+      rows: [{ ...bankExtraction().rows[0], evidence: "31/AGO SALDO FINAL 1,000.00" }],
+    })),
+    (error: unknown) => error instanceof MultimodalReaderError && error.code === "invalid_payload",
+  );
+});
+
 test("convierte centavos, conserva evidencia y reconcilia antes de entregar el resultado", () => {
   const result = extractionToImportResult({ ...bankExtraction(), source: "BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE" }, { name: "BBVA agosto.pdf", size: 1200 });
   assert.equal(result.source, "BBVA");

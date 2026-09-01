@@ -247,6 +247,22 @@ function validNullableCents(value) {
   return value === null || (Number.isInteger(value) && value >= 0 && value <= 1_000_000_000_000);
 }
 
+function normalizeEvidenceText(value) {
+  return String(value ?? "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function evidenceContainsDescriptionAnchor(description, evidence) {
+  const evidenceText = normalizeEvidenceText(evidence);
+  const anchors = normalizeEvidenceText(description).split(" ").filter((token) => token.length >= 4);
+  return anchors.some((token) => evidenceText.includes(token));
+}
+
 function shouldRetryWithoutStructuredOutput(response, body) {
   // A few OpenAI-compatible gateways implement PDF input but reject the
   // optional Structured Outputs envelope. Retry once without that envelope;
@@ -293,6 +309,7 @@ function validateModelShape(value) {
     if (["income", "credit", "refund"].includes(row.kind) && row.direction !== "in") throw new Error("model_invalid_shape");
     if (["purchase", "msi", "interest", "fee"].includes(row.kind) && row.direction !== "out") throw new Error("model_invalid_shape");
     if (typeof row.foreign_currency !== "boolean" || typeof row.evidence !== "string" || row.evidence.trim().length < 3 || row.evidence.length > 500 || typeof row.confidence !== "number" || !Number.isFinite(row.confidence) || row.confidence < 0 || row.confidence > 1) throw new Error("model_invalid_shape");
+    if (!evidenceContainsDescriptionAnchor(row.description, row.evidence)) throw new Error("model_invalid_shape");
   }
   return value;
 }
