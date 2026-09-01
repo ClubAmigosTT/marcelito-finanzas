@@ -626,7 +626,8 @@ final class FinanceStore {
         kindOverride: StatementKind? = nil
     ) -> String {
         let evidence = sourceDetection(from: text, fileName: fileName)
-        let source = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines).flatMap { $0.isEmpty ? nil : $0 } ?? evidence.source
+        let cleanedOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = cleanedOverride?.isEmpty == false ? cleanedOverride! : evidence.source
         let kind = kindOverride ?? statementKind(from: text, source: source)
         let repaired = rebuildAmexSelectableLines(text)
         let rows = parse(text: repaired, fileName: fileName, sourceHint: source)
