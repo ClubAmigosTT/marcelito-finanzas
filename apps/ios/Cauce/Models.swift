@@ -2692,9 +2692,13 @@ final class FinanceStore {
         // need Vision's calibrated columns even when an accidental hidden
         // text layer happens to contain a set of numbers that reconciles.
         let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let layoutNormalized = normalized
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         guard source.localizedCaseInsensitiveContains("Amex"),
               kind == .card,
-              normalized.contains("fecha y detalle de las operaciones") else { return false }
+              (normalized.contains("fecha y detalle de las operaciones")
+                || layoutNormalized.contains("fecha y detalle de las operaciones")) else { return false }
         let candidates = parse(text: text, fileName: fileName, sourceHint: source)
         guard !candidates.isEmpty else { return false }
         // This probe runs from the detached PDF/OCR task. Constructing the
