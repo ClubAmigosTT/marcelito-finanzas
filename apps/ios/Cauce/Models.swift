@@ -553,7 +553,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.09.01.21"
+    static let readerVersion = "ios-reader-2026.09.01.22"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -2670,9 +2670,44 @@ final class FinanceStore {
         let extractedText = (0..<document.pageCount)
             .compactMap { document.page(at: $0)?.string }
             .joined(separator: "\n")
+        let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let extractedSourceEvidence = Self.sourceDetection(from: extractedText, fileName: fileName)
+        let extractedSource = cleanedSourceOverride.flatMap { override -> String? in
+            override.isEmpty ? nil : override
+        } ?? extractedSourceEvidence.source
+        let extractedKind = kindOverride ?? Self.statementKind(from: extractedText, source: extractedSource)
+
+        // A PDF can expose a perfectly usable text layer even when its line
+        // breaks are unusual enough to trip the generic OCR heuristic. Before
+        // rendering every page through Vision, prove that the text-only rows
+        // reconcile with the issuer controls. This is the same safety rule
+        // used at commit time, so a hidden administrative layer cannot win by
+        // accident; an exact Amex table simply avoids a lossy OCR round-trip.
+        let textLayerReconciles: Bool = {
+            guard !extractedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  extractedSource != "Desconocido",
+                  extractedKind != .unknown else { return false }
+            let textCandidates = Self.parse(
+                text: extractedText,
+                fileName: fileName,
+                sourceHint: extractedSource
+            )
+            guard !textCandidates.isEmpty else { return false }
+            let textSummary = Self.summary(from: extractedText, source: extractedSource)
+            return Self().reconcileStatement(
+                kind: extractedKind,
+                summary: textSummary,
+                movements: textCandidates
+            ).status == .valid
+        }()
+
         // A short administrative text layer is not a trustworthy movement
         // table; send it through Vision rather than parsing header numbers.
+        // Conversely, a proven text layer is more faithful than OCR for
+        // Amex rows where RFCs, currency and the local amount occupy separate
+        // PDF text objects.
         let usedOCR = Self.shouldUseOCR(extractedText: extractedText, allowOCR: allowOCR)
+            && !textLayerReconciles
         let ocrObservations = usedOCR ? Self.ocrObservations(from: document) : []
         let text = usedOCR ? Self.ocrText(from: ocrObservations) : extractedText
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -2709,7 +2744,6 @@ final class FinanceStore {
         }
 
         let detectedSourceEvidence = Self.sourceDetection(from: text, fileName: fileName)
-        let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
         let sourceDetection = cleanedSourceOverride.flatMap { override -> SourceDetectionEvidence? in
             guard !override.isEmpty else { return nil }
             return SourceDetectionEvidence(
@@ -4839,11 +4873,17 @@ final class FinanceStore {
             return left.characterOffset < right.characterOffset
         }
         // The Amex local-MXN amount is right aligned in the statement's
-        // monetary column. Prefer that visual column for both the usual
-        // multi-observation OCR result and the whole-row fallback above.
-        // Conversion text is useful only as a secondary tie-breaker: in the
-        // real Amex layout the local amount appears *before* the USD/COP/TC
-        // line, while some Vision revisions place it after that line.
+        // monetary column. Foreign rows have two layouts in the wild:
+        //
+        //   `Euro 15,50  TC:20.40  316.24`
+        //   `1,031.17  Peso Colombiano 183,600.00  TC:0.00562`
+        //
+        // The first is the layout in the selectable PDF and the second is a
+        // layout emitted by some Vision revisions when the whole row is
+        // returned as one observation. A rule that always chooses the token
+        // before the currency marker therefore turns 183,600 COP into a
+        // 183,600 MXN expense. Use the marker as an ordering hint, but let
+        // the right-aligned local column win whenever it is visible.
         let localCurrencyCandidates = orderedAmounts.filter { $0.x >= 0.72 }
         let beforeConversionCandidates = conversionAnchor.map { anchor in
             orderedAmounts.filter { candidate in
@@ -4860,24 +4900,39 @@ final class FinanceStore {
                     && candidate.x >= 0.60
             }
         } ?? []
-        let selected: OCRAmountCandidate? = beforeConversionCandidates.max {
-            // When Vision returns the entire row as one box, the converted
-            // MXN value can be before the `Peso Colombiano`/`Dólar` marker.
-            // Prefer that last pre-marker amount over a later source amount.
-            if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
-            return $0.order < $1.order
-        } ?? localCurrencyCandidates.max {
-            if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
-            return $0.order < $1.order
-        } ?? afterConversionCandidates.max {
-            if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
-            return $0.order < $1.order
-        } ?? (forcedForeignCurrency || Self.hasForeignCurrency(in: normalizedFullText)
-            ? nil
-            : orderedAmounts.max {
+        let rightmost: ([OCRAmountCandidate]) -> OCRAmountCandidate? = { candidates in
+            candidates.max {
                 if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
                 return $0.order < $1.order
-            })
+            }
+        }
+        let isForeignRow = forcedForeignCurrency || Self.hasForeignCurrency(in: normalizedFullText)
+        let selected: OCRAmountCandidate? = {
+            guard isForeignRow else {
+                return rightmost(beforeConversionCandidates)
+                    ?? rightmost(localCurrencyCandidates)
+                    ?? rightmost(orderedAmounts)
+            }
+
+            if conversionAnchor != nil {
+                // A marker before every amount means the source currency is
+                // followed by the conversion rate and then the local amount.
+                // Choose the right-aligned candidate after the marker first.
+                // If the marker appears between two amounts, prefer a
+                // right-aligned candidate after it; otherwise retain the
+                // pre-marker amount (the alternate Vision layout).
+                if beforeConversionCandidates.isEmpty {
+                    return rightmost(afterConversionCandidates)
+                        ?? rightmost(localCurrencyCandidates)
+                }
+                let rightAlignedAfter = afterConversionCandidates.filter { $0.x >= 0.72 }
+                return rightmost(rightAlignedAfter)
+                    ?? rightmost(localCurrencyCandidates)
+                    ?? rightmost(beforeConversionCandidates)
+            }
+
+            return rightmost(localCurrencyCandidates) ?? rightmost(orderedAmounts)
+        }()
         guard let selected else { return nil }
 
         var title = fullText
