@@ -10,7 +10,7 @@ test("el evaluador bloquea un manifiesto dorado incompleto", async () => {
   try {
     const manifestPath = join(directory, "manifest.json");
     await writeFile(manifestPath, JSON.stringify({
-      readerVersion: "web-reader-2026.08.31.8",
+      readerVersion: "web-reader-2026.09.01.9",
       files: [{ file: "estado.pdf", status: "valid" }],
     }), "utf8");
 
