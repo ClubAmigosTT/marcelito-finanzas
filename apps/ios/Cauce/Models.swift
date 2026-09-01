@@ -2618,7 +2618,7 @@ final class FinanceStore {
                 // marker it remains part of the quality gate.
                 return hasDate || hasAmount || hasTableMarker
             }
-            let pages = relevantPages.isEmpty ? grouped.keys : relevantPages
+            let pages = relevantPages.isEmpty ? Array(grouped.keys) : relevantPages
             let values = pages.sorted().compactMap { page -> Double? in
                 guard let observations = grouped[page], !observations.isEmpty else { return nil }
                 return observations.map(\.confidence).reduce(0, +) / Double(observations.count)
