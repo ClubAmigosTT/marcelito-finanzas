@@ -68,6 +68,18 @@ test("Amex Vision selecciona el importe MXN por columna y respeta sus secciones"
   assert.match(source, /forcedForeignCurrency \|\| Self\.hasForeignCurrency\(in: normalizedFullText\)[\s\S]*?\? nil/);
 });
 
+test("Santander protege filas OCR con geometría colapsada", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  // Vision can return a row in one box or in several unusually wide boxes.
+  // Both shapes must use the penultimate/final amount pair so the running
+  // balance can never be promoted to a transaction.
+  assert.match(source, /let isWholeRowObservation = orderedAmountCandidates\.count >= 2/);
+  assert.match(source, /let isCollapsedRowGeometry = orderedAmountCandidates\.count >= 2/);
+  assert.match(source, /let useWholeRowPair = isWholeRowObservation \|\| isCollapsedRowGeometry/);
+  assert.match(source, /let wholeRowMovement = useWholeRowPair \? orderedAmountCandidates\.dropLast\(\)\.last/);
+  assert.match(source, /let wholeRowBalance = useWholeRowPair \? orderedAmountCandidates\.last/);
+});
+
 test("el clasificador iOS solo ofrece modelos gratuitos vigentes de Zen", async () => {
   const source = await readFile(aiClassificationPath, "utf8");
   const freeModels = [
