@@ -111,6 +111,7 @@ test("el proxy exige token y nunca devuelve el PDF", async () => {
     assert.equal(body.extraction.source, "BBVA");
     assert.equal(body.sourceFingerprint.length, 64);
     assert.equal(providerBody.store, false);
+    assert.equal(providerBody.max_output_tokens, 32768);
     assert.equal(providerBody.input[0].content[0].type, "input_file");
     assert.match(providerBody.input[0].content[0].file_data, /^data:application\/pdf;base64,/);
     assert.ok(!JSON.stringify(body).includes("JVBERi0xLjQ="));
@@ -396,6 +397,8 @@ test("reintenta sin Structured Outputs cuando el gateway lo rechaza y conserva l
     assert.equal((await response.json()).extraction.source, "BBVA");
     assert.equal(providerBodies.length, 2);
     assert.equal(providerBodies[0].text.format.type, "json_schema");
+    assert.equal(providerBodies[0].max_output_tokens, 32768);
+    assert.equal(providerBodies[1].max_output_tokens, 32768);
     assert.equal(providerBodies[1].text, undefined);
     assert.match(providerBodies[1].input[0].content[1].text, /sin Markdown/);
   } finally {

@@ -37,6 +37,7 @@ STATEMENT_READER_ALLOWED_ORIGIN=https://<origen-de-la-app>
 STATEMENT_READER_MAX_REQUESTS_PER_MINUTE=10
 STATEMENT_READER_MAX_CONCURRENT_REQUESTS=2
 STATEMENT_READER_PROVIDER_TIMEOUT_MS=120000
+STATEMENT_READER_MAX_OUTPUT_TOKENS=32768
 pnpm reader:server
 ```
 
@@ -49,6 +50,8 @@ proxy:
 - exige `Authorization: Bearer …` (o `x-reader-token`) y origen exacto;
 - limita solicitudes autenticadas por origen y lecturas simultáneas, con un
   tiempo máximo configurable para el proveedor;
+- reserva hasta 32,768 tokens de salida por defecto para que estados con muchas
+  filas no se corten a mitad del JSON; el límite puede ajustarse por entorno;
 - limita el PDF a 20 MB y no lo persiste;
 - envía el PDF como `input_file` a la Responses API, con `store:false` y
   salida `json_schema` estricta;

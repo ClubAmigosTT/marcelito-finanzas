@@ -13,6 +13,7 @@ const DEFAULT_PORT = 8787;
 const DEFAULT_RATE_LIMIT_PER_MINUTE = 10;
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 2;
 const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
+const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
 
 const READER_PROMPT = `Eres un extractor documental financiero. Lee el PDF completo, incluyendo las páginas renderizadas cuando el texto esté desordenado. Devuelve exclusivamente el JSON que cumple el esquema indicado.
 
@@ -371,6 +372,7 @@ async function callProvider({ pdf, fileName, env, fetchImpl, schema, prompt = RE
   const requestBody = (includeStructuredOutput) => ({
     model,
     store: false,
+    max_output_tokens: positiveInt(env.STATEMENT_READER_MAX_OUTPUT_TOKENS, DEFAULT_MAX_OUTPUT_TOKENS, 100_000),
     input: [{
       role: "user",
       content: [
