@@ -553,7 +553,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.09.01.16"
+    static let readerVersion = "ios-reader-2026.09.01.17"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -660,7 +660,44 @@ final class FinanceStore {
         let compactText = extractedText.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
         let hasDateSignal = extractedText.range(of: #"(?i)\b(?:\d{1,2}\s*[\/-]\s*\d{1,2}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s*[\/-]\s*[a-záéíóú]{3,}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s+(?:de\s+)?[a-záéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?)\b"#, options: .regularExpression) != nil
         let hasTableSignal = extractedText.range(of: #"(?i)detalle\s+de\s+movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripci[oó]n|fecha\s+y\s+detalle"#, options: .regularExpression) != nil
-        let hasMovementRowSignal = extractedText.range(of: #"(?i)(?:\b\d{1,2}\s*[\/-]\s*\d{1,2}(?:\s*[\/-]\s*\d{2,4})?|\b\d{1,2}\s*[\/-]\s*[a-záéíóú]{3,}(?:\s*[\/-]\s*\d{2,4})?|\b\d{1,2}\s+(?:de\s+)?[a-záéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?)[^\r\n]{0,180}(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?!\d)"#, options: .regularExpression) != nil
+        let sameLineMovementRowSignal = extractedText.range(of: #"(?i)(?:\b\d{1,2}\s*[\/-]\s*\d{1,2}(?:\s*[\/-]\s*\d{2,4})?|\b\d{1,2}\s*[\/-]\s*[a-záéíóú]{3,}(?:\s*[\/-]\s*\d{2,4})?|\b\d{1,2}\s+(?:de\s+)?[a-záéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?)[^\r\n]{0,180}(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?!\d)"#, options: .regularExpression) != nil
+        // PDFKit often puts an Amex amount on a line below the date and
+        // merchant (RFC/currency details sit between both). That is still a
+        // usable text table; routing it through Vision loses the columns and
+        // turns references and balances into bogus transactions. Look ahead
+        // only a few lines for a date-anchored row before deciding OCR is
+        // necessary.
+        let dateAtLineStart = try? NSRegularExpression(
+            pattern: #"(?i)^\s*(?:\d{1,2}\s*[\/-]\s*\d{1,2}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s*[\/-]\s*[a-záéíóú]{3,}(?:\s*[\/-]\s*\d{2,4})?|\d{1,2}\s+(?:de\s+)?[a-záéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?)\b"#
+        )
+        let amountOnLine = try? NSRegularExpression(
+            pattern: #"(?i)(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
+        )
+        let continuationMovementRowSignal: Bool = {
+            guard let dateAtLineStart, let amountOnLine else { return false }
+            let lines = extractedText.components(separatedBy: .newlines)
+            let administrative = [
+                "saldo anterior", "saldo inicial", "saldo final", "saldo disponible",
+                "fecha de corte", "fecha limite", "periodo de facturacion",
+                "numero de cuenta", "no. de cuenta",
+                "total importe", "total de las transacciones", "resumen de meses"
+            ]
+            for index in lines.indices {
+                let line = lines[index].trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !line.isEmpty else { continue }
+                let lineRange = NSRange(line.startIndex..<line.endIndex, in: line)
+                guard dateAtLineStart.firstMatch(in: line, range: lineRange) != nil else { continue }
+                let end = min(index + 3, lines.count - 1)
+                let window = lines[index...end].joined(separator: " ")
+                let windowRange = NSRange(window.startIndex..<window.endIndex, in: window)
+                guard amountOnLine.firstMatch(in: window, range: windowRange) != nil else { continue }
+                let folded = window.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                guard !administrative.contains(where: { folded.contains($0) }) else { continue }
+                return true
+            }
+            return false
+        }()
+        let hasMovementRowSignal = sameLineMovementRowSignal || continuationMovementRowSignal
         // A short hidden metadata layer or a layer with only period/header
         // text is not a trustworthy movement table. Require a plausible
         // date+amount row before bypassing Vision.
