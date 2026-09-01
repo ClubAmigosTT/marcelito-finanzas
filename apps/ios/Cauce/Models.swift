@@ -4619,7 +4619,14 @@ final class FinanceStore {
         let hasWideObservation = row.contains { $0.boundingBox.width >= 0.42 }
         let isCollapsedRowGeometry = orderedAmountCandidates.count >= 2
             && hasWideObservation
-            && geometrySpan < 0.14
+            // A wide description+movement box can place its amount near the
+            // far right edge while the balance box starts around the middle
+            // of the page. Their estimated token centers can therefore be
+            // ~0.20 apart even though they are the final movement/balance
+            // pair. Keep the bound below the normal movement-to-balance
+            // column gap and only apply it when Vision already reported a
+            // broad, layout-collapsed observation.
+            && geometrySpan < 0.24
         let useWholeRowPair = isWholeRowObservation || isCollapsedRowGeometry
         let wholeRowMovement = useWholeRowPair ? orderedAmountCandidates.dropLast().last : nil
         let wholeRowBalance = useWholeRowPair ? orderedAmountCandidates.last : nil
