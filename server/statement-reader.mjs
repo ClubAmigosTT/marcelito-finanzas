@@ -91,7 +91,10 @@ function decodePdf(value) {
   const base64 = value.replace(/^data:application\/pdf;base64,/i, "");
   if (base64.length > Math.ceil(MAX_FILE_BYTES * 4 / 3) + 8 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) throw new Error("pdf_invalid");
   const buffer = Buffer.from(base64, "base64");
-  if (buffer.length === 0 || buffer.length > MAX_FILE_BYTES) throw new Error("pdf_invalid");
+  // Reject arbitrary binary uploads before they reach the model. The local
+  // reader accepts encrypted/odd PDFs separately, but every remote request
+  // must at least carry the PDF magic header and stay within the size cap.
+  if (buffer.length < 5 || buffer.length > MAX_FILE_BYTES || buffer.subarray(0, 5).toString("ascii") !== "%PDF-") throw new Error("pdf_invalid");
   return buffer;
 }
 
