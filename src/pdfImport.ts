@@ -1249,7 +1249,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       // A fixed high scale can allocate hundreds of megabytes for a scanned
       // poster or a high-DPI export. Adapt the scale to keep OCR within a
       // predictable browser memory envelope while giving bank-sized pages
-      // roughly 200 DPI. This materially improves decimal/date recognition
+      // roughly 220 DPI. This materially improves decimal/date recognition
       // on the Santander scans without weakening the confidence gate.
       const baseViewport = page.getViewport({ scale: 1 });
       const scale = adaptiveOcrScale(baseViewport.width, baseViewport.height);
@@ -1327,7 +1327,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
 
 /**
  * Chooses a bounded render scale for browser OCR. Typical letter/A4 bank pages
- * land near 200 DPI, while unusually large pages are capped by both their
+ * land near 220 DPI, while unusually large pages are capped by both their
  * longest edge and pixel area to avoid exhausting the browser process.
  */
 export function adaptiveOcrScale(width: number, height: number) {
@@ -1335,7 +1335,7 @@ export function adaptiveOcrScale(width: number, height: number) {
   const safeHeight = Number.isFinite(height) && height > 0 ? height : 1;
   const baseDimension = Math.max(safeWidth, safeHeight, 1);
   const baseArea = Math.max(safeWidth * safeHeight, 1);
-  return Math.max(0.75, Math.min(3, 2800 / baseDimension, Math.sqrt(16_000_000 / baseArea)));
+  return Math.max(0.75, Math.min(3.1, 2800 / baseDimension, Math.sqrt(16_000_000 / baseArea)));
 }
 
 export async function inspectPdf(file: File, onProgress: (value: number, label: string) => void): Promise<ImportResult> {

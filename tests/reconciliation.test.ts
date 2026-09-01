@@ -127,9 +127,9 @@ test("la compuerta OCR se conserva al recalcular la vista de revisión", () => {
 
 test("la escala OCR adaptativa mejora páginas bancarias sin desbordar memoria", () => {
   const bankPageScale = adaptiveOcrScale(612, 792);
-  assert.ok(bankPageScale > 2 && bankPageScale <= 3);
+  assert.ok(bankPageScale > 2 && bankPageScale <= 3.1);
   assert.equal(adaptiveOcrScale(10_000, 10_000), 0.75);
-  assert.equal(adaptiveOcrScale(Number.NaN, Number.POSITIVE_INFINITY), 3);
+  assert.equal(adaptiveOcrScale(Number.NaN, Number.POSITIVE_INFINITY), 3.1);
 });
 
 test("una capa de texto administrativo larga no desactiva el OCR visual", () => {
