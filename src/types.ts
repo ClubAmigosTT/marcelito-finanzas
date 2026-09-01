@@ -31,7 +31,17 @@ export type StatementSource = "Amex" | "Santander" | "BBVA" | "Desconocido" | (s
 
 export type SourceDetectionStatus = "verified" | "review" | "unknown";
 
-export type ExtractionMethod = "pdf-text" | "ocr" | "manual";
+/**
+ * How a transaction was read from its source document.
+ *
+ * `multimodal` is intentionally separate from the local PDF text/OCR paths:
+ * it identifies a schema-constrained external reader, which still has to
+ * pass the same validation and reconciliation gates before reaching the
+ * canonical ledger.
+ */
+export type ExtractionMethod = "pdf-text" | "ocr" | "multimodal" | "manual";
+
+export type ExtractionProvider = "local" | "multimodal";
 
 /** Normalized coordinates of the source row (0–1 for OCR, document units for text PDFs). */
 export type ExtractionBounds = {
@@ -162,6 +172,12 @@ export type ImportResult = {
   pageCount?: number;
   /** Exact reader revision that produced this extraction. */
   readerVersion?: string;
+  /** Proveedor de extracción (local o lector multimodal seguro). */
+  extractionProvider?: ExtractionProvider;
+  /** Modelo remoto utilizado, si aplica; nunca contiene credenciales. */
+  extractionModel?: string;
+  /** Versión del contrato/prompt para reproducir la extracción. */
+  extractionPromptVersion?: string;
   /** The parser either used the PDF text layer or rendered pages through OCR. */
   mode: "text" | "ocr";
   transactions: Transaction[];
@@ -193,6 +209,12 @@ export type Statement = {
   pageCount?: number;
   /** Exact reader revision that produced this statement. */
   readerVersion?: string;
+  /** Proveedor de extracción (local o lector multimodal seguro). */
+  extractionProvider?: ExtractionProvider;
+  /** Modelo remoto utilizado, si aplica; nunca contiene credenciales. */
+  extractionModel?: string;
+  /** Versión del contrato/prompt para reproducir la extracción. */
+  extractionPromptVersion?: string;
   importedAt: string;
   mode: ImportResult["mode"];
   transactionCount: number;
@@ -220,6 +242,9 @@ export type ImportCommit = {
   fileSizeBytes?: number;
   pageCount?: number;
   readerVersion?: string;
+  extractionProvider?: ExtractionProvider;
+  extractionModel?: string;
+  extractionPromptVersion?: string;
   mode: ImportResult["mode"];
   transactions: Transaction[];
   summary?: StatementSummary;

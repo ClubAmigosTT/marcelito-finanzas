@@ -7,13 +7,14 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
-    "test": "node --experimental-strip-types --test tests/reconciliation.test.ts tests/native-corpus-report.test.ts tests/native-device-report.test.ts tests/ios-concurrency-contract.test.ts tests/corpus-manifest.test.ts",
+    "test": "node --experimental-strip-types --test tests/reconciliation.test.ts tests/native-corpus-report.test.ts tests/native-device-report.test.ts tests/ios-concurrency-contract.test.ts tests/corpus-manifest.test.ts tests/multimodal-reader.test.ts tests/statement-reader-server.test.mjs",
     "pdf:corpus": "node --experimental-strip-types scripts/evaluate-pdf-corpus.ts",
     "pdf:corpus:diagnose": "node --experimental-strip-types scripts/evaluate-pdf-corpus.ts --manifest tests/fixtures/pdf-corpus-attachments.json --require-manifest --ocr --ocr-dpi 220 --out artifacts/pdf-corpus-ocr.json",
     "pdf:certify": "node --experimental-strip-types scripts/evaluate-pdf-corpus.ts --require-manifest --target-precision 0.99",
     "pdf:native:verify": "node --experimental-strip-types scripts/verify-native-corpus-report.ts",
     "pdf:native:verify-device": "node --experimental-strip-types scripts/verify-native-device-report.ts",
     "audit:public": "node scripts/audit-public-repo.mjs",
+    "reader:server": "node server/statement-reader.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

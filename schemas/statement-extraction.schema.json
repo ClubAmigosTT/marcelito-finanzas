@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://marcelito-finanzas.local/schemas/statement-extraction.v1.json",
+  "title": "Marcelito statement extraction v1",
+  "description": "Strict, auditable output contract for a bank or card statement reader. Amounts are absolute integer cents; direction determines the flow.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "source": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["bank", "card", "unknown"]
+    },
+    "account_last4": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]{4}$"
+    },
+    "period_start": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "period_end": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "cutoff_date": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "page_count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 200
+    },
+    "summary": {
+      "$ref": "#/$defs/summary"
+    },
+    "rows": {
+      "type": "array",
+      "maxItems": 2500,
+      "items": {
+        "$ref": "#/$defs/row"
+      }
+    }
+  },
+  "required": [
+    "source",
+    "kind",
+    "account_last4",
+    "period_start",
+    "period_end",
+    "cutoff_date",
+    "page_count",
+    "summary",
+    "rows"
+  ],
+  "$defs": {
+    "centAmount": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 1000000000000
+    },
+    "count": {
+      "type": ["integer", "null"],
+      "minimum": 0,
+      "maximum": 2500
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "previous_balance_cents": { "$ref": "#/$defs/centAmount" },
+        "statement_balance_cents": { "$ref": "#/$defs/centAmount" },
+        "debt_balance_cents": { "$ref": "#/$defs/centAmount" },
+        "new_transactions_cents": { "$ref": "#/$defs/centAmount" },
+        "payments_cents": { "$ref": "#/$defs/centAmount" },
+        "credits_cents": { "$ref": "#/$defs/centAmount" },
+        "payments_credits_cents": { "$ref": "#/$defs/centAmount" },
+        "new_charges_cents": { "$ref": "#/$defs/centAmount" },
+        "interest_cents": { "$ref": "#/$defs/centAmount" },
+        "fees_cents": { "$ref": "#/$defs/centAmount" },
+        "credit_limit_cents": { "$ref": "#/$defs/centAmount" },
+        "credit_available_cents": { "$ref": "#/$defs/centAmount" },
+        "minimum_payment_cents": { "$ref": "#/$defs/centAmount" },
+        "minimum_plus_msi_cents": { "$ref": "#/$defs/centAmount" },
+        "payment_for_no_interest_cents": { "$ref": "#/$defs/centAmount" },
+        "cash_balance_cents": { "$ref": "#/$defs/centAmount" },
+        "msi_original_deferred_cents": { "$ref": "#/$defs/centAmount" },
+        "msi_pending_cents": { "$ref": "#/$defs/centAmount" },
+        "revolving_balance_cents": { "$ref": "#/$defs/centAmount" },
+        "msi_installments": { "$ref": "#/$defs/count" },
+        "msi_monthly_load_cents": { "$ref": "#/$defs/centAmount" },
+        "domestic_transaction_total_cents": { "$ref": "#/$defs/centAmount" },
+        "domestic_transaction_total_is_credit": { "type": ["boolean", "null"] },
+        "foreign_transaction_total_cents": { "$ref": "#/$defs/centAmount" },
+        "deposit_total_cents": { "$ref": "#/$defs/centAmount" },
+        "withdrawal_total_cents": { "$ref": "#/$defs/centAmount" },
+        "deposit_count": { "$ref": "#/$defs/count" },
+        "withdrawal_count": { "$ref": "#/$defs/count" }
+      },
+      "required": [
+        "previous_balance_cents",
+        "statement_balance_cents",
+        "debt_balance_cents",
+        "new_transactions_cents",
+        "payments_cents",
+        "credits_cents",
+        "payments_credits_cents",
+        "new_charges_cents",
+        "interest_cents",
+        "fees_cents",
+        "credit_limit_cents",
+        "credit_available_cents",
+        "minimum_payment_cents",
+        "minimum_plus_msi_cents",
+        "payment_for_no_interest_cents",
+        "cash_balance_cents",
+        "msi_original_deferred_cents",
+        "msi_pending_cents",
+        "revolving_balance_cents",
+        "msi_installments",
+        "msi_monthly_load_cents",
+        "domestic_transaction_total_cents",
+        "domestic_transaction_total_is_credit",
+        "foreign_transaction_total_cents",
+        "deposit_total_cents",
+        "withdrawal_total_cents",
+        "deposit_count",
+        "withdrawal_count"
+      ]
+    },
+    "row": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "date": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 240
+        },
+        "amount_cents": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000000000
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["in", "out"]
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "purchase",
+            "cardPayment",
+            "bankTransfer",
+            "income",
+            "credit",
+            "refund",
+            "msi",
+            "interest",
+            "fee",
+            "other"
+          ]
+        },
+        "foreign_currency": {
+          "type": "boolean"
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 200
+        },
+        "evidence": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 500
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "required": [
+        "date",
+        "description",
+        "amount_cents",
+        "direction",
+        "kind",
+        "foreign_currency",
+        "page",
+        "evidence",
+        "confidence"
+      ]
+    }
+  }
+}
