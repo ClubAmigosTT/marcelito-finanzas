@@ -213,8 +213,8 @@ final class ReaderContractTests: XCTestCase {
             .reduce(Decimal.zero) { $0 + abs($1.amount) }
         let deposits = snapshot.movements.filter { $0.amount > 0 }
             .reduce(Decimal.zero) { $0 + $1.amount }
-        XCTAssertEqual(charges, Decimal(string: "22058.69"))
-        XCTAssertEqual(deposits, Decimal(string: "19500.00"))
+        XCTAssertEqual(charges, Decimal(string: "22058.69")!)
+        XCTAssertEqual(deposits, Decimal(string: "19500.00")!)
         XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("saldo") })
     }
 
