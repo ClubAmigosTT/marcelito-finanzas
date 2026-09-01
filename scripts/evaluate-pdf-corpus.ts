@@ -46,7 +46,8 @@ function closeEnough(actual: unknown, expected: unknown, tolerance: number) {
 async function textFromPdf(file: string) {
   const data = new Uint8Array(await readFile(file));
   const sourceFingerprint = createHash("sha256").update(data).digest("hex");
-  const document = await pdfjs.getDocument({ data, disableWorker: true }).promise;
+  const loadingTask = pdfjs.getDocument({ data, disableWorker: true });
+  const document = await loadingTask.promise;
   try {
     const pages: string[] = [];
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
@@ -57,7 +58,10 @@ async function textFromPdf(file: string) {
     }
     return { text: pages.join("\n"), sourceFingerprint, numPages: document.numPages };
   } finally {
-    await document.destroy();
+    // PDF.js 6 exposes lifecycle teardown on the loading task rather than on
+    // the resolved PDFDocumentProxy. Keeping this aligned with the app avoids
+    // reporting every real attachment as a parser failure.
+    await loadingTask.destroy();
   }
 }
 
