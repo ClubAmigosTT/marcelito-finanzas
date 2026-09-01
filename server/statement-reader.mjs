@@ -351,8 +351,9 @@ function evidenceContainsAmountAnchor(amountCents, evidence) {
  * response is not trustworthy merely because every field has the right JSON
  * type: if it contains visual rows, its row confidence must clear the same
  * average and per-page thresholds before the proxy returns it. Statements
- * with no rows are allowed through this check so a zero-activity period can
- * still be reconciled by the issuer totals.
+ * with no rows are allowed through this shape check so the caller can
+ * reconcile a zero-activity period against issuer totals; the client still
+ * keeps that result provisional unless the complete reconciliation is valid.
  */
 function validateModelConfidence(value) {
   if (!value.rows.length) return;

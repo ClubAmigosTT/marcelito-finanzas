@@ -11,7 +11,7 @@ import type {
 } from "./types.ts";
 
 /** Versiona el contrato y las instrucciones, no el modelo del proveedor. */
-export const MULTIMODAL_READER_VERSION = "multimodal-reader-2026.09.01.1";
+export const MULTIMODAL_READER_VERSION = "multimodal-reader-2026.09.01.2";
 export const MULTIMODAL_READER_PROMPT_VERSION = "statement-reader-v1";
 export const MULTIMODAL_READER_MAX_FILE_BYTES = 20 * 1024 * 1024;
 export const MULTIMODAL_READER_MAX_ROWS = 2_500;
