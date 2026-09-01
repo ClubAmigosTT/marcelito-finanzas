@@ -103,6 +103,7 @@ struct DiagnosticsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
     @State private var events = DiagnosticsRecorder.events
+    @State private var isNativeCorpusPresented = false
 
     var body: some View {
         NavigationStack {
@@ -271,6 +272,17 @@ struct DiagnosticsView: View {
                     }
                 }
 
+                Section("Certificación del lector") {
+                    Button {
+                        isNativeCorpusPresented = true
+                    } label: {
+                        Label("Certificar estados con Vision", systemImage: "viewfinder")
+                    }
+                    Text("Ejecuta el mismo lector PDFKit/Vision en el iPhone sobre tus estados privados y genera un informe sanitizado para la publicación.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 Section("Resumen por periodo") {
                     if store.statementAudits.isEmpty {
                         Text("Aún no hay estados para auditar.")
@@ -357,6 +369,9 @@ struct DiagnosticsView: View {
                 Button("OK", role: .cancel) { }
             } message: {
                 Text("Puedes pegarlo en el reporte de TestFlight sin adjuntar tus estados de cuenta.")
+            }
+            .sheet(isPresented: $isNativeCorpusPresented) {
+                NativeCorpusCertificationView()
             }
         }
     }
