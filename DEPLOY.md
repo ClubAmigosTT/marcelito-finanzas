@@ -4,8 +4,24 @@
 
 - Web: https://marcelito-finanzas.onrender.com
 - Repositorio privado: https://github.com/ClubAmigosTT/marcelito-finanzas
-- Render publica el sitio estático desde `main`.
+- Render publica el sitio estático desde `main` y, mediante el mismo Blueprint,
+  puede levantar el proxy aislado `marcelito-statement-reader`.
 - Los estados de cuenta se procesan localmente; no se suben al servidor.
+
+## Lector avanzado opcional
+
+El Blueprint incluye un segundo servicio Node en el plan gratuito. Solo se
+activa para un PDF concreto cuando el usuario elige releerlo con el lector
+seguro. Antes de desplegarlo, configura en el servicio
+`marcelito-statement-reader` los secretos `STATEMENT_READER_API_KEY` (la clave
+del proveedor) y `STATEMENT_READER_TOKEN` (un token largo aleatorio para la
+app). Nunca los pongas en `render.yaml`, `VITE_*`, el repositorio ni la app
+móvil. El modelo inicial es `muse-spark-1.2-contributor-free` a través de Zen;
+si ese modelo no acepta PDF/visión o salida estructurada, cambia únicamente
+`STATEMENT_READER_MODEL` y verifica el modelo antes de usar estados reales.
+
+El endpoint `/health` debe responder `configured: true`. Si responde `false`,
+la aplicación conserva el lector local y no envía ningún PDF.
 
 ## Datos reales
 

@@ -59,6 +59,15 @@ Antes de exponerlo públicamente hay que colocarlo detrás de autenticación de
 usuario, rate limiting y TLS. No se debe poner `OPENAI_API_KEY` ni un token
 permanente en `VITE_*`, en una app móvil o en el repositorio.
 
+El `render.yaml` de este repositorio deja preparado el patrón de dos servicios:
+la web estática expone solo `VITE_STATEMENT_READER_URL` y el servicio Node
+`marcelito-statement-reader` conserva las dos credenciales como secretos. El
+valor inicial de Render usa el modelo gratuito
+`muse-spark-1.2-contributor-free` de Zen porque es uno de los modelos que Zen
+publica en el endpoint `/v1/responses`; aun así, se debe hacer una prueba con
+un PDF anonimizado y comprobar que el modelo realmente acepta archivos y
+salida estructurada antes de enviar estados reales.
+
 ## Activación progresiva
 
 1. Ejecutar el lector local y guardar su diagnóstico.
