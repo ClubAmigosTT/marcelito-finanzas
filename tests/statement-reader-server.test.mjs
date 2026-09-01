@@ -217,3 +217,48 @@ test("el proxy permite configurar un endpoint compatible sin exponer la clave", 
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+test("el preflight prueba PDF y JSON sin enviar un estado del usuario", async () => {
+  let providerBody;
+  const server = createStatementReaderServer({
+    env: {
+      STATEMENT_READER_API_KEY: "provider-secret",
+      STATEMENT_READER_MODEL: "vision-model",
+      STATEMENT_READER_TOKEN: "reader-token",
+    },
+    fetchImpl: async (_url, init) => {
+      providerBody = JSON.parse(init.body);
+      return new Response(JSON.stringify({ output_text: JSON.stringify({
+        ...extraction,
+        source: "unknown",
+        kind: "unknown",
+        account_last4: null,
+        period_start: null,
+        period_end: null,
+        cutoff_date: null,
+        summary: emptySummary(),
+        rows: [],
+      }) }), { status: 200 });
+    },
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/statement-reader/preflight`, {
+      method: "POST",
+      headers: { authorization: "Bearer reader-token" },
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      status: "ready",
+      model: "vision-model",
+      contract: "statement-extraction.v1",
+    });
+    const encoded = providerBody.input[0].content[0].file_data;
+    assert.match(encoded, /^data:application\/pdf;base64,/);
+    assert.match(providerBody.input[0].content[1].text, /prueba técnica/);
+    assert.ok(!JSON.stringify(providerBody).includes("provider-secret"));
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});

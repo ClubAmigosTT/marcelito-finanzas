@@ -27,6 +27,15 @@ Reglas obligatorias:
 - Si un subtotal está impreso como crédito (CR), conserva domestic_transaction_total_is_credit=true. No sumes dos veces subtotales y totales.
 - Devuelve todas las propiedades requeridas por el esquema; usa null cuando un campo no esté impreso o no sea legible. No añadas propiedades adicionales.`;
 
+const PREFLIGHT_PROMPT = `Esta es una prueba técnica sin datos financieros reales. Confirma que puedes leer un PDF, interpretar una página y devolver exclusivamente el JSON que cumple el esquema indicado. Devuelve source="unknown", kind="unknown", account_last4=null, period_start=null, period_end=null, cutoff_date=null, page_count=1, todas las propiedades de summary=null y rows=[]. No inventes movimientos ni importes.`;
+
+// A tiny in-memory PDF used only by the authenticated provider preflight. It
+// contains no financial data and is never returned to the caller.
+const PREFLIGHT_PDF = Buffer.from(
+  "%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length 0 >>\nstream\n\nendstream\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n",
+  "utf8",
+);
+
 function json(res, status, body, extraHeaders = {}) {
   const payload = JSON.stringify(body);
   res.writeHead(status, {
@@ -175,7 +184,7 @@ function validateModelShape(value) {
   return value;
 }
 
-async function callProvider({ pdf, fileName, env, fetchImpl, schema }) {
+async function callProvider({ pdf, fileName, env, fetchImpl, schema, prompt = READER_PROMPT }) {
   const apiKey = String(env.STATEMENT_READER_API_KEY ?? env.OPENAI_API_KEY ?? "").trim();
   const model = String(env.STATEMENT_READER_MODEL ?? env.OPENAI_STATEMENT_MODEL ?? "").trim();
   const endpoint = String(env.STATEMENT_READER_PROVIDER_URL ?? "https://api.openai.com/v1/responses").trim();
@@ -211,7 +220,7 @@ async function callProvider({ pdf, fileName, env, fetchImpl, schema }) {
               filename: fileName,
               file_data: `data:application/pdf;base64,${pdf.toString("base64")}`,
             },
-            { type: "input_text", text: READER_PROMPT },
+            { type: "input_text", text: prompt },
           ],
         }],
         text: {
@@ -275,7 +284,9 @@ export function createStatementReaderServer({ env = process.env, fetchImpl = fet
       }, headers);
       return;
     }
-    if (req.method !== "POST" || pathname !== "/api/statement-reader") {
+    const isExtractionRoute = req.method === "POST" && pathname === "/api/statement-reader";
+    const isPreflightRoute = req.method === "POST" && pathname === "/api/statement-reader/preflight";
+    if (!isExtractionRoute && !isPreflightRoute) {
       json(res, 404, { error: "not_found" }, headers);
       return;
     }
@@ -301,12 +312,31 @@ export function createStatementReaderServer({ env = process.env, fetchImpl = fet
     let payload;
     try {
       try {
-        payload = JSON.parse(await readBody(req));
+        const rawBody = await readBody(req);
+        payload = rawBody.trim() ? JSON.parse(rawBody) : {};
       } catch (error) {
         json(res, error?.message === "request_too_large" ? 413 : 400, { error: "invalid_request" }, headers);
         return;
       }
       try {
+        if (isPreflightRoute) {
+          // The preflight proves provider transport, PDF input support and
+          // strict JSON output without uploading a user's document.
+          const result = await callProvider({
+            pdf: PREFLIGHT_PDF,
+            fileName: "marcelito-reader-preflight.pdf",
+            env,
+            fetchImpl,
+            schema,
+            prompt: PREFLIGHT_PROMPT,
+          });
+          json(res, 200, {
+            status: "ready",
+            model: result.model,
+            contract: "statement-extraction.v1",
+          }, headers);
+          return;
+        }
         if (!payload || typeof payload !== "object" || typeof payload.fileName !== "string" || payload.fileName.length < 1 || payload.fileName.length > 240) throw new Error("request_invalid");
         const pdf = decodePdf(payload.pdfBase64);
         const result = await callProvider({ pdf, fileName: path.basename(payload.fileName), env, fetchImpl, schema });

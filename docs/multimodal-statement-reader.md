@@ -59,6 +59,13 @@ Antes de exponerlo públicamente hay que colocarlo detrás de autenticación de
 usuario, rate limiting y TLS. No se debe poner `OPENAI_API_KEY` ni un token
 permanente en `VITE_*`, en una app móvil o en el repositorio.
 
+Antes de cargar estados reales, el propietario puede ejecutar un preflight
+autenticado en `POST /api/statement-reader/preflight`. El proxy envía un PDF
+vacío generado en memoria y exige una respuesta válida del contrato; el
+resultado solo indica `status: "ready"`, el modelo y la versión del contrato.
+Este control no sube ningún estado del usuario y permite detectar si el modelo
+configurado realmente admite entrada PDF y salida JSON estructurada.
+
 El `render.yaml` de este repositorio deja preparado el patrón de dos servicios:
 la web estática expone solo `VITE_STATEMENT_READER_URL` y el servicio Node
 `marcelito-statement-reader` conserva las dos credenciales como secretos. El
