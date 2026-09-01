@@ -86,7 +86,7 @@ export type MultimodalReaderClientOptions = {
 
 export type MultimodalReaderRequest = {
   fileName: string;
-  sourceFingerprint?: string;
+  sourceFingerprint: string;
   extraction: MultimodalStatementExtraction;
   model?: string;
   readerVersion: typeof MULTIMODAL_READER_VERSION;
@@ -424,6 +424,14 @@ function toBase64(buffer: ArrayBuffer) {
   return btoa(binary);
 }
 
+async function fingerprintBuffer(buffer: ArrayBuffer) {
+  if (!globalThis.crypto?.subtle) {
+    throw new MultimodalReaderError("request_failed", "Este dispositivo no puede verificar la identidad del PDF");
+  }
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", buffer);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 function unwrapExtraction(body: unknown): unknown {
   if (!isRecord(body)) return body;
   if ("extraction" in body) return body.extraction;
@@ -530,6 +538,7 @@ export async function requestMultimodalExtraction(file: File, options: Multimoda
   if (!isSecureReaderEndpoint(endpoint)) throw new MultimodalReaderError("not_configured", "El lector avanzado requiere HTTPS o un proxy local");
   if (file.size > MULTIMODAL_READER_MAX_FILE_BYTES) throw new MultimodalReaderError("file_too_large", "El PDF supera el límite de 20 MB");
   const buffer = await file.arrayBuffer();
+  const localFingerprint = await fingerprintBuffer(buffer);
   const fetchImpl = options.fetchImpl ?? fetch;
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? 120_000);
@@ -562,10 +571,14 @@ export async function requestMultimodalExtraction(file: File, options: Multimoda
       const message = isRecord(body) && typeof body.error === "string" ? body.error : `HTTP ${response.status}`;
       throw new MultimodalReaderError("request_failed", `No se pudo leer el PDF: ${message}`);
     }
+    const remoteFingerprint = isRecord(body) ? validSha256(body.sourceFingerprint) : undefined;
+    if (!remoteFingerprint || remoteFingerprint !== localFingerprint) {
+      throw new MultimodalReaderError("invalid_payload", "La respuesta no corresponde al PDF seleccionado");
+    }
     const extraction = validateMultimodalExtraction(unwrapExtraction(body));
     return {
       fileName: file.name,
-      sourceFingerprint: isRecord(body) ? validSha256(body.sourceFingerprint) : undefined,
+      sourceFingerprint: remoteFingerprint,
       extraction,
       model: options.model ?? (isRecord(body) ? optionalModel(body.model) : undefined),
       readerVersion: MULTIMODAL_READER_VERSION,

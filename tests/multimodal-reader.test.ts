@@ -139,14 +139,30 @@ test("no envía el PDF sin opt-in y acepta únicamente respuestas JSON válidas 
     enabled: true,
     fetchImpl: async (_input, init) => {
       requestBody = String(init?.body ?? "");
-      return new Response(JSON.stringify({ extraction: bankExtraction(), model: "vision-statement-v1", sourceFingerprint: "A".repeat(64) }), { status: 200, headers: { "content-type": "application/json" } });
+      return new Response(JSON.stringify({ extraction: bankExtraction(), model: "vision-statement-v1", sourceFingerprint: "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81" }), { status: 200, headers: { "content-type": "application/json" } });
     },
   });
   assert.equal(response.extraction.rows.length, 2);
   assert.equal(response.model, "vision-statement-v1");
-  assert.equal(response.sourceFingerprint, "a".repeat(64));
+  assert.equal(response.sourceFingerprint, "039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81");
   assert.match(requestBody, /pdfBase64/);
   assert.doesNotMatch(requestBody, /api[_-]?key/i);
+});
+
+test("rechaza una extracción cuyo hash no corresponde al PDF enviado", async () => {
+  const file = {
+    name: "estado.pdf",
+    size: 3,
+    arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+  } as unknown as File;
+  await assert.rejects(
+    requestMultimodalExtraction(file, {
+      endpoint: "https://reader.example/api/statement-reader",
+      enabled: true,
+      fetchImpl: async () => new Response(JSON.stringify({ extraction: bankExtraction(), sourceFingerprint: "f".repeat(64) }), { status: 200 }),
+    }),
+    (error: unknown) => error instanceof MultimodalReaderError && error.code === "invalid_payload",
+  );
 });
 
 test("no envía el PDF a un endpoint HTTP público", async () => {
