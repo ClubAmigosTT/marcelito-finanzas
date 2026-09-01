@@ -5,6 +5,7 @@ import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPip
 import { buildFinanceMetrics, hasVerifiedSourceEvidence, isStatementEligibleForDashboard } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
 import { prepareStoredLedger, prepareStoredStatements } from "../src/statementMigration.ts";
+import { MULTIMODAL_READER_VERSION } from "../src/multimodalReader.ts";
 import type { Statement, Transaction } from "../src/types.ts";
 
 const bank = (id: string, source: string, period: string): Statement => ({
@@ -1604,6 +1605,39 @@ test("la migración conserva filas del lector actual que esperan revisión OCR",
   assert.deepEqual(prepared.transactions.map((row) => row.id), ["ocr-row"]);
   assert.equal(prepared.statements[0]?.reconciliationStatus, "pending");
   assert.equal(prepared.statements[0]?.reconciliation?.reason, "OCR provisional");
+});
+
+test("la migración conserva estados del lector multimodal actual", () => {
+  const statement = {
+    ...bank("bbva-multimodal", "BBVA", "agosto 2026"),
+    readerVersion: MULTIMODAL_READER_VERSION,
+    mode: "text" as const,
+    status: "ready" as const,
+    reconciliationStatus: "valid" as const,
+    reconciliation: { status: "valid" as const, tolerance: 0.05 },
+    sourceDetection: {
+      source: "BBVA" as const,
+      confidence: 1,
+      status: "verified" as const,
+      evidence: ["encabezado institucional BBVA"],
+      ignoredBodyMentions: [],
+    },
+  };
+  const row = movement({
+    id: "multimodal-row",
+    date: "10 ago 2026",
+    description: "COMPRA MULTIMODAL",
+    account: "BBVA",
+    amount: -100,
+    flow: "expense",
+    statementId: statement.id,
+  });
+
+  const prepared = prepareStoredLedger([statement], [row]);
+  assert.equal(prepared.quarantinedMovementCount, 0);
+  assert.equal(prepared.statements[0]?.status, "ready");
+  assert.equal(prepared.statements[0]?.reconciliationStatus, "valid");
+  assert.deepEqual(prepared.transactions.map((item) => item.id), ["multimodal-row"]);
 });
 
 test("la auditoría conserva el conteo de filas PDF heredadas en cuarentena", () => {

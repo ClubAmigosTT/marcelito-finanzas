@@ -1,8 +1,13 @@
 import { PDF_READER_VERSION } from "./pdfImport.ts";
+import { MULTIMODAL_READER_VERSION } from "./multimodalReader.ts";
 import { hasSufficientOcrQuality, hasVerifiedSourceEvidence } from "./finance.ts";
 import type { Statement, Transaction } from "./types.ts";
 
 const MIGRATION_TOLERANCE = 0.05;
+
+function isSupportedReaderVersion(version: string | undefined, currentReaderVersion: string) {
+  return version === currentReaderVersion || version === MULTIMODAL_READER_VERSION;
+}
 
 /**
  * Makes persisted statements safe across parser revisions.
@@ -18,7 +23,7 @@ export function prepareStoredStatements(
 ) {
   return statements.map((statement) => {
     const hasReconciliation = Boolean(statement.reconciliationStatus && statement.reconciliation);
-    const isCurrentReader = statement.readerVersion === readerVersion;
+    const isCurrentReader = isSupportedReaderVersion(statement.readerVersion, readerVersion);
     // A statement that is already ready must also carry verified issuer
     // evidence.  Earlier reader versions could mark a file ready from a
     // filename-only guess (or leave the field absent entirely); allowing that
@@ -79,7 +84,7 @@ export function prepareStoredLedger(
           && statement.status === "review"
           && statement.reconciliationStatus !== "valid";
         return !currentPending && (
-          statement.readerVersion !== readerVersion
+          !isSupportedReaderVersion(statement.readerVersion, readerVersion)
           || !statement.reconciliationStatus
           || !statement.reconciliation
           || (statement.status === "ready"
