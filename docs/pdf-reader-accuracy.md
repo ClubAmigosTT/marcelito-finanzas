@@ -296,6 +296,23 @@ capa web: el matching de transferencias y pagos compara la magnitud del
 importe (la salida y la entrada tienen signos opuestos), exige una señal
 explícita de pago en la tarjeta y usa un ordinal por estado para no borrar una
 segunda compra idéntica legítima durante un solapamiento.
+
+El runner nativo también acepta `MARCELITO_PDF_CORPUS_MANIFEST` para auditar
+un corpus privado real sin convertirlo en fixture público. El manifiesto usa
+el mismo contrato de `tests/fixtures/pdf-corpus-attachments.json` —archivo,
+SHA-256, `emisor:últimos4`, emisor, tipo, estado, filas y controles opcionales—
+y debe declarar la `readerVersion` exacta. `apps/ios/scripts/run-native-corpus.sh`
+resuelve la ruta a absoluta, ejecuta PDFKit + Vision y conserva el resultado
+`.xcresult`; si el conjunto de PDFs no coincide con el manifiesto, la corrida
+falla antes de calcular precisión. Cuando no se define esa variable, CI sigue
+usando únicamente el corpus sintético incluido en el repositorio.
+
+La certificación de dispositivo y la corrida con manifiesto son compuertas
+complementarias: la primera valida cualquier selección privada desde el
+iPhone y la segunda permite comparar filas y controles contra expectativas
+doradas. Ninguna ruta sube el PDF, la descripción completa o los importes
+privados al repositorio.
+
 Para transferencias entre bancos, el importe/fecha y la cuenta distinta solo
 generan un candidato: la aceptación exige semántica de transferencia y una
 mención explícita de la cuenta contraparte o del mismo titular. Si esa señal

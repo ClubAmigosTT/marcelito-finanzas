@@ -12,6 +12,22 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
 cd "$script_dir"
 
+# A real/private corpus can provide its own golden manifest without placing
+# financial documents in the repository.  Resolve it before xcodebuild so the
+# XCTest process receives an absolute path regardless of its working folder.
+if [[ -n "${MARCELITO_PDF_CORPUS_MANIFEST:-}" ]]; then
+  manifest_input="$MARCELITO_PDF_CORPUS_MANIFEST"
+  if [[ "$manifest_input" != /* ]]; then
+    manifest_input="$repo_root/$manifest_input"
+  fi
+  if [[ ! -f "$manifest_input" ]]; then
+    echo "No se encontró el manifiesto privado del corpus: $manifest_input" >&2
+    exit 2
+  fi
+  export MARCELITO_PDF_CORPUS_MANIFEST="$(cd "$(dirname "$manifest_input")" && pwd)/$(basename "$manifest_input")"
+  echo "Manifiesto privado: $MARCELITO_PDF_CORPUS_MANIFEST"
+fi
+
 verify_enabled=0
 manifest_path=""
 if [[ "${MARCELITO_PDF_CORPUS_VERIFY:-}" =~ ^(1|true|yes)$ ]]; then

@@ -32,6 +32,59 @@ solo instala el certificador; no certifica el corpus por sí misma. Después de
 subir el informe sanitizado al repositorio, las siguientes builds vuelven a usar
 la compuerta normal y ya no requieren una Mac externa.
 
+## Auditoría nativa con un manifiesto privado (opcional)
+
+Si además de la conciliación del banco quieres comparar cada estado contra
+expectativas doradas, guarda un manifiesto fuera del repositorio y ejecútalo
+con el runner de XCTest. El archivo solo contiene hashes y controles; nunca
+incluye los PDFs ni las descripciones de movimientos:
+
+```json
+{
+  "schemaVersion": 1,
+  "readerVersion": "ios-reader-AAAA.MM.DD.NN",
+  "files": [
+    {
+      "file": "estado-agosto.pdf",
+      "sourceFingerprint": "<sha256 de 64 caracteres>",
+      "source": "Santander",
+      "accountKey": "santander:7079",
+      "kind": "bank",
+      "status": "valid",
+      "rows": 43,
+      "summary": {
+        "previousBalance": 55627.93,
+        "cashBalance": 27654.24,
+        "depositTotal": 36187.42,
+        "withdrawalTotal": 64161.11
+      }
+    }
+  ]
+}
+```
+
+`status: "valid"` exige `rows`; para un escaneo todavía en calibración se
+puede usar `status: "pending"`. Los importes también aceptan texto con coma
+decimal y los nombres `extractedDepositTotal`, `extractedWithdrawalTotal`,
+`extractedChargeTotal` y equivalentes del reporte web. La versión debe
+coincidir exactamente con `FinanceStore.readerVersion`; si cambia una regla,
+el manifiesto queda vencido y hay que volver a medirlo.
+
+En macOS:
+
+```bash
+MARCELITO_PDF_CORPUS_DIR=/ruta/privada/estados \
+MARCELITO_PDF_CORPUS_MANIFEST=/ruta/privada/corpus-ios.json \
+MARCELITO_PDF_CORPUS_VERIFY=1 \
+./apps/ios/scripts/run-native-corpus.sh
+```
+
+El runner comprueba que el directorio y el manifiesto tengan exactamente el
+mismo conjunto de archivos, verifica SHA-256, emisor, cuenta enmascarada,
+filas, controles de saldo y conciliación, y conserva el `.xcresult` para
+reproducir un fallo. El fixture sintético público se sigue usando cuando no
+se define `MARCELITO_PDF_CORPUS_MANIFEST`.
+
 Los estados permanecen en el iPhone y el JSON se puede revisar antes de
 publicarlo. Si un archivo falla, corrígelo o vuelve a seleccionarlo; nunca se
 debe marcar `certified` manualmente.

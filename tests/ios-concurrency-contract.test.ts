@@ -6,6 +6,8 @@ const rootTabPath = new URL("../apps/ios/Cauce/RootTabView.swift", import.meta.u
 const sectionsPath = new URL("../apps/ios/Cauce/Sections.swift", import.meta.url);
 const modelsPath = new URL("../apps/ios/Cauce/Models.swift", import.meta.url);
 const aiClassificationPath = new URL("../apps/ios/Cauce/AIClassification.swift", import.meta.url);
+const nativeCorpusPath = new URL("../apps/ios/Tests/NativeCorpusContractTests.swift", import.meta.url);
+const nativeCorpusRunnerPath = new URL("../apps/ios/scripts/run-native-corpus.sh", import.meta.url);
 
 test("la interfaz iOS usa importación y reconstrucción asíncronas", async () => {
   const [rootTab, sections, models] = await Promise.all([
@@ -36,6 +38,21 @@ test("Vision tiene fallback de idiomas cuando el dispositivo no expone etiquetas
   // A fallback de Vision no puede convertirse en una aceptación silenciosa:
   // las filas siguen pasando por fecha, dirección, evidencia y conciliación.
   assert.match(source, /valid date, direction and issuer reconciliation/);
+});
+
+test("el corpus nativo admite manifiesto privado fuera del repositorio", async () => {
+  const [nativeCorpus, runner] = await Promise.all([
+    readFile(nativeCorpusPath, "utf8"),
+    readFile(nativeCorpusRunnerPath, "utf8"),
+  ]);
+
+  assert.match(nativeCorpus, /MARCELITO_PDF_CORPUS_MANIFEST/);
+  assert.match(nativeCorpus, /readerVersion/);
+  assert.match(nativeCorpus, /runExpectations/);
+  assert.match(nativeCorpus, /runExpectations\.count >= 10/);
+  assert.match(runner, /MARCELITO_PDF_CORPUS_MANIFEST/);
+  assert.match(runner, /export MARCELITO_PDF_CORPUS_MANIFEST=/);
+  assert.match(runner, /No se encontró el manifiesto privado/);
 });
 
 test("Amex Vision selecciona el importe MXN por columna y respeta sus secciones", async () => {
