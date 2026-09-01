@@ -606,6 +606,31 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 1_000 })
     }
 
+    func testAmexOCRUsesLocalAmountAfterForeignCurrencyConversion() {
+        let rows = FinanceStore.amexOCRRowsForTesting([
+            // Cover/header content must not become a movement merely because
+            // it contains a cutoff date and payment amount.
+            OCRObservationFixture(page: 0, text: "Estado de Cuenta", x: 0.05, y: 0.92, width: 0.30),
+            OCRObservationFixture(page: 0, text: "27-Ago-2026", x: 0.40, y: 0.84, width: 0.14),
+            // Page 2 starts the actual transaction table.
+            OCRObservationFixture(page: 1, text: "Fecha y Detalle de las operaciones", x: 0.05, y: 0.92, width: 0.40),
+            OCRObservationFixture(page: 1, text: "5 de Agosto", x: 0.05, y: 0.82, width: 0.16),
+            OCRObservationFixture(page: 1, text: "SUPERMERCADO", x: 0.18, y: 0.82, width: 0.28),
+            OCRObservationFixture(page: 1, text: "123.45", x: 0.86, y: 0.82, width: 0.08),
+            OCRObservationFixture(page: 1, text: "6 de Agosto", x: 0.05, y: 0.70, width: 0.16),
+            OCRObservationFixture(page: 1, text: "BOLD CO S A S", x: 0.18, y: 0.70, width: 0.28),
+            OCRObservationFixture(page: 1, text: "Peso Colombiano", x: 0.18, y: 0.66, width: 0.24),
+            OCRObservationFixture(page: 1, text: "183,600.00", x: 0.70, y: 0.66, width: 0.12),
+            OCRObservationFixture(page: 1, text: "TC:0.00562", x: 0.70, y: 0.62, width: 0.12),
+            OCRObservationFixture(page: 1, text: "1,031.17", x: 0.86, y: 0.58, width: 0.10),
+        ], fileName: "28_jul_2026_-_27_ago_2026.pdf")
+
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].amount, Decimal(string: "-123.45")!)
+        XCTAssertEqual(rows[1].amount, Decimal(string: "-1031.17")!)
+        XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 2_000 })
+    }
+
     func testSantanderOCRCalibratesShiftedColumnsFromHeader() {
         let rows = FinanceStore.santanderOCRRowsForTesting([
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),

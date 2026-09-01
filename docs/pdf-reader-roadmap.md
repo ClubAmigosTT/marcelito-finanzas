@@ -217,6 +217,14 @@ los centavos coinciden exactamente con el delta del saldo. También existe un
 fallback de idiomas en Vision: si el dispositivo no admite las etiquetas
 regionales `es-MX`/`en-US`, reintenta con `es`/`en` y finalmente con el catálogo
 predeterminado, sin saltarse las validaciones de filas ni la conciliación.
+En Amex, las filas OCR ahora se anclan al inicio de la tabla y no al encabezado
+de portada repetido. Para compras en moneda extranjera se toma el importe local
+que aparece después del marcador de moneda/tipo de cambio, nunca el importe de
+origen (por ejemplo, `183,600.00` COP no puede convertirse en un cargo de
+`183,600.00` MXN cuando el estado declara `1,031.17` MXN). La regla cuenta con
+un fixture nativo que incluye una portada con fecha, una compra nacional y una
+compra extranjera; una fila solo se libera después de conciliar con los totales
+del emisor.
 runner nativo de corpus (`NativeCorpusContractTests`)
 que recibe `MARCELITO_PDF_CORPUS_DIR`, procesa los ocho PDFs con
 `PDFDocument + Vision`, verifica los estados de texto y emite un informe

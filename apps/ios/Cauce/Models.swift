@@ -553,7 +553,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.09.01.18"
+    static let readerVersion = "ios-reader-2026.09.01.19"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -651,6 +651,30 @@ final class FinanceStore {
             )
         }
         return parseSantanderOCRResult(observations, fileName: fileName).columnsCalibrated
+    }
+
+    /// Runs the Amex visual row reader against normalized Vision-like
+    /// observations. Keeping this seam beside the Santander fixture helper
+    /// lets the contract suite lock down foreign-currency amount selection
+    /// without shipping a private statement or invoking Vision in CI.
+    static func amexOCRRowsForTesting(
+        _ fixtures: [OCRObservationFixture],
+        fileName: String
+    ) -> [Movement] {
+        let observations = fixtures.map { fixture in
+            OCRObservation(
+                page: fixture.page,
+                text: fixture.text,
+                boundingBox: CGRect(
+                    x: fixture.x,
+                    y: fixture.y,
+                    width: fixture.width,
+                    height: fixture.height
+                ),
+                confidence: fixture.confidence
+            )
+        }
+        return parseAmexOCR(ocrLines(from: observations), fileName: fileName)
     }
 
     /// Decides whether a PDF's selectable text is structurally usable. Kept
@@ -4561,13 +4585,44 @@ final class FinanceStore {
                 }
                 return $0.centerX < $1.centerX
             }
+            // The first Amex page is a cover/summary page and contains many
+            // dates and amounts that are not movements. Continuation pages
+            // sometimes omit the repeated table title, so only suppress a
+            // page when it has no movement marker and clearly belongs to the
+            // MSI summary. This keeps the cover out while retaining the
+            // transaction pages whose header OCR was weak.
+            let normalizedPageText = pageLines
+                .map { $0.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current) }
+                .joined(separator: " ")
+            let hasMovementMarker = normalizedPageText.contains("fecha y detalle")
+                || normalizedPageText.contains("importe en mn")
+            let hasMSISummaryMarker = normalizedPageText.contains("resumen de meses sin intereses")
+                || normalizedPageText.contains("consolidado de compras en meses sin intereses")
+            if (page == 0 && !hasMovementMarker) || (hasMSISummaryMarker && !hasMovementMarker) {
+                continue
+            }
             var pendingRow: [OCRObservation] = []
             var inMSISummary = false
+            // A repeated Amex page header contains a cutoff date and several
+            // monetary controls before the movement table. Do not allow that
+            // date to become a row anchor. On continuation pages where the
+            // table title was not recognized, start open and rely on the
+            // normal administrative-row filters below.
+            var inMovementTable = !hasMovementMarker
             for line in pageLines {
                 let normalized = line.text.folding(
                     options: [.diacriticInsensitive, .caseInsensitive],
                     locale: .current
                 )
+                if normalized.contains("fecha y detalle") || normalized.contains("importe en mn") {
+                    // Any pending content here is page/header material, not a
+                    // transaction. Dropping it is safer than letting a cover
+                    // amount leak into the first row of the page.
+                    pendingRow.removeAll(keepingCapacity: true)
+                    inMovementTable = true
+                    continue
+                }
+                if !inMovementTable { continue }
                 if normalized.contains("transacciones de meses sin intereses")
                     || normalized.contains("descripcion de compras en meses sin intereses")
                     || normalized.contains("resumen de meses sin intereses")
@@ -4580,6 +4635,15 @@ final class FinanceStore {
                     continue
                 }
                 if inMSISummary { continue }
+
+                // Repeated page headers and payment instructions can contain
+                // dates/amounts of their own. Once the table is active they
+                // still form a hard boundary; never append them to the last
+                // merchant row.
+                if ignoredHeaderPhrases.contains(where: { normalized.contains($0) }) {
+                    pendingRow.removeAll(keepingCapacity: true)
+                    continue
+                }
 
                 // The totals after each transaction section are not movements.
                 // Flush the last real row before dropping the total line so a
@@ -4598,7 +4662,14 @@ final class FinanceStore {
                     || firstMatch(in: line.text, regex: shortMonthDateRegex) != nil
                     || firstMatch(in: line.text, regex: textDateRegex) != nil
                 let isTransactionDate = hasDate
-                    && line.boundingBox.minX < 0.30
+                    // Vision can return the date together with a small piece
+                    // of the merchant column, moving the bounding box to the
+                    // right. The old 0.30 cutoff then merged several foreign
+                    // rows into one and selected a Colombian-peso amount as
+                    // MXN. Keep the bound broad on a page already identified
+                    // as a movement page; cover/header text is filtered by
+                    // the explicit phrases above and by row validation.
+                    && line.boundingBox.minX < 0.48
                     && !ignoredHeaderPhrases.contains(where: { normalized.contains($0) })
 
                 if isTransactionDate {
@@ -4666,10 +4737,36 @@ final class FinanceStore {
         }
         let orderedAmounts = amountCandidates.sorted(by: { $0.order < $1.order })
         // The card statement's monetary column is the last amount in the OCR
-        // row. For foreign purchases the row can also contain the source
-        // currency and exchange rate; selecting the first token would record
-        // USD (or the TC) as MXN and make the statement fail reconciliation.
-        guard let selected = orderedAmounts.last else { return nil }
+        // row. For foreign purchases the row also contains the source
+        // currency and sometimes an exchange rate before the final MXN
+        // amount. Do not select by numeric magnitude (a Colombian-peso
+        // amount can be hundreds of thousands); select the token after the
+        // visual currency/conversion anchor and then take the rightmost
+        // candidate. This mirrors the PDF text reader's “local amount after
+        // TC” rule and prevents values such as 183,600.00 from becoming an
+        // MXN charge of 1,031.17.
+        let normalizedRowTexts = row.map {
+            $0.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        }
+        let conversionAnchorOrder = row.enumerated().compactMap { index, _ -> Int? in
+            let normalized = normalizedRowTexts[index]
+            guard normalized.range(
+                of: #"(?i)d[óo]lar|euro|peso\s+colombiano|tipo\s+de\s+cambio|\btc\s*:"#,
+                options: .regularExpression
+            ) != nil else { return nil }
+            return index * 100
+        }.min()
+        let localCurrencyCandidates: [OCRAmountCandidate]
+        if let conversionAnchorOrder {
+            localCurrencyCandidates = orderedAmounts.filter { $0.order >= conversionAnchorOrder }
+        } else {
+            localCurrencyCandidates = []
+        }
+        let selected = localCurrencyCandidates.last ?? orderedAmounts.max {
+            if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
+            return $0.order < $1.order
+        }
+        guard let selected else { return nil }
 
         var title = fullText
             .replacingOccurrences(
