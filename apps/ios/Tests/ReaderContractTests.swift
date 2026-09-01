@@ -200,6 +200,62 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(reconciliation.status, .valid, reconciliation.reason ?? "")
     }
 
+    func testAmexTextReaderUsesOnlyMovementSectionsAndReconciles() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            American Express
+            The Platinum Credit Card
+            Límite de Crédito Límite Disponible
+            a Agosto 27,2026 10,000.00 MN 9,000.00 MN
+            23,150.88 - 32,744.61 + 950.00 = 950.00 300.00
+            Nuevas transacciones: 900.00
+            Total Nuevos Cargos: 950.00
+            MARCELO ANDRES DIAZ SANCHEZ 27-Ago-2026 27-Sep-2026
+            Fecha y Detalle de las operaciones Importe en MN.
+            05 de Agosto SUPERMERCADO 700.00
+            27 de Agosto MONTO A DIFERIR MESES EN AUTOMÁTICO 100.00
+            CR
+            Total de las transacciones en $ de MARCELO ANDRES DIAZ SANCHEZ 600.00
+            Estado de Cuenta Página 3
+            MARCELO ANDRES DIAZ SANCHEZ 27-Ago-2026 27-Sep-2026
+            Fecha y Detalle de las operaciones Importe en MN.
+            6 de Agosto HOLAFLY DUBLIN
+            Euro 15,50 TC:20.00
+            200.00
+            Total de Transacciones en Moneda Extranjera de MARCELO ANDRES DIAZ SANCHEZ 200.00
+            Transacciones de Meses sin Intereses
+            27 de Agosto MESES EN AUTOMÁTICO EXTRANJERO
+            CARGO 01 DE 03
+            50.00
+            Total de Meses sin Intereses 50.00
+            Resumen de Meses sin Intereses
+            27 de Ago 9,593.73 0.00% 6,395.82 1 de 3 3,197.91
+            """,
+            fileName: "28_jul_2026_-_27_ago_2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.source, "Amex")
+        XCTAssertEqual(snapshot.kind, .card)
+        XCTAssertEqual(snapshot.summary?.domesticTransactionTotal, 600)
+        XCTAssertEqual(snapshot.summary?.foreignTransactionTotal, 200)
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .purchase }.count, 2)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .credit }.count, 1)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .msi }.count, 1)
+        XCTAssertEqual(
+            snapshot.movements.filter { $0.flow == .expense }.reduce(Decimal.zero) { $0 + abs($1.amount) },
+            Decimal(string: "950.00")!
+        )
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("estado de cuenta") })
+
+        let reconciliation = FinanceStore.reconcileStatementForTesting(
+            kind: .card,
+            summary: snapshot.summary,
+            movements: snapshot.movements
+        )
+        XCTAssertEqual(reconciliation.status, .valid, reconciliation.reason ?? "")
+    }
+
     func testBBVAStatementRebuildsAllMovementRowsAndExcludesBalances() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
             text: """
@@ -229,12 +285,20 @@ final class ReaderContractTests: XCTestCase {
         )
 
         XCTAssertEqual(snapshot.source, "BBVA")
-        XCTAssertEqual(snapshot.movements.count, 11)
+        XCTAssertEqual(
+            snapshot.movements.count,
+            11,
+            snapshot.movements.map { "\($0.title)=\($0.amount)" }.joined(separator: " | ")
+        )
         let charges = snapshot.movements.filter { $0.amount < 0 }
             .reduce(Decimal.zero) { $0 + abs($1.amount) }
         let deposits = snapshot.movements.filter { $0.amount > 0 }
             .reduce(Decimal.zero) { $0 + $1.amount }
-        XCTAssertEqual(charges, Decimal(string: "22058.69")!)
+        XCTAssertEqual(
+            charges,
+            Decimal(string: "22058.69")!,
+            snapshot.movements.map { "\($0.title)=\($0.amount)" }.joined(separator: " | ")
+        )
         XCTAssertEqual(deposits, Decimal(string: "19500.00")!)
         XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("saldo") })
     }
