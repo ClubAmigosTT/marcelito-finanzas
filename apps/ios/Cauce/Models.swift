@@ -3472,7 +3472,7 @@ final class FinanceStore {
                 $0.text.contains("$") || $0.text.range(of: #"[.,]\d{1,2}$"#, options: .regularExpression) != nil
             }
             let usableAmountMatches = moneyMatches.isEmpty ? allAmountMatches : moneyMatches
-            let foreignCurrency = ["dolar", "euro", "peso colombiano", "tipo de cambio", " tc:"].contains { normalized.contains($0) }
+            let foreignCurrency = Self.hasForeignCurrency(in: normalized)
             let bankLikeRow = documentKind == .bank
                 || ["deposito", "retiro", "saldo", "cuenta de cheques", "cuenta de ahorro", "abono"]
                     .contains { normalized.contains($0) }
@@ -3811,9 +3811,7 @@ final class FinanceStore {
         }.sorted { $0.order < $1.order }
         guard !candidates.isEmpty else { return nil }
 
-        let hasForeignCurrency = ["dolar", "euro", "peso colombiano", "tipo de cambio", " tc:"].contains {
-            normalizedFullText.contains($0)
-        }
+        let hasForeignCurrency = Self.hasForeignCurrency(in: normalizedFullText)
         let bankLikeRow = kind == .bank
             || ["deposito", "retiro", "saldo", "cuenta de cheques", "cuenta de ahorro", "abono"]
                 .contains { normalizedFullText.contains($0) }
@@ -4686,9 +4684,10 @@ final class FinanceStore {
     }
 
     private static func hasForeignCurrency(in normalizedText: String) -> Bool {
-        ["dolar", "euro", "peso colombiano", "tipo de cambio", " tc:"].contains {
-            normalizedText.contains($0)
-        }
+        normalizedText.range(
+            of: #"(?i)d.?lar|euro|peso\s+colombiano|tipo\s+de\s+cambio|\btc\s*:"#,
+            options: .regularExpression
+        ) != nil
     }
 
     private static func parseDate(_ value: String, defaultYear: Int? = nil) -> Date? {
