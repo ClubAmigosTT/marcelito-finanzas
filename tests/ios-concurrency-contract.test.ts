@@ -40,6 +40,16 @@ test("Vision tiene fallback de idiomas cuando el dispositivo no expone etiquetas
   assert.match(source, /valid date, direction and issuer reconciliation/);
 });
 
+test("Vision escala el render por página sin desbordar memoria", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /func renderSize\(for page: PDFPage, longEdge: CGFloat\)/);
+  assert.match(source, /let maxPixels: CGFloat = 5_000_000/);
+  assert.match(source, /render\(page, longEdge: 2_400\)/);
+  assert.match(source, /render\(page, longEdge: 3_200\)/);
+  assert.match(source, /if baseConfidence < 0\.88/);
+  assert.match(source, /var selectedImage = cgImage/);
+});
+
 test("el corpus nativo admite manifiesto privado fuera del repositorio", async () => {
   const [nativeCorpus, runner] = await Promise.all([
     readFile(nativeCorpusPath, "utf8"),

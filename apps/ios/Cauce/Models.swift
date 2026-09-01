@@ -3415,8 +3415,34 @@ final class FinanceStore {
 
     private static func ocrObservations(from document: PDFDocument) -> [OCRObservation] {
         var observations: [OCRObservation] = []
-        let pageSize = CGSize(width: 1800, height: 2400)
         let ciContext = CIContext(options: [.useSoftwareRenderer: false])
+
+        // Render from the page's real aspect ratio instead of assuming every
+        // statement is US Letter. Keep a hard pixel budget so a high-DPI
+        // export cannot allocate an unbounded bitmap on the iPhone. The
+        // normal pass matches the previous ~2.4k long edge; a weak page gets
+        // one bounded detail pass before the contrast retry.
+        func renderSize(for page: PDFPage, longEdge: CGFloat) -> CGSize {
+            let bounds = page.bounds(for: .mediaBox).standardized
+            let width = max(abs(bounds.width), 1)
+            let height = max(abs(bounds.height), 1)
+            let requestedScale = longEdge / max(width, height)
+            let maxPixels: CGFloat = 5_000_000
+            let pixelScale = sqrt(maxPixels / max(width * height, 1))
+            let scale = min(requestedScale, pixelScale)
+            return CGSize(
+                width: max(800, (width * scale).rounded()),
+                height: max(800, (height * scale).rounded())
+            )
+        }
+
+        func render(_ page: PDFPage, longEdge: CGFloat) -> CGImage? {
+            let image = page.thumbnail(
+                of: renderSize(for: page, longEdge: longEdge),
+                for: .mediaBox
+            )
+            return image.cgImage
+        }
 
         func recognize(_ cgImage: CGImage, page: Int) -> [OCRObservation] {
             // Some iOS revisions expose only the base language identifiers
@@ -3502,18 +3528,31 @@ final class FinanceStore {
         for pageIndex in 0..<document.pageCount {
             autoreleasepool {
                 guard let page = document.page(at: pageIndex) else { return }
-                let image = page.thumbnail(of: pageSize, for: .mediaBox)
-                guard let cgImage = image.cgImage else { return }
+                guard let cgImage = render(page, longEdge: 2_400) else { return }
 
                 let baseObservations = recognize(cgImage, page: pageIndex)
                 var selectedObservations = baseObservations
+                var selectedImage = cgImage
+                let baseConfidence = meanConfidence(baseObservations)
+                // Small print and faint scan artifacts can produce a high
+                // count of low-confidence tokens even when the page is
+                // otherwise readable. Re-render only weak pages at a larger
+                // long edge; the pixel cap above keeps this bounded.
+                if baseConfidence < 0.88,
+                   let detailImage = render(page, longEdge: 3_200) {
+                    let detailObservations = recognize(detailImage, page: pageIndex)
+                    if meanConfidence(detailObservations) > meanConfidence(selectedObservations) {
+                        selectedObservations = detailObservations
+                        selectedImage = detailImage
+                    }
+                }
                 // A contrast pass is attempted only for visually weak pages.
                 // It is bounded to one temporary image and the original
                 // result wins whenever the retry does not improve confidence.
-                if meanConfidence(baseObservations) < 0.88,
-                   let contrastImage = enhancedImage(from: cgImage) {
+                if meanConfidence(selectedObservations) < 0.88,
+                   let contrastImage = enhancedImage(from: selectedImage) {
                     let contrastObservations = recognize(contrastImage, page: pageIndex)
-                    if meanConfidence(contrastObservations) > meanConfidence(baseObservations) {
+                    if meanConfidence(contrastObservations) > meanConfidence(selectedObservations) {
                         selectedObservations = contrastObservations
                     }
                 }
