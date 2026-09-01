@@ -341,6 +341,24 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.summary?.paymentForNoInterest, 3_996.62)
     }
 
+    func testAmexSectionTotalsDoNotUseTheCutoffDayAsAmount() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            American Express
+            Fecha y Detalle de las operaciones Importe en MN.
+            Total de las transacciones en $ de MARCELO ANDRES DIAZ SANCHEZ
+            13,990.02
+            Total de Transacciones en Moneda Extranjera de MARCELO ANDRES DIAZ SANCHEZ
+            27 de Agosto
+            9,593.73
+            """,
+            fileName: "28_jul_2026_-_27_ago_2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.domesticTransactionTotal, 13_990.02)
+        XCTAssertEqual(snapshot.summary?.foreignTransactionTotal, 9_593.73)
+    }
+
     func testReaderRejectsAdministrativeNumericRows() {
         let text = """
         Grupo Financiero BBVA

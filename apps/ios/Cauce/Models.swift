@@ -5364,7 +5364,33 @@ final class FinanceStore {
         // after the known label so account/reference numbers cannot satisfy
         // the control accidentally.
         func flexibleAmountOnLabel(_ labels: [String]) -> Decimal? {
-            let amountPattern = #"[-+]?\s*\$?\s*(?:\d{1,3}(?:[,.]\d{3})+|\d+)(?:[,.]\d{1,2})?"#
+            // Section totals are always printed with cents. Requiring a
+            // decimal token (or a tightly bounded separator-less OCR token)
+            // prevents a cutoff day such as `27` on the next visual line from
+            // being returned as the foreign-currency total.
+            let amountPattern = #"[-+]?\s*\$?\s*(?:(?:\d{1,3}(?:[,.]\d{3})+|\d+)[,.]\d{1,2}|\d{7,8})"#
+            guard let amountRegex = try? NSRegularExpression(pattern: amountPattern) else { return nil }
+
+            // Prefer the label's own visual line and then the next few lines.
+            // PDFKit/Vision may put a cutoff date (`27 de Agosto`) between a
+            // wrapped section title and its total; scanning only decimal
+            // tokens skips that date without mistaking it for money.
+            let lines = normalized.components(separatedBy: .newlines)
+            for index in lines.indices {
+                guard labels.contains(where: { lines[index].contains($0) }) else { continue }
+                let end = min(index + 3, lines.count - 1)
+                for candidateIndex in index...end {
+                    let line = lines[candidateIndex]
+                    let lineRange = NSRange(line.startIndex..<line.endIndex, in: line)
+                    let matches = amountRegex.matches(in: line, range: lineRange)
+                    if let match = matches.last,
+                       let valueRange = Range(match.range, in: line),
+                       let value = parseAmount(String(line[valueRange])) {
+                        return normalizeBareBankAmount(String(line[valueRange]), value)
+                    }
+                }
+            }
+
             for label in labels {
                 let labelPattern = label
                     .split(separator: " ")
