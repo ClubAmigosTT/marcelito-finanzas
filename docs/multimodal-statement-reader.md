@@ -64,8 +64,9 @@ permanente en `VITE_*`, en una app móvil o en el repositorio.
 
 Antes de cargar estados reales, el propietario puede ejecutar un preflight
 autenticado en `POST /api/statement-reader/preflight`. El proxy envía un PDF
-vacío generado en memoria y exige una respuesta válida del contrato; el
-resultado solo indica `status: "ready"`, el modelo y la versión del contrato.
+syntético generado en memoria con una sola fila conocida y exige que el
+proveedor la recupere con los valores exactos además de cumplir el contrato;
+el resultado solo indica `status: "ready"`, el modelo y la versión del contrato.
 Este control no sube ningún estado del usuario y permite detectar si el modelo
 configurado realmente admite entrada PDF y salida JSON estructurada.
 La interfaz espera hasta 120 segundos para contemplar el arranque en frío del
