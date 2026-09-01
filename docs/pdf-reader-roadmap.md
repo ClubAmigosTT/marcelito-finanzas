@@ -265,3 +265,36 @@ importación queda provisional y no puede autoalimentar los KPI. La calibración
 solo se considera válida si los anclajes monetarios aparecen junto con `FECHA`
 y `DESCRIPCIÓN` en la misma página y línea visual; tampoco se combinan
 etiquetas de resúmenes o páginas distintas.
+
+## Endurecimientos añadidos en la revisión actual
+
+- El contrato multimodal exige que el fragmento de evidencia contenga el
+  importe literal de la fila además del comercio. El proxy y el cliente aplican
+  la misma regla, por lo que una respuesta que copia bien el nombre pero elige
+  un saldo, folio o referencia queda bloqueada.
+- Una relectura multimodal conserva el emisor institucional verificado por el
+  lector local cuando el proveedor confunde una contraparte (por ejemplo,
+  Santander mencionado dentro de un SPEI de un estado BBVA). El desacuerdo se
+  conserva como evidencia de diagnóstico y no se oculta.
+- Vision para Amex calcula la posición de cada importe aun cuando devuelve la
+  fila completa en una sola observación. Prioriza el importe MXN antes o
+  después del marcador de moneda; si falta el importe local, descarta la fila
+  en vez de convertir pesos colombianos, dólares o el tipo de cambio en gasto.
+- La revisión incrementa la `readerVersion`, por lo que una actualización no
+  reutiliza silenciosamente filas producidas por una regla anterior: los PDFs
+  se reconstruyen y los estados no conciliados permanecen en cuarentena.
+
+## Checklist de aceptación antes de decir “99%”
+
+1. Cada PDF del manifiesto tiene un resultado y una huella distinta; ningún
+   duplicado cuenta como cobertura.
+2. Cada fila aceptada coincide con golden en fecha, importe, dirección,
+   comercio normalizado, tipo y página; la evidencia contiene descripción e
+   importe.
+3. Sumas y conteos del emisor concilian dentro de $0.05; los estados que no
+   concilian no alimentan ninguna pantalla.
+4. Las identidades de flujo, patrimonio, deuda y saldo de efectivo pasan.
+5. La precisión de aceptación automática es ≥99%, la cobertura de archivos es
+   100% y no existen falsos positivos administrativos.
+6. La versión certificada del dispositivo coincide exactamente con la versión
+   del lector que se va a publicar.
