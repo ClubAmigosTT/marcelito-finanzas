@@ -553,7 +553,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.09.01.22"
+    static let readerVersion = "ios-reader-2026.09.01.23"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -621,7 +621,7 @@ final class FinanceStore {
         summary: StatementSummaryRecord?,
         movements: [Movement]
     ) -> StatementReconciliationRecord {
-        FinanceStore().reconcileStatement(kind: kind, summary: summary, movements: movements)
+        FinanceStore(reconciliationOnly: true).reconcileStatement(kind: kind, summary: summary, movements: movements)
     }
 
     /// Runs the Santander visual row reader against normalized Vision-like
@@ -1903,6 +1903,17 @@ final class FinanceStore {
         )
     }
 
+    /// Creates an isolated, empty store for parser-only probes. It must never
+    /// read or write UserDefaults: PDF extraction can call this from a detached
+    /// background task while the live store is committing a ledger snapshot.
+    private init(reconciliationOnly: Bool) {
+        movements = []
+        statements = []
+        ledgerVersion = UUID()
+        lastAuditRun = nil
+        lastImportedFile = nil
+    }
+
     func updateCategory(for movement: Movement, to category: String) {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return }
         movements[index].category = category
@@ -2686,7 +2697,12 @@ final class FinanceStore {
               normalized.contains("fecha y detalle de las operaciones") else { return false }
         let candidates = parse(text: text, fileName: fileName, sourceHint: source)
         guard !candidates.isEmpty else { return false }
-        return FinanceStore().reconcileStatement(
+        // This probe runs from the detached PDF/OCR task. Constructing the
+        // normal store here would read and rewrite UserDefaults (and could
+        // race the live store while an import is in progress). The
+        // reconciliation-only initializer has no persistence side effects;
+        // the probe therefore stays a pure validation of parser output.
+        return FinanceStore(reconciliationOnly: true).reconcileStatement(
             kind: kind,
             summary: summary(from: text, source: source),
             movements: candidates
