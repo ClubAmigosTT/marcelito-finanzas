@@ -105,11 +105,13 @@ defecto para mantener los estados en el dispositivo.
 1. Ejecutar el lector local y guardar su diagnóstico.
 2. Si el PDF queda bloqueado por texto desordenado/OCR, mostrar “Reintentar
    con lector avanzado” y solicitar consentimiento.
-3. Comparar proveedor multimodal y lector local en modo sombra; aceptar solo
+3. Exigir que el preflight del proveedor haya terminado correctamente antes de
+   enviar un PDF real; si no, conservarlo en el lector local.
+4. Comparar proveedor multimodal y lector local en modo sombra; aceptar solo
    cuando las filas y totales concilien.
-4. Guardar en el estado del documento `extractionProvider`, `readerVersion`,
+5. Guardar en el estado del documento `extractionProvider`, `readerVersion`,
    `extractionModel` y `extractionPromptVersion` para reproducibilidad.
-5. Habilitar los KPIs únicamente desde el ledger canónico ya conciliado.
+6. Habilitar los KPIs únicamente desde el ledger canónico ya conciliado.
 
 La precisión se mide sobre un corpus privado de estados reales con totales
 conocidos. Nunca se publica el PDF; en el repositorio solo deben quedar hashes,

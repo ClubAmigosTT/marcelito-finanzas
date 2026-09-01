@@ -529,7 +529,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       <nav className="mobile-nav" aria-label="Navegación principal móvil">
         {navItems.map(({ label, icon: Icon }) => <button key={label} className={section === label ? "active" : ""} onClick={() => setSection(label)}><Icon size={21} weight={section === label ? "fill" : "regular"} /><span>{label}</span></button>)}
       </nav>
-      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onSave={saveImport} categoryRules={categoryRules} />
+      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onSave={saveImport} categoryRules={categoryRules} readerPreflightReady={readerPreflight !== null} />
     </div>
   );
 }
@@ -1231,7 +1231,7 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   return <div className="empty-state"><ListMagnifyingGlass size={32} /><h3>{title}</h3><p>{body}</p></div>;
 }
 
-function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean; onClose: () => void; onSave: (commit: ImportCommit) => void; categoryRules: CategoryRules }) {
+function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightReady }: { open: boolean; onClose: () => void; onSave: (commit: ImportCommit) => void; categoryRules: CategoryRules; readerPreflightReady: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [stage, setStage] = useState<"pick" | "processing" | "review" | "error">("pick");
   const [progress, setProgress] = useState(0);
@@ -1280,6 +1280,11 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
   async function retryWithMultimodalReader() {
     const file = selectedFile.current;
     if (!file || !multimodalReaderEndpoint) return;
+    if (!readerPreflightReady) {
+      setError("Primero comprueba el lector avanzado desde Resumen → Diagnóstico → Probar lector avanzado. No se enviará ningún PDF hasta validar el proveedor.");
+      setStage("error");
+      return;
+    }
     if (!readerConsent.current) {
       const confirmed = window.confirm("El lector avanzado enviará temporalmente este PDF a un proveedor externo. Los modelos gratuitos de Zen pueden tener políticas de uso de datos distintas al lector local. ¿Quieres continuar?");
       if (!confirmed) {
