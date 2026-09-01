@@ -47,6 +47,12 @@ gasto real sin separar esas secciones.
   un desvío menor o igual a $2, o una magnitud claramente mal escalada que
   siga dentro del rango del saldo; si no existe saldo anterior/final confiable
   conserva el importe visual y deja que la conciliación bloquee el estado.
+- Si Vision devuelve una fila Santander completa en una sola caja (fecha,
+  descripción, importe y saldo), el lector estima la coordenada horizontal de
+  cada token a partir de su posición dentro de esa caja. Cuando la geometría
+  queda cerca del límite entre columnas, usa únicamente los dos últimos
+  importes monetarios como pareja movimiento/saldo; nunca toma un saldo
+  corrido o un folio como gasto.
 - La lectura Vision de Santander calibra `DEPÓSITO`, `RETIRO` y `SALDO` con la
   geometría de los encabezados cuando están presentes. Si el recorte no trae
   encabezado, usa los límites de la plantilla conocida; en ambos casos el
