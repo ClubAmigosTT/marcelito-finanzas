@@ -4640,7 +4640,11 @@ final class FinanceStore {
         ), let textDateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         ), let amountRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
+            // Require a token boundary around the decimal separator too.
+            // Without the punctuation guard Vision's `TC:0.00562` can be
+            // matched as the substring `005.62`, which then looks like a
+            // perfectly valid MXN amount and wins the right-column heuristic.
+            pattern: #"(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         ) else {
             return []
         }
@@ -4916,6 +4920,67 @@ final class FinanceStore {
             }
             return left.characterOffset < right.characterOffset
         }
+        // Keep the currency label and the exchange-rate marker separate. A
+        // whole-row Vision observation can look like
+        // `1,031.17 Peso Colombiano 183,600.00 TC:0.00562`: the local amount
+        // is before the currency label, the source amount is between the
+        // label and `TC`, and no local amount follows the rate. Treating the
+        // first foreign marker as a generic conversion anchor makes the
+        // source amount (or a substring of the rate) win by accident.
+        let currencyAnchor: (observationIndex: Int, characterOffset: Int)? = row.enumerated().compactMap { index, _ in
+            let normalized = normalizedRowTexts[index]
+            guard let markerRange = normalized.range(
+                of: #"(?i)d[óo]lar(?:es)?|euro?s?|peso\s+colombiano?s?"#,
+                options: .regularExpression
+            ) else { return nil }
+            return (index, NSRange(markerRange, in: normalized).location)
+        }.min { left, right in
+            if left.observationIndex != right.observationIndex {
+                return left.observationIndex < right.observationIndex
+            }
+            return left.characterOffset < right.characterOffset
+        }
+        let exchangeRateAnchor: (observationIndex: Int, characterOffset: Int)? = row.enumerated().compactMap { index, _ in
+            let normalized = normalizedRowTexts[index]
+            guard let markerRange = normalized.range(
+                of: #"(?i)\btc\s*:|tipo\s+de\s+cambio"#,
+                options: .regularExpression
+            ) else { return nil }
+            return (index, NSRange(markerRange, in: normalized).location)
+        }.min { left, right in
+            if left.observationIndex != right.observationIndex {
+                return left.observationIndex < right.observationIndex
+            }
+            return left.characterOffset < right.characterOffset
+        }
+        let exchangeRateValue: Decimal? = {
+            guard let exchangeRateAnchor else { return nil }
+            let text = normalizedRowTexts[exchangeRateAnchor.observationIndex]
+            guard let regex = try? NSRegularExpression(
+                pattern: #"(?i)(?:\btc\s*:|tipo\s+de\s+cambio)\s*(?:[:=\-])?\s*(\d+(?:[.,]\d{1,6})?)"#
+            ), let match = regex.firstMatch(
+                in: text,
+                range: NSRange(text.startIndex..<text.endIndex, in: text)
+            ), let valueRange = Range(match.range(at: 1), in: text) else { return nil }
+            return parseAmount(String(text[valueRange]))
+        }()
+        let exchangeRateCandidateRanges: [(observationIndex: Int, range: NSRange)] = row.enumerated().compactMap { index, _ in
+            let normalized = normalizedRowTexts[index]
+            guard let regex = try? NSRegularExpression(
+                pattern: #"(?i)(?:\btc\s*:|tipo\s+de\s+cambio)\s*(?:[:=\-])?\s*(\d+(?:[.,]\d{1,6})?)"#
+            ), let match = regex.firstMatch(
+                in: normalized,
+                range: NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+            ) else { return nil }
+            return (index, match.range(at: 1))
+        }
+        let isExchangeRateCandidate: (OCRAmountCandidate) -> Bool = { candidate in
+            exchangeRateCandidateRanges.contains { item in
+                guard item.observationIndex == candidate.observationIndex else { return false }
+                let candidateRange = NSRange(location: candidate.characterOffset, length: candidate.text.utf16.count)
+                return NSIntersectionRange(candidateRange, item.range).length > 0
+            }
+        }
         // The Amex local-MXN amount is right aligned in the statement's
         // monetary column. Foreign rows have two layouts in the wild:
         //
@@ -4928,22 +4993,42 @@ final class FinanceStore {
         // before the currency marker therefore turns 183,600 COP into a
         // 183,600 MXN expense. Use the marker as an ordering hint, but let
         // the right-aligned local column win whenever it is visible.
-        let localCurrencyCandidates = orderedAmounts.filter { $0.x >= 0.72 }
+        let nonRateAmounts = orderedAmounts.filter { !isExchangeRateCandidate($0) }
+        let localCurrencyCandidates = nonRateAmounts.filter { $0.x >= 0.72 }
         let beforeConversionCandidates = conversionAnchor.map { anchor in
-            orderedAmounts.filter { candidate in
+            nonRateAmounts.filter { candidate in
                 candidate.observationIndex < anchor.observationIndex
                     || (candidate.observationIndex == anchor.observationIndex
                         && candidate.characterOffset < anchor.characterOffset)
             }
         } ?? []
-        let afterConversionCandidates = conversionAnchor.map { anchor in
-            orderedAmounts.filter { candidate in
+        let beforeCurrencyCandidates = currencyAnchor.map { anchor in
+            nonRateAmounts.filter { candidate in
+                candidate.observationIndex < anchor.observationIndex
+                    || (candidate.observationIndex == anchor.observationIndex
+                        && candidate.characterOffset < anchor.characterOffset)
+            }
+        } ?? []
+        let afterExchangeRateCandidates = exchangeRateAnchor.map { anchor in
+            nonRateAmounts.filter { candidate in
                 (candidate.observationIndex > anchor.observationIndex
                     || (candidate.observationIndex == anchor.observationIndex
                         && candidate.characterOffset > anchor.characterOffset))
                     && candidate.x >= 0.60
             }
         } ?? []
+        let betweenCurrencyAndRateCandidates: [OCRAmountCandidate] = {
+            guard let currencyAnchor, let exchangeRateAnchor else { return [] }
+            return nonRateAmounts.filter { candidate in
+                let afterCurrency = candidate.observationIndex > currencyAnchor.observationIndex
+                    || (candidate.observationIndex == currencyAnchor.observationIndex
+                        && candidate.characterOffset > currencyAnchor.characterOffset)
+                let beforeRate = candidate.observationIndex < exchangeRateAnchor.observationIndex
+                    || (candidate.observationIndex == exchangeRateAnchor.observationIndex
+                        && candidate.characterOffset < exchangeRateAnchor.characterOffset)
+                return afterCurrency && beforeRate
+            }
+        }()
         let rightmost: ([OCRAmountCandidate]) -> OCRAmountCandidate? = { candidates in
             candidates.max {
                 if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
@@ -4958,24 +5043,39 @@ final class FinanceStore {
                     ?? rightmost(orderedAmounts)
             }
 
-            if conversionAnchor != nil {
-                // A marker before every amount means the source currency is
-                // followed by the conversion rate and then the local amount.
-                // Choose the right-aligned candidate after the marker first.
-                // If the marker appears between two amounts, prefer a
-                // right-aligned candidate after it; otherwise retain the
-                // pre-marker amount (the alternate Vision layout).
-                if beforeConversionCandidates.isEmpty {
-                    return rightmost(afterConversionCandidates)
-                        ?? rightmost(localCurrencyCandidates)
+            if exchangeRateAnchor != nil {
+                // Preferred layout: the converted MXN token follows `TC` and
+                // is right aligned in the amount column.
+                if let converted = rightmost(afterExchangeRateCandidates.filter({ $0.x >= 0.72 }))
+                    ?? rightmost(afterExchangeRateCandidates) {
+                    return converted
                 }
-                let rightAlignedAfter = afterConversionCandidates.filter { $0.x >= 0.72 }
-                return rightmost(rightAlignedAfter)
-                    ?? rightmost(localCurrencyCandidates)
-                    ?? rightmost(beforeConversionCandidates)
+
+                // Alternate whole-row layout: the local token is before the
+                // foreign-currency label while the source amount is between
+                // that label and `TC`. Only accept the pre-label token when
+                // the exchange-rate arithmetic supports it; otherwise leave
+                // the row unresolved instead of recording a foreign amount.
+                if let exchangeRateValue, !betweenCurrencyAndRateCandidates.isEmpty {
+                    let matchesConversion = beforeCurrencyCandidates.filter { local in
+                        betweenCurrencyAndRateCandidates.contains { source in
+                            let expected = absoluteDecimal(source.value * exchangeRateValue)
+                            let difference = absoluteDecimal(expected - absoluteDecimal(local.value))
+                            let tolerance = max(
+                                Decimal(2),
+                                absoluteDecimal(local.value) * Decimal(string: "0.02", locale: Locale(identifier: "en_US_POSIX"))!
+                            )
+                            return difference <= tolerance
+                        }
+                    }
+                    return rightmost(matchesConversion)
+                }
+                return nil
             }
 
-            return rightmost(localCurrencyCandidates) ?? rightmost(orderedAmounts)
+            // Foreign label without an explicit rate: use only the right
+            // amount column. Never fall back to the numerically largest token.
+            return rightmost(localCurrencyCandidates)
         }()
         guard let selected else { return nil }
 

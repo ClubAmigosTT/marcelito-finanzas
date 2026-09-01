@@ -42,7 +42,9 @@ test("Amex Vision selecciona el importe MXN por columna y respeta sus secciones"
   const source = await readFile(modelsPath, "utf8");
   // The local amount is right aligned; source-currency and TC tokens can
   // appear later in OCR text and must not be selected by string order.
-  assert.match(source, /let localCurrencyCandidates = orderedAmounts\.filter \{ \$0\.x >= 0\.72 \}/);
+  assert.match(source, /let nonRateAmounts = orderedAmounts\.filter \{ !isExchangeRateCandidate\(\$0\) \}/);
+  assert.match(source, /let localCurrencyCandidates = nonRateAmounts\.filter \{ \$0\.x >= 0\.72 \}/);
+  assert.match(source, /let exchangeRateAnchor:/);
   assert.match(source, /forcedForeignCurrency: amexSection == 2/);
   assert.match(source, /amexSection = 3/);
   assert.match(source, /foreignCurrency: forcedForeignCurrency \|\| hasForeignCurrency/);
