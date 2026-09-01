@@ -49,10 +49,31 @@ Para que la prueba sea válida, devuelve exactamente estos valores: source="PREF
 // Keeping a real text object here proves the provider can ingest a PDF and
 // recover a row, rather than merely echoing the expected empty response.
 const PREFLIGHT_TEXT = "BT\n/F1 12 Tf\n72 720 Td\n(PREFLIGHT BANK) Tj\n0 -20 Td\n(FECHA DESCRIPCION IMPORTE) Tj\n0 -20 Td\n(15/ENE/2026 PREFLIGHT TEST MOVEMENT 12.34) Tj\nET\n";
-const PREFLIGHT_PDF = Buffer.from(
-  `%PDF-1.4\n1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n3 0 obj\n<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>\nendobj\n4 0 obj\n<< /Length ${Buffer.byteLength(PREFLIGHT_TEXT, "utf8")} >>\nstream\n${PREFLIGHT_TEXT}endstream\nendobj\n5 0 obj\n<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n`,
-  "utf8",
-);
+
+function createPreflightPdf() {
+  const objects = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 300 300] /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    `<< /Length ${Buffer.byteLength(PREFLIGHT_TEXT, "utf8")} >>\nstream\n${PREFLIGHT_TEXT}endstream`,
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+  ];
+  let document = "%PDF-1.4\n";
+  const offsets = [0];
+  objects.forEach((object, index) => {
+    offsets.push(Buffer.byteLength(document, "utf8"));
+    document += `${index + 1} 0 obj\n${object}\nendobj\n`;
+  });
+  const xrefOffset = Buffer.byteLength(document, "utf8");
+  document += `xref\n0 ${objects.length + 1}\n0000000000 65535 f \n`;
+  for (let index = 1; index < offsets.length; index += 1) {
+    document += `${String(offsets[index]).padStart(10, "0")} 00000 n \n`;
+  }
+  document += `trailer\n<< /Size ${objects.length + 1} /Root 1 0 R >>\nstartxref\n${xrefOffset}\n%%EOF\n`;
+  return Buffer.from(document, "utf8");
+}
+
+const PREFLIGHT_PDF = createPreflightPdf();
 
 function json(res, status, body, extraHeaders = {}) {
   const payload = JSON.stringify(body);
