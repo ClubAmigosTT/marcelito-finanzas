@@ -462,10 +462,11 @@ function preflightEndpoint(endpoint: string) {
 }
 
 /**
- * Verifies the configured provider with a synthetic, empty PDF. This is an
- * explicit operator check: no user file is read and no financial data crosses
- * the network. A successful result proves that the proxy accepted the PDF and
- * returned the exact contract the client expects.
+ * Verifies the configured provider with a synthetic PDF containing one known
+ * row. This is an explicit operator check: no user file is read and no
+ * financial data crosses the network. A successful result proves that the
+ * proxy accepted a real PDF input and returned the exact contract the client
+ * expects.
  */
 export async function requestMultimodalReaderPreflight(
   options: Pick<MultimodalReaderClientOptions, "endpoint" | "authorization" | "timeoutMs" | "signal" | "fetchImpl"> & { enabled?: boolean },
