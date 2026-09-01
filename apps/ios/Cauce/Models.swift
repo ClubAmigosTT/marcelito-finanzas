@@ -3562,22 +3562,41 @@ final class FinanceStore {
             // idempotent for already structured rows.
             #"(?i)(?<![A-Za-z0-9.,])(?:(?:0?[1-9]|[12]\d|3[01]|[OBI][0-9]?|[0-9][OBI])\s*[\/-]\s*(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ag(?:o|0)(?:sto)?|sep(?:t|tiembre)?|set(?:t|iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)(?:\s*[\/-]\s*(?:20)?\d{2})?|(?:0?[1-9]|[12]\d|3[01]|[OBI][0-9]?|[0-9][OBI])\s+(?:de\s*)?(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ag(?:o|0)(?:sto)?|sep(?:t|tiembre)?|set(?:t|iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)(?:\s+(?:de\s+)?\d{4})?)(?![A-Za-z])"#,
         ]
-        var positions = Set<String.Index>()
+        // Keep offsets in the original UTF-16 string. Mutating a Swift
+        // `String` while iterating stored `String.Index` values is not safe:
+        // even right-to-left insertions can invalidate indices and leave a
+        // flattened fixture unrepaired. The one-pass rebuild below never
+        // mutates the source while matching.
+        let original = value as NSString
+        let originalRange = NSRange(location: 0, length: original.length)
+        var positions = Set<Int>()
         for pattern in boundaries {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
-            let range = NSRange(value.startIndex..<value.endIndex, in: value)
-            for match in regex.matches(in: value, range: range) {
-                guard let matchRange = Range(match.range, in: value) else { continue }
-                positions.insert(matchRange.lowerBound)
+            for match in regex.matches(in: value, range: originalRange) {
+                positions.insert(match.range.location)
             }
         }
-        for position in positions.sorted(by: { $0 < $1 }).reversed() {
-            guard position > value.startIndex else { continue }
-            let previous = value[value.index(before: position)]
-            guard previous != "\n" else { continue }
-            value.insert("\n", at: position)
+        guard !positions.isEmpty else { return value }
+
+        var rebuilt = String()
+        var cursor = 0
+        for position in positions.sorted() {
+            guard position >= cursor, position <= original.length else { continue }
+            if position > cursor {
+                rebuilt += original.substring(with: NSRange(location: cursor, length: position - cursor))
+            }
+            if position > 0 {
+                let previous = original.substring(with: NSRange(location: position - 1, length: 1))
+                if previous != "\n" && !rebuilt.hasSuffix("\n") {
+                    rebuilt.append("\n")
+                }
+            }
+            cursor = position
         }
-        return value
+        if cursor < original.length {
+            rebuilt += original.substring(from: cursor)
+        }
+        return rebuilt
     }
 
     private static func parse(text: String, fileName: String, sourceHint: String? = nil) -> [Movement] {
