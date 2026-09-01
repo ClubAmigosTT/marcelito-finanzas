@@ -207,6 +207,7 @@ final class ReaderContractTests: XCTestCase {
             fileName: "sample-bank-bbva.pdf"
         )
 
+        print("BBVA_DEBUG source=\(snapshot.source) rows=\(snapshot.movements.count) amounts=\(snapshot.movements.map { NSDecimalNumber(decimal: $0.amount).stringValue }.joined(separator: ","))")
         XCTAssertEqual(snapshot.source, "BBVA")
         XCTAssertEqual(snapshot.movements.count, 11)
         let charges = snapshot.movements.filter { $0.amount < 0 }
