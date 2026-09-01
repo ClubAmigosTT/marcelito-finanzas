@@ -31,6 +31,12 @@ por página mínima de 78% sobre las filas visuales. Una respuesta por debajo de
 esos umbrales se rechaza o queda provisional; nunca se presenta como un estado
 `ready` ni llega a los KPI.
 
+El prompt versionado (`statement-reader-v2`) pide una doble pasada: ubicar la
+tabla por página y después reconstruir filas comprobando conteos y sumas. Las
+filas se devuelven ordenadas y sin combinar operaciones de páginas continuas;
+si el modelo no puede demostrar una fila, debe omitirla para que la
+conciliación la bloquee, en lugar de inventar un importe.
+
 ## Proxy seguro
 
 El servidor está en `server/statement-reader.mjs` y se inicia con:

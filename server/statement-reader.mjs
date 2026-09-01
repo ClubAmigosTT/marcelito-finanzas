@@ -68,9 +68,11 @@ const READER_PROMPT = `Eres un extractor documental financiero. Lee el PDF compl
 Reglas obligatorias:
 - Identifica el emisor por encabezado, razón social, dominio o logotipo institucional. Nunca uses una marca mencionada solo dentro de una operación para decidir el banco.
 - Extrae únicamente filas que pertenezcan a la tabla de movimientos del periodo. Una fila requiere fecha válida, descripción comercial válida, importe monetario válido y dirección clara (in o out).
+- Trabaja en dos pasadas antes de responder: primero ubica visualmente el encabezado y los límites de la tabla en cada página; después reconstruye las filas y comprueba que sus sumas y conteos coincidan con los controles impresos del estado. Si no puedes probar una fila o la conciliación no cierra, omítela y deja que el estado quede para revisión; nunca rellenes el faltante con una estimación.
 - No conviertas en movimientos encabezados, pies, referencias, cuentas, CLABE, RFC, certificados, folios, autorizaciones, fechas de corte, saldos, subtotales, totales, límites, crédito disponible ni texto administrativo.
 - No inventes ni corrijas importes. Los importes son centavos enteros absolutos; la dirección determina el signo. Si un dato no se puede leer con seguridad, usa null en el resumen o no incluyas la fila.
 - Conserva página y un fragmento breve y literal de evidencia de la fila. La evidencia no puede ser una explicación inventada.
+- Devuelve las filas ordenadas por página y fecha, una sola vez por operación. No combines dos filas ni dupliques una operación porque aparezca en una página de continuación.
 - Clasifica cada fila como purchase, cardPayment, bankTransfer, income, credit, refund, msi, interest, fee u other. Un pago de una cuenta bancaria a una tarjeta es cardPayment; una transferencia entre cuentas propias es bankTransfer; un reembolso es refund; ninguno de ellos es gasto ordinario.
 - En estados bancarios, lee los totales declarados de depósitos/retiros y sus conteos. En tarjetas, lee saldo/deuda, límite, disponible, pago mínimo, pago para no generar intereses y MSI si aparecen. Los importes del resumen también son centavos enteros.
 - Si un subtotal está impreso como crédito (CR), conserva domestic_transaction_total_is_credit=true. No sumes dos veces subtotales y totales.
