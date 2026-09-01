@@ -208,6 +208,16 @@ function validNullableCents(value) {
   return value === null || (Number.isInteger(value) && value >= 0 && value <= 1_000_000_000_000);
 }
 
+function shouldRetryWithoutStructuredOutput(response, body) {
+  // A few OpenAI-compatible gateways implement PDF input but reject the
+  // optional Structured Outputs envelope. Retry once without that envelope;
+  // validateModelShape below remains mandatory, so this never relaxes the
+  // contract that reaches the app.
+  if (![400, 404, 422].includes(response.status)) return false;
+  const details = JSON.stringify(body ?? {}).toLowerCase();
+  return /(?:json[_ -]?schema|response[_ -]?format|structured[_ -]?output|text\.format|unsupported|unknown\s+parameter)/.test(details);
+}
+
 /** Lightweight server-side guard. The client performs the full canonical
  * validator; this second boundary prevents a direct caller from receiving an
  * obviously malformed or administrative model response. */
@@ -260,58 +270,80 @@ async function callProvider({ pdf, fileName, env, fetchImpl, schema, prompt = RE
   }
   if (providerUrl.protocol !== "https:") throw new Error("provider_not_configured");
   if (!apiKey || !model) throw new Error("provider_not_configured");
-  const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    positiveInt(env.STATEMENT_READER_PROVIDER_TIMEOUT_MS, DEFAULT_PROVIDER_TIMEOUT_MS, 300_000),
-  );
-  let response;
-  try {
-    response = await fetchImpl(providerUrl, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        store: false,
-        input: [{
-          role: "user",
-          content: [
-            {
-              type: "input_file",
-              filename: fileName,
-              file_data: `data:application/pdf;base64,${pdf.toString("base64")}`,
-            },
-            { type: "input_text", text: prompt },
-          ],
-        }],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "statement_extraction",
-            strict: true,
-            // `$schema`/`$id` are useful repository metadata but are not part
-            // of the provider's strict response grammar. Keep `$defs`/`$ref`,
-            // which Structured Outputs supports, and strip only those hints.
-            schema: Object.fromEntries(Object.entries(schema).filter(([key]) => key !== "$schema" && key !== "$id")),
-          },
+  const requestBody = (includeStructuredOutput) => ({
+    model,
+    store: false,
+    input: [{
+      role: "user",
+      content: [
+        {
+          type: "input_file",
+          filename: fileName,
+          file_data: `data:application/pdf;base64,${pdf.toString("base64")}`,
         },
-      }),
-      signal: controller.signal,
-    });
-  } catch (error) {
-    if (error?.name === "AbortError") throw new Error("provider_timeout");
-    throw error;
-  } finally {
-    clearTimeout(timeout);
-  }
+        {
+          type: "input_text",
+          text: includeStructuredOutput
+            ? prompt
+            : `${prompt}\n\nCompatibilidad: devuelve el objeto JSON directamente, sin Markdown, sin comentarios y sin propiedades fuera del contrato.`,
+        },
+      ],
+    }],
+    ...(includeStructuredOutput ? {
+      text: {
+        format: {
+          type: "json_schema",
+          name: "statement_extraction",
+          strict: true,
+          // `$schema`/`$id` are useful repository metadata but are not part
+          // of the provider's strict response grammar. Keep `$defs`/`$ref`,
+          // which Structured Outputs supports, and strip only those hints.
+          schema: Object.fromEntries(Object.entries(schema).filter(([key]) => key !== "$schema" && key !== "$id")),
+        },
+      },
+    } : {}),
+  });
+  const requestProvider = async (includeStructuredOutput) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(
+      () => controller.abort(),
+      positiveInt(env.STATEMENT_READER_PROVIDER_TIMEOUT_MS, DEFAULT_PROVIDER_TIMEOUT_MS, 300_000),
+    );
+    try {
+      return await fetchImpl(providerUrl, {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${apiKey}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(requestBody(includeStructuredOutput)),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") throw new Error("provider_timeout");
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+
+  let response;
   let body;
   try {
+    response = await requestProvider(true);
     body = await response.json();
-  } catch {
+  } catch (error) {
+    if (error?.message === "provider_timeout") throw error;
     throw new Error("provider_invalid_response");
+  }
+  if (!response.ok && shouldRetryWithoutStructuredOutput(response, body)) {
+    try {
+      response = await requestProvider(false);
+      body = await response.json();
+    } catch (error) {
+      if (error?.message === "provider_timeout") throw error;
+      throw new Error("provider_invalid_response");
+    }
   }
   if (!response.ok) {
     const errorType = typeof body?.error?.type === "string" ? body.error.type : "provider_error";

@@ -287,3 +287,39 @@ test("el preflight prueba PDF y JSON sin enviar un estado del usuario", async ()
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+test("reintenta sin Structured Outputs cuando el gateway lo rechaza y conserva la validación", async () => {
+  const providerBodies = [];
+  const server = createStatementReaderServer({
+    env: {
+      STATEMENT_READER_API_KEY: "provider-secret",
+      STATEMENT_READER_MODEL: "vision-model",
+      STATEMENT_READER_TOKEN: "reader-token",
+    },
+    fetchImpl: async (_url, init) => {
+      const body = JSON.parse(init.body);
+      providerBodies.push(body);
+      if (providerBodies.length === 1) {
+        return new Response(JSON.stringify({ error: { type: "unsupported_response_format", message: "json_schema is not supported" } }), { status: 400 });
+      }
+      return new Response(JSON.stringify({ output_text: JSON.stringify(extraction) }), { status: 200 });
+    },
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/statement-reader`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer reader-token" },
+      body: JSON.stringify({ fileName: "estado.pdf", pdfBase64: "JVBERi0xLjQ=" }),
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).extraction.source, "BBVA");
+    assert.equal(providerBodies.length, 2);
+    assert.equal(providerBodies[0].text.format.type, "json_schema");
+    assert.equal(providerBodies[1].text, undefined);
+    assert.match(providerBodies[1].input[0].content[1].text, /sin Markdown/);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
