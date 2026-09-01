@@ -28,6 +28,16 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
   assert.match(models, /func rebuildCanonicalLedgerIfNeededAsync\(/);
 });
 
+test("Vision tiene fallback de idiomas cuando el dispositivo no expone etiquetas regionales", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /run\(languages: \["es-MX", "en-US"\]\)/);
+  assert.match(source, /run\(languages: \["es", "en"\]\)/);
+  assert.match(source, /run\(languages: nil\)/);
+  // A fallback de Vision no puede convertirse en una aceptación silenciosa:
+  // las filas siguen pasando por fecha, dirección, evidencia y conciliación.
+  assert.match(source, /valid date, direction and issuer reconciliation/);
+});
+
 test("el clasificador iOS solo ofrece modelos gratuitos vigentes de Zen", async () => {
   const source = await readFile(aiClassificationPath, "utf8");
   const freeModels = [

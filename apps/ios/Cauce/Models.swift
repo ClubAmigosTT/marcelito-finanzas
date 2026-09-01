@@ -553,7 +553,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.09.01.17"
+    static let readerVersion = "ios-reader-2026.09.01.18"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -3263,47 +3263,69 @@ final class FinanceStore {
         let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
         func recognize(_ cgImage: CGImage, page: Int) -> [OCRObservation] {
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.recognitionLanguages = ["es-MX", "en-US"]
-            // Keep a small, issuer-specific vocabulary so Vision prefers the
-            // labels that anchor bank columns and issuer detection. Numeric
-            // tokens are intentionally absent: amounts must come from the
-            // visual candidate and reconciliation rules, never a dictionary.
-            request.customWords = [
-                "SANTANDER", "BBVA", "BANCOMER", "AMERICAN EXPRESS", "AMEX",
-                "DEPÓSITOS", "RETIROS", "CARGOS", "ABONOS", "SALDO",
-                "DESCRIPCIÓN", "DETALLE", "MOVIMIENTOS", "FECHA",
-                "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE",
-                "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
-            ]
-            request.usesLanguageCorrection = true
+            // Some iOS revisions expose only the base language identifiers
+            // ("es"/"en") even though the regional BCP-47 tags are accepted
+            // on newer devices. A rejected language list used to make Vision
+            // return zero observations for an otherwise legible Santander
+            // page. Retry with progressively less specific language hints;
+            // this changes no acceptance rule because every resulting row
+            // still needs a valid date, direction and issuer reconciliation.
+            func run(languages: [String]?) -> [OCRObservation]? {
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                if let languages {
+                    request.recognitionLanguages = languages
+                }
+                // Keep a small, issuer-specific vocabulary so Vision prefers
+                // the labels that anchor bank columns and issuer detection.
+                // Numeric tokens are intentionally absent: amounts must come
+                // from the visual candidate and reconciliation rules, never a
+                // dictionary.
+                request.customWords = [
+                    "SANTANDER", "BBVA", "BANCOMER", "AMERICAN EXPRESS", "AMEX",
+                    "DEPÓSITOS", "RETIROS", "CARGOS", "ABONOS", "SALDO",
+                    "DESCRIPCIÓN", "DETALLE", "MOVIMIENTOS", "FECHA",
+                    "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE",
+                    "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+                ]
+                request.usesLanguageCorrection = true
 
-            do {
-                try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
-            } catch {
-                return []
-            }
-
-            return (request.results ?? []).compactMap { result -> OCRObservation? in
-                guard let candidate = result.topCandidates(1).first,
-                      !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                do {
+                    try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+                } catch {
                     return nil
                 }
-                let text = candidate.string
-                return OCRObservation(
-                    page: page,
-                    text: text,
-                    boundingBox: result.boundingBox,
-                    confidence: Double(candidate.confidence)
-                )
-            }
-            .sorted {
-                if abs($0.centerY - $1.centerY) > 0.008 {
-                    return $0.centerY > $1.centerY
+
+                return (request.results ?? []).compactMap { result -> OCRObservation? in
+                    guard let candidate = result.topCandidates(1).first,
+                          !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        return nil
+                    }
+                    let text = candidate.string
+                    return OCRObservation(
+                        page: page,
+                        text: text,
+                        boundingBox: result.boundingBox,
+                        confidence: Double(candidate.confidence)
+                    )
                 }
-                return $0.centerX < $1.centerX
+                .sorted {
+                    if abs($0.centerY - $1.centerY) > 0.008 {
+                        return $0.centerY > $1.centerY
+                    }
+                    return $0.centerX < $1.centerX
+                }
             }
+
+            let preferred = run(languages: ["es-MX", "en-US"])
+            if let preferred, !preferred.isEmpty { return preferred }
+            let baseLanguages = run(languages: ["es", "en"])
+            if let baseLanguages, !baseLanguages.isEmpty { return baseLanguages }
+            // Only run the unconstrained pass after a language-specific pass
+            // failed or produced no text. Blank pages therefore remain cheap,
+            // while devices with a different Vision language catalog still
+            // get a chance to read the table.
+            return run(languages: nil) ?? baseLanguages ?? preferred ?? []
         }
 
         func meanConfidence(_ pageObservations: [OCRObservation]) -> Double {
