@@ -147,3 +147,15 @@ test("no envía el PDF sin opt-in y acepta únicamente respuestas JSON válidas 
   assert.match(requestBody, /pdfBase64/);
   assert.doesNotMatch(requestBody, /api[_-]?key/i);
 });
+
+test("no envía el PDF a un endpoint HTTP público", async () => {
+  const file = {
+    name: "estado.pdf",
+    size: 3,
+    arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+  } as unknown as File;
+  await assert.rejects(
+    requestMultimodalExtraction(file, { endpoint: "http://reader.example/api/statement-reader", enabled: true }),
+    (error: unknown) => error instanceof MultimodalReaderError && error.code === "not_configured",
+  );
+});

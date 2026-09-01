@@ -425,6 +425,17 @@ function unwrapExtraction(body: unknown): unknown {
   return body;
 }
 
+function isSecureReaderEndpoint(endpoint: string) {
+  try {
+    const base = typeof location !== "undefined" ? location.origin : "http://localhost";
+    const parsed = new URL(endpoint, base);
+    if (parsed.protocol === "https:") return true;
+    return parsed.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function validSha256(value: unknown) {
   return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : undefined;
 }
@@ -444,6 +455,7 @@ export async function requestMultimodalExtraction(file: File, options: Multimoda
   if (!options.enabled) throw new MultimodalReaderError("not_configured", "El lector avanzado requiere confirmación explícita");
   const endpoint = options.endpoint.trim();
   if (!endpoint) throw new MultimodalReaderError("not_configured", "No hay un endpoint seguro configurado");
+  if (!isSecureReaderEndpoint(endpoint)) throw new MultimodalReaderError("not_configured", "El lector avanzado requiere HTTPS o un proxy local");
   if (file.size > MULTIMODAL_READER_MAX_FILE_BYTES) throw new MultimodalReaderError("file_too_large", "El PDF supera el límite de 20 MB");
   const buffer = await file.arrayBuffer();
   const fetchImpl = options.fetchImpl ?? fetch;
