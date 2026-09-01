@@ -17,6 +17,11 @@ La carpeta `tests/fixtures` contiene únicamente controles sintéticos. Los
 documentos reales deben mantenerse fuera del repositorio y pasar por la
 compuerta de conciliación antes de alimentar cualquier KPI.
 
+El lector web multimodal es un respaldo opcional para PDFs que la lectura local
+no logra conciliar. Se activa solo con `VITE_STATEMENT_READER_URL` y una
+autorización temporal en la pantalla de importación; el proxy y su configuración
+segura están documentados en [docs/multimodal-statement-reader.md](docs/multimodal-statement-reader.md).
+
 ## iOS
 
 El proyecto nativo se genera con XcodeGen (`apps/ios/project.yml`). El workflow

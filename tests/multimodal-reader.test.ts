@@ -83,6 +83,37 @@ test("convierte centavos, conserva evidencia y reconcilia antes de entregar el r
   assert.equal(result.reconciliation?.status, "valid");
 });
 
+test("la extracción de tarjeta conserva deuda y separa un pago de tarjeta del gasto", () => {
+  const result = extractionToImportResult({
+    source: "Amex",
+    kind: "card",
+    account_last4: "1234",
+    period_start: "2026-07-28",
+    period_end: "2026-08-27",
+    cutoff_date: "2026-08-27",
+    page_count: 4,
+    summary: summary({
+      debt_balance_cents: 5_036_721,
+      statement_balance_cents: 5_036_721,
+      credit_limit_cents: 15_000_000,
+      credit_available_cents: 9_963_279,
+      payment_for_no_interest_cents: 3_996_615,
+      minimum_plus_msi_cents: 1_957_969,
+      domestic_transaction_total_cents: 1_200_000,
+      foreign_transaction_total_cents: 0,
+    }),
+    rows: [
+      { date: "2026-08-02", description: "HOTEL EJEMPLO", amount_cents: 1_200_000, direction: "out", kind: "purchase", foreign_currency: false, page: 2, evidence: "02/AGO HOTEL EJEMPLO 12,000.00", confidence: 0.98 },
+      { date: "2026-08-10", description: "PAGO RECIBIDO", amount_cents: 3_000_000, direction: "in", kind: "cardPayment", foreign_currency: false, page: 1, evidence: "10/AGO PAGO RECIBIDO 30,000.00", confidence: 0.99 },
+    ],
+  }, { name: "Amex agosto.pdf", size: 900 });
+  assert.equal(result.summary?.debtBalance, 50_367.21);
+  assert.equal(result.summary?.paymentForNoInterest, 39_966.15);
+  assert.equal(result.transactions[0].flow, "expense");
+  assert.equal(result.transactions[1].flow, "debt");
+  assert.equal(result.reconciliation?.status, "valid");
+});
+
 test("no envía el PDF sin opt-in y acepta únicamente respuestas JSON válidas del proxy", async () => {
   const file = {
     name: "BBVA agosto.pdf",

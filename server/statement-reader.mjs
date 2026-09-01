@@ -137,7 +137,10 @@ function validateModelShape(value) {
     if (typeof row.date !== "string" || !/^20\d{2}-\d{2}-\d{2}$/.test(row.date)) throw new Error("model_invalid_shape");
     if (typeof row.description !== "string" || row.description.trim().length < 3 || administrativeRowPattern.test(row.description)) throw new Error("model_invalid_shape");
     if (!Number.isInteger(row.amount_cents) || row.amount_cents < 1 || row.amount_cents > 1_000_000_000_000) throw new Error("model_invalid_shape");
+    if (!(["purchase", "cardPayment", "bankTransfer", "income", "credit", "refund", "msi", "interest", "fee", "other"].includes(row.kind))) throw new Error("model_invalid_shape");
     if (!(["in", "out"].includes(row.direction)) || !Number.isInteger(row.page) || row.page < 1 || row.page > value.page_count) throw new Error("model_invalid_shape");
+    if (["income", "credit", "refund"].includes(row.kind) && row.direction !== "in") throw new Error("model_invalid_shape");
+    if (["purchase", "msi", "interest", "fee"].includes(row.kind) && row.direction !== "out") throw new Error("model_invalid_shape");
     if (typeof row.evidence !== "string" || row.evidence.trim().length < 3 || typeof row.confidence !== "number" || row.confidence < 0 || row.confidence > 1) throw new Error("model_invalid_shape");
   }
   return value;
@@ -172,7 +175,10 @@ async function callProvider({ pdf, fileName, env, fetchImpl, schema }) {
           type: "json_schema",
           name: "statement_extraction",
           strict: true,
-          schema,
+          // `$schema`/`$id` are useful repository metadata but are not part
+          // of the provider's strict response grammar. Keep `$defs`/`$ref`,
+          // which Structured Outputs supports, and strip only those hints.
+          schema: Object.fromEntries(Object.entries(schema).filter(([key]) => key !== "$schema" && key !== "$id")),
         },
       },
     }),

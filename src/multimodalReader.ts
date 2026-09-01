@@ -237,6 +237,10 @@ function normalizeRow(input: unknown, index: number, pageCount: number): Multimo
   const kind = typeof input.kind === "string" && transactionKinds.has(input.kind as TransactionKind)
     ? input.kind as TransactionKind
     : fail(`rows[${index}].kind`, "tipo de movimiento no permitido");
+  const directionMustBeIn = new Set<TransactionKind>(["income", "credit", "refund"]);
+  const directionMustBeOut = new Set<TransactionKind>(["purchase", "msi", "interest", "fee"]);
+  if (directionMustBeIn.has(kind) && direction !== "in") fail(`rows[${index}].direction`, `${kind} debe ser una entrada`);
+  if (directionMustBeOut.has(kind) && direction !== "out") fail(`rows[${index}].direction`, `${kind} debe ser una salida`);
   const foreign_currency = booleanField(input.foreign_currency, `rows[${index}].foreign_currency`);
   const page = integerField(input.page, `rows[${index}].page`, 1, pageCount);
   const evidence = stringField(input.evidence, `rows[${index}].evidence`, 3, 500);
