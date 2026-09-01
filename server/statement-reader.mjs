@@ -1,4 +1,4 @@
-/* global Buffer, process, fetch, URL, console */
+/* global AbortController, Buffer, process, fetch, URL, console, setTimeout, clearTimeout */
 
 import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer } from "node:http";
@@ -10,6 +10,9 @@ const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 28 * 1024 * 1024;
 const SCHEMA_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "schemas", "statement-extraction.schema.json");
 const DEFAULT_PORT = 8787;
+const DEFAULT_RATE_LIMIT_PER_MINUTE = 10;
+const DEFAULT_MAX_CONCURRENT_REQUESTS = 2;
+const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
 
 const READER_PROMPT = `Eres un extractor documental financiero. Lee el PDF completo, incluyendo las páginas renderizadas cuando el texto esté desordenado. Devuelve exclusivamente el JSON que cumple el esquema indicado.
 
@@ -56,6 +59,29 @@ function constantTimeEqual(actual, expected) {
   const left = Buffer.from(String(actual ?? ""));
   const right = Buffer.from(String(expected ?? ""));
   return left.length === right.length && timingSafeEqual(left, right);
+}
+
+function positiveInt(value, fallback, maximum = Number.MAX_SAFE_INTEGER) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed > 0 ? Math.min(parsed, maximum) : fallback;
+}
+
+function requestKey(req) {
+  // Do not trust a caller-provided forwarded-for header for quota identity.
+  // The reverse proxy can still enforce its own per-user limits upstream.
+  return req.socket?.remoteAddress ?? "unknown";
+}
+
+function consumeRateLimit(state, key, limit, now = Date.now()) {
+  const windowMs = 60_000;
+  const current = state.get(key);
+  if (!current || now - current.startedAt >= windowMs) {
+    state.set(key, { startedAt: now, count: 1 });
+    return true;
+  }
+  if (current.count >= limit) return false;
+  current.count += 1;
+  return true;
 }
 
 function authorized(req, env) {
@@ -153,39 +179,53 @@ async function callProvider({ pdf, fileName, env, fetchImpl, schema }) {
   const apiKey = String(env.OPENAI_API_KEY ?? "").trim();
   const model = String(env.OPENAI_STATEMENT_MODEL ?? "").trim();
   if (!apiKey || !model) throw new Error("provider_not_configured");
-  const response = await fetchImpl("https://api.openai.com/v1/responses", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      model,
-      store: false,
-      input: [{
-        role: "user",
-        content: [
-          {
-            type: "input_file",
-            filename: fileName,
-            file_data: `data:application/pdf;base64,${pdf.toString("base64")}`,
-          },
-          { type: "input_text", text: READER_PROMPT },
-        ],
-      }],
-      text: {
-        format: {
-          type: "json_schema",
-          name: "statement_extraction",
-          strict: true,
-          // `$schema`/`$id` are useful repository metadata but are not part
-          // of the provider's strict response grammar. Keep `$defs`/`$ref`,
-          // which Structured Outputs supports, and strip only those hints.
-          schema: Object.fromEntries(Object.entries(schema).filter(([key]) => key !== "$schema" && key !== "$id")),
-        },
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    positiveInt(env.STATEMENT_READER_PROVIDER_TIMEOUT_MS, DEFAULT_PROVIDER_TIMEOUT_MS, 300_000),
+  );
+  let response;
+  try {
+    response = await fetchImpl("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
       },
-    }),
-  });
+      body: JSON.stringify({
+        model,
+        store: false,
+        input: [{
+          role: "user",
+          content: [
+            {
+              type: "input_file",
+              filename: fileName,
+              file_data: `data:application/pdf;base64,${pdf.toString("base64")}`,
+            },
+            { type: "input_text", text: READER_PROMPT },
+          ],
+        }],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "statement_extraction",
+            strict: true,
+            // `$schema`/`$id` are useful repository metadata but are not part
+            // of the provider's strict response grammar. Keep `$defs`/`$ref`,
+            // which Structured Outputs supports, and strip only those hints.
+            schema: Object.fromEntries(Object.entries(schema).filter(([key]) => key !== "$schema" && key !== "$id")),
+          },
+        },
+      }),
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error?.name === "AbortError") throw new Error("provider_timeout");
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
   let body;
   try {
     body = await response.json();
@@ -206,6 +246,8 @@ async function callProvider({ pdf, fileName, env, fetchImpl, schema }) {
  * exposing it outside localhost.
  */
 export function createStatementReaderServer({ env = process.env, fetchImpl = fetch, schema = JSON.parse(readFileSync(SCHEMA_PATH, "utf8")) } = {}) {
+  const rateState = new Map();
+  let activeRequests = 0;
   return createServer(async (req, res) => {
     const headers = corsHeaders(req, env);
     if (req.method === "OPTIONS") {
@@ -230,26 +272,41 @@ export function createStatementReaderServer({ env = process.env, fetchImpl = fet
       json(res, 401, { error: "unauthorized" }, headers);
       return;
     }
-    let payload;
-    try {
-      payload = JSON.parse(await readBody(req));
-    } catch (error) {
-      json(res, error?.message === "request_too_large" ? 413 : 400, { error: "invalid_request" }, headers);
+    const rateLimit = positiveInt(env.STATEMENT_READER_MAX_REQUESTS_PER_MINUTE, DEFAULT_RATE_LIMIT_PER_MINUTE, 1_000);
+    if (!consumeRateLimit(rateState, requestKey(req), rateLimit)) {
+      json(res, 429, { error: "rate_limited" }, { ...headers, "retry-after": "60" });
       return;
     }
+    const maxConcurrent = positiveInt(env.STATEMENT_READER_MAX_CONCURRENT_REQUESTS, DEFAULT_MAX_CONCURRENT_REQUESTS, 50);
+    if (activeRequests >= maxConcurrent) {
+      json(res, 429, { error: "reader_busy" }, { ...headers, "retry-after": "10" });
+      return;
+    }
+    activeRequests += 1;
+    let payload;
     try {
-      if (!payload || typeof payload !== "object" || typeof payload.fileName !== "string" || payload.fileName.length < 1 || payload.fileName.length > 240) throw new Error("request_invalid");
-      const pdf = decodePdf(payload.pdfBase64);
-      const result = await callProvider({ pdf, fileName: path.basename(payload.fileName), env, fetchImpl, schema });
-      const sourceFingerprint = createHash("sha256").update(pdf).digest("hex");
-      json(res, 200, { ...result, sourceFingerprint }, headers);
-    } catch (error) {
-      const code = error?.message ?? "reader_failed";
-      const status = code === "provider_not_configured" ? 503 : code.startsWith("provider_") ? 502 : code.startsWith("pdf_") ? 400 : 422;
-      // Do not echo model/provider details or source text. A request id can be
-      // added by the reverse proxy for operational tracing without logging the
-      // financial document.
-      json(res, status, { error: status === 503 ? "reader_not_configured" : status === 502 ? "provider_unavailable" : "reader_rejected" }, headers);
+      try {
+        payload = JSON.parse(await readBody(req));
+      } catch (error) {
+        json(res, error?.message === "request_too_large" ? 413 : 400, { error: "invalid_request" }, headers);
+        return;
+      }
+      try {
+        if (!payload || typeof payload !== "object" || typeof payload.fileName !== "string" || payload.fileName.length < 1 || payload.fileName.length > 240) throw new Error("request_invalid");
+        const pdf = decodePdf(payload.pdfBase64);
+        const result = await callProvider({ pdf, fileName: path.basename(payload.fileName), env, fetchImpl, schema });
+        const sourceFingerprint = createHash("sha256").update(pdf).digest("hex");
+        json(res, 200, { ...result, sourceFingerprint }, headers);
+      } catch (error) {
+        const code = error?.message ?? "reader_failed";
+        const status = code === "provider_not_configured" ? 503 : code.startsWith("provider_") ? 502 : code.startsWith("pdf_") ? 400 : 422;
+        // Do not echo model/provider details or source text. A request id can be
+        // added by the reverse proxy for operational tracing without logging the
+        // financial document.
+        json(res, status, { error: status === 503 ? "reader_not_configured" : status === 502 ? "provider_unavailable" : "reader_rejected" }, headers);
+      }
+    } finally {
+      activeRequests -= 1;
     }
   });
 }

@@ -8,7 +8,8 @@ números de cuenta, referencias, saldos reales ni huellas de archivos reales.
 El lector multimodal es un respaldo opcional. `OPENAI_API_KEY` y
 `STATEMENT_READER_TOKEN` solo viven en el proxy de servidor; nunca deben
 aparecer en `VITE_*`, la app iOS, el bundle web, logs o el historial de Git.
-El proxy exige un origen exacto, token temporal, TLS y límites de tamaño. Antes
+El proxy exige un origen exacto, token temporal, TLS, límites de tamaño,
+solicitudes/concurrencia y tiempo de proveedor. Antes
 de activarlo para más de un usuario hay que añadir autenticación de sesión,
 rate limiting y una política de retención compatible con el proveedor. El
 lector local sigue siendo el camino por defecto y el envío del PDF requiere

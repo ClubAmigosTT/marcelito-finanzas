@@ -159,3 +159,28 @@ test("el proxy rechaza bytes que no son un PDF", async () => {
     await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+test("el proxy limita solicitudes autenticadas por origen", async () => {
+  const server = createStatementReaderServer({
+    env: {
+      OPENAI_API_KEY: "server-secret",
+      OPENAI_STATEMENT_MODEL: "vision-model",
+      STATEMENT_READER_TOKEN: "reader-token",
+      STATEMENT_READER_MAX_REQUESTS_PER_MINUTE: "1",
+    },
+    fetchImpl: async () => new Response(JSON.stringify({ output_text: JSON.stringify(extraction) }), { status: 200 }),
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const request = () => fetch(`http://127.0.0.1:${address.port}/api/statement-reader`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer reader-token" },
+    body: JSON.stringify({ fileName: "estado.pdf", pdfBase64: "JVBERi0xLjQ=" }),
+  });
+  try {
+    assert.equal((await request()).status, 200);
+    assert.equal((await request()).status, 429);
+  } finally {
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
