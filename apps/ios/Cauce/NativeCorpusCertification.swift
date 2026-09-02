@@ -166,6 +166,28 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
              multimodalFallbackAttempted, multimodalFallbackError, rows
     }
 
+    init(
+        file: String,
+        sourceFileName: String,
+        source: String,
+        mode: String,
+        status: String,
+        reconciliationReason: String?,
+        multimodalFallbackAttempted: Bool = false,
+        multimodalFallbackError: String? = nil,
+        rows: [OCRRowDiagnostic]
+    ) {
+        self.file = file
+        self.sourceFileName = sourceFileName
+        self.source = source
+        self.mode = mode
+        self.status = status
+        self.reconciliationReason = reconciliationReason
+        self.multimodalFallbackAttempted = multimodalFallbackAttempted
+        self.multimodalFallbackError = multimodalFallbackError
+        self.rows = rows
+    }
+
     var id: String { file }
 
     func encode(to encoder: Encoder) throws {
