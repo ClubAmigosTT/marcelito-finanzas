@@ -5664,9 +5664,20 @@ final class FinanceStore {
             guard magnitude > 0, magnitude < 100_000_000 else { return nil }
             return delta
         }()
-        let selectedValue = balanceDelta.map(absoluteDecimal) ?? columnValue
+        // A calibrated movement column is the issuer's explicit transaction
+        // amount and must win whenever it contains a plausible value. The
+        // running-balance delta is a powerful repair signal for collapsed or
+        // missing columns, but it can be wildly different when OCR skips a
+        // row or the synthetic balance belongs to another page. Only replace
+        // the column value when no movement-column candidate was available,
+        // or when the delta independently confirms the selected amount.
+        let deltaMatchesColumn = balanceDelta.map {
+            absoluteDecimal(absoluteDecimal($0) - absoluteDecimal(columnValue)) <= Decimal(string: "0.005", locale: Locale(identifier: "en_US_POSIX"))!
+        } ?? false
+        let shouldUseBalanceDelta = balanceDelta != nil && (columnCandidates.isEmpty || deltaMatchesColumn)
+        let selectedValue = shouldUseBalanceDelta ? balanceDelta.map(absoluteDecimal) ?? columnValue : columnValue
         let selectedColumn = selected.x < columns.depositMaxX ? "DEPÓSITO" : "RETIRO"
-        let repairedFromBalance = balanceDelta != nil
+        let repairedFromBalance = shouldUseBalanceDelta && balanceDelta != nil
             && absoluteDecimal(selectedValue - absoluteDecimal(columnValue)) > Decimal(string: "0.005", locale: Locale(identifier: "en_US_POSIX"))!
         let selectionReason: String
         if repairedFromBalance {
