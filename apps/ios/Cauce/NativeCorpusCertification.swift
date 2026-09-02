@@ -185,10 +185,43 @@ struct NativeCorpusDiagnosticReport: Codable {
     }
 
     func writeTemporaryFile() throws -> URL {
-        let encoder = JSONEncoder()
-        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
-        encoder.dateEncodingStrategy = .iso8601
-        let data = try encoder.encode(self)
+        let dateFormatter = ISO8601DateFormatter()
+        let filePayload: [[String: Any]] = files.map { file in
+            let rows: [[String: Any]] = file.rows.map { row in
+                var payload: [String: Any] = [
+                    "id": row.id,
+                    "rawText": row.rawText,
+                    "reason": row.reason,
+                    "accepted": row.accepted
+                ]
+                if let page = row.page { payload["page"] = page }
+                if let selectedColumn = row.selectedColumn { payload["selectedColumn"] = selectedColumn }
+                if let selectedAmount = row.selectedAmount {
+                    payload["selectedAmount"] = NSDecimalNumber(decimal: selectedAmount).stringValue
+                }
+                if let direction = row.direction { payload["direction"] = direction }
+                return payload
+            }
+            var payload: [String: Any] = [
+                "file": file.file,
+                "sourceFileName": file.sourceFileName,
+                "source": file.source,
+                "mode": file.mode,
+                "status": file.status,
+                "rows": rows
+            ]
+            if let reconciliationReason = file.reconciliationReason {
+                payload["reconciliationReason"] = reconciliationReason
+            }
+            return payload
+        }
+        let object: [String: Any] = [
+            "schemaVersion": schemaVersion,
+            "generatedAt": dateFormatter.string(from: generatedAt),
+            "readerVersion": readerVersion,
+            "files": filePayload
+        ]
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("marcelito-native-corpus-row-diagnostics-\(UUID().uuidString).json")
         try data.write(to: url, options: [.atomic])
