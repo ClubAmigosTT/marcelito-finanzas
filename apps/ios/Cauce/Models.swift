@@ -2724,18 +2724,19 @@ final class FinanceStore {
         let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
         let source = cleanedSourceOverride.flatMap { $0.isEmpty ? nil : $0 } ?? detectedSourceEvidence.source
         let kind = kindOverride ?? statementKind(from: text, source: source)
-        // Only the known Amex text layout gets this escape hatch. Bank scans
-        // need Vision's calibrated columns even when an accidental hidden
-        // text layer happens to contain a set of numbers that reconciles.
         let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let layoutNormalized = normalized
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard source.localizedCaseInsensitiveContains("Amex"),
-              kind == .card,
-              (normalized.contains("fecha y detalle de las operaciones")
-                || layoutNormalized.contains("fecha y detalle de las operaciones")) else { return false }
-        let structuredText = Self.rebuildAmexSelectableLines(text)
+        // Rebuild Amex's known flattened layout, but let bank PDFs use the
+        // same proof when their text layer is genuinely tabular. A hidden
+        // administrative layer cannot pass this probe: it must yield rows
+        // that reconcile with the issuer totals before Vision is skipped.
+        let isAmexLayout = source.localizedCaseInsensitiveContains("Amex")
+            && kind == .card
+            && (normalized.contains("fecha y detalle de las operaciones")
+                || layoutNormalized.contains("fecha y detalle de las operaciones"))
+        let structuredText = isAmexLayout ? Self.rebuildAmexSelectableLines(text) : text
         let candidates = parse(text: structuredText, fileName: fileName, sourceHint: source)
         guard !candidates.isEmpty else { return false }
         // This probe runs from the detached PDF/OCR task. Constructing the
@@ -2773,12 +2774,11 @@ final class FinanceStore {
             .joined(separator: "\n")
         let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // A PDF can expose a perfectly usable text layer even when its line
-        // breaks are unusual enough to trip the generic OCR heuristic. Before
-        // rendering every page through Vision, prove that the text-only rows
-        // reconcile with the issuer controls. This is the same safety rule
-        // used at commit time, so a hidden administrative layer cannot win by
-        // accident; an exact Amex table simply avoids a lossy OCR round-trip.
+        // A PDF can expose a text layer even when its line breaks are unusual
+        // enough to trip the generic OCR heuristic. Before rendering every
+        // page through Vision, prove that the text-only rows reconcile with
+        // the issuer controls. This is the same safety rule used at commit
+        // time, so a hidden administrative layer cannot win by accident.
         let textLayerReconciles = Self.textLayerReconciles(
             text: extractedText,
             fileName: fileName,
@@ -2786,15 +2786,21 @@ final class FinanceStore {
             kindOverride: kindOverride
         )
 
-        // A short administrative text layer is not a trustworthy movement
-        // table; send it through Vision rather than parsing header numbers.
-        // Conversely, a proven text layer is more faithful than OCR for
-        // Amex rows where RFCs, currency and the local amount occupy separate
-        // PDF text objects.
-        let usedOCR = Self.shouldUseOCR(extractedText: extractedText, allowOCR: allowOCR)
-            && !textLayerReconciles
-        let ocrObservations = usedOCR ? Self.ocrObservations(from: document) : []
-        let text = usedOCR ? Self.ocrText(from: ocrObservations) : extractedText
+        // A short administrative layer is not a trustworthy movement table;
+        // a structured layer that failed reconciliation is not trustworthy
+        // either. In both cases run Vision as a recovery pass. This closes a
+        // subtle gap where a malformed text layer contained enough dates and
+        // numbers to make `shouldUseOCR` return false while still producing
+        // the wrong rows. A valid, reconciled layer remains the fast path and
+        // avoids a lossy OCR round-trip (especially for Amex's split columns).
+        let shouldAttemptOCR = allowOCR && !textLayerReconciles
+        let ocrObservations = shouldAttemptOCR ? Self.ocrObservations(from: document) : []
+        let ocrText = Self.ocrText(from: ocrObservations)
+        let usedOCR = shouldAttemptOCR && !ocrObservations.isEmpty
+        // If Vision cannot produce a single observation, keep the original
+        // text so the caller receives the normal reconciliation diagnostics
+        // instead of an opaque "empty PDF" error.
+        let text = usedOCR ? ocrText : extractedText
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FinanceImportError.emptyDocument
         }

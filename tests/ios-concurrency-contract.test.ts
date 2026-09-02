@@ -50,6 +50,19 @@ test("Vision escala el render por página sin desbordar memoria", async () => {
   assert.match(source, /var selectedImage = cgImage/);
 });
 
+test("una capa de texto no conciliada fuerza una recuperación visual", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  // A malformed or administrative text layer can contain enough dates and
+  // numbers to look structured while still producing wrong rows. Vision must
+  // be attempted unless the text-only parse has already reconciled with the
+  // issuer controls; if Vision returns no observations, the original text is
+  // retained so the normal reconciliation error remains visible.
+  assert.match(source, /let shouldAttemptOCR = allowOCR && !textLayerReconciles/);
+  assert.match(source, /let ocrText = Self\.ocrText\(from: ocrObservations\)/);
+  assert.match(source, /let usedOCR = shouldAttemptOCR && !ocrObservations\.isEmpty/);
+  assert.match(source, /let text = usedOCR \? ocrText : extractedText/);
+});
+
 test("el corpus nativo admite manifiesto privado fuera del repositorio", async () => {
   const [nativeCorpus, runner] = await Promise.all([
     readFile(nativeCorpusPath, "utf8"),

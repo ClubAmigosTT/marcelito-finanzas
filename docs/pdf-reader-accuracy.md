@@ -97,10 +97,12 @@ gasto real sin separar esas secciones.
 - iOS aplica los mismos límites de 50 MB y 80 páginas antes de crear
   imágenes OCR; excederlos produce un error recuperable y no deja datos
   parciales en el libro canónico.
-- iOS no confía solo en la longitud de una capa de texto oculta: exige señal
-  de fecha, encabezado de tabla y al menos una fila plausible (fecha + importe)
-  antes de omitir Vision. Así un escaneo con metadatos administrativos no se
-  interpreta como un PDF estructurado.
+- iOS no confía solo en la longitud de una capa de texto oculta: aunque haya
+  fechas, encabezado y filas plausibles, primero intenta conciliar esas filas
+  contra los controles del emisor. Una capa estructurada que no concilia activa
+  Vision como recuperación; solo una lectura de texto ya conciliada puede omitir
+  OCR. Así un escaneo con metadatos administrativos o saltos de línea rotos no
+  se interpreta como un PDF estructurado por accidente.
 - La capa web aplica la misma decisión estructural: solo conserva lectura
   directa cuando encuentra fechas, encabezado de tabla y una fila plausible;
   una capa larga de texto administrativo o un encabezado sin filas vuelve a
