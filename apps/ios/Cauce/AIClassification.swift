@@ -354,7 +354,7 @@ struct AISettingsView: View {
                 Text(errorMessage ?? "")
             }
             .scrollContentBackground(.hidden)
-            .background(Color.marcelitoCream)
+            .background(MarcelitoAmbientBackground())
             .foregroundStyle(Color.marcelitoNavy)
         }
     }

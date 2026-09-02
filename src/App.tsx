@@ -557,7 +557,7 @@ function Home({ transactions, statements, metrics, goals, setGoals, auditRun, on
       <CFOBrief metrics={metrics} />
       {metrics.isProvisional && <div className="provisional-banner" role="status"><Warning size={18} /><span>Estos KPI son provisionales hasta corregir los movimientos señalados en Calidad de datos / conciliación.</span></div>}
       <section className="summary-heading">
-        <div><p className="summary-eyebrow">Tu situación financiera</p><h1>Una lectura clara de tu dinero.</h1><p>Actualizado con tus estados y movimientos reales.</p></div>
+        <div><p className="summary-eyebrow">Tu situación financiera</p><h1>Finanzas</h1><p>Patrimonio total · actualizado con tus estados y movimientos reales.</p></div>
         <span className="month-button data-period">{latestPeriodLabel}</span>
       </section>
       <button type="button" className="summary-hero summary-hero-action" aria-label="Ver detalle del patrimonio líquido" onClick={() => setSelectedMetric("patrimony")}>
