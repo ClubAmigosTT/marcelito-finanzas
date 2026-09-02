@@ -450,7 +450,13 @@ struct NativeCorpusCertificationView: View {
                 allowsMultipleSelection: true,
                 onCompletion: handleSelection
             )
-            .sheet(isPresented: $isAISettingsPresented) {
+            .sheet(isPresented: $isAISettingsPresented, onDismiss: {
+                // Refresh the local state after the settings sheet writes the
+                // Keychain/UserDefaults values. Without this, returning from
+                // the first configuration left the certifier showing the old
+                // Vision-only action until the whole screen was recreated.
+                useAIFallback = ZenStatementReaderSettings.isEnabled && ZenAPIKeyStore.apiKey != nil
+            }) {
                 AISettingsView()
             }
             .alert("No se pudo ejecutar la certificación", isPresented: Binding(
@@ -529,10 +535,19 @@ struct NativeCorpusCertificationView: View {
                 }
                 .buttonStyle(.borderless)
             } else {
-                Toggle("Usar IA si Vision no concilia", isOn: $useAIFallback)
-                    .onChange(of: useAIFallback) { _, enabled in
-                        ZenStatementReaderSettings.isEnabled = enabled
+                HStack(spacing: 12) {
+                    Toggle("Usar IA si Vision no concilia", isOn: $useAIFallback)
+                        .onChange(of: useAIFallback) { _, enabled in
+                            ZenStatementReaderSettings.isEnabled = enabled
+                        }
+                    Button {
+                        isAISettingsPresented = true
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                            .accessibilityLabel("Editar configuración de OpenCode Zen")
                     }
+                    .buttonStyle(.borderless)
+                }
                 Text("Al activarlo, un PDF bloqueado puede enviarse a Zen. La respuesta seguirá sujeta a conciliación exacta y nunca entra directamente a los KPI.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
