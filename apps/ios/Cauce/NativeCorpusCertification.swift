@@ -55,7 +55,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
                   let weakestOCRPage,
                   ocrConfidence >= 0.88,
                   weakestOCRPage >= 0.78 else { return false }
-            if mode == "vision-ocr", source == "Santander", ocrColumnsCalibrated != true { return false }
+            if mode == "vision-ocr", ["Santander", "BBVA"].contains(source), ocrColumnsCalibrated != true { return false }
         }
         return true
     }
@@ -134,6 +134,101 @@ struct NativeCorpusFileReport: Codable, Identifiable {
     }
 }
 
+/// Private, row-level companion to the redacted corpus report. It is intended
+/// for local debugging only and is never included in the publication JSON.
+struct NativeCorpusDiagnosticFile: Codable, Identifiable {
+    let file: String
+    let sourceFileName: String
+    let source: String
+    let mode: String
+    let status: String
+    let reconciliationReason: String?
+    let rows: [OCRRowDiagnostic]
+
+    private enum CodingKeys: String, CodingKey {
+        case file, sourceFileName, source, mode, status, reconciliationReason, rows
+    }
+
+    var id: String { file }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(file, forKey: .file)
+        try container.encode(sourceFileName, forKey: .sourceFileName)
+        try container.encode(source, forKey: .source)
+        try container.encode(mode, forKey: .mode)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(reconciliationReason, forKey: .reconciliationReason)
+        try container.encode(rows, forKey: .rows)
+    }
+}
+
+struct NativeCorpusDiagnosticReport: Codable {
+    let schemaVersion: Int
+    let generatedAt: Date
+    let readerVersion: String
+    let files: [NativeCorpusDiagnosticFile]
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, generatedAt, readerVersion, files
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(generatedAt, forKey: .generatedAt)
+        try container.encode(readerVersion, forKey: .readerVersion)
+        // Keep row evidence in the private export explicitly. The public
+        // certification report uses a different encoder and intentionally
+        // omits this field.
+        try container.encode(files, forKey: .files)
+    }
+
+    func writeTemporaryFile() throws -> URL {
+        let dateFormatter = ISO8601DateFormatter()
+        let filePayload: [[String: Any]] = files.map { file in
+            let rows: [[String: Any]] = file.rows.map { row in
+                var payload: [String: Any] = [
+                    "id": row.id,
+                    "rawText": row.rawText,
+                    "reason": row.reason,
+                    "accepted": row.accepted
+                ]
+                if let page = row.page { payload["page"] = page }
+                if let selectedColumn = row.selectedColumn { payload["selectedColumn"] = selectedColumn }
+                if let selectedAmount = row.selectedAmount {
+                    payload["selectedAmount"] = NSDecimalNumber(decimal: selectedAmount).stringValue
+                }
+                if let direction = row.direction { payload["direction"] = direction }
+                return payload
+            }
+            var payload: [String: Any] = [
+                "file": file.file,
+                "sourceFileName": file.sourceFileName,
+                "source": file.source,
+                "mode": file.mode,
+                "status": file.status,
+                "rows": rows
+            ]
+            if let reconciliationReason = file.reconciliationReason {
+                payload["reconciliationReason"] = reconciliationReason
+            }
+            return payload
+        }
+        let object: [String: Any] = [
+            "schemaVersion": schemaVersion,
+            "generatedAt": dateFormatter.string(from: generatedAt),
+            "readerVersion": readerVersion,
+            "files": filePayload
+        ]
+        let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("marcelito-native-corpus-row-diagnostics-\(UUID().uuidString).json")
+        try data.write(to: url, options: [.atomic])
+        return url
+    }
+}
+
 struct NativeCorpusCertificationReport: Codable, Identifiable {
     static let schemaVersion = 1
     static let minimumFileCount = 10
@@ -155,10 +250,25 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
     /// A machine-readable promise consumed by the GitHub verifier.
     let financialDataRedacted: Bool
     let generatedBy: String
+    /// Kept in memory for the explicit private diagnostics export. This is
+    /// intentionally excluded from `jsonData`, which remains safe to share
+    /// with the publication verifier.
+    var diagnostics: [NativeCorpusDiagnosticFile] = []
+
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, generatedAt, readerVersion, files, accepted,
+             blocked, expectedValid, expectedPending, goldenAutoAccepted,
+             goldenFalseAccepted, automaticAcceptancePrecision, unresolvedOCR,
+             certified, financialDataRedacted, generatedBy
+    }
 
     var id: String { "native-corpus-\(generatedAt.timeIntervalSince1970)" }
 
-    init(files: [NativeCorpusFileReport], readerVersion: String = FinanceStore.readerVersion) {
+    init(
+        files: [NativeCorpusFileReport],
+        readerVersion: String = FinanceStore.readerVersion,
+        diagnostics: [NativeCorpusDiagnosticFile] = []
+    ) {
         self.schemaVersion = Self.schemaVersion
         generatedAt = .now
         self.readerVersion = readerVersion
@@ -179,6 +289,7 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
         generatedBy = files.contains { $0.mode == "multimodal-ai" }
             ? "ios-hybrid-device"
             : "ios-vision-device"
+        self.diagnostics = diagnostics
     }
 
     var jsonData: Data? {
@@ -195,6 +306,15 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
         try jsonData.write(to: url, options: [.atomic])
         return url
     }
+
+    func writeDiagnosticsTemporaryFile() throws -> URL {
+        try NativeCorpusDiagnosticReport(
+            schemaVersion: 1,
+            generatedAt: generatedAt,
+            readerVersion: readerVersion,
+            files: diagnostics
+        ).writeTemporaryFile()
+    }
 }
 
 extension FinanceStore {
@@ -207,6 +327,7 @@ extension FinanceStore {
     ) async -> NativeCorpusCertificationReport {
         let sortedURLs = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         var reports: [NativeCorpusFileReport] = []
+        var diagnostics: [NativeCorpusDiagnosticFile] = []
         var seenFingerprints = Set<String>()
 
         for (index, url) in sortedURLs.enumerated() {
@@ -227,6 +348,19 @@ extension FinanceStore {
                 } else {
                     reports.append(NativeCorpusFileReport(index: index, sourceFileName: url.lastPathComponent, summary: summary))
                 }
+                diagnostics.append(
+                    NativeCorpusDiagnosticFile(
+                        file: "document-\(String(format: "%02d", index + 1)).pdf",
+                        sourceFileName: url.lastPathComponent,
+                        source: summary.source,
+                        mode: summary.extractionProvider == "multimodal"
+                            ? "multimodal-ai"
+                            : (summary.usedOCR ? "vision-ocr" : "pdf-text"),
+                        status: summary.reconciliation?.status.rawValue ?? StatementReconciliationStatus.pending.rawValue,
+                        reconciliationReason: summary.reconciliation?.reason,
+                        rows: summary.rowDiagnostics
+                    )
+                )
             } catch is CancellationError {
                 break
             } catch {
@@ -238,11 +372,22 @@ extension FinanceStore {
                         errorCode: "reader-error"
                     )
                 )
+                diagnostics.append(
+                    NativeCorpusDiagnosticFile(
+                        file: "document-\(String(format: "%02d", index + 1)).pdf",
+                        sourceFileName: url.lastPathComponent,
+                        source: "Desconocido",
+                        mode: "reader-error",
+                        status: StatementReconciliationStatus.invalid.rawValue,
+                        reconciliationReason: "El lector no pudo producir una extracción.",
+                        rows: []
+                    )
+                )
             }
             progress?(index + 1, sortedURLs.count, url.lastPathComponent)
         }
 
-        return NativeCorpusCertificationReport(files: reports)
+        return NativeCorpusCertificationReport(files: reports, diagnostics: diagnostics)
     }
 
     private static func fingerprintForCertification(_ url: URL) -> String? {
@@ -269,6 +414,7 @@ struct NativeCorpusCertificationView: View {
     @State private var status = "Selecciona los 10 estados validados para ejecutar Vision en este iPhone."
     @State private var report: NativeCorpusCertificationReport?
     @State private var exportURL: URL?
+    @State private var diagnosticExportURL: URL?
     @State private var errorMessage: String?
 
     var body: some View {
@@ -459,6 +605,17 @@ struct NativeCorpusCertificationView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(Color.marcelitoNavy)
             }
+            if let diagnosticExportURL {
+                Text("El diagnóstico por fila contiene el texto OCR, la columna y el importe seleccionados para cada fila. Compártelo solo para depurar tus propios estados.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                ShareLink(item: diagnosticExportURL) {
+                    Label("Compartir diagnóstico por fila", systemImage: "list.bullet.rectangle.portrait")
+                        .frame(maxWidth: .infinity, minHeight: 42)
+                }
+                .buttonStyle(.bordered)
+                .tint(Color.marcelitoNavy)
+            }
         }
         .foregroundStyle(Color.marcelitoNavy)
         .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 16)
@@ -470,6 +627,7 @@ struct NativeCorpusCertificationView: View {
             selectedFiles = urls
             report = nil
             exportURL = nil
+            diagnosticExportURL = nil
             status = urls.isEmpty ? "No seleccionaste archivos." : "Listo para ejecutar Vision sobre \(urls.count) PDF(s)."
         case .failure(let error):
             errorMessage = error.localizedDescription
@@ -481,6 +639,7 @@ struct NativeCorpusCertificationView: View {
         isRunning = true
         report = nil
         exportURL = nil
+        diagnosticExportURL = nil
         progress = 0
         status = "Preparando el corpus…"
         Task { @MainActor in
@@ -497,6 +656,7 @@ struct NativeCorpusCertificationView: View {
             progress = 1
             status = result.certified ? "Certificación lista." : "Hay archivos que requieren revisión."
             exportURL = try? result.writeTemporaryFile()
+            diagnosticExportURL = try? result.writeDiagnosticsTemporaryFile()
             isRunning = false
             DiagnosticsRecorder.record(
                 level: result.certified ? "info" : "error",
@@ -525,7 +685,7 @@ private extension NativeCorpusFileReport {
         if sourceStatus != SourceDetectionStatus.verified.rawValue {
             parts.append("emisor \(sourceStatus)")
         }
-        if source == "Santander", let ocrColumnsCalibrated {
+        if ["Santander", "BBVA"].contains(source), let ocrColumnsCalibrated {
             parts.append(ocrColumnsCalibrated ? "columnas calibradas" : "columnas sin calibrar")
         }
         return parts.joined(separator: " · ")

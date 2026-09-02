@@ -683,6 +683,77 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 1_000 })
     }
 
+    func testBBVAOCRUsesCalibratedCargoAndAbonoColumns() {
+        let fixtures = [
+            OCRObservationFixture(text: "FECHA", x: 0.04, y: 0.94, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.20, y: 0.94, width: 0.14),
+            OCRObservationFixture(text: "CARGOS", x: 0.60, y: 0.94, width: 0.08),
+            OCRObservationFixture(text: "ABONOS", x: 0.72, y: 0.94, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.84, y: 0.94, width: 0.08),
+
+            OCRObservationFixture(text: "23/JUL", x: 0.02, y: 0.82, width: 0.10),
+            OCRObservationFixture(text: "FACEBK XR4NKVVF52", x: 0.13, y: 0.82, width: 0.40),
+            OCRObservationFixture(text: "120.00", x: 0.60, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "3,469.63", x: 0.84, y: 0.82, width: 0.08),
+
+            OCRObservationFixture(text: "27/JUL", x: 0.02, y: 0.72, width: 0.10),
+            OCRObservationFixture(text: "SPEI RECIBIDO NVIO", x: 0.13, y: 0.72, width: 0.40),
+            OCRObservationFixture(text: "15,000.00", x: 0.72, y: 0.72, width: 0.10),
+            OCRObservationFixture(text: "18,469.63", x: 0.84, y: 0.72, width: 0.08),
+        ]
+
+        XCTAssertTrue(FinanceStore.bbvaOCRColumnsCalibratedForTesting(
+            fixtures,
+            fileName: "BBVA-agosto-2026.pdf"
+        ))
+        let rows = FinanceStore.bbvaOCRRowsForTesting(
+            fixtures,
+            fileName: "BBVA-agosto-2026.pdf"
+        )
+
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].amount, Decimal(string: "-120.00")!)
+        XCTAssertEqual(rows[1].amount, Decimal(string: "15000.00")!)
+        XCTAssertEqual(rows[0].extractionEvidence?.selectedColumn, "CARGOS")
+        XCTAssertEqual(rows[1].extractionEvidence?.selectedColumn, "ABONOS")
+        XCTAssertTrue(rows[1].flow == .income)
+        XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 100_000 })
+    }
+
+    func testBBVAOCRRequiresCalibrationForARealMovementPage() {
+        let fixtures = [
+            OCRObservationFixture(text: "23/JUL", x: 0.02, y: 0.82, width: 0.10),
+            OCRObservationFixture(text: "SPEI RECIBIDO", x: 0.13, y: 0.82, width: 0.40),
+            OCRObservationFixture(text: "15,000.00", x: 0.72, y: 0.82, width: 0.10),
+            OCRObservationFixture(text: "18,469.63", x: 0.84, y: 0.82, width: 0.08),
+        ]
+
+        XCTAssertFalse(FinanceStore.bbvaOCRColumnsCalibratedForTesting(
+            fixtures,
+            fileName: "BBVA-agosto-2026.pdf"
+        ))
+        XCTAssertTrue(
+            FinanceStore.bbvaOCRRowsForTesting(fixtures, fileName: "BBVA-agosto-2026.pdf").isEmpty,
+            "BBVA no debe inferir la dirección usando coordenadas de respaldo"
+        )
+    }
+
+    func testBBVAOCRCalibratesWhenVisionReturnsTheWholeHeaderInOneBox() {
+        let fixtures = [
+            OCRObservationFixture(
+                text: "FECHA SALDO OPER LIQ DESCRIPCION REFERENCIA CARGOS ABONOS OPERACION LIQUIDACION",
+                x: 0.04,
+                y: 0.94,
+                width: 0.92
+            )
+        ]
+
+        XCTAssertTrue(
+            FinanceStore.bbvaOCRColumnsCalibratedForTesting(fixtures, fileName: "BBVA-agosto-2026.pdf"),
+            "la calibración debe localizar CARGOS/ABONOS y la última columna de saldo aunque Vision fusione el encabezado"
+        )
+    }
+
     func testSantanderOCRUsesTokenGeometryWhenVisionReturnsWholeRow() {
         // Vision sometimes emits the date, folio, description, movement and
         // running balance as one long observation. The parser must estimate
@@ -756,6 +827,8 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(rows[0].amount, Decimal(string: "-123.45")!)
         XCTAssertEqual(rows[1].amount, Decimal(string: "-1031.17")!)
+        XCTAssertEqual(rows[0].extractionEvidence?.selectedColumn, "IMPORTE EN MN")
+        XCTAssertEqual(rows[1].extractionEvidence?.selectedAmount, Decimal(string: "1031.17")!)
         XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 2_000 })
     }
 
@@ -777,6 +850,24 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(rows.count, 1)
         XCTAssertEqual(rows[0].amount, Decimal(string: "-1031.17")!)
         XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 2_000 })
+    }
+
+    func testAmexOCRDoesNotTurnMSISectionIntoCurrentPurchasesAcrossPages() {
+        let rows = FinanceStore.amexOCRRowsForTesting([
+            OCRObservationFixture(page: 1, text: "Fecha y Detalle de las operaciones Importe en MN", x: 0.05, y: 0.92, width: 0.50),
+            OCRObservationFixture(page: 1, text: "6 de Agosto SUPERMERCADO", x: 0.05, y: 0.82, width: 0.45),
+            OCRObservationFixture(page: 1, text: "100.00", x: 0.86, y: 0.82, width: 0.08),
+            OCRObservationFixture(page: 1, text: "Transacciones de Meses sin Intereses", x: 0.05, y: 0.70, width: 0.45),
+            OCRObservationFixture(page: 1, text: "7 de Agosto COMPRA MSI", x: 0.05, y: 0.62, width: 0.45),
+            OCRObservationFixture(page: 1, text: "1,000.00", x: 0.86, y: 0.62, width: 0.08),
+            OCRObservationFixture(page: 2, text: "Fecha y Detalle de las operaciones Importe en MN", x: 0.05, y: 0.92, width: 0.50),
+            OCRObservationFixture(page: 2, text: "8 de Agosto CAFE", x: 0.05, y: 0.82, width: 0.45),
+            OCRObservationFixture(page: 2, text: "50.00", x: 0.86, y: 0.82, width: 0.08),
+        ], fileName: "28_jul_2026_-_27_ago_2026.pdf")
+
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows.map(\.amount), [Decimal(string: "-100.00")!, Decimal(string: "-50.00")!])
+        XCTAssertFalse(rows.contains { $0.title.localizedCaseInsensitiveContains("msi") })
     }
 
     func testAmexOCRUsesConvertedAmountWhenSourceCurrencyPrecedesIt() {
@@ -858,6 +949,22 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(FinanceStore.santanderOCRColumnsCalibratedForTesting(missingAnchor, fileName: "sample-bank-period-3.pdf"))
     }
 
+    func testSantanderOCRCalibratesWhenVisionReturnsTheWholeHeaderInOneBox() {
+        let fixtures = [
+            OCRObservationFixture(
+                text: "FECHA FOLIO DESCRIPCION DEPOSITO RETIRO SALDO",
+                x: 0.04,
+                y: 0.94,
+                width: 0.88
+            )
+        ]
+
+        XCTAssertTrue(
+            FinanceStore.santanderOCRColumnsCalibratedForTesting(fixtures, fileName: "estado-agosto-2026.pdf"),
+            "la calibración debe funcionar aunque Vision entregue el encabezado Santander en un solo bloque"
+        )
+    }
+
     func testSantanderOCRAcceptsEquivalentAbonosAndCargosColumnLabels() {
         let labels = [
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
@@ -871,6 +978,38 @@ final class ReaderContractTests: XCTestCase {
             labels,
             fileName: "sample-bank-period-3.pdf"
         ))
+    }
+
+    func testSantanderOCRInheritsCalibrationAcrossContinuationPagesAndUsesBalanceDelta() {
+        let fixtures = [
+            OCRObservationFixture(page: 0, text: "FECHA", x: 0.05, y: 0.94, width: 0.06),
+            OCRObservationFixture(page: 0, text: "DESCRIPCION", x: 0.22, y: 0.94, width: 0.12),
+            OCRObservationFixture(page: 0, text: "DEPOSITO", x: 0.50, y: 0.94, width: 0.08),
+            OCRObservationFixture(page: 0, text: "RETIRO", x: 0.64, y: 0.94, width: 0.08),
+            OCRObservationFixture(page: 0, text: "SALDO", x: 0.79, y: 0.94, width: 0.08),
+            OCRObservationFixture(page: 0, text: "16-JUL-2026", x: 0.02, y: 0.82, width: 0.10),
+            OCRObservationFixture(page: 0, text: "PAGO TRANSFERENCIA SPEI", x: 0.18, y: 0.82, width: 0.40),
+            OCRObservationFixture(page: 0, text: "30.00", x: 0.64, y: 0.82, width: 0.08),
+            OCRObservationFixture(page: 0, text: "970.00", x: 0.84, y: 0.82, width: 0.08),
+
+            // Continuation page intentionally omits the column header.
+            OCRObservationFixture(page: 1, text: "17-JUL-2026", x: 0.02, y: 0.82, width: 0.10),
+            OCRObservationFixture(page: 1, text: "SUPERMERCADO", x: 0.18, y: 0.82, width: 0.40),
+            OCRObservationFixture(page: 1, text: "20.00", x: 0.64, y: 0.82, width: 0.08),
+            OCRObservationFixture(page: 1, text: "950.00", x: 0.84, y: 0.82, width: 0.08),
+        ]
+
+        XCTAssertTrue(FinanceStore.santanderOCRColumnsCalibratedForTesting(
+            fixtures,
+            fileName: "sample-bank-period-3.pdf"
+        ))
+        let rows = FinanceStore.santanderOCRRowsForTesting(
+            fixtures,
+            fileName: "sample-bank-period-3.pdf"
+        )
+        XCTAssertEqual(rows.map(\.amount), [Decimal(string: "-30.00")!, Decimal(string: "-20.00")!])
+        XCTAssertEqual(rows[1].extractionEvidence?.page, 2)
+        XCTAssertTrue(rows[1].extractionEvidence?.selectionReason?.contains("delta") == true)
     }
 
     func testSantanderOCRDoesNotMixColumnAnchorsAcrossPagesOrRows() {

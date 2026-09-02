@@ -28,6 +28,14 @@ xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
   -destination "platform=iOS Simulator,name=iPhone 16" test
 ```
 
+La misma corrida ejecuta además una prueba de seguridad sin manifiesto: cada PDF
+real debe identificar un emisor, conservar páginas y diagnóstico por fila, no
+seleccionar importes mayores de $10 millones y no alimentar el libro si la
+conciliación es inválida. El diagnóstico privado puede compartirse desde la
+pantalla de certificación; contiene el fragmento OCR, la columna, el importe y
+la razón de cada fila. No se incluye en `NATIVE_CORPUS_REPORT` ni en el JSON que
+se guarda en GitHub.
+
 También puedes usar el runner reproducible desde esta carpeta o desde la raíz
 del repositorio; conserva el
 `.xcresult` y el log en un directorio temporal para adjuntarlos a la auditoría:
@@ -59,7 +67,7 @@ cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
   --manifest tests/fixtures/pdf-corpus-attachments.json \
-  --reader-version ios-reader-2026.08.31.14 \
+  --reader-version ios-reader-2026.09.02.28 \
   --require-certified
 ```
 
@@ -106,8 +114,10 @@ la certificación completa debe ejecutarse manualmente con
 Para no depender de una Mac, los builds recientes incluyen un certificador en
 **Resumen > Opciones > Diagnóstico > Certificar estados con Vision**. Selecciona
 los estados privados directamente en el iPhone, ejecuta el lector nativo y
-comparte el informe JSON sanitizado. El informe no contiene PDFs, descripciones,
-saldos ni importes; solo hashes y señales de calidad. Guárdalo como
+comparte el informe JSON sanitizado. El informe de certificación no contiene
+PDFs, descripciones, saldos ni importes; solo hashes y señales de calidad. El
+botón separado **Compartir diagnóstico por fila** es privado y sí incluye el
+texto OCR necesario para depurar una extracción. Guárdalo como
 `docs/native-corpus-certification.json` para que el workflow lo valide antes de
 publicar. La primera build que instala esta herramienta se ejecuta con la
 opción de bootstrap del workflow; después la compuerta vuelve a exigir un
