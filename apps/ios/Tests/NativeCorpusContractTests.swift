@@ -380,9 +380,15 @@ final class NativeCorpusContractTests: XCTestCase {
         let diagnosticURL = try report.writeDiagnosticsTemporaryFile()
         defer { try? FileManager.default.removeItem(at: diagnosticURL) }
         let privateJSON = try String(contentsOf: diagnosticURL, encoding: .utf8)
-        XCTAssertTrue(privateJSON.contains("23/JUL FACEBK"), "diagnóstico privado exportado: \(privateJSON)")
-        XCTAssertTrue(privateJSON.contains("CARGOS"))
-        XCTAssertTrue(privateJSON.contains("120"))
+        let privateObject = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: Data(privateJSON.utf8)) as? [String: Any]
+        )
+        let privateFiles = try XCTUnwrap(privateObject["files"] as? [[String: Any]])
+        let privateRows = try XCTUnwrap(privateFiles.first?["rows"] as? [[String: Any]])
+        let privateRow = try XCTUnwrap(privateRows.first)
+        XCTAssertEqual(privateRow["rawText"] as? String, "23/JUL FACEBK 120.00 3,469.63")
+        XCTAssertEqual(privateRow["selectedColumn"] as? String, "CARGOS")
+        XCTAssertEqual(privateRow["selectedAmount"] as? String, "120")
     }
 
     func testValidatedCorpusThroughNativeReaderWhenProvided() throws {
