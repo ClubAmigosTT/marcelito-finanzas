@@ -5,9 +5,10 @@ convertirlo en una fuente de verdad. El recorrido obligatorio es:
 
 `PDF → proveedor multimodal → contrato JSON estricto → validación local → conciliación con totales → pipeline canónico → KPIs`
 
-El lector local continúa siendo el camino por defecto. El envío al proxy debe
-ser una acción explícita del usuario para cada PDF; así no se suben estados
-financieros de forma silenciosa.
+El lector local continúa siendo el camino por defecto. La web solicita
+autorización para cada PDF. La app personal de iOS ofrece una preferencia
+persistente y explícita: al activar “Usar IA cuando Vision no concilie”, solo
+los documentos que fallen la conciliación local se envían a Zen.
 
 ## Contrato
 
@@ -79,7 +80,18 @@ proxy:
 
 Antes de exponerlo públicamente hay que colocarlo detrás de autenticación de
 usuario, rate limiting y TLS. No se debe poner `OPENAI_API_KEY` ni un token
-permanente en `VITE_*`, en una app móvil o en el repositorio.
+permanente en `VITE_*`, en el paquete de una app móvil o en el repositorio.
+
+### App personal de iOS
+
+Mientras el proxy administrado no esté disponible, iOS puede usar la clave
+personal que el usuario introduce en Ajustes. La clave se guarda con Keychain
+como `ThisDeviceOnly`, nunca se compila en la app y se envía únicamente por
+HTTPS a `opencode.ai`. El cliente usa el modelo gratuito multimodal
+`muse-spark-1.2-contributor-free`, limita los archivos a 20 MB, exige evidencia
+literal por fila, confianza media de 88%, página mínima de 78% y ejecuta la
+misma conciliación determinista que el lector local. Desactivar la preferencia
+o eliminar la clave impide cualquier envío posterior.
 
 Antes de cargar estados reales, el propietario puede ejecutar un preflight
 autenticado en `POST /api/statement-reader/preflight`. El proxy envía un PDF

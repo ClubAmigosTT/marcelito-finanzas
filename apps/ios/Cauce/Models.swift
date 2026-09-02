@@ -281,6 +281,9 @@ struct StatementRecord: Identifiable, Codable {
     var sourceFingerprint: String? = nil
     /// Exact native reader revision that produced this statement.
     var readerVersion: String? = nil
+    /// `local` for PDFKit/Vision and `multimodal` when the opt-in Zen fallback
+    /// reconstructed the rows before deterministic reconciliation.
+    var extractionProvider: String? = nil
     /// Original PDF metadata retained for reproducible import diagnostics.
     var fileSizeBytes: Int? = nil
     var pageCount: Int? = nil
@@ -303,6 +306,7 @@ struct ImportSummary {
     let sourceDetection: SourceDetectionEvidence
     let sourceFingerprint: String
     let readerVersion: String
+    var extractionProvider: String = "local"
     let ocrConfidence: Double?
     let ocrPageConfidences: [Double]?
     let ocrColumnsCalibrated: Bool?
@@ -488,6 +492,7 @@ private struct PDFImportExtraction: @unchecked Sendable {
     let fileName: String
     let pageCount: Int
     let sourceFingerprint: String
+    let extractionProvider: String
     let sourceDetection: SourceDetectionEvidence
     let source: String
     let accountKey: String?
@@ -553,7 +558,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.09.01.26"
+    static let readerVersion = "ios-reader-2026.09.02.27"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -2917,6 +2922,7 @@ final class FinanceStore {
             fileName: fileName,
             pageCount: document.pageCount,
             sourceFingerprint: Self.pdfFingerprint(data),
+            extractionProvider: "local",
             sourceDetection: sourceDetection,
             source: source,
             accountKey: accountKey,
@@ -2932,6 +2938,145 @@ final class FinanceStore {
             ocrColumnCalibrationNeedsReview: ocrColumnCalibrationNeedsReview,
             ocrConfidenceNeedsReview: ocrConfidenceNeedsReview
         )
+    }
+
+    /// Converts the strictly validated Zen contract into the same immutable
+    /// extraction snapshot used by PDFKit/Vision. The remote candidate still
+    /// passes through `reconcileStatement` before it can write a single row to
+    /// the canonical ledger.
+    private static func multimodalExtraction(
+        _ remote: ZenStatementExtraction,
+        documentData: Data,
+        fileName: String,
+        local: PDFImportExtraction,
+        learnedRules: [String: String]
+    ) throws -> PDFImportExtraction {
+        let localHasInstitutionalSource = local.sourceDetection.status != .unknown
+            && local.source.caseInsensitiveCompare("Desconocido") != .orderedSame
+        let source = localHasInstitutionalSource ? local.source : remote.normalizedSource
+        let kind = local.kind == .unknown ? remote.statementKind : local.kind
+        let sourceDetection: SourceDetectionEvidence
+        if localHasInstitutionalSource {
+            var evidence = local.sourceDetection.evidence
+            if remote.normalizedSource.caseInsensitiveCompare(source) == .orderedSame {
+                evidence.append("lector multimodal confirmó \(source)")
+            } else {
+                evidence.append("lector multimodal indicó \(remote.normalizedSource); se conservó el encabezado institucional")
+            }
+            sourceDetection = SourceDetectionEvidence(
+                source: source,
+                confidence: local.sourceDetection.confidence,
+                status: local.sourceDetection.status,
+                evidence: evidence,
+                ignoredBodyMentions: local.sourceDetection.ignoredBodyMentions
+            )
+        } else {
+            sourceDetection = SourceDetectionEvidence(
+                source: source,
+                confidence: 0.85,
+                status: .review,
+                evidence: ["emisor propuesto por lector multimodal; requiere confirmación"],
+                ignoredBodyMentions: []
+            )
+        }
+        let rawMovements = try remote.movements(account: source)
+        let movements = rawMovements.map { movement -> Movement in
+            var corrected = movement
+            if let learned = learnedRules[Self.categoryRuleKey(movement.title)] {
+                corrected.category = learned
+            }
+            return corrected
+        }
+        let pageConfidences = remote.pageConfidences
+        let qualityWeak = remote.averageConfidence < ZenStatementReader.minimumAverageConfidence
+            || (pageConfidences.min() ?? 0) < ZenStatementReader.minimumPageConfidence
+
+        return PDFImportExtraction(
+            documentData: documentData,
+            fileName: fileName,
+            pageCount: remote.pageCount,
+            sourceFingerprint: Self.pdfFingerprint(documentData),
+            extractionProvider: "multimodal",
+            sourceDetection: sourceDetection,
+            source: source,
+            accountKey: remote.accountLast4.map {
+                "\(ZenStatementReader.normalized(source).replacingOccurrences(of: " ", with: "")):\($0)"
+            } ?? local.accountKey,
+            kind: kind,
+            candidates: movements,
+            period: remote.periodLabel,
+            summary: remote.summary.statementSummary,
+            usedOCR: false,
+            ocrConfidence: remote.averageConfidence,
+            ocrPageConfidences: pageConfidences,
+            ocrColumnsCalibrated: nil,
+            ocrFallbackNeedsReview: qualityWeak,
+            ocrColumnCalibrationNeedsReview: false,
+            ocrConfidenceNeedsReview: qualityWeak
+        )
+    }
+
+    private func extractionWithOptionalMultimodalFallback(
+        local: PDFImportExtraction,
+        url: URL,
+        documentData: Data,
+        learnedRules: [String: String],
+        allowMultimodalFallback: Bool?,
+        stage: ((String) -> Void)? = nil
+    ) async -> PDFImportExtraction {
+        let localSummary = inspectionSummary(for: local, url: url)
+        guard localSummary.reconciliation?.status != .valid || localSummary.requiresReview else {
+            return local
+        }
+        let enabled = allowMultimodalFallback ?? ZenStatementReaderSettings.isEnabled
+        guard enabled else { return local }
+        guard let apiKey = ZenAPIKeyStore.apiKey else {
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "import.multimodal.missing-key",
+                message: "El respaldo con IA está activado, pero falta la clave de OpenCode Zen."
+            )
+            return local
+        }
+        do {
+            stage?("La lectura local no concilió. Reintentando con IA…")
+            DiagnosticsRecorder.record(
+                stage: "import.multimodal.start",
+                message: "La lectura local no concilió; se inició el respaldo multimodal para \(url.lastPathComponent)."
+            )
+            let remote = try await ZenStatementReader.extract(
+                pdf: documentData,
+                fileName: url.lastPathComponent,
+                apiKey: apiKey
+            )
+            let candidate = try Self.multimodalExtraction(
+                remote,
+                documentData: documentData,
+                fileName: url.lastPathComponent,
+                local: local,
+                learnedRules: learnedRules
+            )
+            stage?("Validando la lectura de IA contra los totales…")
+            let remoteSummary = inspectionSummary(for: candidate, url: url)
+            DiagnosticsRecorder.record(
+                level: remoteSummary.reconciliation?.status == .valid && !remoteSummary.requiresReview ? "info" : "error",
+                stage: "import.multimodal.done",
+                message: remoteSummary.reconciliation?.status == .valid && !remoteSummary.requiresReview
+                    ? "El respaldo con IA concilió \(url.lastPathComponent)."
+                    : "La IA leyó \(url.lastPathComponent), pero la conciliación lo mantuvo bloqueado: \(remoteSummary.reconciliation?.reason ?? "requiere revisión")."
+            )
+            // A successful remote response is more useful diagnostically than
+            // the failed local candidate, but it remains quarantined unless
+            // the deterministic reconciliation below returns `.valid`.
+            return candidate
+        } catch {
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "import.multimodal.error",
+                message: "El respaldo con IA no pudo leer \(url.lastPathComponent): \(error.localizedDescription)"
+            )
+            return local
+        }
     }
 
     private func applyPDFExtraction(
@@ -3078,6 +3223,7 @@ final class FinanceStore {
             ocrColumnsCalibrated: ocrColumnsCalibrated,
             sourceFingerprint: sourceFingerprint,
             readerVersion: Self.readerVersion,
+            extractionProvider: extraction.extractionProvider,
             fileSizeBytes: documentData.count,
             pageCount: extraction.pageCount
         )
@@ -3108,6 +3254,7 @@ final class FinanceStore {
             sourceDetection: sourceDetection,
             sourceFingerprint: sourceFingerprint,
             readerVersion: Self.readerVersion,
+            extractionProvider: extraction.extractionProvider,
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences,
             ocrColumnsCalibrated: ocrColumnsCalibrated,
@@ -3163,7 +3310,9 @@ final class FinanceStore {
         preserveExistingOnEmpty: Bool = false,
         requireValidReconciliation: Bool = false,
         sourceOverride: String? = nil,
-        kindOverride: StatementKind? = nil
+        kindOverride: StatementKind? = nil,
+        allowMultimodalFallback: Bool? = nil,
+        stage: ((String) -> Void)? = nil
     ) async throws -> ImportSummary {
         let didStartAccessing = url.startAccessingSecurityScopedResource()
         defer {
@@ -3181,7 +3330,7 @@ final class FinanceStore {
         let fileName = url.lastPathComponent
         let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
         try Task.checkCancellation()
-        let extraction = try await Task.detached(priority: .userInitiated) {
+        let localExtraction = try await Task.detached(priority: .userInitiated) {
             try autoreleasepool {
                 try Self.extractPDF(
                     data: documentData,
@@ -3193,6 +3342,15 @@ final class FinanceStore {
                 )
             }
         }.value
+        try Task.checkCancellation()
+        let extraction = await extractionWithOptionalMultimodalFallback(
+            local: localExtraction,
+            url: url,
+            documentData: documentData,
+            learnedRules: learnedRules,
+            allowMultimodalFallback: allowMultimodalFallback,
+            stage: stage
+        )
         try Task.checkCancellation()
         return try applyPDFExtraction(
             extraction,
@@ -3210,7 +3368,9 @@ final class FinanceStore {
         from url: URL,
         allowOCR: Bool = true,
         sourceOverride: String? = nil,
-        kindOverride: StatementKind? = nil
+        kindOverride: StatementKind? = nil,
+        allowMultimodalFallback: Bool? = nil,
+        stage: ((String) -> Void)? = nil
     ) async throws -> ImportSummary {
         let didStartAccessing = url.startAccessingSecurityScopedResource()
         defer {
@@ -3229,7 +3389,7 @@ final class FinanceStore {
         let fileName = url.lastPathComponent
         let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
         try Task.checkCancellation()
-        let extraction = try await Task.detached(priority: .userInitiated) {
+        let localExtraction = try await Task.detached(priority: .userInitiated) {
             try autoreleasepool {
                 try Self.extractPDF(
                     data: documentData,
@@ -3241,6 +3401,15 @@ final class FinanceStore {
                 )
             }
         }.value
+        try Task.checkCancellation()
+        let extraction = await extractionWithOptionalMultimodalFallback(
+            local: localExtraction,
+            url: url,
+            documentData: documentData,
+            learnedRules: learnedRules,
+            allowMultimodalFallback: allowMultimodalFallback,
+            stage: stage
+        )
         try Task.checkCancellation()
         return inspectionSummary(for: extraction, url: url)
     }
@@ -3312,6 +3481,7 @@ final class FinanceStore {
             sourceDetection: extraction.sourceDetection,
             sourceFingerprint: extraction.sourceFingerprint,
             readerVersion: Self.readerVersion,
+            extractionProvider: extraction.extractionProvider,
             ocrConfidence: extraction.ocrConfidence,
             ocrPageConfidences: extraction.ocrPageConfidences,
             ocrColumnsCalibrated: extraction.ocrColumnsCalibrated,

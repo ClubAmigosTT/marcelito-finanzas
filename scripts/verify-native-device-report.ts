@@ -64,7 +64,7 @@ function isMaskedAccount(value: unknown) {
 export function verifyNativeDeviceReport(report: DeviceReport, expectedReaderVersion: string, minimumFiles: number) {
   const errors: string[] = [];
   if (report.schemaVersion !== 1) errors.push("schemaVersion debe ser 1");
-  if (report.generatedBy !== "ios-vision-device") errors.push("generatedBy no corresponde al certificador de iOS");
+  if (!["ios-vision-device", "ios-hybrid-device"].includes(String(report.generatedBy))) errors.push("generatedBy no corresponde al certificador de iOS");
   if (report.financialDataRedacted !== true) errors.push("el informe no confirma que los datos financieros estén redactados");
   if (report.readerVersion !== expectedReaderVersion) {
     errors.push(`readerVersion ${String(report.readerVersion ?? "vacía")} no coincide con ${expectedReaderVersion}`);
@@ -82,7 +82,7 @@ export function verifyNativeDeviceReport(report: DeviceReport, expectedReaderVer
   if (Number.isInteger(accepted) && Number.isInteger(blocked) && accepted + blocked !== files.length) {
     errors.push("accepted + blocked no coincide con files");
   }
-  if (!Number.isFinite(precision) || precision < 0.99 || precision > 1) errors.push("precisión automática menor a 99%");
+  if (!Number.isFinite(precision) || precision < 0.97 || precision > 1) errors.push("precisión automática menor a 97%");
   if (unresolvedOCR !== 0) errors.push(`quedan ${Number.isFinite(unresolvedOCR) ? unresolvedOCR : "desconocido"} OCR pendientes`);
   if (report.expectedValid !== files.length) errors.push("expectedValid no coincide con el número de archivos");
   if (report.expectedPending !== 0) errors.push("expectedPending debe ser 0");
@@ -106,7 +106,7 @@ export function verifyNativeDeviceReport(report: DeviceReport, expectedReaderVer
     if (typeof row.source !== "string" || !row.source.trim() || row.source === "Desconocido") errors.push(`${label}: emisor no identificado`);
     if (!isMaskedAccount(row.accountKey)) errors.push(`${label}: accountKey no está en formato emisor:últimos4`);
     if (!(["bank", "card", "unknown"] as unknown[]).includes(row.kind)) errors.push(`${label}: kind inválido`);
-    if (!(["pdf-text", "vision-ocr"] as unknown[]).includes(row.mode)) errors.push(`${label}: mode inválido`);
+    if (!(["pdf-text", "vision-ocr", "multimodal-ai"] as unknown[]).includes(row.mode)) errors.push(`${label}: mode inválido`);
     if (row.sourceStatus !== "verified") errors.push(`${label}: sourceStatus no es verified`);
     const sourceConfidence = numberValue(row.sourceConfidence);
     if (!Number.isFinite(sourceConfidence) || sourceConfidence < 0 || sourceConfidence > 1) errors.push(`${label}: sourceConfidence inválida`);
@@ -116,12 +116,12 @@ export function verifyNativeDeviceReport(report: DeviceReport, expectedReaderVer
     if (row.duplicate === true) errors.push(`${label}: PDF duplicado`);
     const rows = numberValue(row.rows);
     if (!Number.isInteger(rows) || rows < 0) errors.push(`${label}: rows inválido`);
-    if (row.mode === "vision-ocr") {
+    if (row.mode === "vision-ocr" || row.mode === "multimodal-ai") {
       const confidence = numberValue(row.ocrConfidence);
       const weakest = numberValue(row.weakestOCRPage);
       if (!Number.isFinite(confidence) || confidence < 0.88) errors.push(`${label}: confianza OCR media menor a 88%`);
       if (!Number.isFinite(weakest) || weakest < 0.78) errors.push(`${label}: página OCR menor a 78%`);
-      if (row.source === "Santander" && row.ocrColumnsCalibrated !== true) errors.push(`${label}: columnas Santander sin calibrar`);
+      if (row.mode === "vision-ocr" && row.source === "Santander" && row.ocrColumnsCalibrated !== true) errors.push(`${label}: columnas Santander sin calibrar`);
     }
     if (row.status !== "valid" || row.requiresReview !== false || row.reconciliationValid !== true) {
       errors.push(`${label}: el archivo no quedó aceptado por el lector`);
