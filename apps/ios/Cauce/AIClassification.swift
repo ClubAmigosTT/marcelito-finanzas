@@ -288,6 +288,7 @@ struct AISettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var apiKey = ZenAPIKeyStore.apiKey ?? ""
     @State private var selectedModel = ZenAPIKeyStore.selectedModel
+    @State private var statementReaderEnabled = ZenStatementReaderSettings.isEnabled
     @State private var errorMessage: String?
 
     var body: some View {
@@ -302,7 +303,8 @@ struct AISettingsView: View {
                             Text(model.name).tag(model.id)
                         }
                     }
-                    Text("La clave se guarda en el llavero de este iPhone. Solo se envían los movimientos que marques para clasificar y únicamente cuando lo confirmes.")
+                    Toggle("Usar IA cuando Vision no concilie", isOn: $statementReaderEnabled)
+                    Text("La clave se guarda en el llavero de este iPhone. La clasificación envía movimientos pendientes; el lector con IA envía el PDF completo solo cuando la lectura privada no concilia y esta opción está activa.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -310,6 +312,7 @@ struct AISettingsView: View {
                     Button("Guardar configuración") {
                         do {
                             try ZenAPIKeyStore.save(apiKey: apiKey, model: selectedModel)
+                            ZenStatementReaderSettings.isEnabled = statementReaderEnabled
                             dismiss()
                         } catch {
                             errorMessage = error.localizedDescription
@@ -319,6 +322,8 @@ struct AISettingsView: View {
                     if ZenAPIKeyStore.apiKey != nil {
                         Button("Eliminar clave", role: .destructive) {
                             ZenAPIKeyStore.delete()
+                            ZenStatementReaderSettings.isEnabled = false
+                            statementReaderEnabled = false
                             apiKey = ""
                         }
                         .frame(maxWidth: .infinity)
@@ -326,6 +331,9 @@ struct AISettingsView: View {
                 }
                 Section("Privacidad") {
                     Text("La clasificación es opcional. Los modelos gratuitos de Zen son externos: evita enviar descripciones que contengan información sensible que no quieras compartir.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Text("La IA nunca aprueba cifras por sí sola: cada resultado debe conciliar contra los totales impresos antes de alimentar los KPI.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

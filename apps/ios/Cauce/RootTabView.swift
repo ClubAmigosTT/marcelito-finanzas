@@ -166,7 +166,9 @@ struct HomeView: View {
                     importProgress = Int(((completedCount / totalCount) * 100).rounded())
                     await Task.yield()
                     do {
-                        let summary = try await store.importPDFAsync(from: url)
+                        let summary = try await store.importPDFAsync(from: url, stage: { message in
+                            importStatus = message
+                        })
                         items.append(ImportReportItem(summary: summary))
                         DiagnosticsRecorder.record(
                             stage: "import.file",

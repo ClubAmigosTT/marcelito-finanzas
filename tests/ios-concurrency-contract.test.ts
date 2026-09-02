@@ -6,6 +6,8 @@ const rootTabPath = new URL("../apps/ios/Cauce/RootTabView.swift", import.meta.u
 const sectionsPath = new URL("../apps/ios/Cauce/Sections.swift", import.meta.url);
 const modelsPath = new URL("../apps/ios/Cauce/Models.swift", import.meta.url);
 const aiClassificationPath = new URL("../apps/ios/Cauce/AIClassification.swift", import.meta.url);
+const statementReaderAIPath = new URL("../apps/ios/Cauce/StatementReaderAI.swift", import.meta.url);
+const certificationViewPath = new URL("../apps/ios/Cauce/NativeCorpusCertification.swift", import.meta.url);
 const nativeCorpusPath = new URL("../apps/ios/Tests/NativeCorpusContractTests.swift", import.meta.url);
 const nativeCorpusRunnerPath = new URL("../apps/ios/scripts/run-native-corpus.sh", import.meta.url);
 
@@ -140,4 +142,25 @@ test("el clasificador iOS divide lotes y filtra respuestas fuera de alcance", as
   assert.match(source, /requested\.contains\(movementID\)/);
   assert.match(source, /seen\.insert\(movementID\)\.inserted/);
   assert.match(source, /maxTokens: 2000/);
+});
+
+test("iOS usa Zen solo como respaldo opt-in y conserva la conciliación como compuerta", async () => {
+  const [models, reader, settings, certification] = await Promise.all([
+    readFile(modelsPath, "utf8"),
+    readFile(statementReaderAIPath, "utf8"),
+    readFile(aiClassificationPath, "utf8"),
+    readFile(certificationViewPath, "utf8"),
+  ]);
+  assert.match(settings, /Toggle\("Usar IA cuando Vision no concilie"/);
+  assert.match(models, /localSummary\.reconciliation\?\.status != \.valid \|\| localSummary\.requiresReview/);
+  assert.match(models, /ZenStatementReader\.extract\(/);
+  assert.match(models, /let remoteSummary = inspectionSummary/);
+  assert.match(reader, /static let model = "muse-spark-1\.2-contributor-free"/);
+  assert.match(reader, /minimumAverageConfidence = 0\.88/);
+  assert.match(reader, /minimumPageConfidence = 0\.78/);
+  assert.match(reader, /evidenceContainsDescription/);
+  assert.match(reader, /evidenceContainsAmount/);
+  assert.match(certification, /static let targetPrecision = 0\.97/);
+  assert.match(certification, /allowMultimodalFallback: useAIFallback/);
+  assert.match(certification, /cada archivo aceptado debe conciliar al 100%/);
 });

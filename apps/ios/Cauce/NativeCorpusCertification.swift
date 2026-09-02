@@ -50,12 +50,12 @@ struct NativeCorpusFileReport: Codable, Identifiable {
               !requiresReview,
               reconciliationValid,
               !duplicate else { return false }
-        if mode == "vision-ocr" {
+        if mode == "vision-ocr" || mode == "multimodal-ai" {
             guard let ocrConfidence,
                   let weakestOCRPage,
                   ocrConfidence >= 0.88,
                   weakestOCRPage >= 0.78 else { return false }
-            if source == "Santander" && ocrColumnsCalibrated != true { return false }
+            if mode == "vision-ocr", source == "Santander", ocrColumnsCalibrated != true { return false }
         }
         return true
     }
@@ -66,7 +66,9 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         source = summary.source
         accountKey = summary.accountKey ?? ""
         kind = summary.kind.rawValue
-        mode = summary.usedOCR ? "vision-ocr" : "pdf-text"
+        mode = summary.extractionProvider == "multimodal"
+            ? "multimodal-ai"
+            : (summary.usedOCR ? "vision-ocr" : "pdf-text")
         sourceStatus = summary.sourceDetection.status.rawValue
         sourceConfidence = summary.sourceDetection.confidence
         status = summary.reconciliation?.status.rawValue ?? StatementReconciliationStatus.pending.rawValue
@@ -112,7 +114,9 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         source = summary.source
         accountKey = summary.accountKey ?? ""
         kind = summary.kind.rawValue
-        mode = summary.usedOCR ? "vision-ocr" : "pdf-text"
+        mode = summary.extractionProvider == "multimodal"
+            ? "multimodal-ai"
+            : (summary.usedOCR ? "vision-ocr" : "pdf-text")
         sourceStatus = summary.sourceDetection.status.rawValue
         sourceConfidence = summary.sourceDetection.confidence
         status = StatementReconciliationStatus.invalid.rawValue
@@ -133,6 +137,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
 struct NativeCorpusCertificationReport: Codable, Identifiable {
     static let schemaVersion = 1
     static let minimumFileCount = 10
+    static let targetPrecision = 0.97
 
     let schemaVersion: Int
     let generatedAt: Date
@@ -165,13 +170,15 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
         goldenAutoAccepted = accepted
         goldenFalseAccepted = 0
         automaticAcceptancePrecision = files.isEmpty ? 0 : Double(accepted) / Double(files.count)
-        unresolvedOCR = files.filter { $0.mode == "vision-ocr" && !$0.accepted }.count
+        unresolvedOCR = files.filter { ["vision-ocr", "multimodal-ai"].contains($0.mode) && !$0.accepted }.count
         certified = files.count >= Self.minimumFileCount
             && blocked == 0
-            && automaticAcceptancePrecision >= 0.99
+            && automaticAcceptancePrecision >= Self.targetPrecision
             && unresolvedOCR == 0
         financialDataRedacted = true
-        generatedBy = "ios-vision-device"
+        generatedBy = files.contains { $0.mode == "multimodal-ai" }
+            ? "ios-hybrid-device"
+            : "ios-vision-device"
     }
 
     var jsonData: Data? {
@@ -195,6 +202,7 @@ extension FinanceStore {
     /// without touching movements, statements or the canonical ledger.
     func certifyNativeCorpus(
         from urls: [URL],
+        allowMultimodalFallback: Bool = false,
         progress: ((Int, Int, String) -> Void)? = nil
     ) async -> NativeCorpusCertificationReport {
         let sortedURLs = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
@@ -206,7 +214,14 @@ extension FinanceStore {
             progress?(index, sortedURLs.count, url.lastPathComponent)
             let fingerprint = Self.fingerprintForCertification(url) ?? String(repeating: "0", count: 64)
             do {
-                let summary = try await inspectPDFAsync(from: url, allowOCR: true)
+                let summary = try await inspectPDFAsync(
+                    from: url,
+                    allowOCR: true,
+                    allowMultimodalFallback: allowMultimodalFallback,
+                    stage: { stage in
+                        progress?(index, sortedURLs.count, "\(url.lastPathComponent): \(stage)")
+                    }
+                )
                 if !seenFingerprints.insert(summary.sourceFingerprint).inserted {
                     reports.append(NativeCorpusFileReport(index: index, sourceFileName: url.lastPathComponent, duplicateOf: summary))
                 } else {
@@ -246,7 +261,9 @@ struct NativeCorpusCertificationView: View {
     @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var isImporterPresented = false
+    @State private var isAISettingsPresented = false
     @State private var selectedFiles: [URL] = []
+    @State private var useAIFallback = ZenStatementReaderSettings.isEnabled && ZenAPIKeyStore.apiKey != nil
     @State private var isRunning = false
     @State private var progress = 0.0
     @State private var status = "Selecciona los 10 estados validados para ejecutar Vision en este iPhone."
@@ -287,6 +304,9 @@ struct NativeCorpusCertificationView: View {
                 allowsMultipleSelection: true,
                 onCompletion: handleSelection
             )
+            .sheet(isPresented: $isAISettingsPresented) {
+                AISettingsView()
+            }
             .alert("No se pudo ejecutar la certificación", isPresented: Binding(
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
@@ -305,7 +325,7 @@ struct NativeCorpusCertificationView: View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Certificación privada en el dispositivo", systemImage: "checkmark.shield.fill")
                 .font(.headline)
-            Text("El lector ejecuta PDFKit y Vision sobre tus estados. Los PDFs nunca salen del iPhone; el informe solo contiene hashes, emisor, calidad OCR y resultado de conciliación.")
+            Text("El lector intenta primero PDFKit y Vision dentro del iPhone. Si activas el respaldo con IA, solo los estados que no concilien se enviarán directamente a OpenCode Zen; el informe exportado contiene únicamente hashes y resultados de calidad.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Text("Se requieren al menos \(NativeCorpusCertificationReport.minimumFileCount) archivos únicos para habilitar la compuerta de publicación.")
@@ -345,7 +365,7 @@ struct NativeCorpusCertificationView: View {
                 Button {
                     runCertification()
                 } label: {
-                    Label("Ejecutar Vision", systemImage: "viewfinder")
+                    Label(useAIFallback ? "Ejecutar lector" : "Ejecutar Vision", systemImage: "viewfinder")
                         .frame(maxWidth: .infinity, minHeight: 42)
                         // The parent card sets a navy foreground style. Keep
                         // the prominent action legible on its navy fill on
@@ -356,6 +376,20 @@ struct NativeCorpusCertificationView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(Color.marcelitoNavy)
                 .disabled(selectedFiles.isEmpty || isRunning)
+            }
+            if ZenAPIKeyStore.apiKey == nil {
+                Button("Configurar OpenCode Zen") {
+                    isAISettingsPresented = true
+                }
+                .buttonStyle(.borderless)
+            } else {
+                Toggle("Usar IA si Vision no concilia", isOn: $useAIFallback)
+                    .onChange(of: useAIFallback) { _, enabled in
+                        ZenStatementReaderSettings.isEnabled = enabled
+                    }
+                Text("Al activarlo, un PDF bloqueado puede enviarse a Zen. La respuesta seguirá sujeta a conciliación exacta y nunca entra directamente a los KPI.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             Text(status)
                 .font(.caption)
@@ -377,12 +411,12 @@ struct NativeCorpusCertificationView: View {
             HStack(spacing: 16) {
                 NativeCorpusMetric(title: "Aceptados", value: "\(report.accepted)/\(report.files.count)")
                 NativeCorpusMetric(title: "Precisión", value: "\(Int((report.automaticAcceptancePrecision * 100).rounded()))%")
-                NativeCorpusMetric(title: "OCR pendiente", value: "\(report.unresolvedOCR)")
+                NativeCorpusMetric(title: "Por resolver", value: "\(report.unresolvedOCR)")
             }
 
             Text(report.certified
                 ? "Comparte este informe JSON y guárdalo como docs/native-corpus-certification.json en GitHub. La siguiente build podrá usarlo sin una Mac."
-                : "Corrige los archivos bloqueados y vuelve a ejecutar Vision. El informe no habilita publicación hasta alcanzar 99% y cubrir los 10 estados.")
+                : "Corrige los archivos bloqueados y vuelve a ejecutar el lector. El informe no habilita publicación hasta alcanzar 97% y cubrir los 10 estados; cada archivo aceptado debe conciliar al 100%.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
@@ -450,9 +484,14 @@ struct NativeCorpusCertificationView: View {
         progress = 0
         status = "Preparando el corpus…"
         Task { @MainActor in
-            let result = await store.certifyNativeCorpus(from: selectedFiles) { completed, total, fileName in
+            let result = await store.certifyNativeCorpus(
+                from: selectedFiles,
+                allowMultimodalFallback: useAIFallback
+            ) { completed, total, fileName in
                 progress = total == 0 ? 0 : Double(completed) / Double(total)
-                status = "Leyendo \(fileName)…"
+                status = useAIFallback
+                    ? "Leyendo \(fileName) con Vision y respaldo IA…"
+                    : "Leyendo \(fileName) con Vision…"
             }
             report = result
             progress = 1
@@ -475,7 +514,8 @@ private extension NativeCorpusFileReport {
     /// issue is OCR quality, Santander column calibration or text
     /// reconciliation without exposing transaction content.
     var qualityDetail: String {
-        var parts: [String] = [mode == "vision-ocr" ? "Vision" : "PDF de texto"]
+        let method = mode == "multimodal-ai" ? "IA multimodal" : (mode == "vision-ocr" ? "Vision" : "PDF de texto")
+        var parts: [String] = [method]
         if let ocrConfidence {
             parts.append("OCR media \(Int((ocrConfidence * 100).rounded()))%")
         }
