@@ -197,7 +197,9 @@ struct ZenStatementExtraction: Decodable, Sendable {
         return try rows.compactMap { row in
             let identity = "\(row.date)|\(row.amountCents)|\(row.direction)|\(ZenStatementReader.normalized(row.description))|\(row.kind)"
             guard seen.insert(identity).inserted else { return nil }
-            guard let date = formatter.date(from: row.date) else { throw ZenStatementReader.ReaderError.invalidResponse }
+            guard let date = formatter.date(from: row.date) else {
+                throw ZenStatementReader.ReaderError.invalidResponse("rows.date no contiene una fecha ISO válida")
+            }
             let movementKind = ZenStatementReader.movementKind(row.kind)
             let amount = Decimal(row.amountCents) / Decimal(100) * (row.direction == "in" ? 1 : -1)
             let flow: FlowKind
@@ -248,8 +250,17 @@ enum ZenStatementReader {
         case fileTooLarge
         case invalidPDF
         case provider(Int)
-        case invalidResponse
-        case lowConfidence
+        /// The provider answered, but the body could not be decoded into the
+        /// statement contract. Keeping the reason lets the diagnostic trail
+        /// distinguish malformed JSON from a semantic contract violation.
+        case invalidResponse(String)
+        case lowConfidence(String)
+        /// Some OpenAI-compatible gateways do not implement `text.format`.
+        /// This internal case triggers one safe retry without structured
+        /// output before the error is surfaced to the user.
+        case structuredOutputRejected(Int)
+        case fallbackFailed(String, String)
+        case transport(String)
 
         var errorDescription: String? {
             switch self {
@@ -257,8 +268,20 @@ enum ZenStatementReader {
             case .fileTooLarge: "El lector con IA admite PDFs de hasta 20 MB."
             case .invalidPDF: "El archivo seleccionado no es un PDF válido."
             case .provider(let status): "OpenCode Zen no pudo leer el estado (HTTP \(status))."
-            case .invalidResponse: "La IA devolvió información incompleta o no verificable."
-            case .lowConfidence: "La lectura con IA no alcanzó la calidad visual mínima y quedó bloqueada."
+            case .invalidResponse(let reason): "Zen devolvió una respuesta incompatible: \(reason)"
+            case .lowConfidence(let reason): "La lectura con IA no alcanzó la calidad visual mínima: \(reason)"
+            case .structuredOutputRejected(let status): "Zen rechazó la salida estructurada (HTTP \(status))."
+            case .fallbackFailed(let structured, let plain): "La respuesta de Zen no pudo validarse. Esquema: \(structured). Reintento JSON: \(plain)"
+            case .transport(let reason): "No se pudo conectar con OpenCode Zen: \(reason)"
+            }
+        }
+
+        var shouldRetryWithoutStructuredOutput: Bool {
+            switch self {
+            case .structuredOutputRejected, .invalidResponse:
+                return true
+            default:
+                return false
             }
         }
     }
@@ -283,13 +306,209 @@ enum ZenStatementReader {
     - Devuelve las filas ordenadas, sin duplicados. Si algo no puede probarse, omítelo para que la conciliación local lo bloquee.
     """
 
+    /// The mobile reader uses the same contract as the server-side reader,
+    /// expressed here as a Foundation dictionary so the iPhone can request
+    /// strict Responses output without shipping a second parser. `$schema`
+    /// and `$id` are intentionally omitted because some Zen-compatible
+    /// gateways reject those metadata keys inside a strict response schema.
+    private static let strictResponseSchema: [String: Any] = {
+        let nullableCents: [String: Any] = [
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "maximum": 1_000_000_000_000
+        ]
+        let nullableCount: [String: Any] = [
+            "type": ["integer", "null"],
+            "minimum": 0,
+            "maximum": 2_500
+        ]
+        let nullableBool: [String: Any] = ["type": ["boolean", "null"]]
+
+        let summaryKeys = [
+            "previous_balance_cents", "statement_balance_cents", "debt_balance_cents",
+            "new_transactions_cents", "payments_cents", "credits_cents",
+            "payments_credits_cents", "new_charges_cents", "interest_cents",
+            "fees_cents", "credit_limit_cents", "credit_available_cents",
+            "minimum_payment_cents", "minimum_plus_msi_cents", "payment_for_no_interest_cents",
+            "cash_balance_cents", "msi_original_deferred_cents", "msi_pending_cents",
+            "revolving_balance_cents", "msi_installments", "msi_monthly_load_cents",
+            "domestic_transaction_total_cents", "domestic_transaction_total_is_credit",
+            "foreign_transaction_total_cents", "deposit_total_cents", "withdrawal_total_cents",
+            "deposit_count", "withdrawal_count"
+        ]
+        var summaryProperties: [String: Any] = [:]
+        for key in summaryKeys {
+            summaryProperties[key] = key == "domestic_transaction_total_is_credit"
+                ? nullableBool
+                : (key.hasSuffix("_count") || key == "msi_installments" ? nullableCount : nullableCents)
+        }
+
+        let rowProperties: [String: Any] = [
+            "date": ["type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"],
+            "description": ["type": "string", "minLength": 3, "maxLength": 240],
+            "amount_cents": ["type": "integer", "minimum": 1, "maximum": 1_000_000_000_000],
+            "direction": ["type": "string", "enum": ["in", "out"]],
+            "kind": [
+                "type": "string",
+                "enum": ["purchase", "cardPayment", "bankTransfer", "income", "credit", "refund", "msi", "interest", "fee", "other"]
+            ],
+            "foreign_currency": ["type": "boolean"],
+            "page": ["type": "integer", "minimum": 1, "maximum": 200],
+            "evidence": ["type": "string", "minLength": 3, "maxLength": 500],
+            "confidence": ["type": "number", "minimum": 0, "maximum": 1]
+        ]
+
+        return [
+            "type": "object",
+            "additionalProperties": false,
+            "properties": [
+                "source": ["type": "string", "minLength": 1, "maxLength": 80],
+                "kind": ["type": "string", "enum": ["bank", "card", "unknown"]],
+                "account_last4": ["type": ["string", "null"], "pattern": "^[0-9]{4}$"],
+                "period_start": ["type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"],
+                "period_end": ["type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"],
+                "cutoff_date": ["type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"],
+                "page_count": ["type": "integer", "minimum": 1, "maximum": 200],
+                "summary": [
+                    "type": "object",
+                    "additionalProperties": false,
+                    "properties": summaryProperties,
+                    "required": summaryKeys
+                ],
+                "rows": [
+                    "type": "array",
+                    "maxItems": 2_500,
+                    "items": [
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": rowProperties,
+                        "required": ["date", "description", "amount_cents", "direction", "kind", "foreign_currency", "page", "evidence", "confidence"]
+                    ]
+                ]
+            ],
+            "required": ["source", "kind", "account_last4", "period_start", "period_end", "cutoff_date", "page_count", "summary", "rows"]
+        ]
+    }()
+
+    private static func decodingReason(_ error: Error) -> String {
+        let path: ([CodingKey]) -> String = { keys in
+            let value = keys.map(\.stringValue).joined(separator: ".")
+            return value.isEmpty ? "respuesta" : value
+        }
+        switch error {
+        case let DecodingError.keyNotFound(key, context):
+            return "falta el campo \(path(context.codingPath + [key]))"
+        case let DecodingError.typeMismatch(_, context):
+            return "tipo inválido en \(path(context.codingPath))"
+        case let DecodingError.valueNotFound(_, context):
+            return "valor ausente en \(path(context.codingPath))"
+        case let DecodingError.dataCorrupted(context):
+            return "JSON corrupto en \(path(context.codingPath))"
+        default:
+            return "JSON incompatible (\(error.localizedDescription))"
+        }
+    }
+
     static func extract(pdf data: Data, fileName: String, apiKey: String) async throws -> ZenStatementExtraction {
         let cleanKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanKey.isEmpty else { throw ReaderError.missingAPIKey }
         guard data.count <= maximumFileBytes else { throw ReaderError.fileTooLarge }
         guard data.starts(with: Data("%PDF-".utf8)) else { throw ReaderError.invalidPDF }
 
-        let requestBody: [String: Any] = [
+        // Responses supports strict JSON Schema, but compatible gateways may
+        // reject the `text.format` envelope. Try the auditable contract first
+        // and fall back once to a plain JSON prompt when the provider cannot
+        // consume structured output. Both paths still use the same decoder
+        // and deterministic validation below.
+        do {
+            return try await requestAndDecode(
+                data: data,
+                fileName: fileName,
+                apiKey: cleanKey,
+                structuredOutput: true
+            )
+        } catch let structuredError as ReaderError where structuredError.shouldRetryWithoutStructuredOutput {
+            do {
+                return try await requestAndDecode(
+                    data: data,
+                    fileName: fileName,
+                    apiKey: cleanKey,
+                    structuredOutput: false
+                )
+            } catch let plainError as ReaderError {
+                throw ReaderError.fallbackFailed(
+                    structuredError.localizedDescription,
+                    plainError.localizedDescription
+                )
+            }
+        }
+    }
+
+    private static func requestAndDecode(
+        data: Data,
+        fileName: String,
+        apiKey: String,
+        structuredOutput: Bool
+    ) async throws -> ZenStatementExtraction {
+        let requestBody = requestBody(
+            data: data,
+            fileName: fileName,
+            structuredOutput: structuredOutput
+        )
+        var request = URLRequest(url: endpoint)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 180
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
+
+        let responseData: Data
+        let http: HTTPURLResponse
+        do {
+            let result = try await URLSession.shared.data(for: request)
+            guard let response = result.1 as? HTTPURLResponse else {
+                throw ReaderError.invalidResponse("Zen no devolvió una respuesta HTTP.")
+            }
+            responseData = result.0
+            http = response
+        } catch let error as ReaderError {
+            throw error
+        } catch {
+            throw ReaderError.transport(error.localizedDescription)
+        }
+
+        guard (200..<300).contains(http.statusCode) else {
+            // A 4xx response to the structured envelope is commonly a
+            // capability mismatch. Retry once without the envelope; never
+            // retry authentication, rate-limit or server errors.
+            if structuredOutput && [400, 404, 422].contains(http.statusCode) {
+                throw ReaderError.structuredOutputRejected(http.statusCode)
+            }
+            throw ReaderError.provider(http.statusCode)
+        }
+
+        guard let text = outputText(from: responseData) else {
+            throw ReaderError.invalidResponse("la respuesta no contiene texto de salida")
+        }
+        guard let jsonData = jsonObjectData(from: text) else {
+            throw ReaderError.invalidResponse("la salida no contiene un objeto JSON válido")
+        }
+        let extraction: ZenStatementExtraction
+        do {
+            extraction = try JSONDecoder().decode(ZenStatementExtraction.self, from: jsonData)
+        } catch {
+            throw ReaderError.invalidResponse(decodingReason(error))
+        }
+        try validate(extraction)
+        return extraction
+    }
+
+    private static func requestBody(
+        data: Data,
+        fileName: String,
+        structuredOutput: Bool
+    ) -> [String: Any] {
+        var body: [String: Any] = [
             "model": model,
             "store": false,
             "max_output_tokens": 32_768,
@@ -305,21 +524,17 @@ enum ZenStatementReader {
                 ]
             ]]
         ]
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 180
-        request.setValue("Bearer \(cleanKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONSerialization.data(withJSONObject: requestBody)
-
-        let (responseData, response) = try await URLSession.shared.data(for: request)
-        guard let http = response as? HTTPURLResponse else { throw ReaderError.invalidResponse }
-        guard (200..<300).contains(http.statusCode) else { throw ReaderError.provider(http.statusCode) }
-        guard let text = outputText(from: responseData),
-              let jsonData = jsonObjectData(from: text) else { throw ReaderError.invalidResponse }
-        let extraction = try JSONDecoder().decode(ZenStatementExtraction.self, from: jsonData)
-        try validate(extraction)
-        return extraction
+        if structuredOutput {
+            body["text"] = [
+                "format": [
+                    "type": "json_schema",
+                    "name": "statement_extraction",
+                    "strict": true,
+                    "schema": strictResponseSchema
+                ]
+            ]
+        }
+        return body
     }
 
     private static func outputText(from data: Data) -> String? {
@@ -349,10 +564,49 @@ enum ZenStatementReader {
             .replacingOccurrences(of: "```json", with: "")
             .replacingOccurrences(of: "```", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let start = cleaned.firstIndex(of: "{"),
-              let end = cleaned.lastIndex(of: "}"),
-              start <= end else { return nil }
-        return String(cleaned[start...end]).data(using: .utf8)
+        // Prefer the complete response when the provider already returned a
+        // bare JSON object. This avoids accidentally joining two JSON-looking
+        // fragments from a streamed Responses payload.
+        if let data = cleaned.data(using: .utf8),
+           (try? JSONSerialization.jsonObject(with: data)) is [String: Any] {
+            return data
+        }
+
+        // Otherwise locate the first balanced object while respecting quoted
+        // strings and escapes. The previous first-brace/last-brace heuristic
+        // could include explanatory text or a second object and then surface
+        // only Foundation's opaque “data couldn't be read” error.
+        guard let start = cleaned.firstIndex(of: "{") else { return nil }
+        var depth = 0
+        var inString = false
+        var escaped = false
+        var index = start
+        while index < cleaned.endIndex {
+            let character = cleaned[index]
+            if inString {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    inString = false
+                }
+            } else if character == "\"" {
+                inString = true
+            } else if character == "{" {
+                depth += 1
+            } else if character == "}" {
+                depth -= 1
+                if depth == 0 {
+                    let object = String(cleaned[start...index])
+                    guard let data = object.data(using: .utf8),
+                          (try? JSONSerialization.jsonObject(with: data)) is [String: Any] else { return nil }
+                    return data
+                }
+            }
+            index = cleaned.index(after: index)
+        }
+        return nil
     }
 
     private static func validate(_ extraction: ZenStatementExtraction) throws {
@@ -361,41 +615,73 @@ enum ZenStatementReader {
               extraction.statementKind != .unknown,
               extraction.pageCount > 0,
               extraction.pageCount <= 200,
-              extraction.rows.count <= 2_500 else { throw ReaderError.invalidResponse }
+              extraction.rows.count <= 2_500 else {
+            throw ReaderError.invalidResponse("faltan datos de emisor, tipo, páginas o filas fuera de rango")
+        }
         if let last4 = extraction.accountLast4, last4.range(of: #"^\d{4}$"#, options: .regularExpression) == nil {
-            throw ReaderError.invalidResponse
+            throw ReaderError.invalidResponse("account_last4 no tiene cuatro dígitos")
         }
         if let start = extraction.periodStart, let end = extraction.periodEnd, start > end {
-            throw ReaderError.invalidResponse
+            throw ReaderError.invalidResponse("period_start es posterior a period_end")
         }
-        guard !extraction.rows.isEmpty else { throw ReaderError.invalidResponse }
+        guard !extraction.rows.isEmpty else {
+            throw ReaderError.invalidResponse("rows está vacío; no se pudo demostrar ninguna transacción")
+        }
 
-        for row in extraction.rows {
-            guard row.date.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil,
-                  row.description.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3,
-                  !isAdministrative(row.description),
-                  row.amountCents > 0,
-                  row.amountCents <= 1_000_000_000_000,
-                  ["in", "out"].contains(row.direction),
-                  ["purchase", "cardPayment", "bankTransfer", "income", "credit", "refund", "msi", "interest", "fee", "other"].contains(row.kind),
-                  row.page > 0,
-                  row.page <= extraction.pageCount,
-                  row.confidence.isFinite,
+        let kinds = ["purchase", "cardPayment", "bankTransfer", "income", "credit", "refund", "msi", "interest", "fee", "other"]
+        for (index, row) in extraction.rows.enumerated() {
+            let prefix = "rows[\(index)]"
+            guard row.date.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil else {
+                throw ReaderError.invalidResponse("\(prefix).date no usa YYYY-MM-DD")
+            }
+            guard row.description.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3 else {
+                throw ReaderError.invalidResponse("\(prefix).description está vacío")
+            }
+            guard !isAdministrative(row.description) else {
+                throw ReaderError.invalidResponse("\(prefix).description parece texto administrativo")
+            }
+            guard row.amountCents > 0, row.amountCents <= 1_000_000_000_000 else {
+                throw ReaderError.invalidResponse("\(prefix).amount_cents está fuera de rango")
+            }
+            guard ["in", "out"].contains(row.direction) else {
+                throw ReaderError.invalidResponse("\(prefix).direction debe ser in u out")
+            }
+            guard kinds.contains(row.kind) else {
+                throw ReaderError.invalidResponse("\(prefix).kind no está permitido")
+            }
+            guard row.page > 0, row.page <= extraction.pageCount else {
+                throw ReaderError.invalidResponse("\(prefix).page no pertenece al PDF")
+            }
+            guard row.confidence.isFinite,
                   row.confidence >= minimumRowConfidence,
-                  row.confidence <= 1,
-                  evidenceContainsDescription(row.description, evidence: row.evidence),
-                  evidenceContainsAmount(row.amountCents, evidence: row.evidence) else {
-                throw ReaderError.invalidResponse
+                  row.confidence <= 1 else {
+                throw ReaderError.invalidResponse("\(prefix).confidence es menor que el mínimo de 0.80")
+            }
+            guard evidenceContainsDescription(row.description, evidence: row.evidence) else {
+                throw ReaderError.invalidResponse("\(prefix).evidence no contiene la descripción reconocible")
+            }
+            guard evidenceContainsAmount(row.amountCents, evidence: row.evidence) else {
+                throw ReaderError.invalidResponse("\(prefix).evidence no contiene el importe literal")
             }
             let kind = movementKind(row.kind)
-            if [.income, .credit, .refund].contains(kind), row.direction != "in" { throw ReaderError.invalidResponse }
-            if [.purchase, .msi, .interest, .fee].contains(kind), row.direction != "out" { throw ReaderError.invalidResponse }
-            if let start = extraction.periodStart, row.date < start { throw ReaderError.invalidResponse }
-            if let end = extraction.periodEnd, row.date > end { throw ReaderError.invalidResponse }
+            if [.income, .credit, .refund].contains(kind), row.direction != "in" {
+                throw ReaderError.invalidResponse("\(prefix).direction debe ser in para \(row.kind)")
+            }
+            if [.purchase, .msi, .interest, .fee].contains(kind), row.direction != "out" {
+                throw ReaderError.invalidResponse("\(prefix).direction debe ser out para \(row.kind)")
+            }
+            if let start = extraction.periodStart, row.date < start {
+                throw ReaderError.invalidResponse("\(prefix).date queda antes del periodo declarado")
+            }
+            if let end = extraction.periodEnd, row.date > end {
+                throw ReaderError.invalidResponse("\(prefix).date queda después del periodo declarado")
+            }
         }
         guard extraction.averageConfidence >= minimumAverageConfidence,
               extraction.pageConfidences.min() ?? 0 >= minimumPageConfidence else {
-            throw ReaderError.lowConfidence
+            throw ReaderError.lowConfidence(
+                "media \(Int((extraction.averageConfidence * 100).rounded()))% y página mínima \(Int(((extraction.pageConfidences.min() ?? 0) * 100).rounded()))%"
+            )
         }
     }
 
