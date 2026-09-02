@@ -29,8 +29,8 @@ struct NativeCorpusFileReport: Codable, Identifiable {
     let duplicate: Bool
     let errorCode: String?
     let reconciliationReason: String?
-    let multimodalFallbackAttempted: Bool = false
-    let multimodalFallbackError: String? = nil
+    let multimodalFallbackAttempted: Bool
+    let multimodalFallbackError: String?
 
     /// Kept only in memory for the local result list. It is deliberately not
     /// part of the Codable payload exported to GitHub.
@@ -157,8 +157,8 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
     let mode: String
     let status: String
     let reconciliationReason: String?
-    let multimodalFallbackAttempted: Bool = false
-    let multimodalFallbackError: String? = nil
+    let multimodalFallbackAttempted: Bool
+    let multimodalFallbackError: String?
     let rows: [OCRRowDiagnostic]
 
     private enum CodingKeys: String, CodingKey {
