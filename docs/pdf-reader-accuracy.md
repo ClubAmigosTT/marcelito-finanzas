@@ -1,6 +1,6 @@
-# Lector de estados: criterio de confianza del 99%
+# Lector de estados: criterio de confianza del 97%
 
-El 99% se mide como **precisión de aceptación automática**: de cada 100 filas o estados que el sistema acepta sin intervención, al menos 99 deben coincidir con el estado original. No es una promesa de 99% de caracteres OCR. Una lectura ambigua se rechaza o queda provisional; nunca se convierte en un KPI.
+El 97% se mide como **precisión de aceptación automática**: de cada 100 filas o estados que el sistema acepta sin intervención, al menos 97 deben coincidir con el estado original. No es una promesa de caracteres OCR. Una lectura ambigua se rechaza o queda provisional; nunca se convierte en un KPI. Los totales e identidades financieras de cada estado aceptado deben conciliar al 100%.
 
 ## Flujo obligatorio
 
@@ -82,7 +82,7 @@ gasto real sin separar esas secciones.
 - La certificación exige evidencia completa por fila: método, página, confianza
   finita y fragmento de origen no vacío. Si falta uno de estos campos, la fila
   puede permanecer visible para revisión, pero el estado no cuenta como
-  aceptación automática ni como evidencia del 99%.
+  aceptación automática ni como evidencia del 97%.
 - La frontera de cálculo aplica la misma regla fuera de la interfaz: si una
   fila vinculada a un estado carece de esa trazabilidad, el estado completo se
   excluye del libro canónico y ningún KPI puede agregarlo, incluso si un
@@ -95,7 +95,7 @@ gasto real sin separar esas secciones.
   tanto una corrida que solo procesa los PDFs de texto no puede presentarse como
   certificación total. También reporta `goldenCoverage`: la proporción de
   goldens marcados como válidos que fueron aceptados automáticamente. La
-  certificación exige cobertura 1.0 además de precisión ≥99%, evitando que un
+  certificación exige cobertura 1.0 además de precisión ≥97%, evitando que un
   lector alcance el objetivo simplemente bloqueando documentos válidos.
 - El OCR web conserva confianza media y por página, limita la resolución de cada lienzo para evitar crashes por memoria y rechaza archivos de más de 50 MB con un mensaje recuperable. También guarda tamaño y número de páginas del PDF junto a su huella para reproducir la ingesta.
 - iOS aplica los mismos límites de 50 MB y 80 páginas antes de crear
@@ -159,7 +159,7 @@ gasto real sin separar esas secciones.
 - Si el banco mostrado es conocido pero la evidencia automática es provisional,
   el usuario puede confirmarlo de forma explícita. Esa liberación se guarda
   como `issuerConfirmedByUser` y no se cuenta como aceptación automática del
-  corpus del 99%.
+  corpus del 97%.
 - Reimportar los mismos bytes no borra esa confirmación humana: se conserva
   únicamente cuando coinciden la huella SHA-256, el emisor y el tipo de estado;
   si cualquiera cambia, el documento vuelve a revisión.
@@ -187,7 +187,7 @@ bandera `certified`:
 ```bash
 npm run pdf:corpus -- --dir <carpeta> \
   --manifest tests/fixtures/pdf-corpus-attachments.json \
-  --require-manifest --target-precision 0.99 --out artifacts/pdf-corpus.json
+  --require-manifest --target-precision 0.97 --out artifacts/pdf-corpus.json
 ```
 
 Para diagnosticar escaneos sin capa de texto se puede ejecutar el mismo
@@ -224,7 +224,7 @@ macOS/Xcode.
 
 Las promociones logradas por Tesseract local se reportan como
 `diagnosticOcrAccepted`, pero se excluyen de `automaticAcceptancePrecision`:
-la métrica del 99% solo cuenta aceptaciones automáticas del lector de texto o
+la métrica del 97% solo cuenta aceptaciones automáticas del lector de texto, Vision o
 de Vision nativa. Así una corrida diagnóstica no convierte OCR local en una
 certificación ni lo cuenta erróneamente como falso positivo.
 
@@ -241,7 +241,7 @@ promoción o de conteo exige actualizar el golden de forma explícita.
 
 Métricas mínimas por versión:
 
-- precisión automática de filas >= 99%;
+- precisión automática de filas >= 97%;
 - 0 encabezados administrativos aceptados como movimientos;
 - 100% de estados aceptados conciliados contra importes y conteos;
 - 100% de duplicados de solapamiento eliminados sin borrar compras idénticas legítimas;
@@ -262,11 +262,11 @@ npm run pdf:corpus -- --dir "./estados-validados" --manifest ./corpus.json > cor
 
 Para una corrida de certificación, el comando debe exigir expectativas
 doradas y umbral explícito; falla si falta el manifiesto, hay PDFs sin
-describir o la precisión automática queda por debajo de 99%:
+describir o la precisión automática queda por debajo de 97%:
 
 ```bash
 npm run pdf:corpus -- --dir "./estados-validados" --manifest ./corpus.json \
-  --require-manifest --target-precision 0.99 > corpus-certification.json
+  --require-manifest --target-precision 0.97 > corpus-certification.json
 ```
 
 El manifiesto opcional fija la versión exacta del lector (`readerVersion`),

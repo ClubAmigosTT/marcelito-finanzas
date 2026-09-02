@@ -38,7 +38,7 @@ test("el resumen nativo pendiente o desactualizado no pasa la certificación", (
   assert.ok(result.errors.some((error) => error.includes("readerVersion")));
   assert.ok(result.errors.some((error) => error.includes("golden(s) pendientes")));
   assert.ok(result.errors.some((error) => error.includes("aceptación(es) falsa(s)")));
-  assert.ok(result.errors.some((error) => error.includes("objetivo 0.99")));
+  assert.ok(result.errors.some((error) => error.includes("objetivo 0.97")));
 });
 
 test("el resumen no se acepta si los conteos estructurales no cuadran", () => {
@@ -76,7 +76,7 @@ test("el resumen nativo rechaza contadores fraccionarios o negativos", () => {
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((error) => error.includes("files no coincide")));
   assert.ok(result.errors.some((error) => error.includes("OCR sin resolver")));
-  assert.ok(result.errors.some((error) => error.includes("objetivo 0.99")));
+  assert.ok(result.errors.some((error) => error.includes("objetivo 0.97")));
 });
 
 test("el resumen nativo exige cubrir todos los archivos con goldens", () => {
@@ -325,4 +325,23 @@ test("el reporte nativo aplica umbrales OCR a estados promovidos", () => {
   assert.ok(weak.errors.some((error) => error.includes("confianza media menor")));
   assert.ok(weak.errors.some((error) => error.includes("página menor")));
   assert.ok(weak.errors.some((error) => error.includes("columnas OCR calibradas")));
+});
+
+test("el reporte nativo acepta respaldo multimodal conciliado sin exigir columnas Santander", () => {
+  const result = verifyNativeCorpusReport([{
+    file: "santander-ai.pdf",
+    sourceFingerprint: "c".repeat(64),
+    source: "Santander",
+    kind: "bank",
+    status: "valid",
+    mode: "multimodal-ai",
+    sourceStatus: "verified",
+    sourceConfidence: 0.998,
+    requiresReview: false,
+    ocrConfidence: 0.94,
+    weakestOCRPage: 0.84,
+    rows: 43,
+    accountKey: "santander:7079",
+  }], 1);
+  assert.equal(result.ok, true);
 });

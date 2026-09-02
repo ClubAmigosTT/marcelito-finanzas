@@ -24,7 +24,7 @@ struct MarcelitoApp: App {
                         .environment(authModel)
                 }
             }
-            .background(Color.marcelitoCream.ignoresSafeArea())
+            .background(MarcelitoAmbientBackground())
             .tint(Color.marcelitoNavy)
             .preferredColorScheme(.light)
             .onChange(of: scenePhase) { _, phase in

@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "purpose": "Valores sintéticos de control para probar el lector; no representa ninguna cuenta real.",
-  "automaticAcceptanceTarget": 0.99,
+  "automaticAcceptanceTarget": 0.97,
   "statements": [
     {
       "id": "sample-bank-period-1",

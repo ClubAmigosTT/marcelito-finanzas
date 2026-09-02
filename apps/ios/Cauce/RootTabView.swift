@@ -16,8 +16,9 @@ struct RootTabView: View {
                 .tabItem { Label("Patrimonio", systemImage: "chart.line.uptrend.xyaxis") }
         }
         .tint(Color.marcelitoNavy)
-        .toolbarBackground(Color.marcelitoCreamSoft, for: .tabBar)
+        .toolbarBackground(.ultraThinMaterial, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
+        .toolbarColorScheme(.light, for: .tabBar)
     }
 }
 
@@ -83,10 +84,10 @@ struct HomeView: View {
                     .padding(.vertical, 14)
             }
             .scrollIndicators(.hidden)
-            .background(Color.marcelitoCream.ignoresSafeArea())
+            .background(MarcelitoAmbientBackground())
             .navigationTitle("Resumen")
             .navigationBarTitleDisplayMode(.large)
-            .toolbarBackground(Color.marcelitoCream, for: .navigationBar)
+            .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .disabled(isImporting)
             .overlay {
@@ -166,7 +167,9 @@ struct HomeView: View {
                     importProgress = Int(((completedCount / totalCount) * 100).rounded())
                     await Task.yield()
                     do {
-                        let summary = try await store.importPDFAsync(from: url)
+                        let summary = try await store.importPDFAsync(from: url, stage: { message in
+                            importStatus = message
+                        })
                         items.append(ImportReportItem(summary: summary))
                         DiagnosticsRecorder.record(
                             stage: "import.file",
@@ -394,7 +397,7 @@ private struct ImportReportSheet: View {
                 .padding(20)
             }
             .scrollIndicators(.hidden)
-            .background(Color.marcelitoCream.ignoresSafeArea())
+            .background(MarcelitoAmbientBackground())
             .navigationTitle("Importación")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -406,7 +409,7 @@ private struct ImportReportSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .presentationBackground(Color.marcelitoCream)
+        .presentationBackground(.regularMaterial)
     }
 
     private var summaryHeader: some View {
@@ -1002,7 +1005,7 @@ struct MetricDetailSheet: View {
                 .padding(20)
             }
             .scrollIndicators(.hidden)
-            .background(Color.marcelitoCream.ignoresSafeArea())
+            .background(MarcelitoAmbientBackground())
             .navigationTitle("Detalle")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -1014,7 +1017,7 @@ struct MetricDetailSheet: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .presentationBackground(Color.marcelitoCream)
+        .presentationBackground(.regularMaterial)
     }
 }
 
@@ -1291,7 +1294,7 @@ private struct CashFlowPointDetail: View {
                 .padding(20)
             }
             .scrollIndicators(.hidden)
-            .background(Color.marcelitoCream.ignoresSafeArea())
+            .background(MarcelitoAmbientBackground())
             .navigationTitle("Detalle")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

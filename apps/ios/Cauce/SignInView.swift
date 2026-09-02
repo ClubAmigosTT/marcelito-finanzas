@@ -105,7 +105,7 @@ struct SignInView: View {
                 .padding(.vertical, 30)
             }
             .scrollIndicators(.hidden)
-            .background(Color.marcelitoCream.ignoresSafeArea())
+            .background(MarcelitoAmbientBackground())
             .foregroundStyle(Color.marcelitoNavy)
             .toolbar(.hidden, for: .navigationBar)
             .onChange(of: mode) { _, _ in

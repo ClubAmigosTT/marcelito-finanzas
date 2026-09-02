@@ -5,10 +5,10 @@ extension Color {
     static let marcelitoNavyDeep = Color(red: 0.045, green: 0.105, blue: 0.19)
     static let marcelitoNavyMid = Color(red: 0.19, green: 0.29, blue: 0.41)
     static let marcelitoNavySoft = Color(red: 0.35, green: 0.43, blue: 0.53)
-    static let marcelitoCream = Color(red: 0.96, green: 0.94, blue: 0.88)
-    static let marcelitoCreamSoft = Color(red: 0.99, green: 0.98, blue: 0.94)
-    static let marcelitoCreamTint = Color(red: 0.925, green: 0.905, blue: 0.84)
-    static let marcelitoLine = Color(red: 0.84, green: 0.82, blue: 0.75)
+    static let marcelitoCream = Color(red: 0.95, green: 0.96, blue: 0.97)
+    static let marcelitoCreamSoft = Color(red: 0.985, green: 0.99, blue: 0.995)
+    static let marcelitoCreamTint = Color(red: 0.90, green: 0.93, blue: 0.97)
+    static let marcelitoLine = Color(red: 0.82, green: 0.86, blue: 0.91)
     static let marcelitoAmber = Color(red: 0.72, green: 0.42, blue: 0.12)
     static let marcelitoViolet = Color(red: 0.38, green: 0.24, blue: 0.52)
     static let marcelitoSuccess = Color(red: 0.16, green: 0.43, blue: 0.31)
@@ -30,22 +30,56 @@ extension ShapeStyle where Self == Color {
     static var marcelitoDanger: Color { Color.marcelitoDanger }
 }
 
+struct MarcelitoAmbientBackground: View {
+    var body: some View {
+        ZStack {
+            Color.marcelitoCream
+            RadialGradient(
+                colors: [Color.marcelitoNavySoft.opacity(0.18), .clear],
+                center: .topLeading,
+                startRadius: 0,
+                endRadius: 330
+            )
+            RadialGradient(
+                colors: [Color.marcelitoNavyMid.opacity(0.10), .clear],
+                center: .bottomTrailing,
+                startRadius: 0,
+                endRadius: 300
+            )
+        }
+        .ignoresSafeArea()
+    }
+}
+
 struct MarcelitoCardModifier: ViewModifier {
     var fill: Color = .marcelitoCreamSoft
-    var radius: CGFloat = 16
+    var radius: CGFloat = 24
     var padding: CGFloat = 18
 
     func body(content: Content) -> some View {
         content
             .padding(padding)
-            .background(fill, in: RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .background {
+                RoundedRectangle(cornerRadius: radius, style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: radius, style: .continuous)
+                            .fill(fill.opacity(0.68))
+                    }
+                    .overlay {
+                        RoundedRectangle(cornerRadius: radius, style: .continuous)
+                            .stroke(Color.white.opacity(0.78), lineWidth: 1)
+                    }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: radius, style: .continuous))
+            .shadow(color: Color.marcelitoNavy.opacity(0.075), radius: 18, x: 0, y: 8)
     }
 }
 
 extension View {
     func marcelitoCard(
         fill: Color = .marcelitoCreamSoft,
-        radius: CGFloat = 16,
+        radius: CGFloat = 24,
         padding: CGFloat = 18
     ) -> some View {
         modifier(MarcelitoCardModifier(fill: fill, radius: radius, padding: padding))

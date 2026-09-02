@@ -69,3 +69,18 @@ test("el informe del dispositivo bloquea duplicados y estados pendientes", () =>
   assert.ok(result.errors.some((error) => error.includes("PDF duplicada")));
   assert.ok(result.errors.some((error) => error.includes("no quedó aceptado")));
 });
+
+test("el informe híbrido acepta una lectura multimodal conciliada", () => {
+  const rows = Array.from({ length: 10 }, (_, index) => row(index + 1));
+  rows[0] = row(1, {
+    mode: "multimodal-ai",
+    ocrConfidence: 0.94,
+    weakestOCRPage: 0.84,
+  });
+  const result = verifyNativeDeviceReport(
+    { ...report(rows), generatedBy: "ios-hybrid-device" },
+    "ios-reader-2026.08.31.14",
+    10,
+  );
+  assert.equal(result.ok, true);
+});

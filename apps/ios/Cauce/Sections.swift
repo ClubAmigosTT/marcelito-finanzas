@@ -147,7 +147,7 @@ struct MovementsView: View {
             .listRowBackground(Color.marcelitoCreamSoft)
             .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)
-            .background(Color.marcelitoCream)
+            .background(MarcelitoAmbientBackground())
             .sheet(isPresented: $isAddPresented) {
                 AddMovementView()
             }
@@ -295,7 +295,7 @@ private struct AddMovementView: View {
                 }
             }
             .scrollContentBackground(.hidden)
-            .background(Color.marcelitoCream)
+            .background(MarcelitoAmbientBackground())
             .foregroundStyle(Color.marcelitoNavy)
         }
     }
@@ -384,7 +384,7 @@ private struct MovementDetailView: View {
         .navigationBarTitleDisplayMode(.inline)
         .foregroundStyle(Color.marcelitoNavy)
         .scrollContentBackground(.hidden)
-        .background(Color.marcelitoCream)
+        .background(MarcelitoAmbientBackground())
     }
 }
 
@@ -471,7 +471,7 @@ struct ExpensesView: View {
                 .listRowBackground(Color.marcelitoCreamSoft)
                 .foregroundStyle(Color.marcelitoNavy)
                 .scrollContentBackground(.hidden)
-                .background(Color.marcelitoCream)
+                .background(MarcelitoAmbientBackground())
                 .sheet(item: $selectedCategory) { selection in
                     ExpenseCategoryDetailView(category: selection.category, store: store)
                 }
@@ -721,7 +721,7 @@ private struct ExpenseCategoryDetailView: View {
                 .padding(20)
             }
             .scrollIndicators(.hidden)
-            .background(Color.marcelitoCream.ignoresSafeArea())
+            .background(MarcelitoAmbientBackground())
             .navigationTitle("Detalle de gasto")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -733,7 +733,7 @@ private struct ExpenseCategoryDetailView: View {
         }
         .presentationDetents([.medium, .large])
         .presentationDragIndicator(.visible)
-        .presentationBackground(Color.marcelitoCream)
+        .presentationBackground(.regularMaterial)
     }
 }
 
@@ -884,7 +884,7 @@ struct AccountsView: View {
             .listRowBackground(Color.marcelitoCreamSoft)
             .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)
-            .background(Color.marcelitoCream)
+            .background(MarcelitoAmbientBackground())
         }
     }
 }
@@ -979,7 +979,7 @@ private struct AccountDetailView: View {
             .padding(20)
         }
         .scrollIndicators(.hidden)
-        .background(Color.marcelitoCream.ignoresSafeArea())
+        .background(MarcelitoAmbientBackground())
         .navigationTitle("Detalle de cuenta")
         .navigationBarTitleDisplayMode(.inline)
         .foregroundStyle(Color.marcelitoNavy)
@@ -1105,7 +1105,7 @@ private struct StatementDocumentView: View {
         }
         .navigationTitle("\(statement.source) · \(conciseStatementPeriod(statement))")
         .navigationBarTitleDisplayMode(.inline)
-        .background(Color.marcelitoCream)
+        .background(MarcelitoAmbientBackground())
         .foregroundStyle(Color.marcelitoNavy)
     }
 }
@@ -1275,7 +1275,7 @@ private struct StatementSummaryEditor: View {
         .navigationTitle("Cifras del corte")
         .navigationBarTitleDisplayMode(.inline)
         .scrollContentBackground(.hidden)
-        .background(Color.marcelitoCream)
+        .background(MarcelitoAmbientBackground())
         .foregroundStyle(Color.marcelitoNavy)
     }
 }
@@ -1327,7 +1327,7 @@ struct NetWorthView: View {
             .listRowBackground(Color.marcelitoCreamSoft)
             .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)
-            .background(Color.marcelitoCream)
+            .background(MarcelitoAmbientBackground())
             .sheet(item: $selectedMetric) { metric in
                 MetricDetailSheet(metric: metric, store: store)
             }

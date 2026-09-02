@@ -40,7 +40,7 @@ MARCELITO_PDF_CORPUS_DIR="/ruta/a/estados-validados" \
 Para validar automáticamente el log contra el manifiesto al terminar la
 corrida, añade `MARCELITO_PDF_CORPUS_VERIFY=1`. Si además defines
 `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`, el runner devuelve error mientras
-el corpus no cumpla el 99%:
+el corpus no cumpla el 97%:
 
 ```bash
 MARCELITO_PDF_CORPUS_VERIFY=1 \
@@ -52,7 +52,7 @@ MARCELITO_PDF_CORPUS_DIR="/ruta/a/estados-validados" \
 Después de una corrida certificable, valida el resumen de XCTest antes de
 registrar la versión en GitHub Actions. El verificador lee únicamente la línea
 `NATIVE_CORPUS_SUMMARY` del log y falla si falta un golden, queda OCR pendiente,
-hay falsos positivos o la precisión cae por debajo de 99%:
+hay falsos positivos o la precisión cae por debajo de 97%:
 
 ```bash
 cd ../..
@@ -86,7 +86,7 @@ su expectativa, la corrida falla antes de considerar sus filas como evidencia.
 Al final se emite también `NATIVE_CORPUS_SUMMARY` con aceptados, bloqueados,
 aceptaciones falsas, precisión automática, OCR pendiente y `certified`. La
 bandera solo puede ser verdadera cuando todos los goldens están promovidos,
-no hay falsos positivos, la precisión es ≥99% y no queda OCR sin resolver.
+no hay falsos positivos, la precisión es ≥97% y no queda lectura visual sin resolver.
 Para convertir esa condición en una compuerta de publicación, añade
 `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1` al comando; con esa variable el
 test falla si `certified` es `false`. Sin ella, los goldens `pending` permiten

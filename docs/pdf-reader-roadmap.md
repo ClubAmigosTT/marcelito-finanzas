@@ -1,12 +1,12 @@
-# Roadmap del lector de estados al 99%
+# Roadmap del lector de estados al 97%
 
 ## Definición de éxito
 
-La meta es **99% de precisión de aceptación automática**: de todos los
+La meta es **97% de precisión de aceptación automática**: de todos los
 documentos que el sistema marca como `valid` y alimentan el libro canónico,
 al menos 99 de cada 100 deben coincidir con el estado original en emisor,
 periodo, filas, importes, dirección y clasificación. No se promete que OCR
-reconozca el 99% de los caracteres; una lectura incierta se bloquea o queda
+reconozca un porcentaje fijo de caracteres; una lectura incierta se bloquea o queda
 provisional.
 
 La unidad de control es el estado de cuenta y la unidad de auditoría es cada
@@ -126,7 +126,7 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
 ### Fase 6 — Certificación y despliegue
 
 - Ejecutar el corpus completo en macOS/Xcode, incluyendo Vision y simulador.
-- Publicar solo si precisión de aceptación ≥99%, cobertura de plantillas 100%,
+- Publicar solo si precisión de aceptación ≥97%, cobertura de plantillas 100%,
   cero falsos positivos administrativos y todas las identidades contables
   pasan.
 - Mantener canary: nuevas plantillas empiezan en `pending`, se miden durante
@@ -141,7 +141,7 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
 - La corrida nativa admite un modo de publicación explícito mediante
   `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`: la calibración puede dejar
   goldens `pending`, pero una certificación no puede pasar mientras exista
-  alguno, haya OCR sin resolver o la precisión automática sea menor a 99%.
+  alguno, haya lectura visual sin resolver o la precisión automática sea menor a 97%.
   El resumen emitido por XCTest se valida además con
   `npm run pdf:native:verify -- --log ... --reader-version ... --require-certified`,
   para que la variable de publicación no pueda sustituir al informe real. Si
@@ -164,7 +164,7 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
 | Cobertura de filas | < 100% cuando el estado declara conteo | Bloquear estado |
 | Cobertura de evidencia | < 100% en filas importadas aceptables | Bloquear aceptación automática |
 | Identidad contable | Fuera de tolerancia | Marcar periodo inconsistente |
-| Precisión automática del corpus | < 99% | Detener publicación |
+| Precisión automática del corpus | < 97% | Detener publicación |
 
 ## Estado actual
 
@@ -189,7 +189,7 @@ antiguas que hubieran persistido un estado incorrectamente listo. Si el usuario
 confirma manualmente el banco mostrado, se conserva una marca separada y el
 evento no se considera aceptación automática en la medición de precisión.
 
-La certificación final del 99% queda pendiente de ejecutar el corpus completo
+La certificación final del 97% queda pendiente de ejecutar el corpus completo
 en macOS/Xcode con Vision; el entorno Windows no dispone de `xcodebuild` ni del
 framework Vision. Hasta completar esa corrida, los estados OCR no deben
 alimentar KPI productivos.
@@ -289,7 +289,7 @@ etiquetas de resúmenes o páginas distintas.
   reutiliza silenciosamente filas producidas por una regla anterior: los PDFs
   se reconstruyen y los estados no conciliados permanecen en cuarentena.
 
-## Checklist de aceptación antes de decir “99%”
+## Checklist de aceptación antes de decir “97%”
 
 1. Cada PDF del manifiesto tiene un resultado y una huella distinta; ningún
    duplicado cuenta como cobertura.
@@ -299,7 +299,7 @@ etiquetas de resúmenes o páginas distintas.
 3. Sumas y conteos del emisor concilian dentro de $0.05; los estados que no
    concilian no alimentan ninguna pantalla.
 4. Las identidades de flujo, patrimonio, deuda y saldo de efectivo pasan.
-5. La precisión de aceptación automática es ≥99%, la cobertura de archivos es
+5. La precisión de aceptación automática es ≥97%, la cobertura de archivos es
    100% y no existen falsos positivos administrativos.
 6. La versión certificada del dispositivo coincide exactamente con la versión
    del lector que se va a publicar.

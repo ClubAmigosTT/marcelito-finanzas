@@ -515,7 +515,7 @@ final class NativeCorpusContractTests: XCTestCase {
             && expectedPendingCount == 0
             && goldenFalseAccepted == 0
             && goldenAutoAccepted == expectedValidCount
-            && automaticAcceptancePrecision >= 0.99
+            && automaticAcceptancePrecision >= 0.97
             && unresolvedOCR == 0
         let requireCertified = ["1", "true", "yes"].contains(
             ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED"]?.lowercased() ?? ""

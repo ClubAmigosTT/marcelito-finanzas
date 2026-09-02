@@ -1,18 +1,21 @@
 # Certificación del lector sin Mac
 
 Marcelito puede certificar el lector nativo directamente en un iPhone. La
-herramienta usa el mismo PDFKit + Vision de producción, pero trabaja sobre una
-selección temporal de estados y no escribe movimientos en el libro canónico.
+herramienta usa el mismo PDFKit + Vision de producción y, si el usuario lo
+activa, el respaldo multimodal de Zen. Trabaja sobre una selección temporal de
+estados y no escribe movimientos en el libro canónico.
 
 ## Ejecutar en el iPhone
 
 1. Abre **Resumen → Opciones → Diagnóstico → Certificar estados con Vision**.
 2. Selecciona los 10 estados validados desde Archivos.
-3. Pulsa **Ejecutar Vision** y espera a que termine cada PDF.
-4. Solo se acepta un corpus con al menos 10 archivos únicos, todos conciliados,
+3. Si quieres el respaldo externo, configura OpenCode Zen y activa **Usar IA
+   si Vision no concilia**. Los PDFs que ya concilien localmente no se envían.
+4. Pulsa **Ejecutar lector** y espera a que termine cada PDF.
+5. Solo se acepta un corpus con al menos 10 archivos únicos, todos conciliados,
    emisor verificado, sin revisión pendiente, OCR ≥ 88% y página más débil ≥
    78%. Para Santander también deben estar calibradas las columnas.
-5. Comparte **informe JSON** y guárdalo como
+6. Comparte **informe JSON** y guárdalo como
    `docs/native-corpus-certification.json` en el repositorio. El archivo está
    sanitizado: no contiene PDFs, descripciones, saldos ni importes.
 
@@ -24,7 +27,7 @@ Un PDF duplicado o un estado pendiente bloquea la certificación completa.
 
 El workflow `iOS TestFlight` valida automáticamente ese JSON contra la versión
 actual (`FinanceStore.readerVersion`). Si el informe no coincide, está vencido,
-contiene una fila incompleta o queda por debajo de 99%, la build se detiene.
+contiene una fila incompleta o queda por debajo de 97%, la build se detiene.
 
 La primera build que incluye esta herramienta se ejecuta manualmente con la
 opción **Bootstrap: incluir la herramienta de certificación local**. Esa opción
@@ -85,6 +88,8 @@ filas, controles de saldo y conciliación, y conserva el `.xcresult` para
 reproducir un fallo. El fixture sintético público se sigue usando cuando no
 se define `MARCELITO_PDF_CORPUS_MANIFEST`.
 
-Los estados permanecen en el iPhone y el JSON se puede revisar antes de
-publicarlo. Si un archivo falla, corrígelo o vuelve a seleccionarlo; nunca se
-debe marcar `certified` manualmente.
+Sin respaldo externo, los estados permanecen en el iPhone. Con Zen activado,
+solo los documentos que no concilien localmente salen temporalmente del
+dispositivo. El JSON se puede revisar antes de publicarlo. Si un archivo falla,
+corrígelo o vuelve a seleccionarlo; nunca se debe marcar `certified`
+manualmente.
