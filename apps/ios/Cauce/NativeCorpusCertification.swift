@@ -150,6 +150,17 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
     }
 
     var id: String { file }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(file, forKey: .file)
+        try container.encode(sourceFileName, forKey: .sourceFileName)
+        try container.encode(source, forKey: .source)
+        try container.encode(mode, forKey: .mode)
+        try container.encode(status, forKey: .status)
+        try container.encodeIfPresent(reconciliationReason, forKey: .reconciliationReason)
+        try container.encode(rows, forKey: .rows)
+    }
 }
 
 struct NativeCorpusDiagnosticReport: Codable {
