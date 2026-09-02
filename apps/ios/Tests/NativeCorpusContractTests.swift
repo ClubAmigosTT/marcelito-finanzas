@@ -380,7 +380,7 @@ final class NativeCorpusContractTests: XCTestCase {
         let diagnosticURL = try report.writeDiagnosticsTemporaryFile()
         defer { try? FileManager.default.removeItem(at: diagnosticURL) }
         let privateJSON = try String(contentsOf: diagnosticURL, encoding: .utf8)
-        XCTAssertTrue(privateJSON.contains("23/JUL FACEBK"))
+        XCTAssertTrue(privateJSON.contains("23/JUL FACEBK"), "diagnóstico privado exportado: \(privateJSON)")
         XCTAssertTrue(privateJSON.contains("CARGOS"))
         XCTAssertTrue(privateJSON.contains("120"))
     }
