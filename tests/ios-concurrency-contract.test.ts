@@ -180,6 +180,13 @@ test("iOS usa Zen solo como respaldo opt-in y conserva la conciliación como com
   assert.match(reader, /minimumPageConfidence = 0\.78/);
   assert.match(reader, /evidenceContainsDescription/);
   assert.match(reader, /evidenceContainsAmount/);
+  assert.match(reader, /"type": "json_schema"/);
+  assert.match(reader, /structuredOutput: true/);
+  assert.match(reader, /structuredOutput: false/);
+  assert.match(reader, /fallbackFailed/);
+  assert.match(reader, /decodingReason/);
+  assert.match(models, /multimodalFallbackAttempted/);
+  assert.match(certification, /IA multimodal falló/);
   assert.match(certification, /static let targetPrecision = 0\.97/);
   assert.match(certification, /allowMultimodalFallback: useAIFallback/);
   assert.match(certification, /cada archivo aceptado debe conciliar al 100%/);

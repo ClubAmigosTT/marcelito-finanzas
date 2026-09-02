@@ -373,6 +373,11 @@ struct ImportSummary {
     /// Row-level visual decisions retained for the explicit private
     /// diagnostics export. Normal dashboard calculations ignore this field.
     var rowDiagnostics: [OCRRowDiagnostic] = []
+    /// Whether the opt-in Zen fallback was invoked for this document. This is
+    /// kept separate from `extractionProvider` so a failed fallback can remain
+    /// visibly distinct from a Vision-only read in diagnostics.
+    var multimodalFallbackAttempted: Bool = false
+    var multimodalFallbackError: String? = nil
 }
 
 /// Deterministic reader output used by the iOS contract tests. Keeping this
@@ -569,6 +574,8 @@ private struct PDFImportExtraction: @unchecked Sendable {
     let ocrColumnCalibrationNeedsReview: Bool
     let ocrConfidenceNeedsReview: Bool
     let rowDiagnostics: [OCRRowDiagnostic]
+    var multimodalFallbackAttempted: Bool = false
+    var multimodalFallbackError: String? = nil
 }
 
 struct LedgerConsistencyCheck: Identifiable {
@@ -3177,12 +3184,15 @@ final class FinanceStore {
         let enabled = allowMultimodalFallback ?? ZenStatementReaderSettings.isEnabled
         guard enabled else { return local }
         guard let apiKey = ZenAPIKeyStore.apiKey else {
+            var failedLocal = local
+            failedLocal.multimodalFallbackAttempted = true
+            failedLocal.multimodalFallbackError = ZenStatementReader.ReaderError.missingAPIKey.localizedDescription
             DiagnosticsRecorder.record(
                 level: "error",
                 stage: "import.multimodal.missing-key",
                 message: "El respaldo con IA está activado, pero falta la clave de OpenCode Zen."
             )
-            return local
+            return failedLocal
         }
         do {
             stage?("La lectura local no concilió. Reintentando con IA…")
@@ -3216,12 +3226,15 @@ final class FinanceStore {
             // the deterministic reconciliation below returns `.valid`.
             return candidate
         } catch {
+            var failedLocal = local
+            failedLocal.multimodalFallbackAttempted = true
+            failedLocal.multimodalFallbackError = error.localizedDescription
             DiagnosticsRecorder.record(
                 level: "error",
                 stage: "import.multimodal.error",
                 message: "El respaldo con IA no pudo leer \(url.lastPathComponent): \(error.localizedDescription)"
             )
-            return local
+            return failedLocal
         }
     }
 
@@ -3410,7 +3423,9 @@ final class FinanceStore {
             ocrColumnsCalibrated: ocrColumnsCalibrated,
             fileSizeBytes: documentData.count,
             pageCount: extraction.pageCount,
-            rowDiagnostics: extraction.rowDiagnostics
+            rowDiagnostics: extraction.rowDiagnostics,
+            multimodalFallbackAttempted: extraction.multimodalFallbackAttempted,
+            multimodalFallbackError: extraction.multimodalFallbackError
         )
     }
 
@@ -3641,7 +3656,9 @@ final class FinanceStore {
             ocrColumnsCalibrated: extraction.ocrColumnsCalibrated,
             fileSizeBytes: extraction.documentData.count,
             pageCount: extraction.pageCount,
-            rowDiagnostics: extraction.rowDiagnostics
+            rowDiagnostics: extraction.rowDiagnostics,
+            multimodalFallbackAttempted: extraction.multimodalFallbackAttempted,
+            multimodalFallbackError: extraction.multimodalFallbackError
         )
     }
 

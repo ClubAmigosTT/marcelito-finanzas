@@ -29,6 +29,8 @@ struct NativeCorpusFileReport: Codable, Identifiable {
     let duplicate: Bool
     let errorCode: String?
     let reconciliationReason: String?
+    let multimodalFallbackAttempted: Bool = false
+    let multimodalFallbackError: String? = nil
 
     /// Kept only in memory for the local result list. It is deliberately not
     /// part of the Codable payload exported to GitHub.
@@ -39,7 +41,8 @@ struct NativeCorpusFileReport: Codable, Identifiable {
              sourceStatus, sourceConfidence, status, requiresReview, rows,
              extractedRows,
              ocrConfidence, weakestOCRPage, ocrColumnsCalibrated,
-             reconciliationValid, duplicate, errorCode, reconciliationReason
+             reconciliationValid, duplicate, errorCode, reconciliationReason,
+             multimodalFallbackAttempted, multimodalFallbackError
     }
 
     var id: String { file }
@@ -50,6 +53,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
               !requiresReview,
               reconciliationValid,
               !duplicate else { return false }
+        guard mode != "multimodal-error" else { return false }
         if mode == "vision-ocr" || mode == "multimodal-ai" {
             guard let ocrConfidence,
                   let weakestOCRPage,
@@ -68,7 +72,9 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         kind = summary.kind.rawValue
         mode = summary.extractionProvider == "multimodal"
             ? "multimodal-ai"
-            : (summary.usedOCR ? "vision-ocr" : "pdf-text")
+            : (summary.multimodalFallbackAttempted
+                ? "multimodal-error"
+                : (summary.usedOCR ? "vision-ocr" : "pdf-text"))
         sourceStatus = summary.sourceDetection.status.rawValue
         sourceConfidence = summary.sourceDetection.confidence
         status = summary.reconciliation?.status.rawValue ?? StatementReconciliationStatus.pending.rawValue
@@ -82,6 +88,8 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         duplicate = false
         errorCode = nil
         reconciliationReason = summary.reconciliation?.reason
+        multimodalFallbackAttempted = summary.multimodalFallbackAttempted
+        multimodalFallbackError = summary.multimodalFallbackError
         self.sourceFileName = sourceFileName
     }
 
@@ -105,6 +113,8 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         duplicate = false
         self.errorCode = errorCode
         reconciliationReason = nil
+        multimodalFallbackAttempted = false
+        multimodalFallbackError = nil
         self.sourceFileName = sourceFileName
     }
 
@@ -116,7 +126,9 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         kind = summary.kind.rawValue
         mode = summary.extractionProvider == "multimodal"
             ? "multimodal-ai"
-            : (summary.usedOCR ? "vision-ocr" : "pdf-text")
+            : (summary.multimodalFallbackAttempted
+                ? "multimodal-error"
+                : (summary.usedOCR ? "vision-ocr" : "pdf-text"))
         sourceStatus = summary.sourceDetection.status.rawValue
         sourceConfidence = summary.sourceDetection.confidence
         status = StatementReconciliationStatus.invalid.rawValue
@@ -130,6 +142,8 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         duplicate = true
         errorCode = "duplicate-pdf"
         reconciliationReason = "Este PDF ya fue seleccionado anteriormente."
+        multimodalFallbackAttempted = summary.multimodalFallbackAttempted
+        multimodalFallbackError = summary.multimodalFallbackError
         self.sourceFileName = sourceFileName
     }
 }
@@ -143,10 +157,13 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
     let mode: String
     let status: String
     let reconciliationReason: String?
+    let multimodalFallbackAttempted: Bool = false
+    let multimodalFallbackError: String? = nil
     let rows: [OCRRowDiagnostic]
 
     private enum CodingKeys: String, CodingKey {
-        case file, sourceFileName, source, mode, status, reconciliationReason, rows
+        case file, sourceFileName, source, mode, status, reconciliationReason,
+             multimodalFallbackAttempted, multimodalFallbackError, rows
     }
 
     var id: String { file }
@@ -159,6 +176,8 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
         try container.encode(mode, forKey: .mode)
         try container.encode(status, forKey: .status)
         try container.encodeIfPresent(reconciliationReason, forKey: .reconciliationReason)
+        try container.encode(multimodalFallbackAttempted, forKey: .multimodalFallbackAttempted)
+        try container.encodeIfPresent(multimodalFallbackError, forKey: .multimodalFallbackError)
         try container.encode(rows, forKey: .rows)
     }
 }
@@ -280,7 +299,7 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
         goldenAutoAccepted = accepted
         goldenFalseAccepted = 0
         automaticAcceptancePrecision = files.isEmpty ? 0 : Double(accepted) / Double(files.count)
-        unresolvedOCR = files.filter { ["vision-ocr", "multimodal-ai"].contains($0.mode) && !$0.accepted }.count
+        unresolvedOCR = files.filter { ["vision-ocr", "multimodal-ai", "multimodal-error"].contains($0.mode) && !$0.accepted }.count
         certified = files.count >= Self.minimumFileCount
             && blocked == 0
             && automaticAcceptancePrecision >= Self.targetPrecision
@@ -355,9 +374,13 @@ extension FinanceStore {
                         source: summary.source,
                         mode: summary.extractionProvider == "multimodal"
                             ? "multimodal-ai"
-                            : (summary.usedOCR ? "vision-ocr" : "pdf-text"),
+                            : (summary.multimodalFallbackAttempted
+                                ? "multimodal-error"
+                                : (summary.usedOCR ? "vision-ocr" : "pdf-text")),
                         status: summary.reconciliation?.status.rawValue ?? StatementReconciliationStatus.pending.rawValue,
                         reconciliationReason: summary.reconciliation?.reason,
+                        multimodalFallbackAttempted: summary.multimodalFallbackAttempted,
+                        multimodalFallbackError: summary.multimodalFallbackError,
                         rows: summary.rowDiagnostics
                     )
                 )
@@ -598,6 +621,13 @@ struct NativeCorpusCertificationView: View {
                                 .font(.caption2)
                                 .foregroundStyle(Color.marcelitoAmber)
                         }
+                        if let reason = file.multimodalFallbackError,
+                           !reason.isEmpty {
+                            Text("Respaldo IA: \(reason)")
+                                .font(.caption2)
+                                .foregroundStyle(Color.marcelitoDanger)
+                                .lineLimit(4)
+                        }
                         if let reason = file.reconciliationReason,
                            !reason.isEmpty {
                             Text(reason)
@@ -685,7 +715,12 @@ private extension NativeCorpusFileReport {
     /// issue is OCR quality, Santander column calibration or text
     /// reconciliation without exposing transaction content.
     var qualityDetail: String {
-        let method = mode == "multimodal-ai" ? "IA multimodal" : (mode == "vision-ocr" ? "Vision" : "PDF de texto")
+        let method: String = switch mode {
+        case "multimodal-ai": "IA multimodal"
+        case "multimodal-error": "IA multimodal falló · se conservó Vision"
+        case "vision-ocr": "Vision"
+        default: "PDF de texto"
+        }
         var parts: [String] = [method]
         if let ocrConfidence {
             parts.append("OCR media \(Int((ocrConfidence * 100).rounded()))%")
