@@ -163,6 +163,48 @@ struct MovementExtractionEvidence: Codable {
     var sourceText: String? = nil
     /// Normalized Vision bounding box for the reconstructed row.
     var bounds: MovementExtractionBounds? = nil
+    /// Column selected by the visual reader (for example `CARGOS`, `ABONOS`
+    /// or the local MXN amount). This is diagnostic provenance, not a second
+    /// source of truth for the ledger.
+    var selectedColumn: String? = nil
+    /// Amount token selected from the OCR row before the flow sign is applied.
+    var selectedAmount: Decimal? = nil
+    /// Short explanation of the deterministic selection rule used for the row.
+    var selectionReason: String? = nil
+}
+
+/// Private row-level evidence used to debug a visual import. It is exported
+/// only through the explicit diagnostic share action; the public corpus
+/// certification report intentionally remains redacted.
+struct OCRRowDiagnostic: Codable, Identifiable {
+    let id: String
+    let page: Int?
+    let rawText: String
+    let selectedColumn: String?
+    let selectedAmount: Decimal?
+    let direction: String?
+    let reason: String
+    let accepted: Bool
+
+    init(
+        id: String = UUID().uuidString,
+        page: Int?,
+        rawText: String,
+        selectedColumn: String? = nil,
+        selectedAmount: Decimal? = nil,
+        direction: String? = nil,
+        reason: String,
+        accepted: Bool
+    ) {
+        self.id = id
+        self.page = page
+        self.rawText = String(rawText.prefix(500))
+        self.selectedColumn = selectedColumn
+        self.selectedAmount = selectedAmount
+        self.direction = direction
+        self.reason = reason
+        self.accepted = accepted
+    }
 }
 
 struct Movement: Identifiable, Codable {
@@ -272,8 +314,9 @@ struct StatementRecord: Identifiable, Codable {
     var ocrConfidence: Double? = nil
     /// Mean Vision confidence grouped by page for targeted review.
     var ocrPageConfidences: [Double]? = nil
-    /// Santander OCR only: true when DEPÓSITO/RETIRO/SALDO were calibrated
-    /// from a co-located visual header. A false value keeps the state
+    /// Bank OCR only: true when the issuer's movement columns were calibrated
+    /// from a co-located visual header (DEPÓSITO/RETIRO/SALDO for Santander or
+    /// CARGOS/ABONOS/SALDO for BBVA). A false value keeps the state
     /// provisional even if its totals happen to reconcile.
     var ocrColumnsCalibrated: Bool? = nil
     /// SHA-256 of the original PDF bytes. This is the stable document identity
@@ -312,6 +355,9 @@ struct ImportSummary {
     let ocrColumnsCalibrated: Bool?
     var fileSizeBytes: Int? = nil
     var pageCount: Int? = nil
+    /// Row-level visual decisions retained for the explicit private
+    /// diagnostics export. Normal dashboard calculations ignore this field.
+    var rowDiagnostics: [OCRRowDiagnostic] = []
 }
 
 /// Deterministic reader output used by the iOS contract tests. Keeping this
@@ -507,6 +553,7 @@ private struct PDFImportExtraction: @unchecked Sendable {
     let ocrFallbackNeedsReview: Bool
     let ocrColumnCalibrationNeedsReview: Bool
     let ocrConfidenceNeedsReview: Bool
+    let rowDiagnostics: [OCRRowDiagnostic]
 }
 
 struct LedgerConsistencyCheck: Identifiable {
@@ -558,7 +605,10 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.09.02.27"
+    // Bump the reader revision whenever extraction rules change. Existing
+    // PDF-derived rows then trigger the canonical rebuild on next launch and
+    // cannot remain silently backed by the previous OCR decisions.
+    static let readerVersion = "ios-reader-2026.09.02.28"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -709,6 +759,53 @@ final class FinanceStore {
             )
         }
         return parseSantanderOCRResult(observations, fileName: fileName).columnsCalibrated
+    }
+
+    /// Runs the BBVA-specific visual reader against normalized Vision-like
+    /// observations. BBVA keeps CARGOS, ABONOS and SALDO in separate columns;
+    /// this seam makes the calibrated direction rule testable without
+    /// rendering a private statement in CI.
+    static func bbvaOCRRowsForTesting(
+        _ fixtures: [OCRObservationFixture],
+        fileName: String
+    ) -> [Movement] {
+        let observations = fixtures.map { fixture in
+            OCRObservation(
+                page: fixture.page,
+                text: fixture.text,
+                boundingBox: CGRect(
+                    x: fixture.x,
+                    y: fixture.y,
+                    width: fixture.width,
+                    height: fixture.height
+                ),
+                confidence: fixture.confidence
+            )
+        }
+        return parseBBVAOCR(observations, fileName: fileName)
+    }
+
+    /// Reports whether the BBVA fixture contains a co-located FECHA /
+    /// DESCRIPCIÓN / CARGOS / ABONOS / SALDO header. A fallback geometry is
+    /// deliberately provisional and should not feed executive KPIs.
+    static func bbvaOCRColumnsCalibratedForTesting(
+        _ fixtures: [OCRObservationFixture],
+        fileName: String
+    ) -> Bool {
+        let observations = fixtures.map { fixture in
+            OCRObservation(
+                page: fixture.page,
+                text: fixture.text,
+                boundingBox: CGRect(
+                    x: fixture.x,
+                    y: fixture.y,
+                    width: fixture.width,
+                    height: fixture.height
+                ),
+                confidence: fixture.confidence
+            )
+        }
+        return parseBBVAOCRResult(observations, fileName: fileName).columnsCalibrated
     }
 
     /// Runs the Amex visual row reader against normalized Vision-like
@@ -2865,19 +2962,41 @@ final class FinanceStore {
             ? Self.maskedAccountKey(from: text, source: source)
             : nil
         let kind = kindOverride ?? Self.statementKind(from: text, source: source)
-        var santanderColumnsCalibrated = true
+        var movementColumnsCalibrated = true
+        var rowDiagnostics: [OCRRowDiagnostic] = []
         let parsedCandidates: [Movement]
         if usedOCR, source == "Santander" {
             let santanderResult = Self.parseSantanderOCRResult(ocrObservations, fileName: fileName)
-            santanderColumnsCalibrated = santanderResult.columnsCalibrated
-            parsedCandidates = santanderResult.movements.isEmpty
-                ? Self.parse(text: text, fileName: fileName, sourceHint: source)
-                : santanderResult.movements
+            movementColumnsCalibrated = santanderResult.columnsCalibrated
+            rowDiagnostics = santanderResult.diagnostics
+            if santanderResult.movements.isEmpty {
+                let fallback = Self.parse(text: text, fileName: fileName, sourceHint: source)
+                rowDiagnostics.append(contentsOf: Self.rowDiagnostics(for: fallback, fallbackReason: "fila reconstruida desde el texto OCR tras agotar la calibración Santander"))
+                parsedCandidates = fallback
+            } else {
+                parsedCandidates = santanderResult.movements
+            }
         } else if usedOCR, source == "Amex" {
-            let amexCandidates = Self.parseAmexOCR(Self.ocrLines(from: ocrObservations), fileName: fileName)
-            parsedCandidates = amexCandidates.isEmpty
-                ? Self.parse(text: text, fileName: fileName, sourceHint: source)
-                : amexCandidates
+            let amexResult = Self.parseAmexOCRResult(Self.ocrLines(from: ocrObservations), fileName: fileName)
+            rowDiagnostics = amexResult.diagnostics
+            if amexResult.movements.isEmpty {
+                let fallback = Self.parse(text: text, fileName: fileName, sourceHint: source)
+                rowDiagnostics.append(contentsOf: Self.rowDiagnostics(for: fallback, fallbackReason: "fila reconstruida desde el texto OCR tras agotar Vision Amex"))
+                parsedCandidates = fallback
+            } else {
+                parsedCandidates = amexResult.movements
+            }
+        } else if usedOCR, source == "BBVA" {
+            let bbvaResult = Self.parseBBVAOCRResult(ocrObservations, fileName: fileName)
+            movementColumnsCalibrated = bbvaResult.columnsCalibrated
+            rowDiagnostics = bbvaResult.diagnostics
+            if bbvaResult.movements.isEmpty {
+                let fallback = Self.parse(text: text, fileName: fileName, sourceHint: source)
+                rowDiagnostics.append(contentsOf: Self.rowDiagnostics(for: fallback, fallbackReason: "fila reconstruida desde el texto OCR tras agotar la calibración BBVA"))
+                parsedCandidates = fallback
+            } else {
+                parsedCandidates = bbvaResult.movements
+            }
         } else if usedOCR {
             let genericCandidates = Self.parseGenericOCR(
                 ocrObservations,
@@ -2885,11 +3004,17 @@ final class FinanceStore {
                 source: source,
                 kind: kind
             )
-            parsedCandidates = genericCandidates.isEmpty
-                ? Self.parse(text: text, fileName: fileName, sourceHint: source)
-                : genericCandidates
+            rowDiagnostics = Self.rowDiagnostics(for: genericCandidates, fallbackReason: "importe seleccionado por el parser OCR genérico")
+            if genericCandidates.isEmpty {
+                let fallback = Self.parse(text: text, fileName: fileName, sourceHint: source)
+                rowDiagnostics.append(contentsOf: Self.rowDiagnostics(for: fallback, fallbackReason: "fila reconstruida desde el texto OCR tras agotar el parser genérico"))
+                parsedCandidates = fallback
+            } else {
+                parsedCandidates = genericCandidates
+            }
         } else {
             parsedCandidates = Self.parse(text: text, fileName: fileName, sourceHint: source)
+            rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "fila reconstruida desde la capa de texto PDFKit")
         }
         let candidates = parsedCandidates.map { candidate -> Movement in
             var corrected = candidate
@@ -2907,13 +3032,17 @@ final class FinanceStore {
             ? Self.rebuildAmexSelectableLines(text)
             : text
         let summary = Self.summary(from: summaryText, source: source)
-        let ocrFallbackNeedsReview = usedOCR && candidates.contains {
-            guard let evidence = $0.extractionEvidence else { return true }
-            return evidence.method != "vision-ocr" || evidence.confidence < 0.88
-        }
+        let ocrRejectedRowsNeedReview = usedOCR && rowDiagnostics.contains { !$0.accepted }
+        let ocrFallbackNeedsReview = usedOCR && (
+            ocrRejectedRowsNeedReview
+                || candidates.contains {
+                    guard let evidence = $0.extractionEvidence else { return true }
+                    return evidence.method != "vision-ocr" || evidence.confidence < 0.88
+                }
+        )
         let ocrColumnCalibrationNeedsReview = usedOCR
-            && source == "Santander"
-            && !santanderColumnsCalibrated
+            && (source == "Santander" || source == "BBVA")
+            && !movementColumnsCalibrated
         let ocrConfidenceNeedsReview = usedOCR
             && ((ocrConfidence ?? 0) < 0.88 || (ocrPageConfidences?.min() ?? 0) < 0.78)
 
@@ -2933,10 +3062,11 @@ final class FinanceStore {
             usedOCR: usedOCR,
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences,
-            ocrColumnsCalibrated: usedOCR && source == "Santander" ? santanderColumnsCalibrated : nil,
+            ocrColumnsCalibrated: usedOCR && (source == "Santander" || source == "BBVA") ? movementColumnsCalibrated : nil,
             ocrFallbackNeedsReview: ocrFallbackNeedsReview,
             ocrColumnCalibrationNeedsReview: ocrColumnCalibrationNeedsReview,
-            ocrConfidenceNeedsReview: ocrConfidenceNeedsReview
+            ocrConfidenceNeedsReview: ocrConfidenceNeedsReview,
+            rowDiagnostics: rowDiagnostics
         )
     }
 
@@ -3012,7 +3142,8 @@ final class FinanceStore {
             ocrColumnsCalibrated: nil,
             ocrFallbackNeedsReview: qualityWeak,
             ocrColumnCalibrationNeedsReview: false,
-            ocrConfidenceNeedsReview: qualityWeak
+            ocrConfidenceNeedsReview: qualityWeak,
+            rowDiagnostics: Self.rowDiagnostics(for: movements, fallbackReason: "fila propuesta por OpenCode Zen; pendiente de conciliación determinista")
         )
     }
 
@@ -3122,6 +3253,7 @@ final class FinanceStore {
             )
         }
         let ocrFallbackNeedsReview = extraction.ocrFallbackNeedsReview
+        let ocrRejectedRowsNeedReview = extraction.rowDiagnostics.contains { !$0.accepted }
         let ocrColumnCalibrationNeedsReview = extraction.ocrColumnCalibrationNeedsReview
         let weakestOCRPage = ocrPageConfidences?.min()
         let ocrConfidenceNeedsReview = extraction.ocrConfidenceNeedsReview
@@ -3132,9 +3264,10 @@ final class FinanceStore {
             )
         }
         if ocrColumnCalibrationNeedsReview {
+            let columns = source == "BBVA" ? "CARGOS/ABONOS/SALDO" : "DEPÓSITO/RETIRO/SALDO"
             DiagnosticsRecorder.record(
                 stage: "import.ocr.columns",
-                message: "\(url.lastPathComponent): no se pudieron calibrar las columnas DEPÓSITO/RETIRO/SALDO; el estado queda provisional."
+                message: "\(url.lastPathComponent): no se pudieron calibrar las columnas \(columns); el estado queda provisional."
             )
         }
         if ocrConfidenceNeedsReview {
@@ -3155,6 +3288,8 @@ final class FinanceStore {
             let reason: String
             if ocrColumnCalibrationNeedsReview {
                 reason = "OCR provisional: columnas de movimientos sin calibrar; revisa la tabla visual antes de aceptar."
+            } else if ocrRejectedRowsNeedReview {
+                reason = "OCR provisional: una o más filas fueron rechazadas por falta de fecha, importe, dirección o descripción demostrable."
             } else if ocrFallbackNeedsReview {
                 reason = "OCR provisional: alguna fila no conserva evidencia visual suficiente; revisa el estado antes de aceptar."
             } else {
@@ -3259,7 +3394,8 @@ final class FinanceStore {
             ocrPageConfidences: ocrPageConfidences,
             ocrColumnsCalibrated: ocrColumnsCalibrated,
             fileSizeBytes: documentData.count,
-            pageCount: extraction.pageCount
+            pageCount: extraction.pageCount,
+            rowDiagnostics: extraction.rowDiagnostics
         )
     }
 
@@ -3431,6 +3567,7 @@ final class FinanceStore {
             movements: fresh
         )
         let weakestOCRPage = extraction.ocrPageConfidences?.min()
+        let ocrRejectedRowsNeedReview = extraction.rowDiagnostics.contains { !$0.accepted }
         let ocrQualityNeedsReview = extraction.ocrFallbackNeedsReview
             || extraction.ocrColumnCalibrationNeedsReview
             || extraction.ocrConfidenceNeedsReview
@@ -3439,6 +3576,8 @@ final class FinanceStore {
             let reason: String
             if extraction.ocrColumnCalibrationNeedsReview {
                 reason = "OCR provisional: columnas de movimientos sin calibrar; revisa la tabla visual antes de aceptar."
+            } else if ocrRejectedRowsNeedReview {
+                reason = "OCR provisional: una o más filas fueron rechazadas por falta de fecha, importe, dirección o descripción demostrable."
             } else if extraction.ocrFallbackNeedsReview {
                 reason = "OCR provisional: alguna fila no conserva evidencia visual suficiente; revisa el estado antes de aceptar."
             } else {
@@ -3486,7 +3625,8 @@ final class FinanceStore {
             ocrPageConfidences: extraction.ocrPageConfidences,
             ocrColumnsCalibrated: extraction.ocrColumnsCalibrated,
             fileSizeBytes: extraction.documentData.count,
-            pageCount: extraction.pageCount
+            pageCount: extraction.pageCount,
+            rowDiagnostics: extraction.rowDiagnostics
         )
     }
 
@@ -3571,6 +3711,7 @@ final class FinanceStore {
         let balanceMinX: CGFloat
         let depositMaxX: CGFloat
         let calibratedFromHeader: Bool
+        let calibrationReason: String
 
         static let fallback = SantanderOCRColumns(
             movementMinX: 0.59,
@@ -3579,7 +3720,8 @@ final class FinanceStore {
             // out of the movement candidates even when no header was seen.
             balanceMinX: 0.80,
             depositMaxX: 0.73,
-            calibratedFromHeader: false
+            calibratedFromHeader: false,
+            calibrationReason: "se usó la geometría Santander de respaldo; no se reconoció el encabezado completo"
         )
     }
 
@@ -3591,12 +3733,71 @@ final class FinanceStore {
     private struct SantanderOCRParseResult {
         let movements: [Movement]
         let columnsCalibrated: Bool
+        let diagnostics: [OCRRowDiagnostic]
+    }
+
+    private struct AmexOCRParseResult {
+        let movements: [Movement]
+        let diagnostics: [OCRRowDiagnostic]
+    }
+
+    /// BBVA prints two movement columns (CARGOS/ABONOS) followed by one or
+    /// two running-balance columns. Unlike the generic OCR reader, this
+    /// parser keeps those columns separate and derives the direction from
+    /// the selected visual column instead of from merchant wording.
+    private struct BBVAOCRColumns {
+        let chargesX: CGFloat
+        let depositsX: CGFloat
+        let balanceMinX: CGFloat
+        let calibratedFromHeader: Bool
+        let reason: String
+
+        static let fallback = BBVAOCRColumns(
+            chargesX: 0.63,
+            depositsX: 0.73,
+            balanceMinX: 0.82,
+            calibratedFromHeader: false,
+            reason: "se usó la geometría BBVA de respaldo; no se reconoció el encabezado completo"
+        )
+    }
+
+    private struct BBVAOCRParseResult {
+        let movements: [Movement]
+        let columnsCalibrated: Bool
+        let diagnostics: [OCRRowDiagnostic]
+    }
+
+    private struct BBVARowResult {
+        let movement: Movement
+        let selectedColumn: String
+        let selectedAmount: Decimal
+        let reason: String
+        let runningBalance: Decimal?
     }
 
     private static func extractionBounds(for row: [OCRObservation]) -> MovementExtractionBounds? {
         guard let first = row.first else { return nil }
         let rect = row.dropFirst().reduce(first.boundingBox) { $0.union($1.boundingBox) }
         return MovementExtractionBounds(rect: rect)
+    }
+
+    private static func rowDiagnostics(
+        for movements: [Movement],
+        fallbackReason: String
+    ) -> [OCRRowDiagnostic] {
+        movements.map { movement in
+            let evidence = movement.extractionEvidence
+            return OCRRowDiagnostic(
+                id: movement.id.uuidString,
+                page: evidence?.page,
+                rawText: evidence?.sourceText ?? movement.title,
+                selectedColumn: evidence?.selectedColumn,
+                selectedAmount: evidence?.selectedAmount ?? absoluteDecimal(movement.amount),
+                direction: movement.amount >= 0 ? "in" : "out",
+                reason: evidence?.selectionReason ?? fallbackReason,
+                accepted: true
+            )
+        }
     }
 
     private static func ocrObservations(from document: PDFDocument) -> [OCRObservation] {
@@ -4225,7 +4426,20 @@ final class FinanceStore {
                 flow = .expense
             }
 
-            let signedAmount = flow == .income ? abs(parsedAmount) : -abs(parsedAmount)
+            let transferIsIncoming = titleNormalized.contains("transferencia recibida")
+                || titleNormalized.contains("spei recibido")
+                || titleNormalized.contains("abono")
+                || titleNormalized.contains("deposito")
+                || titleNormalized.contains("entrada")
+            let signedAmount: Decimal
+            switch flow {
+            case .income:
+                signedAmount = abs(parsedAmount)
+            case .transfer:
+                signedAmount = transferIsIncoming ? abs(parsedAmount) : -abs(parsedAmount)
+            default:
+                signedAmount = -abs(parsedAmount)
+            }
             let displayAccount = flow == .transfer && titleNormalized.contains("amex")
                 ? "Santander a Amex"
                 : account
@@ -4529,7 +4743,20 @@ final class FinanceStore {
         } else {
             flow = .expense
         }
-        let signedAmount = flow == .income ? abs(selected.value) : -abs(selected.value)
+        let transferIsIncoming = titleNormalized.contains("transferencia recibida")
+            || titleNormalized.contains("spei recibido")
+            || titleNormalized.contains("abono")
+            || titleNormalized.contains("deposito")
+            || titleNormalized.contains("entrada")
+        let signedAmount: Decimal
+        switch flow {
+        case .income:
+            signedAmount = abs(selected.value)
+        case .transfer:
+            signedAmount = transferIsIncoming ? abs(selected.value) : -abs(selected.value)
+        default:
+            signedAmount = -abs(selected.value)
+        }
         let displayAccount = flow == .transfer && titleNormalized.contains("amex")
             ? "Santander a Amex"
             : source
@@ -4578,8 +4805,461 @@ final class FinanceStore {
                 page: row.first.map { $0.page + 1 },
                 confidence: row.map(\.confidence).min() ?? 0,
                 sourceText: String(fullText.prefix(240)),
-                bounds: extractionBounds(for: row)
+                bounds: extractionBounds(for: row),
+                selectedColumn: bankLikeRow ? "MOVIMIENTO (OCR genérico)" : "IMPORTE",
+                selectedAmount: abs(selected.value),
+                selectionReason: bankLikeRow
+                    ? "importe de la columna de movimiento; saldo corrido excluido por regla genérica"
+                    : "importe monetario derecho seleccionado por el lector OCR genérico"
             )
+        )
+    }
+
+    /// BBVA's statement is a two-direction bank table. Keep CARGOS and ABONOS
+    /// separate from the running balance; selecting a numeric token by order
+    /// alone is what previously turned incoming SPEI rows into expenses.
+    private static func parseBBVAOCR(
+        _ observations: [OCRObservation],
+        fileName: String
+    ) -> [Movement] {
+        parseBBVAOCRResult(observations, fileName: fileName).movements
+    }
+
+    private static func bbvaOCRColumns(from observations: [OCRObservation]) -> BBVAOCRColumns {
+        let normalizedLabel: (OCRObservation) -> String = { observation in
+            observation.text
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+                .replacingOccurrences(of: "0", with: "o")
+                .replacingOccurrences(of: "1", with: "i")
+        }
+        // Vision can return the entire header as one box, e.g.
+        // `FECHA SALDO OPER LIQ DESCRIPCION ... CARGOS ABONOS ...`.
+        // Locate the label inside that box and project its character offset
+        // back into normalized page coordinates. This retains calibration
+        // even when the OCR engine does not split the header into columns.
+        func anchorX(_ observation: OCRObservation, labels: [String]) -> CGFloat? {
+            let compact = normalizedLabel(observation)
+            let utfLength = max(compact.utf16.count, 1)
+            let matches = labels.compactMap { label -> CGFloat? in
+                guard let range = compact.range(of: label) else { return nil }
+                let nsRange = NSRange(range, in: compact)
+                let relative = CGFloat(nsRange.location + (nsRange.length / 2)) / CGFloat(utfLength)
+                return min(max(observation.boundingBox.minX + observation.boundingBox.width * relative, 0), 1)
+            }
+            // A bank header can contain a summary anchor before the actual
+            // movement columns (for example `FECHA SALDO OPER LIQ ...
+            // CARGOS ABONOS OPERACION LIQUIDACION`). Keep the rightmost
+            // occurrence inside a combined OCR box so SALDO/LIQUIDACION
+            // after ABONOS, rather than the early summary word, defines the
+            // running-balance boundary.
+            return matches.max()
+        }
+        let pages = Dictionary(grouping: observations, by: \.page)
+        let chargesLabels = ["cargo", "cargos", "retiro", "retiros", "salida", "salidas"]
+        let depositsLabels = ["abono", "abonos", "deposito", "depositos", "entrada", "entradas"]
+        let balanceLabels = ["saldo", "saldos", "balance", "operacion", "liquidacion"]
+        let tableLabels = ["fecha", "descripcion", "description", "referencia", "ref"]
+        let yTolerance: CGFloat = 0.055
+
+        for page in pages.keys.sorted() {
+            let pageObservations = pages[page] ?? []
+            let headerSignals = pageObservations.filter { observation in
+                let normalized = normalizedLabel(observation)
+                return normalized.contains("fecha")
+                    || normalized.contains("descripcion")
+                    || normalized.contains("description")
+                    || normalized.contains("referencia")
+            }
+            for signal in headerSignals {
+                let charges = pageObservations.compactMap { observation -> (CGFloat, CGFloat)? in
+                    guard abs(observation.centerY - signal.centerY) <= yTolerance,
+                          let x = anchorX(observation, labels: chargesLabels) else { return nil }
+                    return (x, observation.centerY)
+                }
+                let deposits = pageObservations.compactMap { observation -> (CGFloat, CGFloat)? in
+                    guard abs(observation.centerY - signal.centerY) <= yTolerance,
+                          let x = anchorX(observation, labels: depositsLabels) else { return nil }
+                    return (x, observation.centerY)
+                }
+                let balances = pageObservations.compactMap { observation -> (CGFloat, CGFloat)? in
+                    guard abs(observation.centerY - signal.centerY) <= yTolerance,
+                          let x = anchorX(observation, labels: balanceLabels) else { return nil }
+                    return (x, observation.centerY)
+                }
+                guard let chargesX = charges.map({ $0.0 }).min(),
+                      let depositsX = deposits.map({ $0.0 }).filter({ $0 > chargesX }).min(),
+                      let balanceX = balances.map({ $0.0 }).filter({ $0 > depositsX }).min(),
+                      pageObservations.contains(where: { observation in
+                          let label = normalizedLabel(observation)
+                          return tableLabels.contains(where: { tableLabel in label.contains(tableLabel) })
+                              && abs(observation.centerY - signal.centerY) <= yTolerance
+                      }) else { continue }
+                guard chargesX < depositsX, depositsX < balanceX else { continue }
+                let movementMinX = max(0.38, min(0.70, chargesX - 0.10))
+                let balanceMinX = max(0.76, min(0.97, depositsX + (balanceX - depositsX) * 0.42))
+                guard movementMinX < balanceMinX else { continue }
+                return BBVAOCRColumns(
+                    chargesX: chargesX,
+                    depositsX: depositsX,
+                    balanceMinX: balanceMinX,
+                    calibratedFromHeader: true,
+                    reason: "columnas CARGOS/ABONOS/SALDO calibradas con el encabezado visual de la página \(page + 1)"
+                )
+            }
+        }
+        return .fallback
+    }
+
+    private static func parseBBVAOCRResult(
+        _ observations: [OCRObservation],
+        fileName: String
+    ) -> BBVAOCRParseResult {
+        guard let dateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-.]\s*(\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*(\d{2,4}))?(?![A-Za-z])"#
+        ), let amountRegex = try? NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+        ) else {
+            return BBVAOCRParseResult(movements: [], columnsCalibrated: false, diagnostics: [])
+        }
+
+        let defaultYear: Int = {
+            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+               let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
+                return year
+            }
+            return Calendar.current.component(.year, from: .now)
+        }()
+
+        let observationsByPage = Dictionary(grouping: observations, by: \.page)
+        var parsed: [Movement] = []
+        var diagnostics: [OCRRowDiagnostic] = []
+        var lastCalibratedColumns: BBVAOCRColumns?
+        var allMovementPagesCalibrated = true
+        var previousRunningBalance: Decimal?
+
+        for page in observationsByPage.keys.sorted() {
+            let rawPageObservations = observationsByPage[page] ?? []
+            let localColumns = bbvaOCRColumns(from: rawPageObservations)
+            let columns: BBVAOCRColumns
+            if localColumns.calibratedFromHeader {
+                columns = localColumns
+                lastCalibratedColumns = localColumns
+            } else if let lastCalibratedColumns {
+                columns = BBVAOCRColumns(
+                    chargesX: lastCalibratedColumns.chargesX,
+                    depositsX: lastCalibratedColumns.depositsX,
+                    balanceMinX: lastCalibratedColumns.balanceMinX,
+                    calibratedFromHeader: true,
+                    reason: "\(lastCalibratedColumns.reason); geometría heredada para página \(page + 1)"
+                )
+            } else {
+                columns = localColumns
+                let hasDate = rawPageObservations.contains {
+                    $0.boundingBox.minX < 0.30 && firstMatch(in: $0.text, regex: dateRegex) != nil
+                }
+                let pageText = rawPageObservations
+                    .map { $0.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current) }
+                    .joined(separator: " ")
+                let hasTableSignal = pageText.contains("fecha")
+                    && pageText.contains("saldo")
+                    && (pageText.contains("cargo") || pageText.contains("abono") || pageText.contains("retiro") || pageText.contains("deposit"))
+                if hasDate || hasTableSignal { allMovementPagesCalibrated = false }
+            }
+
+            let pageObservations = rawPageObservations.sorted {
+                if abs($0.centerY - $1.centerY) > 0.008 { return $0.centerY > $1.centerY }
+                return $0.centerX < $1.centerX
+            }
+            var rows: [[OCRObservation]] = []
+            var pendingRow: [OCRObservation] = []
+            for observation in pageObservations {
+                let normalized = observation.text.folding(
+                    options: [.diacriticInsensitive, .caseInsensitive],
+                    locale: .current
+                )
+                let hasDate = firstMatch(in: observation.text, regex: dateRegex) != nil
+                let isDateCell = hasDate
+                    && observation.boundingBox.minX < 0.30
+                    && !normalized.contains("periodo")
+                    && !normalized.contains("corte")
+                    && !normalized.contains("pagina")
+                if normalized.contains("total importe cargos")
+                    || normalized.contains("total importe abonos")
+                    || normalized.contains("total movimientos cargos")
+                    || normalized.contains("total movimientos abonos") {
+                    if !pendingRow.isEmpty { rows.append(pendingRow); pendingRow.removeAll(keepingCapacity: true) }
+                    continue
+                }
+                if isDateCell {
+                    if !pendingRow.isEmpty { rows.append(pendingRow) }
+                    pendingRow = [observation]
+                } else if !pendingRow.isEmpty {
+                    let administrative = ["estado de cuenta", "resumen de movimientos", "saldo anterior", "saldo final", "fecha de corte", "numero de cuenta", "cuenta clabe", "rfc", "pagina"]
+                    if administrative.contains(where: { normalized.contains($0) }) {
+                        rows.append(pendingRow)
+                        pendingRow.removeAll(keepingCapacity: true)
+                    } else {
+                        pendingRow.append(observation)
+                    }
+                }
+            }
+            if !pendingRow.isEmpty { rows.append(pendingRow) }
+
+            for row in rows {
+                let rawText = row.map(\.text).joined(separator: " ")
+                if let result = parseBBVAOCRRow(
+                    row,
+                    dateRegex: dateRegex,
+                    amountRegex: amountRegex,
+                    defaultYear: defaultYear,
+                    columns: columns,
+                    previousRunningBalance: previousRunningBalance
+                ) {
+                    parsed.append(result.movement)
+                    diagnostics.append(
+                        OCRRowDiagnostic(
+                            page: row.first.map { $0.page + 1 },
+                            rawText: rawText,
+                            selectedColumn: result.selectedColumn,
+                            selectedAmount: result.selectedAmount,
+                            direction: result.movement.amount >= 0 ? "in" : "out",
+                            reason: result.reason,
+                            accepted: true
+                        )
+                    )
+                    previousRunningBalance = result.runningBalance
+                } else {
+                    diagnostics.append(
+                        OCRRowDiagnostic(
+                            page: row.first.map { $0.page + 1 },
+                            rawText: rawText,
+                            reason: "fila BBVA rechazada: fecha, importe, dirección de columna o descripción no demostrables",
+                            accepted: false
+                        )
+                    )
+                    previousRunningBalance = nil
+                }
+            }
+        }
+
+        return BBVAOCRParseResult(
+            movements: parsed,
+            columnsCalibrated: allMovementPagesCalibrated && !observationsByPage.isEmpty,
+            diagnostics: diagnostics
+        )
+    }
+
+    private static func parseBBVAOCRRow(
+        _ row: [OCRObservation],
+        dateRegex: NSRegularExpression,
+        amountRegex: NSRegularExpression,
+        defaultYear: Int,
+        columns: BBVAOCRColumns,
+        previousRunningBalance: Decimal?
+    ) -> BBVARowResult? {
+        // A BBVA row is only safe when its page has a real CARGOS/ABONOS/
+        // SALDO calibration (or inherited calibration from the immediately
+        // preceding table page).  Do not turn the fallback x coordinates into
+        // a guessed direction: an uncalibrated row remains visible in the
+        // private diagnostics export, but it is not a ledger candidate.
+        guard columns.calibratedFromHeader else { return nil }
+        guard let dateObservation = row.first(where: {
+            $0.boundingBox.minX < 0.30 && firstMatch(in: $0.text, regex: dateRegex) != nil
+        }), let dateMatch = firstMatch(in: dateObservation.text, regex: dateRegex),
+        let date = parseDate(dateMatch.text, defaultYear: defaultYear) else { return nil }
+
+        let fullText = row.map(\.text).joined(separator: " ")
+        let normalizedFullText = fullText.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let ignoredPhrases = [
+            "estado de cuenta", "resumen de cuenta", "resumen de movimientos",
+            "saldo anterior", "saldo final", "saldo disponible", "fecha de corte",
+            "fecha limite", "numero de cuenta", "cuenta clabe", "total importe",
+            "total movimientos", "rfc", "pagina"
+        ]
+        guard !ignoredPhrases.contains(where: { normalizedFullText.contains($0) }) else { return nil }
+
+        var amountCandidates: [OCRAmountCandidate] = []
+        for (observationOrder, observation) in row.enumerated() {
+            for (matchOrder, match) in allMatches(in: observation.text, regex: amountRegex).enumerated() {
+                guard let value = parseAmount(match.text), abs(value) > 0, abs(value) < 10_000_000 else { continue }
+                let utfLength = max(observation.text.utf16.count, 1)
+                let matchCenter = CGFloat(match.range.location + (match.range.length / 2))
+                let relativeX = min(max(matchCenter / CGFloat(utfLength), 0), 1)
+                let visualX = min(max(observation.boundingBox.minX + observation.boundingBox.width * relativeX, 0), 1)
+                amountCandidates.append(
+                    OCRAmountCandidate(
+                        value: value,
+                        text: match.text,
+                        x: visualX,
+                        order: observationOrder * 100 + matchOrder,
+                        observationIndex: observationOrder,
+                        characterOffset: match.range.location
+                    )
+                )
+            }
+        }
+        guard !amountCandidates.isEmpty else { return nil }
+
+        let movementCandidates = amountCandidates.filter { $0.x >= 0.36 && $0.x < columns.balanceMinX }
+        let nearest: (CGFloat) -> OCRAmountCandidate? = { target in
+            movementCandidates.min {
+                let leftDistance = abs($0.x - target)
+                let rightDistance = abs($1.x - target)
+                if abs(leftDistance - rightDistance) > 0.01 { return leftDistance < rightDistance }
+                return $0.order < $1.order
+            }
+        }
+        let chargeCandidate = nearest(columns.chargesX)
+        let depositCandidate = nearest(columns.depositsX)
+        let selected: OCRAmountCandidate?
+        let selectedColumn: String
+        if let chargeCandidate, let depositCandidate {
+            if abs(chargeCandidate.x - columns.chargesX) <= abs(depositCandidate.x - columns.depositsX) {
+                selected = chargeCandidate
+                selectedColumn = "CARGOS"
+            } else {
+                selected = depositCandidate
+                selectedColumn = "ABONOS"
+            }
+        } else if let chargeCandidate {
+            selected = chargeCandidate
+            selectedColumn = "CARGOS"
+        } else if let depositCandidate {
+            selected = depositCandidate
+            selectedColumn = "ABONOS"
+        } else {
+            // A monetary token outside CARGOS/ABONOS is either a running
+            // balance or an administrative number. Keeping the row blocked
+            // is safer than inferring its sign from wording or token order.
+            return nil
+        }
+        guard let selected else { return nil }
+
+        let runningBalance = amountCandidates
+            .filter { $0.x >= columns.balanceMinX }
+            .sorted { $0.order < $1.order }
+            .first?.value
+        let titleParts = row
+            .filter { $0.centerX >= 0.14 && $0.centerX < max(columns.chargesX - 0.02, 0.40) }
+            .filter { observation in
+                let normalized = observation.text
+                    .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return !normalized.hasPrefix("referencia")
+                    && !normalized.hasPrefix("ref ")
+                    && !normalized.hasPrefix("rfc")
+                    && !normalized.hasPrefix("clave de rastreo")
+                    && !normalized.hasPrefix("mban")
+                    && !normalized.hasPrefix("bnet")
+            }
+            .map(\.text)
+        var title = (titleParts.isEmpty ? fullText : titleParts.joined(separator: " "))
+            .replacingOccurrences(
+                of: #"(?i)(?<!\d)[0-9OBI]{1,3}\s*[\/\-.]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*\d{2,4})?(?![A-Za-z])"#,
+                with: " ", options: .regularExpression
+            )
+            .replacingOccurrences(
+                of: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#,
+                with: " ", options: .regularExpression
+            )
+            .replacingOccurrences(of: #"\bRFC\s*[:#]?\s*[A-Z0-9]+\b"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        title = cleanMerchantTitle(title)
+        guard title.count >= 3, title.rangeOfCharacter(from: .letters) != nil, !isAdministrativeTitle(title) else { return nil }
+
+        let titleNormalized = title.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let isRefund = titleNormalized.contains("devolucion") || titleNormalized.contains("reembolso") || titleNormalized.contains("bonificacion")
+        let isCardPayment = titleNormalized.contains("pago de tarjeta")
+            || (titleNormalized.contains("pago") && (titleNormalized.contains("amex") || titleNormalized.contains("credito")))
+        let isTransfer = titleNormalized.contains("transfer") || titleNormalized.contains("traspaso") || titleNormalized.contains("spei")
+        let explicitOwnTransfer = titleNormalized.contains("entre cuentas")
+            || titleNormalized.contains("cuenta propia")
+            || titleNormalized.contains("mismo titular")
+            || titleNormalized.contains("traspaso interno")
+        let semanticIncome = titleNormalized.contains("nomina")
+            || titleNormalized.contains("sueldo")
+            || titleNormalized.contains("salario")
+            || titleNormalized.contains("deposito")
+            || titleNormalized.contains("abono")
+            || titleNormalized.contains("recibido")
+            || titleNormalized.contains("recibida")
+            || titleNormalized.contains("ingreso")
+        let isDepositColumn = selectedColumn == "ABONOS"
+        let flow: FlowKind
+        if explicitOwnTransfer {
+            flow = .transfer
+        } else if isDepositColumn || semanticIncome {
+            flow = .income
+        } else if isCardPayment {
+            flow = .debt
+        } else {
+            flow = .expense
+        }
+        let selectedValue = absoluteDecimal(selected.value)
+        let signedAmount: Decimal
+        switch flow {
+        case .income:
+            signedAmount = selectedValue
+        case .transfer:
+            // `FlowKind.transfer` describes the accounting treatment, not the
+            // direction. Preserve the explicit BBVA column sign so an
+            // ABONOS transfer can match its outgoing counterpart.
+            signedAmount = isDepositColumn ? selectedValue : -selectedValue
+        default:
+            signedAmount = -selectedValue
+        }
+        let category = category(for: titleNormalized, flow: flow)
+        let kind: MovementKind
+        if isRefund { kind = .refund }
+        else if titleNormalized.contains("msi") || titleNormalized.contains("meses sin intereses") { kind = .msi }
+        else if titleNormalized.contains("interes") { kind = .interest }
+        else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") { kind = .fee }
+        else if isCardPayment { kind = .cardPayment }
+        else if isTransfer && explicitOwnTransfer { kind = .bankTransfer }
+        else if flow == .income { kind = .income }
+        else { kind = .purchase }
+
+        let directionReason = isDepositColumn
+            ? "ABONOS determina entrada; CARGOS y SALDO se excluyen"
+            : "CARGOS determina salida; ABONOS y SALDO se excluyen"
+        let balanceReason: String
+        if let previousRunningBalance, let runningBalance {
+            let delta = runningBalance - previousRunningBalance
+            balanceReason = "saldo corrido observado; delta \(NSDecimalNumber(decimal: delta).stringValue)"
+        } else {
+            balanceReason = "sin delta de saldo disponible en esta fila"
+        }
+        let reason = "\(directionReason); \(balanceReason); \(columns.reason)"
+        let movement = Movement(
+            date: date,
+            title: title,
+            account: "BBVA",
+            category: category,
+            amount: signedAmount,
+            flow: flow,
+            kind: kind,
+            travelRelated: ["viaje", "hotel", "hospedaje", "aerolinea", "vuelo", "avion", "uber", "taxi", "airbnb"].contains { titleNormalized.contains($0) },
+            foreignCurrency: false,
+            extractionEvidence: MovementExtractionEvidence(
+                method: "vision-ocr",
+                page: row.first.map { $0.page + 1 },
+                confidence: row.map(\.confidence).min() ?? 0,
+                sourceText: String(fullText.prefix(240)),
+                bounds: extractionBounds(for: row),
+                selectedColumn: selectedColumn,
+                selectedAmount: selectedValue,
+                selectionReason: reason
+            )
+        )
+        return BBVARowResult(
+            movement: movement,
+            selectedColumn: selectedColumn,
+            selectedAmount: selectedValue,
+            reason: reason,
+            runningBalance: runningBalance
         )
     }
 
@@ -4606,7 +5286,7 @@ final class FinanceStore {
         ), let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
         ) else {
-            return SantanderOCRParseResult(movements: [], columnsCalibrated: false)
+            return SantanderOCRParseResult(movements: [], columnsCalibrated: false, diagnostics: [])
         }
 
         let defaultYear: Int = {
@@ -4618,12 +5298,46 @@ final class FinanceStore {
         }()
 
         let observationsByPage = Dictionary(grouping: observations, by: \.page)
-        let columns = santanderOCRColumns(from: observations)
         var parsed: [Movement] = []
+        var diagnostics: [OCRRowDiagnostic] = []
         var previousRunningBalance: Decimal?
+        var lastCalibratedColumns: SantanderOCRColumns?
+        var everyPageCalibrated = true
 
         for page in observationsByPage.keys.sorted() {
-            let pageObservations = (observationsByPage[page] ?? []).sorted {
+            let rawPageObservations = observationsByPage[page] ?? []
+            let localColumns = santanderOCRColumns(from: rawPageObservations)
+            let columns: SantanderOCRColumns
+            if localColumns.calibratedFromHeader {
+                columns = localColumns
+                lastCalibratedColumns = localColumns
+            } else if let lastCalibratedColumns {
+                // Continuation pages often omit the repeated header. Reuse
+                // the last header calibrated on-device, but record that the
+                // page was inherited so the audit can distinguish it from a
+                // page whose columns were guessed from a global layout.
+                columns = SantanderOCRColumns(
+                    movementMinX: lastCalibratedColumns.movementMinX,
+                    balanceMinX: lastCalibratedColumns.balanceMinX,
+                    depositMaxX: lastCalibratedColumns.depositMaxX,
+                    calibratedFromHeader: true,
+                    calibrationReason: "\(lastCalibratedColumns.calibrationReason); geometría heredada para página \(page + 1)"
+                )
+            } else {
+                columns = localColumns
+                let hasDateAnchoredRow = rawPageObservations.contains { observation in
+                    observation.boundingBox.minX < 0.24
+                        && firstMatch(in: observation.text, regex: dateRegex) != nil
+                }
+                let pageText = rawPageObservations
+                    .map { $0.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current) }
+                    .joined(separator: " ")
+                let hasTableSignal = pageText.contains("fecha")
+                    && pageText.contains("saldo")
+                    && (pageText.contains("deposit") || pageText.contains("abono") || pageText.contains("retiro") || pageText.contains("cargo"))
+                if hasDateAnchoredRow || hasTableSignal { everyPageCalibrated = false }
+            }
+            let pageObservations = rawPageObservations.sorted {
                 if abs($0.centerY - $1.centerY) > 0.008 {
                     return $0.centerY > $1.centerY
                 }
@@ -4663,8 +5377,27 @@ final class FinanceStore {
                     columns: columns
                 ) {
                     parsed.append(result.movement)
+                    diagnostics.append(
+                        OCRRowDiagnostic(
+                            page: row.first.map { $0.page + 1 },
+                            rawText: row.map(\.text).joined(separator: " "),
+                            selectedColumn: result.movement.extractionEvidence?.selectedColumn,
+                            selectedAmount: result.movement.extractionEvidence?.selectedAmount,
+                            direction: result.movement.amount >= 0 ? "in" : "out",
+                            reason: result.movement.extractionEvidence?.selectionReason ?? "movimiento Santander validado contra la fila visual",
+                            accepted: true
+                        )
+                    )
                     previousRunningBalance = result.runningBalance
                 } else {
+                    diagnostics.append(
+                        OCRRowDiagnostic(
+                            page: row.first.map { $0.page + 1 },
+                            rawText: row.map(\.text).joined(separator: " "),
+                            reason: "fila Santander rechazada: no se pudo probar fecha, columna de movimiento, saldo o descripción",
+                            accepted: false
+                        )
+                    )
                     // A row without a trustworthy running balance must not
                     // contaminate the next row's delta-based repair.
                     previousRunningBalance = nil
@@ -4674,7 +5407,8 @@ final class FinanceStore {
 
         return SantanderOCRParseResult(
             movements: parsed,
-            columnsCalibrated: columns.calibratedFromHeader
+            columnsCalibrated: everyPageCalibrated && !observationsByPage.isEmpty,
+            diagnostics: diagnostics
         )
     }
 
@@ -4704,9 +5438,47 @@ final class FinanceStore {
         let depositLabels = ["deposito", "depositos", "abono", "abonos", "entrada", "entradas"]
         let withdrawalLabels = ["retiro", "retiros", "cargo", "cargos", "salida", "salidas"]
         let balanceLabels = ["saldo", "balance", "saldoactual"]
+        func anchorX(_ observation: OCRObservation, labels: [String]) -> CGFloat? {
+            let compact = normalizedLabel(observation)
+            let length = max(compact.utf16.count, 1)
+            let anchors = labels.compactMap { label -> CGFloat? in
+                guard let range = compact.range(of: label) else { return nil }
+                let nsRange = NSRange(range, in: compact)
+                let relative = CGFloat(nsRange.location + (nsRange.length / 2)) / CGFloat(length)
+                return min(max(observation.boundingBox.minX + observation.boundingBox.width * relative, 0), 1)
+            }
+            return anchors.max()
+        }
         var anchors: (deposit: CGFloat, withdrawal: CGFloat, balance: CGFloat)?
         for page in grouped.keys.sorted() {
             let pageObservations = grouped[page] ?? []
+            // Vision can return the complete header as one observation. Use
+            // character offsets inside that box just as the BBVA reader does;
+            // otherwise a perfectly legible header would be mistaken for an
+            // uncalibrated page and every row would be quarantined.
+            let headerSignals = pageObservations.filter { observation in
+                let label = normalizedLabel(observation)
+                return label.contains("fecha")
+                    || label.contains("descripcion")
+                    || label.contains("description")
+            }
+            for signal in headerSignals {
+                let sameLine: (OCRObservation) -> Bool = { observation in
+                    abs(observation.centerY - signal.centerY) <= headerYTolerance
+                }
+                let depositAnchors = pageObservations.filter(sameLine).compactMap { anchorX($0, labels: depositLabels) }
+                let withdrawalAnchors = pageObservations.filter(sameLine).compactMap { anchorX($0, labels: withdrawalLabels) }
+                let balanceAnchors = pageObservations.filter(sameLine).compactMap { anchorX($0, labels: balanceLabels) }
+                guard let deposit = depositAnchors.min(),
+                      let withdrawal = withdrawalAnchors.filter({ $0 > deposit }).min(),
+                      let balance = balanceAnchors.filter({ $0 > withdrawal }).max(),
+                      deposit < withdrawal,
+                      withdrawal < balance else { continue }
+                anchors = (deposit, withdrawal, balance)
+                break
+            }
+            if anchors != nil { break }
+
             let deposits = pageObservations.filter { depositLabels.contains(normalizedLabel($0)) }
             let withdrawals = pageObservations.filter { withdrawalLabels.contains(normalizedLabel($0)) }
             let balances = pageObservations.filter { balanceLabels.contains(normalizedLabel($0)) }
@@ -4750,7 +5522,8 @@ final class FinanceStore {
             movementMinX: movementMinX,
             balanceMinX: balanceMinX,
             depositMaxX: depositMaxX,
-            calibratedFromHeader: true
+            calibratedFromHeader: true,
+            calibrationReason: "columnas calibradas con el encabezado visual de esta página"
         )
     }
 
@@ -4873,12 +5646,41 @@ final class FinanceStore {
                 .filter { $0.x >= columns.balanceMinX }
                 .sorted { $0.order < $1.order }
                 .first?.value
-        let selectedValue = repairedBankOCRAmount(
+        let columnValue = repairedBankOCRAmount(
             selected: selected.value,
             selectedText: selected.text,
             previousBalance: previousRunningBalance,
             runningBalance: runningBalance
         )
+        // The running balance is an issuer-provided control. When two
+        // consecutive rows expose a trustworthy balance, derive the movement
+        // magnitude and direction from its delta. This corrects an OCR token
+        // that landed in the wrong movement column while still retaining the
+        // visual token and its coordinates in the diagnostic evidence.
+        let balanceDelta: Decimal? = {
+            guard let previousRunningBalance, let runningBalance else { return nil }
+            let delta = runningBalance - previousRunningBalance
+            let magnitude = absoluteDecimal(delta)
+            guard magnitude > 0, magnitude < 100_000_000 else { return nil }
+            return delta
+        }()
+        let selectedValue = balanceDelta.map(absoluteDecimal) ?? columnValue
+        let selectedColumn = selected.x < columns.depositMaxX ? "DEPÓSITO" : "RETIRO"
+        let repairedFromBalance = balanceDelta != nil
+            && absoluteDecimal(selectedValue - absoluteDecimal(columnValue)) > Decimal(string: "0.005", locale: Locale(identifier: "en_US_POSIX"))!
+        let selectionReason: String
+        if repairedFromBalance {
+            let source = useWholeRowPair
+                ? "par movimiento/saldo por geometría colapsada"
+                : "columna visual"
+            selectionReason = "\(source); corrección por delta del saldo corrido; \(columns.calibrationReason)"
+        } else if let balanceDelta {
+            selectionReason = "importe dentro de la columna \(selectedColumn.lowercased()); ecuación del saldo corrido confirma delta \(NSDecimalNumber(decimal: balanceDelta).stringValue); \(columns.calibrationReason)"
+        } else if useWholeRowPair {
+            selectionReason = "penúltimo importe de la fila; último importe reservado para saldo corrido; \(columns.calibrationReason)"
+        } else {
+            selectionReason = "importe dentro de la columna \(selectedColumn.lowercased()); saldo excluido por geometría; \(columns.calibrationReason)"
+        }
 
         let titleParts = row
             .filter { $0.centerX >= 0.18 && $0.centerX < 0.62 }
@@ -4936,6 +5738,7 @@ final class FinanceStore {
             || titleNormalized.contains("sueldo")
             || titleNormalized.contains("deposito")
             || titleNormalized.contains("abono")
+            || titleNormalized.contains("recibido")
             || titleNormalized.contains("transferencia recibida")
         let semanticWithdrawal = !semanticDeposit && (
             titleNormalized.contains("retiro")
@@ -4956,10 +5759,17 @@ final class FinanceStore {
             || titleNormalized.contains("mismo titular")
             || titleNormalized.contains("traspaso interno")
         let flow: FlowKind
-        if isCardPayment {
-            flow = .debt
-        } else if explicitOwnTransfer {
+        if explicitOwnTransfer {
             flow = .transfer
+        } else if let balanceDelta {
+            // The balance equation wins over wording when Vision has
+            // flattened the row. A positive delta is an incoming deposit;
+            // a negative delta is an outgoing charge/payment.
+            flow = balanceDelta > 0
+                ? .income
+                : (isCardPayment ? .debt : .expense)
+        } else if isCardPayment {
+            flow = .debt
         } else if semanticDeposit {
             flow = .income
         } else if semanticWithdrawal {
@@ -4970,7 +5780,19 @@ final class FinanceStore {
             flow = .expense
         }
 
-        let signedAmount = flow == .income ? selectedValue : -selectedValue
+        let signedAmount: Decimal
+        switch flow {
+        case .income:
+            signedAmount = selectedValue
+        case .transfer:
+            // If the balance equation is available it is stronger than the
+            // wording/column OCR; otherwise the calibrated deposit column is
+            // the explicit direction signal.
+            let incoming = balanceDelta.map { $0 > 0 } ?? depositColumn
+            signedAmount = incoming ? selectedValue : -selectedValue
+        default:
+            signedAmount = -selectedValue
+        }
         let displayAccount = flow == .transfer && titleNormalized.contains("amex")
             ? "Santander a Amex"
             : "Santander"
@@ -4982,7 +5804,7 @@ final class FinanceStore {
             kind = .interest
         } else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") {
             kind = .fee
-        } else if isCardPayment {
+        } else if isCardPayment && flow != .income {
             kind = .cardPayment
         } else if isTransfer && explicitOwnTransfer {
             kind = .bankTransfer
@@ -5011,7 +5833,10 @@ final class FinanceStore {
                 page: row.first.map { $0.page + 1 },
                 confidence: row.map(\.confidence).min() ?? 0,
                 sourceText: String(fullText.prefix(240)),
-                bounds: extractionBounds(for: row)
+                bounds: extractionBounds(for: row),
+                selectedColumn: selectedColumn,
+                selectedAmount: selectedValue,
+                selectionReason: selectionReason
             )
         )
         return SantanderRowResult(movement: movement, runningBalance: runningBalance)
@@ -5024,6 +5849,13 @@ final class FinanceStore {
         _ lines: [OCRObservation],
         fileName: String
     ) -> [Movement] {
+        parseAmexOCRResult(lines, fileName: fileName).movements
+    }
+
+    private static func parseAmexOCRResult(
+        _ lines: [OCRObservation],
+        fileName: String
+    ) -> AmexOCRParseResult {
         guard let dateRegex = try? NSRegularExpression(
             // Amex OCR can emit full dates or short bank-style dates. OCR
             // repairs remain scoped to this date token; parseDate supplies the
@@ -5040,7 +5872,7 @@ final class FinanceStore {
             // perfectly valid MXN amount and wins the right-column heuristic.
             pattern: #"(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         ) else {
-            return []
+            return AmexOCRParseResult(movements: [], diagnostics: [])
         }
 
         let defaultYear: Int = {
@@ -5112,7 +5944,12 @@ final class FinanceStore {
                     // amount leak into the first row of the page.
                     pendingRow.removeAll(keepingCapacity: true)
                     inMovementTable = true
-                    if amexSection == 0 { amexSection = 1 }
+                    // A new operation-table header starts a fresh domestic
+                    // section after the MSI pages. Do not let the previous
+                    // `amexSection == 3` state classify those rows as an MSI
+                    // purchase or keep `inMSISummary` suppressing them.
+                    inMSISummary = false
+                    if amexSection == 0 || amexSection == 3 { amexSection = 1 }
                     continue
                 }
                 if !inMovementTable { continue }
@@ -5201,17 +6038,45 @@ final class FinanceStore {
             }
         }
 
-        return rows.compactMap {
-            parseAmexRow(
-                $0.observations,
+        var movements: [Movement] = []
+        var diagnostics: [OCRRowDiagnostic] = []
+        for row in rows {
+            let rawText = row.observations.map(\.text).joined(separator: " ")
+            if let movement = parseAmexRow(
+                row.observations,
                 dateRegex: dateRegex,
                 shortMonthDateRegex: shortMonthDateRegex,
                 textDateRegex: textDateRegex,
                 amountRegex: amountRegex,
                 defaultYear: defaultYear,
-                forcedForeignCurrency: $0.forcedForeignCurrency
-            )
+                forcedForeignCurrency: row.forcedForeignCurrency
+            ) {
+                movements.append(movement)
+                let evidence = movement.extractionEvidence
+                diagnostics.append(
+                    OCRRowDiagnostic(
+                        id: movement.id.uuidString,
+                        page: row.observations.first.map { $0.page + 1 },
+                        rawText: rawText,
+                        selectedColumn: evidence?.selectedColumn,
+                        selectedAmount: evidence?.selectedAmount,
+                        direction: movement.amount >= 0 ? "in" : "out",
+                        reason: evidence?.selectionReason ?? "importe Amex validado en la sección visual",
+                        accepted: true
+                    )
+                )
+            } else {
+                diagnostics.append(
+                    OCRRowDiagnostic(
+                        page: row.observations.first.map { $0.page + 1 },
+                        rawText: rawText,
+                        reason: "fila Amex rechazada: fecha, importe MXN, sección o descripción no demostrables",
+                        accepted: false
+                    )
+                )
+            }
         }
+        return AmexOCRParseResult(movements: movements, diagnostics: diagnostics)
     }
 
     private static func parseAmexRow(
@@ -5557,6 +6422,19 @@ final class FinanceStore {
             "transporte", "uber", "taxi", "metro", "renta de auto", "destino", "equipaje",
             "airbnb", "aeromexico", "vivaaerobus", "volaris"
         ].contains { titleNormalized.contains($0) }
+        let selectedColumn = "IMPORTE EN MN"
+        let selectionReason: String
+        if isForeignRow {
+            selectionReason = exchangeRateAnchor != nil
+                ? "importe MXN local seleccionado después de la conversión; moneda extranjera y TC excluidos"
+                : "importe MXN de la columna derecha seleccionado; no se usó la moneda extranjera"
+        } else if isPayment {
+            selectionReason = "importe de pago separado de compras nacionales, extranjeras y MSI"
+        } else if titleNormalized.contains("msi") || titleNormalized.contains("meses sin intereses") {
+            selectionReason = "importe de la sección MSI separado de compras nacionales y extranjeras"
+        } else {
+            selectionReason = "importe nacional de la columna monetaria Amex; controles y saldos excluidos"
+        }
 
         return Movement(
             date: date,
@@ -5573,7 +6451,10 @@ final class FinanceStore {
                 page: row.first.map { $0.page + 1 },
                 confidence: row.map(\.confidence).min() ?? 0,
                 sourceText: String(fullText.prefix(240)),
-                bounds: extractionBounds(for: row)
+                bounds: extractionBounds(for: row),
+                selectedColumn: selectedColumn,
+                selectedAmount: abs(selected.value),
+                selectionReason: selectionReason
             )
         )
     }

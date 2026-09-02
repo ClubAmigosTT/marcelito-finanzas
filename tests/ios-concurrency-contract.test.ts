@@ -102,6 +102,26 @@ test("Amex Vision selecciona el importe MXN por columna y respeta sus secciones"
   assert.match(source, /forcedForeignCurrency \|\| Self\.hasForeignCurrency\(in: normalizedFullText\)[\s\S]*?\? nil/);
 });
 
+test("Amex conserva PDFKit cuando su capa de texto ya concilia", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  // OCR is a recovery path only. A reconciled Amex text layer must win so
+  // PDFKit's native domestic/foreign/payment/MSI section boundaries are not
+  // lost in a second, noisier Vision pass.
+  assert.match(source, /let textLayerReconciles = Self\.textLayerReconciles\(/);
+  assert.match(source, /let isAmexLayout = source\.localizedCaseInsensitiveContains\("Amex"\)[\s\S]*?Self\.rebuildAmexSelectableLines/);
+  assert.match(source, /let shouldAttemptOCR = allowOCR && !textLayerReconciles/);
+});
+
+test("BBVA exige calibración y dirección explícita por columna", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /private static func parseBBVAOCRRow\([\s\S]*?guard columns\.calibratedFromHeader else \{ return nil \}/);
+  assert.match(source, /selectedColumn = "CARGOS"/);
+  assert.match(source, /selectedColumn = "ABONOS"/);
+  assert.match(source, /CARGOS determina salida; ABONOS y SALDO se excluyen/);
+  assert.match(source, /ABONOS determina entrada; CARGOS y SALDO se excluyen/);
+  assert.doesNotMatch(source, /selectedColumn = "MOVIMIENTO \(respaldo\)"/);
+});
+
 test("Santander protege filas OCR con geometría colapsada", async () => {
   const source = await readFile(modelsPath, "utf8");
   // Vision can return a row in one box or in several unusually wide boxes.

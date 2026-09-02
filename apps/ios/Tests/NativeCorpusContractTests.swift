@@ -303,6 +303,88 @@ final class NativeCorpusContractTests: XCTestCase {
         return String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), value)
     }
 
+    /// Lightweight real-file smoke test for the ten-state corpus supplied
+    /// out-of-band on a development device/runner. It intentionally does not
+    /// require a golden manifest: its job is to ensure the production reader
+    /// never emits an absurd amount or an accepted OCR row without row-level
+    /// provenance before someone attempts certification/publication.
+    func testRealPDFCorpusHasSafeRowDiagnostics() async throws {
+        guard let rawDirectory = ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_DIR"],
+              !rawDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw XCTSkip("Define MARCELITO_PDF_CORPUS_DIR para ejecutar la prueba de seguridad sobre PDFs reales.")
+        }
+
+        let directory = URL(fileURLWithPath: rawDirectory, isDirectory: true)
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+        .filter { $0.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !files.isEmpty else {
+            throw XCTSkip("MARCELITO_PDF_CORPUS_DIR no contiene PDFs.")
+        }
+
+        let store = FinanceStore()
+        for file in files {
+            let result = try await store.inspectPDFAsync(
+                from: file,
+                allowOCR: true,
+                allowMultimodalFallback: false
+            )
+            XCTAssertNotEqual(result.source, "Desconocido", file.lastPathComponent + " no identificó el emisor")
+            XCTAssertGreaterThan(result.pageCount ?? 0, 0, file.lastPathComponent + " no tiene páginas")
+            XCTAssertLessThanOrEqual(result.rowDiagnostics.count, 2_000, file.lastPathComponent + " produjo diagnóstico de filas absurdo")
+            for row in result.rowDiagnostics where row.accepted {
+                XCTAssertFalse(row.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                XCTAssertFalse(row.selectedColumn?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true,
+                               file.lastPathComponent + " aceptó una fila sin columna")
+                if let amount = row.selectedAmount {
+                    XCTAssertLessThan(abs(NSDecimalNumber(decimal: amount).doubleValue), 10_000_000,
+                                      file.lastPathComponent + " convirtió un identificador en importe")
+                }
+            }
+            if result.reconciliation?.status == .invalid {
+                XCTAssertEqual(result.imported, 0, file.lastPathComponent + " inválido alimentó el libro canónico")
+            }
+        }
+    }
+
+    func testRowDiagnosticsStayPrivateAndCanBeExported() throws {
+        let diagnostic = NativeCorpusDiagnosticFile(
+            file: "document-01.pdf",
+            sourceFileName: "estado-privado.pdf",
+            source: "BBVA",
+            mode: "vision-ocr",
+            status: StatementReconciliationStatus.pending.rawValue,
+            reconciliationReason: "columnas pendientes",
+            rows: [
+                OCRRowDiagnostic(
+                    page: 2,
+                    rawText: "23/JUL FACEBK 120.00 3,469.63",
+                    selectedColumn: "CARGOS",
+                    selectedAmount: 120,
+                    direction: "out",
+                    reason: "CARGOS determina salida",
+                    accepted: true
+                )
+            ]
+        )
+        let report = NativeCorpusCertificationReport(files: [], diagnostics: [diagnostic])
+        let publicJSON = try XCTUnwrap(report.jsonData)
+        let publicText = try XCTUnwrap(String(data: publicJSON, encoding: .utf8))
+        XCTAssertFalse(publicText.contains("23/JUL FACEBK"), "el informe público no debe exponer texto OCR")
+        XCTAssertFalse(publicText.contains("selectedColumn"), "el informe público no debe exponer decisiones de fila")
+
+        let diagnosticURL = try report.writeDiagnosticsTemporaryFile()
+        defer { try? FileManager.default.removeItem(at: diagnosticURL) }
+        let privateJSON = try String(contentsOf: diagnosticURL, encoding: .utf8)
+        XCTAssertTrue(privateJSON.contains("23/JUL FACEBK"))
+        XCTAssertTrue(privateJSON.contains("CARGOS"))
+        XCTAssertTrue(privateJSON.contains("120"))
+    }
+
     func testValidatedCorpusThroughNativeReaderWhenProvided() throws {
         guard let rawDirectory = ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_DIR"],
               !rawDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -359,6 +441,39 @@ final class NativeCorpusContractTests: XCTestCase {
             XCTAssertLessThanOrEqual(result.imported, 1_000, file.lastPathComponent + " produjo un volumen de filas absurdo")
             XCTAssertEqual(result.fileSizeBytes, fileSizeBytes, file.lastPathComponent + " no conserva el tamaño original")
             XCTAssertGreaterThan(result.pageCount ?? 0, 0, file.lastPathComponent + " no conserva el número de páginas")
+
+            // Every real-corpus run also verifies the private row-level
+            // provenance emitted by the reader. This catches a regression
+            // where the totals look plausible but an OCR reference, balance
+            // or certificate number was silently selected as the movement.
+            let diagnostics = result.rowDiagnostics
+            let extractedRows = result.reconciliation?.extractedMovementCount ?? result.imported
+            XCTAssertGreaterThanOrEqual(
+                diagnostics.count,
+                extractedRows,
+                file.lastPathComponent + " no conserva diagnóstico para cada fila extraída"
+            )
+            for diagnostic in diagnostics {
+                XCTAssertFalse(
+                    diagnostic.rawText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                    file.lastPathComponent + " contiene una fila de diagnóstico sin texto"
+                )
+                if diagnostic.accepted {
+                    if let selectedAmount = diagnostic.selectedAmount {
+                        XCTAssertLessThan(
+                            abs(NSDecimalNumber(decimal: selectedAmount).doubleValue),
+                            10_000_000,
+                            file.lastPathComponent + " seleccionó un importe fuera de rango"
+                        )
+                    }
+                    if result.usedOCR {
+                        XCTAssertFalse(
+                            diagnostic.selectedColumn?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true,
+                            file.lastPathComponent + " aceptó una fila OCR sin columna elegida"
+                        )
+                    }
+                }
+            }
 
             // Summary controls are independent of row acceptance. Assert them
             // even while a scan remains pending so a plausible-looking OCR
@@ -469,6 +584,8 @@ final class NativeCorpusContractTests: XCTestCase {
                 "ocrConfidence": percentText(result.ocrConfidence),
                 "weakestOCRPage": percentText(result.ocrPageConfidences?.min()),
                 "ocrColumnsCalibrated": result.ocrColumnsCalibrated.map { $0 ? "true" : "false" } ?? "",
+                "diagnosticRows": String(result.rowDiagnostics.count),
+                "acceptedDiagnosticRows": String(result.rowDiagnostics.filter(\.accepted).count),
                 "expectedPreviousBalance": decimalText(expected.previousBalance),
                 "extractedPreviousBalance": decimalText(result.summary?.previousBalance),
                 "expectedCashBalance": decimalText(expected.cashBalance),
