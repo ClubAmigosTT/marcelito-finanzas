@@ -47,6 +47,12 @@ gasto real sin separar esas secciones.
   un desvío menor o igual a $2, o una magnitud claramente mal escalada que
   siga dentro del rango del saldo; si no existe saldo anterior/final confiable
   conserva el importe visual y deja que la conciliación bloquee el estado.
+- Si Vision devuelve una fila Santander completa en una sola caja (fecha,
+  descripción, importe y saldo), el lector estima la coordenada horizontal de
+  cada token a partir de su posición dentro de esa caja. Cuando la geometría
+  queda cerca del límite entre columnas, usa únicamente los dos últimos
+  importes monetarios como pareja movimiento/saldo; nunca toma un saldo
+  corrido o un folio como gasto.
 - La lectura Vision de Santander calibra `DEPÓSITO`, `RETIRO` y `SALDO` con la
   geometría de los encabezados cuando están presentes. Si el recorte no trae
   encabezado, usa los límites de la plantilla conocida; en ambos casos el
@@ -69,6 +75,10 @@ gasto real sin separar esas secciones.
 - Cada fila también conserva un fragmento de origen acotado y, cuando existe
   OCR visual, sus coordenadas normalizadas. La vista de detalle permite
   inspeccionar esta evidencia sin guardar el PDF completo dentro del libro.
+- La lectura directa de PDFKit conserva un marcador de página interno antes de
+  unir el texto. Por eso las filas de PDFs con texto seleccionable mantienen la
+  misma trazabilidad de página que las filas Vision; si una capa no concilia,
+  se reintenta visualmente en lugar de aceptar una fila sin contexto.
 - La certificación exige evidencia completa por fila: método, página, confianza
   finita y fragmento de origen no vacío. Si falta uno de estos campos, la fila
   puede permanecer visible para revisión, pero el estado no cuenta como
@@ -91,10 +101,12 @@ gasto real sin separar esas secciones.
 - iOS aplica los mismos límites de 50 MB y 80 páginas antes de crear
   imágenes OCR; excederlos produce un error recuperable y no deja datos
   parciales en el libro canónico.
-- iOS no confía solo en la longitud de una capa de texto oculta: exige señal
-  de fecha, encabezado de tabla y al menos una fila plausible (fecha + importe)
-  antes de omitir Vision. Así un escaneo con metadatos administrativos no se
-  interpreta como un PDF estructurado.
+- iOS no confía solo en la longitud de una capa de texto oculta: aunque haya
+  fechas, encabezado y filas plausibles, primero intenta conciliar esas filas
+  contra los controles del emisor. Una capa estructurada que no concilia activa
+  Vision como recuperación; solo una lectura de texto ya conciliada puede omitir
+  OCR. Así un escaneo con metadatos administrativos o saltos de línea rotos no
+  se interpreta como un PDF estructurado por accidente.
 - La capa web aplica la misma decisión estructural: solo conserva lectura
   directa cuando encuentra fechas, encabezado de tabla y una fila plausible;
   una capa larga de texto administrativo o un encabezado sin filas vuelve a
@@ -112,9 +124,11 @@ gasto real sin separar esas secciones.
 - En páginas con confianza inferior a 88%, el OCR web hace una segunda pasada
   acotada con contraste mejorado y conserva el resultado de mayor confianza;
   si la conciliación o el conteo no cuadran, el estado sigue bloqueado.
-- Vision en iOS aplica la misma estrategia por página: solo genera una imagen
-  temporal con contraste cuando la primera pasada es débil y conserva el
-  resultado que tenga mayor confianza media.
+- Vision en iOS aplica la misma estrategia por página: conserva la proporción
+  real del documento, limita cada bitmap a 5 millones de píxeles y, cuando la
+  primera pasada queda por debajo de 88%, prueba una renderización de detalle
+  antes de aplicar contraste. Solo conserva el resultado con mayor confianza
+  media; ninguna de esas pasadas salta la conciliación o la compuerta OCR.
 - iOS reutiliza el contexto de imagen y libera cada página OCR dentro de un
   `autoreleasepool`, limitando la memoria temporal en estados de varias páginas.
 - Las páginas sin observaciones Vision se registran explícitamente como 0%
@@ -296,6 +310,23 @@ capa web: el matching de transferencias y pagos compara la magnitud del
 importe (la salida y la entrada tienen signos opuestos), exige una señal
 explícita de pago en la tarjeta y usa un ordinal por estado para no borrar una
 segunda compra idéntica legítima durante un solapamiento.
+
+El runner nativo también acepta `MARCELITO_PDF_CORPUS_MANIFEST` para auditar
+un corpus privado real sin convertirlo en fixture público. El manifiesto usa
+el mismo contrato de `tests/fixtures/pdf-corpus-attachments.json` —archivo,
+SHA-256, `emisor:últimos4`, emisor, tipo, estado, filas y controles opcionales—
+y debe declarar la `readerVersion` exacta. `apps/ios/scripts/run-native-corpus.sh`
+resuelve la ruta a absoluta, ejecuta PDFKit + Vision y conserva el resultado
+`.xcresult`; si el conjunto de PDFs no coincide con el manifiesto, la corrida
+falla antes de calcular precisión. Cuando no se define esa variable, CI sigue
+usando únicamente el corpus sintético incluido en el repositorio.
+
+La certificación de dispositivo y la corrida con manifiesto son compuertas
+complementarias: la primera valida cualquier selección privada desde el
+iPhone y la segunda permite comparar filas y controles contra expectativas
+doradas. Ninguna ruta sube el PDF, la descripción completa o los importes
+privados al repositorio.
+
 Para transferencias entre bancos, el importe/fecha y la cuenta distinta solo
 generan un candidato: la aceptación exige semántica de transferencia y una
 mención explícita de la cuenta contraparte o del mismo titular. Si esa señal

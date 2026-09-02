@@ -19,6 +19,16 @@ const OCR_MIN_PAGE_CONFIDENCE = 0.78;
 export function hasSufficientOcrQuality(statement: Statement) {
   // Treat malformed/legacy runtime data as unsafe instead of assuming that a
   // missing mode means a trustworthy text-layer extraction.
+  // Multimodal output is visual/model-assisted even when the import result
+  // keeps `mode: "text"` for backwards compatibility. It must therefore
+  // prove its own confidence instead of taking the text-layer fast path.
+  if (statement.extractionProvider === "multimodal") {
+    const average = statement.ocrConfidence;
+    const pages = statement.ocrPageConfidences;
+    if (average === undefined || !Number.isFinite(average) || average < OCR_MIN_AVERAGE_CONFIDENCE) return false;
+    if (!pages?.length || pages.some((page) => !Number.isFinite(page) || page < OCR_MIN_PAGE_CONFIDENCE)) return false;
+    return true;
+  }
   if (statement.mode === "text") return true;
   if (statement.mode !== "ocr") return false;
   const average = statement.ocrConfidence;

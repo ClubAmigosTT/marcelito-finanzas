@@ -5,7 +5,41 @@ services:
     buildCommand: npm ci && npm run build
     staticPublishPath: dist
     pullRequestPreviewsEnabled: true
+    envVars:
+      # The browser only receives the public reader URL. Provider credentials
+      # stay on the separate API service below.
+      - key: VITE_STATEMENT_READER_URL
+        value: https://marcelito-statement-reader.onrender.com/api/statement-reader
     routes:
       - type: rewrite
         source: /*
         destination: /index.html
+
+  # Isolated backend for the opt-in multimodal PDF reader. It never stores
+  # documents and does not share the static site's build environment.
+  - type: web
+    runtime: node
+    plan: free
+    name: marcelito-statement-reader
+    buildCommand: npm ci
+    startCommand: npm run reader:server
+    healthCheckPath: /health
+    envVars:
+      - key: STATEMENT_READER_API_KEY
+        sync: false
+      - key: STATEMENT_READER_MODEL
+        value: muse-spark-1.2-contributor-free
+      - key: STATEMENT_READER_PROVIDER_URL
+        value: https://opencode.ai/zen/v1/responses
+      - key: STATEMENT_READER_TOKEN
+        sync: false
+      - key: STATEMENT_READER_ALLOWED_ORIGIN
+        value: https://marcelito-finanzas.onrender.com
+      - key: STATEMENT_READER_MAX_REQUESTS_PER_MINUTE
+        value: "10"
+      - key: STATEMENT_READER_MAX_CONCURRENT_REQUESTS
+        value: "2"
+      - key: STATEMENT_READER_PROVIDER_TIMEOUT_MS
+        value: "120000"
+      - key: STATEMENT_READER_MAX_OUTPUT_TOKENS
+        value: "32768"

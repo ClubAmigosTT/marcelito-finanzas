@@ -214,6 +214,19 @@ se adivina y la conciliación mantiene el estado bloqueado. Esta regla ya tiene
 prueba de contrato. La misma reparación cubre confusiones OCR con un `1`
 inicial espurio (`160.00`→`60.00` y `1693.00`→`693.00`) únicamente cuando
 los centavos coinciden exactamente con el delta del saldo. También existe un
+fallback de idiomas en Vision: si el dispositivo no admite las etiquetas
+regionales `es-MX`/`en-US`, reintenta con `es`/`en` y finalmente con el catálogo
+predeterminado, sin saltarse las validaciones de filas ni la conciliación.
+En Amex, las filas OCR ahora se anclan al inicio de la tabla y no al encabezado
+de portada repetido. Para compras en moneda extranjera se toma el importe local
+en la columna monetaria alineada a la derecha, incluso cuando la línea de
+moneda/tipo de cambio aparece después o cuando Vision devuelve toda la fila como
+una sola observación. Nunca se usa el importe de origen (por ejemplo,
+`183,600.00` COP no puede convertirse en un cargo de `183,600.00` MXN cuando el
+estado declara `1,031.17` MXN). La regla cuenta con fixtures nativos que cubren
+portada con fecha, compra nacional, fila extranjera tokenizada y fila extranjera
+completa; una fila solo se libera después de conciliar con los totales del
+emisor.
 runner nativo de corpus (`NativeCorpusContractTests`)
 que recibe `MARCELITO_PDF_CORPUS_DIR`, procesa los ocho PDFs con
 `PDFDocument + Vision`, verifica los estados de texto y emite un informe
@@ -232,6 +245,20 @@ El evaluador web también contrasta en los estados Amex de texto el límite,
 crédito disponible, deuda comprometida, pago para no generar intereses, mínimo
 más MSI y principal MSI pendiente; estos controles son independientes de las
 filas para evitar que una deuda mal extraída pase por una conciliación parcial.
+
+La capa multimodal opcional ya está implementada en
+`server/statement-reader.mjs`. Recibe el PDF completo en un proxy autenticado,
+exige el contrato JSON estricto y devuelve únicamente la extracción validada y
+su huella. La aplicación no la activa por defecto: requiere configurar
+`VITE_STATEMENT_READER_URL` y una autorización temporal. La plantilla
+`.env.example` muestra los nombres de variables sin contener secretos; la
+certificación de precisión sigue pendiente de ejecutar el proxy con un modelo
+visual y un corpus privado.
+El proxy aplica además la misma compuerta de confianza visual que el cliente:
+media de filas ≥88% y media mínima por página ≥78%; por eso un modelo no puede
+declarar `mode: "text"` para eludir una lectura multimodal débil. La pantalla
+de revisión conserva ese estado como `review` y el libro canónico lo vuelve a
+comprobar antes de calcular cualquier cifra.
 La ejecución está encapsulada en `apps/ios/scripts/run-native-corpus.sh`, que
 conserva el `.xcresult` y el log para que cada calibración sea reproducible.
 El runner puede ejecutar el verificador automáticamente con
@@ -243,3 +270,36 @@ importación queda provisional y no puede autoalimentar los KPI. La calibración
 solo se considera válida si los anclajes monetarios aparecen junto con `FECHA`
 y `DESCRIPCIÓN` en la misma página y línea visual; tampoco se combinan
 etiquetas de resúmenes o páginas distintas.
+
+## Endurecimientos añadidos en la revisión actual
+
+- El contrato multimodal exige que el fragmento de evidencia contenga el
+  importe literal de la fila además del comercio. El proxy y el cliente aplican
+  la misma regla, por lo que una respuesta que copia bien el nombre pero elige
+  un saldo, folio o referencia queda bloqueada.
+- Una relectura multimodal conserva el emisor institucional verificado por el
+  lector local cuando el proveedor confunde una contraparte (por ejemplo,
+  Santander mencionado dentro de un SPEI de un estado BBVA). El desacuerdo se
+  conserva como evidencia de diagnóstico y no se oculta.
+- Vision para Amex calcula la posición de cada importe aun cuando devuelve la
+  fila completa en una sola observación. Prioriza el importe MXN antes o
+  después del marcador de moneda; si falta el importe local, descarta la fila
+  en vez de convertir pesos colombianos, dólares o el tipo de cambio en gasto.
+- La revisión incrementa la `readerVersion`, por lo que una actualización no
+  reutiliza silenciosamente filas producidas por una regla anterior: los PDFs
+  se reconstruyen y los estados no conciliados permanecen en cuarentena.
+
+## Checklist de aceptación antes de decir “99%”
+
+1. Cada PDF del manifiesto tiene un resultado y una huella distinta; ningún
+   duplicado cuenta como cobertura.
+2. Cada fila aceptada coincide con golden en fecha, importe, dirección,
+   comercio normalizado, tipo y página; la evidencia contiene descripción e
+   importe.
+3. Sumas y conteos del emisor concilian dentro de $0.05; los estados que no
+   concilian no alimentan ninguna pantalla.
+4. Las identidades de flujo, patrimonio, deuda y saldo de efectivo pasan.
+5. La precisión de aceptación automática es ≥99%, la cobertura de archivos es
+   100% y no existen falsos positivos administrativos.
+6. La versión certificada del dispositivo coincide exactamente con la versión
+   del lector que se va a publicar.

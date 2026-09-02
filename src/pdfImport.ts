@@ -3,7 +3,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-2026.08.31.8";
+export const PDF_READER_VERSION = "web-reader-2026.09.01.9";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
@@ -279,7 +279,28 @@ export function shouldUseOCR(extractedText: string) {
   // a date followed on the same visual/text line by a plausible decimal
   // amount before trusting the selectable layer; otherwise Vision must inspect
   // the rendered page.
-  const hasMovementRowSignal = /(?:\b\d{1,2}[-/.]\d{1,2}[-/.](?:20)?\d{2}\b|\b\d{1,2}[-/]\w{3,}(?:[-/](?:20)?\d{2})?\b|\b\d{1,2}\s+(?:de\s+)?(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|ago|sep|set|oct|nov|dic)\b)[^\r\n]{0,180}(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?!\d)/i.test(extractedText);
+  const sameLineMovementRowSignal = /(?:\b\d{1,2}[-/.]\d{1,2}[-/.](?:20)?\d{2}\b|\b\d{1,2}[-/]\w{3,}(?:[-/](?:20)?\d{2})?\b|\b\d{1,2}\s+(?:de\s+)?(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\b)[^\r\n]{0,180}(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?!\d)/i.test(extractedText);
+  // Amex selectable PDFs commonly place the RFC/reference between the
+  // merchant and amount. This is still a trustworthy text table: route it
+  // through the positional parser instead of OCR, which can turn references
+  // and balances into transactions. Look ahead only a few lines from a
+  // date-anchored row and reject administrative windows.
+  const dateAtLineStart = /^\s*(?:\d{1,2}[-/.]\d{1,2}(?:[-/.](?:20)?\d{2})?|\d{1,2}[-/]\w{3,}(?:[-/](?:20)?\d{2})?|\d{1,2}\s+(?:de\s+)?(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic))(?:\b|\s)/i;
+  const amountOnLine = /(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])/i;
+  const administrativeWindows = [
+    "saldo anterior", "saldo inicial", "saldo final", "saldo disponible",
+    "fecha de corte", "fecha limite", "periodo de facturacion",
+    "numero de cuenta", "no. de cuenta", "total importe",
+    "total de las transacciones", "resumen de meses",
+  ];
+  const continuationMovementRowSignal = extractedText.split(/\r?\n/).some((rawLine, index, lines) => {
+    const line = rawLine.trim();
+    if (!line || !dateAtLineStart.test(line)) return false;
+    const window = lines.slice(index, index + 4).join(" ");
+    const folded = normalizeText(window);
+    return amountOnLine.test(window) && !administrativeWindows.some((phrase) => folded.includes(phrase));
+  });
+  const hasMovementRowSignal = sameLineMovementRowSignal || continuationMovementRowSignal;
   return !hasDateSignal || !hasTableSignal || !hasMovementRowSignal;
 }
 
@@ -688,6 +709,25 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       const difference = netForeignChargeTotal - summary.foreignTransactionTotal;
       if (Math.abs(difference) > tolerance) sectionDifferences.push(`moneda extranjera ${difference.toFixed(2)}`);
     }
+    const rawCreditIdentityDifference = summary.creditLimit !== undefined
+      && summary.creditAvailable !== undefined
+      && summary.debtBalance !== undefined
+      ? summary.creditLimit - summary.creditAvailable - summary.debtBalance
+      : undefined;
+    // Keep the public audit value in currency precision. The source amounts
+    // are cent-based, but converting them to JS numbers can leave a tiny
+    // binary floating-point residue (for example 7e-12 instead of 0).
+    const creditIdentityDifference = rawCreditIdentityDifference === undefined
+      ? undefined
+      : Number(rawCreditIdentityDifference.toFixed(2));
+    if (summary.creditLimit !== undefined
+        && summary.creditAvailable !== undefined
+        && summary.creditAvailable - summary.creditLimit > tolerance) {
+      sectionDifferences.push(`crédito disponible supera límite ${(summary.creditAvailable - summary.creditLimit).toFixed(2)}`);
+    }
+    if (creditIdentityDifference !== undefined && Math.abs(creditIdentityDifference) > tolerance) {
+      sectionDifferences.push(`identidad de crédito ${creditIdentityDifference.toFixed(2)}`);
+    }
     const invalid = transactions.length === 0 && declaredCharges > tolerance
       || Math.abs(chargeDifference) > tolerance
       || (summary.payments !== undefined && Math.abs(paymentDifference) > tolerance)
@@ -700,6 +740,7 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       extractedForeignChargeTotal,
       extractedCreditTotal,
       extractedPaymentTotal,
+      creditIdentityDifference,
       extractedMovementCount: transactions.length,
       reason: invalid ? `Las filas no concilian con cargos/pagos del estado (cargos ${chargeDifference.toFixed(2)}, pagos ${paymentDifference.toFixed(2)}${sectionDifferences.length ? `, secciones ${sectionDifferences.join("; ")}` : ""})` : undefined,
     };
@@ -1219,7 +1260,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       // A fixed high scale can allocate hundreds of megabytes for a scanned
       // poster or a high-DPI export. Adapt the scale to keep OCR within a
       // predictable browser memory envelope while giving bank-sized pages
-      // roughly 200 DPI. This materially improves decimal/date recognition
+      // roughly 220 DPI. This materially improves decimal/date recognition
       // on the Santander scans without weakening the confidence gate.
       const baseViewport = page.getViewport({ scale: 1 });
       const scale = adaptiveOcrScale(baseViewport.width, baseViewport.height);
@@ -1297,7 +1338,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
 
 /**
  * Chooses a bounded render scale for browser OCR. Typical letter/A4 bank pages
- * land near 200 DPI, while unusually large pages are capped by both their
+ * land near 220 DPI, while unusually large pages are capped by both their
  * longest edge and pixel area to avoid exhausting the browser process.
  */
 export function adaptiveOcrScale(width: number, height: number) {
@@ -1305,7 +1346,7 @@ export function adaptiveOcrScale(width: number, height: number) {
   const safeHeight = Number.isFinite(height) && height > 0 ? height : 1;
   const baseDimension = Math.max(safeWidth, safeHeight, 1);
   const baseArea = Math.max(safeWidth * safeHeight, 1);
-  return Math.max(0.75, Math.min(3, 2800 / baseDimension, Math.sqrt(16_000_000 / baseArea)));
+  return Math.max(0.75, Math.min(3.1, 2800 / baseDimension, Math.sqrt(16_000_000 / baseArea)));
 }
 
 export async function inspectPdf(file: File, onProgress: (value: number, label: string) => void): Promise<ImportResult> {

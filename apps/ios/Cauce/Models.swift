@@ -553,7 +553,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.09.01.17"
+    static let readerVersion = "ios-reader-2026.09.01.26"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -597,6 +597,59 @@ final class FinanceStore {
         )
     }
 
+    /// Proves a selectable PDF text layer against the same issuer controls
+    /// used by the import path. This seam lets the contract suite verify that
+    /// a multiline Amex table avoids OCR when its rows are already auditable.
+    static func selectableTextLayerReconcilesForTesting(
+        text: String,
+        fileName: String,
+        sourceOverride: String? = nil,
+        kindOverride: StatementKind? = nil
+    ) -> Bool {
+        textLayerReconciles(
+            text: text,
+            fileName: fileName,
+            sourceOverride: sourceOverride,
+            kindOverride: kindOverride
+        )
+    }
+
+#if DEBUG
+    /// Compact probe used by the native contract when a text-layer fixture
+    /// fails. It is compiled only for tests/debug builds and never persisted
+    /// or shown in the application; keeping it here makes a boolean gate
+    /// diagnosable without logging a user's PDF contents.
+    static func selectableTextLayerDebugForTesting(
+        text: String,
+        fileName: String,
+        sourceOverride: String? = nil,
+        kindOverride: StatementKind? = nil
+    ) -> String {
+        let evidence = sourceDetection(from: text, fileName: fileName)
+        let cleanedOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = cleanedOverride?.isEmpty == false ? cleanedOverride! : evidence.source
+        let kind = kindOverride ?? statementKind(from: text, source: source)
+        let repaired = rebuildAmexSelectableLines(text)
+        let rows = parse(text: repaired, fileName: fileName, sourceHint: source)
+        let statementSummary = summary(from: repaired, source: source)
+        let reconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
+            kind: kind,
+            summary: statementSummary,
+            movements: rows
+        )
+        let probeStore = FinanceStore(reconciliationOnly: true)
+        let rowText = rows.map { movement in
+            "\(movement.title)=\(NSDecimalNumber(decimal: movement.amount).stringValue)/\(probeStore.movementKind(movement).rawValue)/\(movement.foreignCurrency)"
+        }.joined(separator: " || ")
+        let summaryText = [
+            "domestic=\(statementSummary?.domesticTransactionTotal.map { NSDecimalNumber(decimal: $0).stringValue } ?? "nil")",
+            "foreign=\(statementSummary?.foreignTransactionTotal.map { NSDecimalNumber(decimal: $0).stringValue } ?? "nil")",
+            "charges=\(statementSummary?.newCharges.map { NSDecimalNumber(decimal: $0).stringValue } ?? "nil")"
+        ].joined(separator: ",")
+        return "source=\(source), kind=\(kind.rawValue), rows=\(rows.count), reconciliation=\(reconciliation.status.rawValue), reason=\(reconciliation.reason ?? "nil"), \(summaryText), parsed=\(rowText), repaired=\(repaired.replacingOccurrences(of: "\\n", with: "|"))"
+    }
+#endif
+
     /// Exposes the issuer-total control to the native reader contract tests
     /// without making the reconciliation implementation part of the app API.
     static func reconcileStatementForTesting(
@@ -604,7 +657,7 @@ final class FinanceStore {
         summary: StatementSummaryRecord?,
         movements: [Movement]
     ) -> StatementReconciliationRecord {
-        FinanceStore().reconcileStatement(kind: kind, summary: summary, movements: movements)
+        FinanceStore(reconciliationOnly: true).reconcileStatement(kind: kind, summary: summary, movements: movements)
     }
 
     /// Runs the Santander visual row reader against normalized Vision-like
@@ -651,6 +704,30 @@ final class FinanceStore {
             )
         }
         return parseSantanderOCRResult(observations, fileName: fileName).columnsCalibrated
+    }
+
+    /// Runs the Amex visual row reader against normalized Vision-like
+    /// observations. Keeping this seam beside the Santander fixture helper
+    /// lets the contract suite lock down foreign-currency amount selection
+    /// without shipping a private statement or invoking Vision in CI.
+    static func amexOCRRowsForTesting(
+        _ fixtures: [OCRObservationFixture],
+        fileName: String
+    ) -> [Movement] {
+        let observations = fixtures.map { fixture in
+            OCRObservation(
+                page: fixture.page,
+                text: fixture.text,
+                boundingBox: CGRect(
+                    x: fixture.x,
+                    y: fixture.y,
+                    width: fixture.width,
+                    height: fixture.height
+                ),
+                confidence: fixture.confidence
+            )
+        }
+        return parseAmexOCR(ocrLines(from: observations), fileName: fileName)
     }
 
     /// Decides whether a PDF's selectable text is structurally usable. Kept
@@ -1862,6 +1939,17 @@ final class FinanceStore {
         )
     }
 
+    /// Creates an isolated, empty store for parser-only probes. It must never
+    /// read or write UserDefaults: PDF extraction can call this from a detached
+    /// background task while the live store is committing a ledger snapshot.
+    private init(reconciliationOnly: Bool) {
+        movements = []
+        statements = []
+        ledgerVersion = UUID()
+        lastAuditRun = nil
+        lastImportedFile = nil
+    }
+
     func updateCategory(for movement: Movement, to category: String) {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return }
         movements[index].category = category
@@ -2625,6 +2713,44 @@ final class FinanceStore {
         )
     }
 
+    private static func textLayerReconciles(
+        text: String,
+        fileName: String,
+        sourceOverride: String?,
+        kindOverride: StatementKind?
+    ) -> Bool {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
+        let detectedSourceEvidence = sourceDetection(from: text, fileName: fileName)
+        let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let source = cleanedSourceOverride.flatMap { $0.isEmpty ? nil : $0 } ?? detectedSourceEvidence.source
+        let kind = kindOverride ?? statementKind(from: text, source: source)
+        let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let layoutNormalized = normalized
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Rebuild Amex's known flattened layout, but let bank PDFs use the
+        // same proof when their text layer is genuinely tabular. A hidden
+        // administrative layer cannot pass this probe: it must yield rows
+        // that reconcile with the issuer totals before Vision is skipped.
+        let isAmexLayout = source.localizedCaseInsensitiveContains("Amex")
+            && kind == .card
+            && (normalized.contains("fecha y detalle de las operaciones")
+                || layoutNormalized.contains("fecha y detalle de las operaciones"))
+        let structuredText = isAmexLayout ? Self.rebuildAmexSelectableLines(text) : text
+        let candidates = parse(text: structuredText, fileName: fileName, sourceHint: source)
+        guard !candidates.isEmpty else { return false }
+        // This probe runs from the detached PDF/OCR task. Constructing the
+        // normal store here would read and rewrite UserDefaults (and could
+        // race the live store while an import is in progress). The
+        // reconciliation-only initializer has no persistence side effects;
+        // the probe therefore stays a pure validation of parser output.
+        return FinanceStore(reconciliationOnly: true).reconcileStatement(
+            kind: kind,
+            summary: summary(from: structuredText, source: source),
+            movements: candidates
+        ).status == .valid
+    }
+
     private static func extractPDF(
         data: Data,
         fileName: String,
@@ -2643,14 +2769,48 @@ final class FinanceStore {
             throw FinanceImportError.documentTooManyPages
         }
 
+        // Keep a page sentinel in the selectable-text path as well as in the
+        // Vision path. Without it, PDFKit's joined string left every direct
+        // row with `page == nil`; the accounting result could reconcile but
+        // the evidence gate then quarantined the entire statement. The
+        // parser treats these sentinels as structural markers and carries the
+        // real 1-based page into each movement's provenance.
         let extractedText = (0..<document.pageCount)
-            .compactMap { document.page(at: $0)?.string }
+            .compactMap { index -> String? in
+                guard let pageText = document.page(at: index)?.string,
+                      !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return "__PDF_PAGE_\(index + 1)__\n\(pageText)"
+            }
             .joined(separator: "\n")
-        // A short administrative text layer is not a trustworthy movement
-        // table; send it through Vision rather than parsing header numbers.
-        let usedOCR = Self.shouldUseOCR(extractedText: extractedText, allowOCR: allowOCR)
-        let ocrObservations = usedOCR ? Self.ocrObservations(from: document) : []
-        let text = usedOCR ? Self.ocrText(from: ocrObservations) : extractedText
+        let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        // A PDF can expose a text layer even when its line breaks are unusual
+        // enough to trip the generic OCR heuristic. Before rendering every
+        // page through Vision, prove that the text-only rows reconcile with
+        // the issuer controls. This is the same safety rule used at commit
+        // time, so a hidden administrative layer cannot win by accident.
+        let textLayerReconciles = Self.textLayerReconciles(
+            text: extractedText,
+            fileName: fileName,
+            sourceOverride: cleanedSourceOverride,
+            kindOverride: kindOverride
+        )
+
+        // A short administrative layer is not a trustworthy movement table;
+        // a structured layer that failed reconciliation is not trustworthy
+        // either. In both cases run Vision as a recovery pass. This closes a
+        // subtle gap where a malformed text layer contained enough dates and
+        // numbers to make `shouldUseOCR` return false while still producing
+        // the wrong rows. A valid, reconciled layer remains the fast path and
+        // avoids a lossy OCR round-trip (especially for Amex's split columns).
+        let shouldAttemptOCR = allowOCR && !textLayerReconciles
+        let ocrObservations = shouldAttemptOCR ? Self.ocrObservations(from: document) : []
+        let ocrText = Self.ocrText(from: ocrObservations)
+        let usedOCR = shouldAttemptOCR && !ocrObservations.isEmpty
+        // If Vision cannot produce a single observation, keep the original
+        // text so the caller receives the normal reconciliation diagnostics
+        // instead of an opaque "empty PDF" error.
+        let text = usedOCR ? ocrText : extractedText
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FinanceImportError.emptyDocument
         }
@@ -2685,7 +2845,6 @@ final class FinanceStore {
         }
 
         let detectedSourceEvidence = Self.sourceDetection(from: text, fileName: fileName)
-        let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
         let sourceDetection = cleanedSourceOverride.flatMap { override -> SourceDetectionEvidence? in
             guard !override.isEmpty else { return nil }
             return SourceDetectionEvidence(
@@ -2735,7 +2894,14 @@ final class FinanceStore {
             return corrected
         }
         let period = Self.periodLabel(from: text, fileName: fileName)
-        let summary = Self.summary(from: text, source: source)
+        // Keep summary extraction on the same repaired Amex layout used for
+        // rows. When PDFKit flattens the page, a single line containing every
+        // section would otherwise make `lastAmountOnLabel` pick the final MSI
+        // total for both domestic and foreign controls.
+        let summaryText = source.localizedCaseInsensitiveContains("Amex") && kind == .card
+            ? Self.rebuildAmexSelectableLines(text)
+            : text
+        let summary = Self.summary(from: summaryText, source: source)
         let ocrFallbackNeedsReview = usedOCR && candidates.contains {
             guard let evidence = $0.extractionEvidence else { return true }
             return evidence.method != "vision-ocr" || evidence.confidence < 0.88
@@ -3218,6 +3384,12 @@ final class FinanceStore {
         let text: String
         let x: CGFloat
         let order: Int
+        /// Index and UTF-16 offset of the token inside Vision's observation.
+        /// When Vision returns an entire row as one box, this lets the parser
+        /// distinguish a local MXN amount before a foreign-currency marker
+        /// from the source amount that follows it.
+        let observationIndex: Int
+        let characterOffset: Int
     }
 
     /// Visual column anchors for a Santander table. The statement examples
@@ -3259,51 +3431,99 @@ final class FinanceStore {
 
     private static func ocrObservations(from document: PDFDocument) -> [OCRObservation] {
         var observations: [OCRObservation] = []
-        let pageSize = CGSize(width: 1800, height: 2400)
         let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
+        // Render from the page's real aspect ratio instead of assuming every
+        // statement is US Letter. Keep a hard pixel budget so a high-DPI
+        // export cannot allocate an unbounded bitmap on the iPhone. The
+        // normal pass matches the previous ~2.4k long edge; a weak page gets
+        // one bounded detail pass before the contrast retry.
+        func renderSize(for page: PDFPage, longEdge: CGFloat) -> CGSize {
+            let bounds = page.bounds(for: .mediaBox).standardized
+            let width = max(abs(bounds.width), 1)
+            let height = max(abs(bounds.height), 1)
+            let requestedScale = longEdge / max(width, height)
+            let maxPixels: CGFloat = 5_000_000
+            let pixelScale = sqrt(maxPixels / max(width * height, 1))
+            let scale = min(requestedScale, pixelScale)
+            return CGSize(
+                width: max(800, (width * scale).rounded()),
+                height: max(800, (height * scale).rounded())
+            )
+        }
+
+        func render(_ page: PDFPage, longEdge: CGFloat) -> CGImage? {
+            let image = page.thumbnail(
+                of: renderSize(for: page, longEdge: longEdge),
+                for: .mediaBox
+            )
+            return image.cgImage
+        }
+
         func recognize(_ cgImage: CGImage, page: Int) -> [OCRObservation] {
-            let request = VNRecognizeTextRequest()
-            request.recognitionLevel = .accurate
-            request.recognitionLanguages = ["es-MX", "en-US"]
-            // Keep a small, issuer-specific vocabulary so Vision prefers the
-            // labels that anchor bank columns and issuer detection. Numeric
-            // tokens are intentionally absent: amounts must come from the
-            // visual candidate and reconciliation rules, never a dictionary.
-            request.customWords = [
-                "SANTANDER", "BBVA", "BANCOMER", "AMERICAN EXPRESS", "AMEX",
-                "DEPÓSITOS", "RETIROS", "CARGOS", "ABONOS", "SALDO",
-                "DESCRIPCIÓN", "DETALLE", "MOVIMIENTOS", "FECHA",
-                "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE",
-                "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
-            ]
-            request.usesLanguageCorrection = true
+            // Some iOS revisions expose only the base language identifiers
+            // ("es"/"en") even though the regional BCP-47 tags are accepted
+            // on newer devices. A rejected language list used to make Vision
+            // return zero observations for an otherwise legible Santander
+            // page. Retry with progressively less specific language hints;
+            // this changes no acceptance rule because every resulting row
+            // still needs a valid date, direction and issuer reconciliation.
+            func run(languages: [String]?) -> [OCRObservation]? {
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                if let languages {
+                    request.recognitionLanguages = languages
+                }
+                // Keep a small, issuer-specific vocabulary so Vision prefers
+                // the labels that anchor bank columns and issuer detection.
+                // Numeric tokens are intentionally absent: amounts must come
+                // from the visual candidate and reconciliation rules, never a
+                // dictionary.
+                request.customWords = [
+                    "SANTANDER", "BBVA", "BANCOMER", "AMERICAN EXPRESS", "AMEX",
+                    "DEPÓSITOS", "RETIROS", "CARGOS", "ABONOS", "SALDO",
+                    "DESCRIPCIÓN", "DETALLE", "MOVIMIENTOS", "FECHA",
+                    "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE",
+                    "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+                ]
+                request.usesLanguageCorrection = true
 
-            do {
-                try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
-            } catch {
-                return []
-            }
-
-            return (request.results ?? []).compactMap { result -> OCRObservation? in
-                guard let candidate = result.topCandidates(1).first,
-                      !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                do {
+                    try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
+                } catch {
                     return nil
                 }
-                let text = candidate.string
-                return OCRObservation(
-                    page: page,
-                    text: text,
-                    boundingBox: result.boundingBox,
-                    confidence: Double(candidate.confidence)
-                )
-            }
-            .sorted {
-                if abs($0.centerY - $1.centerY) > 0.008 {
-                    return $0.centerY > $1.centerY
+
+                return (request.results ?? []).compactMap { result -> OCRObservation? in
+                    guard let candidate = result.topCandidates(1).first,
+                          !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                        return nil
+                    }
+                    let text = candidate.string
+                    return OCRObservation(
+                        page: page,
+                        text: text,
+                        boundingBox: result.boundingBox,
+                        confidence: Double(candidate.confidence)
+                    )
                 }
-                return $0.centerX < $1.centerX
+                .sorted {
+                    if abs($0.centerY - $1.centerY) > 0.008 {
+                        return $0.centerY > $1.centerY
+                    }
+                    return $0.centerX < $1.centerX
+                }
             }
+
+            let preferred = run(languages: ["es-MX", "en-US"])
+            if let preferred, !preferred.isEmpty { return preferred }
+            let baseLanguages = run(languages: ["es", "en"])
+            if let baseLanguages, !baseLanguages.isEmpty { return baseLanguages }
+            // Only run the unconstrained pass after a language-specific pass
+            // failed or produced no text. Blank pages therefore remain cheap,
+            // while devices with a different Vision language catalog still
+            // get a chance to read the table.
+            return run(languages: nil) ?? baseLanguages ?? preferred ?? []
         }
 
         func meanConfidence(_ pageObservations: [OCRObservation]) -> Double {
@@ -3324,18 +3544,31 @@ final class FinanceStore {
         for pageIndex in 0..<document.pageCount {
             autoreleasepool {
                 guard let page = document.page(at: pageIndex) else { return }
-                let image = page.thumbnail(of: pageSize, for: .mediaBox)
-                guard let cgImage = image.cgImage else { return }
+                guard let cgImage = render(page, longEdge: 2_400) else { return }
 
                 let baseObservations = recognize(cgImage, page: pageIndex)
                 var selectedObservations = baseObservations
+                var selectedImage = cgImage
+                let baseConfidence = meanConfidence(baseObservations)
+                // Small print and faint scan artifacts can produce a high
+                // count of low-confidence tokens even when the page is
+                // otherwise readable. Re-render only weak pages at a larger
+                // long edge; the pixel cap above keeps this bounded.
+                if baseConfidence < 0.88,
+                   let detailImage = render(page, longEdge: 3_200) {
+                    let detailObservations = recognize(detailImage, page: pageIndex)
+                    if meanConfidence(detailObservations) > meanConfidence(selectedObservations) {
+                        selectedObservations = detailObservations
+                        selectedImage = detailImage
+                    }
+                }
                 // A contrast pass is attempted only for visually weak pages.
                 // It is bounded to one temporary image and the original
                 // result wins whenever the retry does not improve confidence.
-                if meanConfidence(baseObservations) < 0.88,
-                   let contrastImage = enhancedImage(from: cgImage) {
+                if meanConfidence(selectedObservations) < 0.88,
+                   let contrastImage = enhancedImage(from: selectedImage) {
                     let contrastObservations = recognize(contrastImage, page: pageIndex)
-                    if meanConfidence(contrastObservations) > meanConfidence(baseObservations) {
+                    if meanConfidence(contrastObservations) > meanConfidence(selectedObservations) {
                         selectedObservations = contrastObservations
                     }
                 }
@@ -3397,6 +3630,74 @@ final class FinanceStore {
         let text: String
     }
 
+    /// PDFKit may concatenate adjacent text objects into one long string even
+    /// when the source PDF has a visually tabular layout. Amex rows are
+    /// anchored by a date, so restore those boundaries (and the known section
+    /// headers) before the normal parser runs. This is intentionally a
+    /// structural-only repair: no characters or amounts are changed, and the
+    /// issuer-total reconciliation remains the acceptance gate.
+    private static func rebuildAmexSelectableLines(_ text: String) -> String {
+        var value = text.replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+
+        // Match complete markers/tokens and record their start positions. A
+        // previous zero-width replacement implementation could make Swift's
+        // regex engine revisit an already separated line and change valid
+        // fixtures. Rebuilding from concrete ranges is idempotent and leaves
+        // every original character untouched.
+        let boundaries = [
+            #"(?i)fecha\s+y\s+detalle\s+de\s+las\s+operaciones"#,
+            #"(?i)total\s+de\s+las\s+transacciones\s+en"#,
+            #"(?i)total\s+de\s+transacciones\s+en\s+moneda\s+extranjera"#,
+            #"(?i)transacciones\s+de\s+meses\s+sin\s+intereses"#,
+            #"(?i)descripcion\s+de\s+compras\s+en\s+meses\s+sin\s+intereses"#,
+            #"(?i)total\s+de\s+(?:meses|plan\s+de\s+meses)\s+sin\s+intereses"#,
+            // Require a real month token. A broad "digits + whitespace +
+            // letters" pattern can mistake the cents of `950.00` followed
+            // by `Nuevas` or `Total` for a date and split a valid amount.
+            // Restricting the structural repair to known Spanish months
+            // keeps OCR variants such as AG0 while making the operation
+            // idempotent for already structured rows.
+            #"(?i)(?<![A-Za-z0-9.,])(?:(?:0?[1-9]|[12]\d|3[01]|[OBI][0-9]?|[0-9][OBI])\s*[\/-]\s*(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ag(?:o|0)(?:sto)?|sep(?:t|tiembre)?|set(?:t|iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)(?:\s*[\/-]\s*(?:20)?\d{2})?|(?:0?[1-9]|[12]\d|3[01]|[OBI][0-9]?|[0-9][OBI])\s+(?:de\s*)?(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ag(?:o|0)(?:sto)?|sep(?:t|tiembre)?|set(?:t|iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)(?:\s+(?:de\s+)?\d{4})?)(?![A-Za-z])"#,
+        ]
+        // Keep offsets in the original UTF-16 string. Mutating a Swift
+        // `String` while iterating stored `String.Index` values is not safe:
+        // even right-to-left insertions can invalidate indices and leave a
+        // flattened fixture unrepaired. The one-pass rebuild below never
+        // mutates the source while matching.
+        let original = value as NSString
+        let originalRange = NSRange(location: 0, length: original.length)
+        var positions = Set<Int>()
+        for pattern in boundaries {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: value, range: originalRange) {
+                positions.insert(match.range.location)
+            }
+        }
+        guard !positions.isEmpty else { return value }
+
+        var rebuilt = String()
+        var cursor = 0
+        for position in positions.sorted() {
+            guard position >= cursor, position <= original.length else { continue }
+            if position > cursor {
+                rebuilt += original.substring(with: NSRange(location: cursor, length: position - cursor))
+            }
+            if position > 0 {
+                let previous = original.substring(with: NSRange(location: position - 1, length: 1))
+                if previous != "\n" && !rebuilt.hasSuffix("\n") {
+                    rebuilt.append("\n")
+                }
+            }
+            cursor = position
+        }
+        if cursor < original.length {
+            rebuilt += original.substring(from: cursor)
+        }
+        return rebuilt
+    }
+
     private static func parse(text: String, fileName: String, sourceHint: String? = nil) -> [Movement] {
         let dateRegex = try? NSRegularExpression(
             pattern: #"(?<!\d)(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?!\d)"#
@@ -3432,6 +3733,9 @@ final class FinanceStore {
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: .current
         )
+        let documentLayoutNormalized = documentNormalized
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let account = filenameAccount == "Importado"
             ? accountName(from: documentNormalized)
             : filenameAccount
@@ -3468,7 +3772,8 @@ final class FinanceStore {
         // Restrict row anchors to those tables; dates in page headers,
         // payment instructions and the MSI summary are not movements.
         let amexSectionAware = isAmexText
-            && documentNormalized.contains("fecha y detalle de las operaciones")
+            && (documentNormalized.contains("fecha y detalle de las operaciones")
+                || documentLayoutNormalized.contains("fecha y detalle de las operaciones"))
         var amexSection = 0 // 0: outside, 1: domestic, 2: foreign, 3: MSI
         var rows: [ParsedTextRow] = []
         var pendingRow = ""
@@ -3501,7 +3806,8 @@ final class FinanceStore {
                 return match
             }.first
         }
-        for rawLine in text.components(separatedBy: .newlines) {
+        let textForRows = amexSectionAware ? Self.rebuildAmexSelectableLines(text) : text
+        for rawLine in textForRows.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             guard line.count > 1 else { continue }
             let normalizedLine = line.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
@@ -3956,7 +4262,9 @@ final class FinanceStore {
                     value: value,
                     text: match.text,
                     x: observation.boundingBox.minX,
-                    order: observationOrder * 100 + matchOrder
+                    order: observationOrder * 100 + matchOrder,
+                    observationIndex: observationOrder,
+                    characterOffset: match.range.location
                 )
             }
         }.sorted { $0.order < $1.order }
@@ -4311,12 +4619,31 @@ final class FinanceStore {
                 guard let value = parseAmount(match.text), abs(value) > 0, abs(value) < 10_000_000 else {
                     continue
                 }
+                // Vision can return the complete Santander row as one
+                // observation (date, description, movement and running
+                // balance in a single bounding box). Using only
+                // `boundingBox.minX` for every token makes the column filter
+                // blind and can select a folio or the saldo corrido. Estimate
+                // the token's horizontal position from its character offset
+                // inside that observation. Separate observations keep their
+                // original geometry, while whole-row observations regain the
+                // same deposit/withdrawal/saldo distinction as the visual
+                // table.
+                let utfLength = max(observation.text.utf16.count, 1)
+                let matchCenter = CGFloat(match.range.location + (match.range.length / 2))
+                let relativeX = min(max(matchCenter / CGFloat(utfLength), 0), 1)
+                let visualX = min(
+                    max(observation.boundingBox.minX + observation.boundingBox.width * relativeX, 0),
+                    1
+                )
                 amountCandidates.append(
                     OCRAmountCandidate(
                         value: value,
                         text: match.text,
-                        x: observation.boundingBox.minX,
-                        order: observationOrder * 100 + matchOrder
+                        x: visualX,
+                        order: observationOrder * 100 + matchOrder,
+                        observationIndex: observationOrder,
+                        characterOffset: match.range.location
                     )
                 )
             }
@@ -4325,26 +4652,57 @@ final class FinanceStore {
 
         // On Santander's table the deposit and withdrawal columns sit before
         // the running balance. Prefer those columns so the balance is never
-        // mistaken for a purchase.
+        // mistaken for a purchase. When Vision returns the complete row as a
+        // single observation, the estimated x coordinate can drift toward the
+        // balance boundary because the description occupies most of the box;
+        // in that shape the final two monetary tokens are the safest pair:
+        // penultimate = movement, last = running balance.
+        let orderedAmountCandidates = amountCandidates.sorted { $0.order < $1.order }
+        let isWholeRowObservation = orderedAmountCandidates.count >= 2
+            && Set(orderedAmountCandidates.map(\.observationIndex)).count == 1
+        // A second failure mode seen on-device is a row split into two very
+        // wide boxes (for example, description+movement and balance). The
+        // estimated token coordinates then overlap even though the OCR
+        // observations are technically different. Treat that geometry as a
+        // collapsed whole-row observation too; Santander rows contain one
+        // movement amount followed by one running balance, so the penultimate
+        // and final monetary tokens are the only safe pair. Without this
+        // guard a balance can still win the fallback column filter and become
+        // a false expense when Vision returns broad boxes.
+        let amountXs = orderedAmountCandidates.map(\.x)
+        let geometrySpan = (amountXs.max() ?? 0) - (amountXs.min() ?? 0)
+        let hasWideObservation = row.contains { $0.boundingBox.width >= 0.42 }
+        let isCollapsedRowGeometry = orderedAmountCandidates.count >= 2
+            && hasWideObservation
+            // A wide description+movement box can place its amount near the
+            // far right edge while the balance box starts around the middle
+            // of the page. Their estimated token centers can therefore be
+            // ~0.20 apart even though they are the final movement/balance
+            // pair. Keep the bound below the normal movement-to-balance
+            // column gap and only apply it when Vision already reported a
+            // broad, layout-collapsed observation.
+            && geometrySpan < 0.24
+        let useWholeRowPair = isWholeRowObservation || isCollapsedRowGeometry
+        let wholeRowMovement = useWholeRowPair ? orderedAmountCandidates.dropLast().last : nil
+        let wholeRowBalance = useWholeRowPair ? orderedAmountCandidates.last : nil
         let columnCandidates = amountCandidates.filter { $0.x >= columns.movementMinX && $0.x < columns.balanceMinX }
-        let selected = columnCandidates.sorted { $0.order < $1.order }.first
+        let selected = wholeRowMovement
+            ?? columnCandidates.sorted { $0.order < $1.order }.first
             ?? { () -> OCRAmountCandidate? in
                 let fallbackCandidates = amountCandidates
                     .filter { $0.x < 0.90 && ($0.text.contains(".") || $0.text.contains(",")) }
                     .sorted { $0.order < $1.order }
-                // If Vision returns the whole row as one observation, the
-                // final amount is usually the running balance. Use the
-                // penultimate amount (the transaction) in that case.
                 if fallbackCandidates.count > 1 {
                     return fallbackCandidates[fallbackCandidates.count - 2]
                 }
                 return fallbackCandidates.first
             }()
         guard let selected else { return nil }
-        let runningBalance = amountCandidates
-            .filter { $0.x >= columns.balanceMinX }
-            .sorted { $0.order < $1.order }
-            .first?.value
+        let runningBalance = wholeRowBalance?.value
+            ?? amountCandidates
+                .filter { $0.x >= columns.balanceMinX }
+                .sorted { $0.order < $1.order }
+                .first?.value
         let selectedValue = repairedBankOCRAmount(
             selected: selected.value,
             selectedText: selected.text,
@@ -4506,7 +4864,11 @@ final class FinanceStore {
         ), let textDateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
         ), let amountRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
+            // Require a token boundary around the decimal separator too.
+            // Without the punctuation guard Vision's `TC:0.00562` can be
+            // matched as the substring `005.62`, which then looks like a
+            // perfectly valid MXN amount and wins the right-column heuristic.
+            pattern: #"(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         ) else {
             return []
         }
@@ -4519,8 +4881,6 @@ final class FinanceStore {
             return Calendar.current.component(.year, from: .now)
         }()
 
-        let linesByPage = Dictionary(grouping: lines, by: \.page)
-        var rows: [[OCRObservation]] = []
         let ignoredHeaderPhrases = [
             "estado de cuenta", "tarjetahabiente", "test user",
             "fecha y detalle", "este no es", "paga desde", "total nuevos cargos",
@@ -4532,6 +4892,14 @@ final class FinanceStore {
             "a partir del", "anualidad de la tarjeta"
         ]
 
+        struct AmexOCRRow {
+            let observations: [OCRObservation]
+            let forcedForeignCurrency: Bool
+        }
+
+        let linesByPage = Dictionary(grouping: lines, by: \.page)
+        var rows: [AmexOCRRow] = []
+        var amexSection = 0 // 0: outside, 1: domestic, 2: foreign, 3: MSI
         for page in linesByPage.keys.sorted() {
             let pageLines = (linesByPage[page] ?? []).sorted {
                 if abs($0.centerY - $1.centerY) > 0.012 {
@@ -4539,25 +4907,70 @@ final class FinanceStore {
                 }
                 return $0.centerX < $1.centerX
             }
+            // The first Amex page is a cover/summary page and contains many
+            // dates and amounts that are not movements. Continuation pages
+            // sometimes omit the repeated table title, so only suppress a
+            // page when it has no movement marker and clearly belongs to the
+            // MSI summary. This keeps the cover out while retaining the
+            // transaction pages whose header OCR was weak.
+            let normalizedPageText = pageLines
+                .map { $0.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current) }
+                .joined(separator: " ")
+            let hasMovementMarker = normalizedPageText.contains("fecha y detalle")
+                || normalizedPageText.contains("importe en mn")
+            let hasMSISummaryMarker = normalizedPageText.contains("resumen de meses sin intereses")
+                || normalizedPageText.contains("consolidado de compras en meses sin intereses")
+            if (page == 0 && !hasMovementMarker) || (hasMSISummaryMarker && !hasMovementMarker) {
+                continue
+            }
             var pendingRow: [OCRObservation] = []
             var inMSISummary = false
+            // A repeated Amex page header contains a cutoff date and several
+            // monetary controls before the movement table. Do not allow that
+            // date to become a row anchor. On continuation pages where the
+            // table title was not recognized, start open and rely on the
+            // normal administrative-row filters below.
+            var inMovementTable = !hasMovementMarker
             for line in pageLines {
                 let normalized = line.text.folding(
                     options: [.diacriticInsensitive, .caseInsensitive],
                     locale: .current
                 )
+                if normalized.contains("fecha y detalle") || normalized.contains("importe en mn") {
+                    // Any pending content here is page/header material, not a
+                    // transaction. Dropping it is safer than letting a cover
+                    // amount leak into the first row of the page.
+                    pendingRow.removeAll(keepingCapacity: true)
+                    inMovementTable = true
+                    if amexSection == 0 { amexSection = 1 }
+                    continue
+                }
+                if !inMovementTable { continue }
                 if normalized.contains("transacciones de meses sin intereses")
                     || normalized.contains("descripcion de compras en meses sin intereses")
                     || normalized.contains("resumen de meses sin intereses")
                     || normalized.contains("consolidado de compras en meses sin intereses") {
                     if !pendingRow.isEmpty {
-                        rows.append(pendingRow)
+                        rows.append(AmexOCRRow(
+                            observations: pendingRow,
+                            forcedForeignCurrency: amexSection == 2
+                        ))
                         pendingRow.removeAll(keepingCapacity: true)
                     }
                     inMSISummary = true
+                    amexSection = 3
                     continue
                 }
                 if inMSISummary { continue }
+
+                // Repeated page headers and payment instructions can contain
+                // dates/amounts of their own. Once the table is active they
+                // still form a hard boundary; never append them to the last
+                // merchant row.
+                if ignoredHeaderPhrases.contains(where: { normalized.contains($0) }) {
+                    pendingRow.removeAll(keepingCapacity: true)
+                    continue
+                }
 
                 // The totals after each transaction section are not movements.
                 // Flush the last real row before dropping the total line so a
@@ -4567,36 +4980,66 @@ final class FinanceStore {
                     || normalized.contains("total de meses sin intereses")
                     || normalized.contains("total de plan de meses sin intereses") {
                     if !pendingRow.isEmpty {
-                        rows.append(pendingRow)
+                        rows.append(AmexOCRRow(
+                            observations: pendingRow,
+                            forcedForeignCurrency: amexSection == 2
+                        ))
                         pendingRow.removeAll(keepingCapacity: true)
+                    }
+                    if normalized.contains("total de las transacciones")
+                        && !normalized.contains("moneda extranjera") {
+                        amexSection = 2
+                    } else if normalized.contains("moneda extranjera") || normalized.contains("total de meses") {
+                        amexSection = 0
                     }
                     continue
                 }
-                let hasDate = firstMatch(in: line.text, regex: dateRegex) != nil
-                    || firstMatch(in: line.text, regex: shortMonthDateRegex) != nil
-                    || firstMatch(in: line.text, regex: textDateRegex) != nil
+                let dateCandidates = [dateRegex, shortMonthDateRegex, textDateRegex]
+                    .flatMap { allMatches(in: line.text, regex: $0) }
+                let hasDate = dateCandidates.contains { candidate in
+                    Self.isPlausibleDateToken(candidate.text)
+                        && Self.parseDate(candidate.text, defaultYear: defaultYear) != nil
+                }
                 let isTransactionDate = hasDate
-                    && line.boundingBox.minX < 0.30
+                    // Vision can return the date together with a small piece
+                    // of the merchant column, moving the bounding box to the
+                    // right. The old 0.30 cutoff then merged several foreign
+                    // rows into one and selected a Colombian-peso amount as
+                    // MXN. Keep the bound broad on a page already identified
+                    // as a movement page; cover/header text is filtered by
+                    // the explicit phrases above and by row validation.
+                    && line.boundingBox.minX < 0.48
                     && !ignoredHeaderPhrases.contains(where: { normalized.contains($0) })
 
                 if isTransactionDate {
-                    if !pendingRow.isEmpty { rows.append(pendingRow) }
+                    if !pendingRow.isEmpty {
+                        rows.append(AmexOCRRow(
+                            observations: pendingRow,
+                            forcedForeignCurrency: amexSection == 2
+                        ))
+                    }
                     pendingRow = [line]
                 } else if !pendingRow.isEmpty {
                     pendingRow.append(line)
                 }
             }
-            if !pendingRow.isEmpty { rows.append(pendingRow) }
+            if !pendingRow.isEmpty {
+                rows.append(AmexOCRRow(
+                    observations: pendingRow,
+                    forcedForeignCurrency: amexSection == 2
+                ))
+            }
         }
 
         return rows.compactMap {
             parseAmexRow(
-                $0,
+                $0.observations,
                 dateRegex: dateRegex,
                 shortMonthDateRegex: shortMonthDateRegex,
                 textDateRegex: textDateRegex,
                 amountRegex: amountRegex,
-                defaultYear: defaultYear
+                defaultYear: defaultYear,
+                forcedForeignCurrency: $0.forcedForeignCurrency
             )
         }
     }
@@ -4607,13 +5050,30 @@ final class FinanceStore {
         shortMonthDateRegex: NSRegularExpression,
         textDateRegex: NSRegularExpression,
         amountRegex: NSRegularExpression,
-        defaultYear: Int
+        defaultYear: Int,
+        forcedForeignCurrency: Bool = false
     ) -> Movement? {
         let fullText = row.map(\.text).joined(separator: " ")
-        let dateMatch = firstMatch(in: fullText, regex: dateRegex)
-            ?? firstMatch(in: fullText, regex: shortMonthDateRegex)
-            ?? firstMatch(in: fullText, regex: textDateRegex)
-        guard let dateMatch, let date = parseDate(dateMatch.text, defaultYear: defaultYear) else { return nil }
+        // A numeric amount such as `123.45` can superficially match the
+        // day/month portion of the numeric date regex. Never let that first
+        // (but invalid) match shadow a real textual date later in the row.
+        // Collect every candidate, keep the earliest one in the row, and only
+        // accept candidates that round-trip through the strict date parser.
+        let dateCandidates = [dateRegex, shortMonthDateRegex, textDateRegex]
+            .flatMap { allMatches(in: fullText, regex: $0) }
+            .filter { Self.isPlausibleDateToken($0.text) }
+            .sorted { left, right in
+                if left.range.location != right.range.location {
+                    return left.range.location < right.range.location
+                }
+                return left.range.length > right.range.length
+            }
+        guard let parsedDate = dateCandidates.compactMap({ candidate -> (TextMatch, Date)? in
+            guard let date = parseDate(candidate.text, defaultYear: defaultYear) else { return nil }
+            return (candidate, date)
+        }).first else { return nil }
+        let dateMatch = parsedDate.0
+        let date = parsedDate.1
 
         let normalizedFullText = fullText.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
@@ -4632,22 +5092,216 @@ final class FinanceStore {
                 guard let value = parseAmount(match.text), abs(value) > 0, abs(value) < 10_000_000 else {
                     continue
                 }
+                // Vision normally returns one observation per visual token,
+                // but it can also return the complete merchant row as one
+                // bounding box. Estimate the token's horizontal position in
+                // that fallback case so a source-currency amount cannot win
+                // merely because it appears later in the OCR string.
+                let utfLength = max(observation.text.utf16.count, 1)
+                let matchCenter = CGFloat(match.range.location + (match.range.length / 2))
+                let relativeX = min(max(matchCenter / CGFloat(utfLength), 0), 1)
+                let visualX = min(
+                    max(observation.boundingBox.minX + observation.boundingBox.width * relativeX, 0),
+                    1
+                )
                 amountCandidates.append(
                     OCRAmountCandidate(
                         value: value,
                         text: match.text,
-                        x: observation.boundingBox.minX,
-                        order: observationOrder * 100 + matchOrder
+                        x: visualX,
+                        order: observationOrder * 100 + matchOrder,
+                        observationIndex: observationOrder,
+                        characterOffset: match.range.location
                     )
                 )
             }
         }
         let orderedAmounts = amountCandidates.sorted(by: { $0.order < $1.order })
-        // The card statement's monetary column is the last amount in the OCR
-        // row. For foreign purchases the row can also contain the source
-        // currency and exchange rate; selecting the first token would record
-        // USD (or the TC) as MXN and make the statement fail reconciliation.
-        guard let selected = orderedAmounts.last else { return nil }
+        // The card statement's monetary column is right aligned. Foreign
+        // purchases also contain a source-currency amount and an exchange
+        // rate, often on a line *after* the local MXN amount. Do not select
+        // by numeric magnitude (a Colombian-peso amount can be hundreds of
+        // thousands); select by visual column first and use conversion text
+        // only as a fallback. This prevents values such as 183,600.00 from
+        // becoming an MXN charge of 1,031.17.
+        let normalizedRowTexts = row.map {
+            $0.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        }
+        let conversionAnchor: (observationIndex: Int, characterOffset: Int)? = row.enumerated().compactMap { index, observation in
+            let normalized = normalizedRowTexts[index]
+            guard let markerRange = normalized.range(
+                of: #"(?i)d[óo]lar|euro|peso\s+colombiano|tipo\s+de\s+cambio|\btc\s*:"#,
+                options: .regularExpression
+            ) else { return nil }
+            // `markerRange` belongs to the folded string; converting it with
+            // the original observation would use indices from another
+            // String and can trap at runtime. Spanish accent folding keeps
+            // the UTF-16 offsets stable for these labels.
+            return (index, NSRange(markerRange, in: normalized).location)
+        }.min { left, right in
+            if left.observationIndex != right.observationIndex {
+                return left.observationIndex < right.observationIndex
+            }
+            return left.characterOffset < right.characterOffset
+        }
+        // Keep the currency label and the exchange-rate marker separate. A
+        // whole-row Vision observation can look like
+        // `1,031.17 Peso Colombiano 183,600.00 TC:0.00562`: the local amount
+        // is before the currency label, the source amount is between the
+        // label and `TC`, and no local amount follows the rate. Treating the
+        // first foreign marker as a generic conversion anchor makes the
+        // source amount (or a substring of the rate) win by accident.
+        let currencyAnchor: (observationIndex: Int, characterOffset: Int)? = row.enumerated().compactMap { index, _ in
+            let normalized = normalizedRowTexts[index]
+            guard let markerRange = normalized.range(
+                of: #"(?i)d[óo]lar(?:es)?|euro?s?|peso\s+colombiano?s?"#,
+                options: .regularExpression
+            ) else { return nil }
+            return (index, NSRange(markerRange, in: normalized).location)
+        }.min { left, right in
+            if left.observationIndex != right.observationIndex {
+                return left.observationIndex < right.observationIndex
+            }
+            return left.characterOffset < right.characterOffset
+        }
+        let exchangeRateAnchor: (observationIndex: Int, characterOffset: Int)? = row.enumerated().compactMap { index, _ in
+            let normalized = normalizedRowTexts[index]
+            guard let markerRange = normalized.range(
+                of: #"(?i)\btc\s*:|tipo\s+de\s+cambio"#,
+                options: .regularExpression
+            ) else { return nil }
+            return (index, NSRange(markerRange, in: normalized).location)
+        }.min { left, right in
+            if left.observationIndex != right.observationIndex {
+                return left.observationIndex < right.observationIndex
+            }
+            return left.characterOffset < right.characterOffset
+        }
+        let exchangeRateValue: Decimal? = {
+            guard let exchangeRateAnchor else { return nil }
+            let text = normalizedRowTexts[exchangeRateAnchor.observationIndex]
+            guard let regex = try? NSRegularExpression(
+                pattern: #"(?i)(?:\btc\s*:|tipo\s+de\s+cambio)\s*(?:[:=\-])?\s*(\d+(?:[.,]\d{1,6})?)"#
+            ), let match = regex.firstMatch(
+                in: text,
+                range: NSRange(text.startIndex..<text.endIndex, in: text)
+            ), let valueRange = Range(match.range(at: 1), in: text) else { return nil }
+            return parseAmount(String(text[valueRange]))
+        }()
+        let exchangeRateCandidateRanges: [(observationIndex: Int, range: NSRange)] = row.enumerated().compactMap { index, _ in
+            let normalized = normalizedRowTexts[index]
+            guard let regex = try? NSRegularExpression(
+                pattern: #"(?i)(?:\btc\s*:|tipo\s+de\s+cambio)\s*(?:[:=\-])?\s*(\d+(?:[.,]\d{1,6})?)"#
+            ), let match = regex.firstMatch(
+                in: normalized,
+                range: NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+            ) else { return nil }
+            return (index, match.range(at: 1))
+        }
+        let isExchangeRateCandidate: (OCRAmountCandidate) -> Bool = { candidate in
+            exchangeRateCandidateRanges.contains { item in
+                guard item.observationIndex == candidate.observationIndex else { return false }
+                let candidateRange = NSRange(location: candidate.characterOffset, length: candidate.text.utf16.count)
+                return NSIntersectionRange(candidateRange, item.range).length > 0
+            }
+        }
+        // The Amex local-MXN amount is right aligned in the statement's
+        // monetary column. Foreign rows have two layouts in the wild:
+        //
+        //   `Euro 15,50  TC:20.40  316.24`
+        //   `1,031.17  Peso Colombiano 183,600.00  TC:0.00562`
+        //
+        // The first is the layout in the selectable PDF and the second is a
+        // layout emitted by some Vision revisions when the whole row is
+        // returned as one observation. A rule that always chooses the token
+        // before the currency marker therefore turns 183,600 COP into a
+        // 183,600 MXN expense. Use the marker as an ordering hint, but let
+        // the right-aligned local column win whenever it is visible.
+        let nonRateAmounts = orderedAmounts.filter { !isExchangeRateCandidate($0) }
+        let localCurrencyCandidates = nonRateAmounts.filter { $0.x >= 0.72 }
+        let beforeConversionCandidates = conversionAnchor.map { anchor in
+            nonRateAmounts.filter { candidate in
+                candidate.observationIndex < anchor.observationIndex
+                    || (candidate.observationIndex == anchor.observationIndex
+                        && candidate.characterOffset < anchor.characterOffset)
+            }
+        } ?? []
+        let beforeCurrencyCandidates = currencyAnchor.map { anchor in
+            nonRateAmounts.filter { candidate in
+                candidate.observationIndex < anchor.observationIndex
+                    || (candidate.observationIndex == anchor.observationIndex
+                        && candidate.characterOffset < anchor.characterOffset)
+            }
+        } ?? []
+        let afterExchangeRateCandidates = exchangeRateAnchor.map { anchor in
+            nonRateAmounts.filter { candidate in
+                (candidate.observationIndex > anchor.observationIndex
+                    || (candidate.observationIndex == anchor.observationIndex
+                        && candidate.characterOffset > anchor.characterOffset))
+                    && candidate.x >= 0.60
+            }
+        } ?? []
+        let betweenCurrencyAndRateCandidates: [OCRAmountCandidate] = {
+            guard let currencyAnchor, let exchangeRateAnchor else { return [] }
+            return nonRateAmounts.filter { candidate in
+                let afterCurrency = candidate.observationIndex > currencyAnchor.observationIndex
+                    || (candidate.observationIndex == currencyAnchor.observationIndex
+                        && candidate.characterOffset > currencyAnchor.characterOffset)
+                let beforeRate = candidate.observationIndex < exchangeRateAnchor.observationIndex
+                    || (candidate.observationIndex == exchangeRateAnchor.observationIndex
+                        && candidate.characterOffset < exchangeRateAnchor.characterOffset)
+                return afterCurrency && beforeRate
+            }
+        }()
+        let rightmost: ([OCRAmountCandidate]) -> OCRAmountCandidate? = { candidates in
+            candidates.max {
+                if abs($0.x - $1.x) > 0.02 { return $0.x < $1.x }
+                return $0.order < $1.order
+            }
+        }
+        let isForeignRow = forcedForeignCurrency || Self.hasForeignCurrency(in: normalizedFullText)
+        let selected: OCRAmountCandidate? = {
+            guard isForeignRow else {
+                return rightmost(beforeConversionCandidates)
+                    ?? rightmost(localCurrencyCandidates)
+                    ?? rightmost(orderedAmounts)
+            }
+
+            if exchangeRateAnchor != nil {
+                // Preferred layout: the converted MXN token follows `TC` and
+                // is right aligned in the amount column.
+                if let converted = rightmost(afterExchangeRateCandidates.filter({ $0.x >= 0.72 }))
+                    ?? rightmost(afterExchangeRateCandidates) {
+                    return converted
+                }
+
+                // Alternate whole-row layout: the local token is before the
+                // foreign-currency label while the source amount is between
+                // that label and `TC`. Only accept the pre-label token when
+                // the exchange-rate arithmetic supports it; otherwise leave
+                // the row unresolved instead of recording a foreign amount.
+                if let exchangeRateValue, !betweenCurrencyAndRateCandidates.isEmpty {
+                    let matchesConversion = beforeCurrencyCandidates.filter { local in
+                        betweenCurrencyAndRateCandidates.contains { source in
+                            let expected = absoluteDecimal(source.value * exchangeRateValue)
+                            let difference = absoluteDecimal(expected - absoluteDecimal(local.value))
+                            let tolerance = max(
+                                Decimal(2),
+                                absoluteDecimal(local.value) * Decimal(string: "0.02", locale: Locale(identifier: "en_US_POSIX"))!
+                            )
+                            return difference <= tolerance
+                        }
+                    }
+                    return rightmost(matchesConversion)
+                }
+                return nil
+            }
+
+            // Foreign label without an explicit rate: use only the right
+            // amount column. Never fall back to the numerically largest token.
+            return rightmost(localCurrencyCandidates)
+        }()
+        guard let selected else { return nil }
 
         var title = fullText
             .replacingOccurrences(
@@ -4743,6 +5397,7 @@ final class FinanceStore {
             flow: flow,
             kind: kind,
             travelRelated: travelRelated,
+            foreignCurrency: forcedForeignCurrency || hasForeignCurrency(in: normalizedFullText),
             extractionEvidence: MovementExtractionEvidence(
                 method: "vision-ocr",
                 page: row.first.map { $0.page + 1 },
@@ -4919,6 +5574,23 @@ final class FinanceStore {
         return date
     }
 
+    /// Prevents a decimal amount (for example `123.45`) from being treated
+    /// as a date candidate. Numeric dates have at least two separators,
+    /// while Spanish month-name dates carry an explicit month word. The final
+    /// validity check still belongs to `parseDate`, which validates calendar
+    /// ranges and round-trips the components.
+    private static func isPlausibleDateToken(_ value: String) -> Bool {
+        let normalized = value.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: .current
+        )
+        let monthPattern = #"(?i)\b(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)\b"#
+        if normalized.range(of: monthPattern, options: .regularExpression) != nil {
+            return true
+        }
+        return normalized.filter { "/-.".contains($0) }.count >= 2
+    }
+
     private static func monthNumber(_ value: String) -> Int? {
         // A frequent Vision error in Spanish bank months is AG0 instead of
         // AGO. Normalise only the month token, never the full row text.
@@ -5032,7 +5704,33 @@ final class FinanceStore {
         // after the known label so account/reference numbers cannot satisfy
         // the control accidentally.
         func flexibleAmountOnLabel(_ labels: [String]) -> Decimal? {
-            let amountPattern = #"[-+]?\s*\$?\s*(?:\d{1,3}(?:[,.]\d{3})+|\d+)(?:[,.]\d{1,2})?"#
+            // Section totals are always printed with cents. Requiring a
+            // decimal token (or a tightly bounded separator-less OCR token)
+            // prevents a cutoff day such as `27` on the next visual line from
+            // being returned as the foreign-currency total.
+            let amountPattern = #"[-+]?\s*\$?\s*(?:(?:\d{1,3}(?:[,.]\d{3})+|\d+)[,.]\d{1,2}|\d{7,8})"#
+            guard let amountRegex = try? NSRegularExpression(pattern: amountPattern) else { return nil }
+
+            // Prefer the label's own visual line and then the next few lines.
+            // PDFKit/Vision may put a cutoff date (`27 de Agosto`) between a
+            // wrapped section title and its total; scanning only decimal
+            // tokens skips that date without mistaking it for money.
+            let lines = normalized.components(separatedBy: .newlines)
+            for index in lines.indices {
+                guard labels.contains(where: { lines[index].contains($0) }) else { continue }
+                let end = min(index + 3, lines.count - 1)
+                for candidateIndex in index...end {
+                    let line = lines[candidateIndex]
+                    let lineRange = NSRange(line.startIndex..<line.endIndex, in: line)
+                    let matches = amountRegex.matches(in: line, range: lineRange)
+                    if let match = matches.last,
+                       let valueRange = Range(match.range, in: line),
+                       let value = parseAmount(String(line[valueRange])) {
+                        return normalizeBareBankAmount(String(line[valueRange]), value)
+                    }
+                }
+            }
+
             for label in labels {
                 let labelPattern = label
                     .split(separator: " ")
@@ -5252,7 +5950,17 @@ final class FinanceStore {
         for line in normalized.components(separatedBy: .newlines).prefix(120) {
             let compact = line.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if compact.range(of: #"detalle\s+(?:de\s+)?movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripcion|fecha\s+y\s+detalle"#, options: .regularExpression) != nil {
+            if let markerRange = compact.range(
+                of: #"detalle\s+(?:de\s+)?movimientos|movimientos\s+realizados|fecha\s+(?:folio\s+)?descripcion|fecha\s+y\s+detalle"#,
+                options: .regularExpression
+            ) {
+                // PDFKit can flatten the whole first page into one line. Keep
+                // the institutional prefix before the table marker instead
+                // of discarding the entire line, so `American Express` (or a
+                // bank's legal header) remains usable for issuer detection.
+                let prefix = String(compact[..<markerRange.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !prefix.isEmpty { header.append(prefix) }
                 break
             }
             if !compact.isEmpty { header.append(compact) }
@@ -5404,7 +6112,10 @@ final class FinanceStore {
         var headerLines: [String] = []
         for line in normalized.components(separatedBy: .newlines).prefix(120) {
             let compact = line.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
-            if compact.range(of: "detalle de movimientos|movimientos realizados|fecha (?:folio )?descripcion|fecha y detalle", options: .regularExpression) != nil {
+            if let markerRange = compact.range(of: "detalle de movimientos|movimientos realizados|fecha (?:folio )?descripcion|fecha y detalle", options: .regularExpression) {
+                let prefix = String(compact[..<markerRange.lowerBound])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                if !prefix.isEmpty { headerLines.append(prefix) }
                 break
             }
             if !compact.isEmpty { headerLines.append(compact) }

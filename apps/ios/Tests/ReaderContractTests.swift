@@ -341,6 +341,26 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.summary?.paymentForNoInterest, 3_996.62)
     }
 
+    func testAmexSectionTotalsDoNotUseTheCutoffDayAsAmount() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            American Express
+            Fecha y Detalle de las operaciones Importe en MN.
+            Total de las transacciones en $ de MARCELO ANDRES DIAZ SANCHEZ
+            13,990.02
+            Total de Transacciones en Moneda Extranjera de MARCELO ANDRES DIAZ SANCHEZ
+            27 de Agosto
+            9,593.73
+            """,
+            fileName: "28_jul_2026_-_27_ago_2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.domesticTransactionTotal, 13_990.02)
+        // Compare the decimal parsed from the PDF with an exact string value;
+        // a Swift floating-point literal can carry a different Decimal scale.
+        XCTAssertEqual(snapshot.summary?.foreignTransactionTotal, Decimal(string: "9593.73"))
+    }
+
     func testReaderRejectsAdministrativeNumericRows() {
         let text = """
         Grupo Financiero BBVA
@@ -546,6 +566,63 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(FinanceStore.shouldUseOCR(extractedText: text, allowOCR: true))
     }
 
+    func testProvenAmexTextLayerWinsOverOCRHeuristic() {
+        let text = """
+        American Express
+        The Platinum Credit Card
+        Límite de Crédito Límite Disponible
+        a Agosto 27,2026 10,000.00 MN 9,000.00 MN
+        23,150.88 - 32,744.61 + 950.00 = 950.00 300.00
+        Nuevas transacciones: 900.00
+        Total Nuevos Cargos: 950.00
+        Fecha y Detalle de las operaciones Importe en MN.
+        05 de Agosto SUPERMERCADO 700.00
+        27 de Agosto MONTO A DIFERIR MESES EN AUTOMÁTICO 100.00 CR
+        Total de las transacciones en $ de MARCELO ANDRES DIAZ SANCHEZ 600.00
+        Fecha y Detalle de las operaciones Importe en MN.
+        6 de Agosto HOLAFLY DUBLIN Euro 15,50 TC:20.00 200.00
+        Total de Transacciones en Moneda Extranjera de MARCELO ANDRES DIAZ SANCHEZ 200.00
+        Transacciones de Meses sin Intereses
+        27 de Agosto MESES EN AUTOMÁTICO EXTRANJERO CARGO 01 DE 03 50.00
+        Total de Meses sin Intereses 50.00
+        """
+
+        XCTAssertTrue(FinanceStore.selectableTextLayerReconcilesForTesting(
+            text: text,
+            fileName: "28_jul_2026_-_27_ago_2026.pdf"
+        ))
+    }
+
+    func testFlattenedAmexTextLayerRebuildsRowsBeforeOCR() {
+        let structured = """
+        American Express
+        Limite de Credito Limite Disponible 150,000.00 99,632.79
+        Fecha y Detalle de las operaciones Importe en MN.
+        5 de Agosto SUPERMERCADO 20,167.50
+        27 de Agosto MONTO A DIFERIR MESES EN AUTOMATICO 13,177.48 CR
+        Total de las transacciones en $ de MARCELO ANDRES DIAZ SANCHEZ 6,990.02
+        Fecha y Detalle de las operaciones Importe en MN.
+        6 de Agosto HOLAFLY DUBLIN Euro 15,50 TC:20.00 2,603.71
+        Total de Transacciones en Moneda Extranjera de MARCELO ANDRES DIAZ SANCHEZ 2,603.71
+        Transacciones de Meses sin Intereses
+        27 de Agosto MSI TIENDA 13 DE 18 1,000.00
+        Total de Meses sin Intereses 1,000.00
+        """
+        let flattened = structured.replacingOccurrences(of: "\n", with: " ")
+
+        let reconciles = FinanceStore.selectableTextLayerReconcilesForTesting(
+            text: flattened,
+            fileName: "28_jul_2026_-_27_ago_2026.pdf"
+        )
+        XCTAssertTrue(
+            reconciles,
+            FinanceStore.selectableTextLayerDebugForTesting(
+                text: flattened,
+                fileName: "28_jul_2026_-_27_ago_2026.pdf"
+            )
+        )
+    }
+
     func testTableHeaderWithoutPlausibleRowsFallsBackToOCR() {
         let text = String(repeating: "RFC DIRECCION CERTIFICADO SALDO ", count: 30)
             + "Detalle de Movimientos Realizados\n"
@@ -604,6 +681,139 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(rows[0].amount, -30)
         XCTAssertEqual(rows[1].amount, 500)
         XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 1_000 })
+    }
+
+    func testSantanderOCRUsesTokenGeometryWhenVisionReturnsWholeRow() {
+        // Vision sometimes emits the date, folio, description, movement and
+        // running balance as one long observation. The parser must estimate
+        // each amount's x position inside that box; otherwise both amounts
+        // look like they start in the description column and the balance can
+        // become a false expense.
+        let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+            OCRObservationFixture(
+                text: "16-JUL-2026 4309379 PAGO TRANSFERENCIA SPEI HORA 12:10:44 30.00 5,559.79",
+                x: 0.02,
+                y: 0.80,
+                width: 0.96
+            ),
+        ], fileName: "sample-bank-period-3.pdf")
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].amount, Decimal(string: "-30.00")!)
+        XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 1_000 })
+    }
+
+    func testSantanderOCRUsesLastTwoTokensWhenVisionBoxesCollapse() {
+        // Vision can split a row into two unusually wide boxes instead of
+        // returning one box for the complete line. Their estimated token
+        // coordinates overlap, so column filtering alone would be ambiguous;
+        // the parser must still keep the penultimate token as the movement and
+        // the final token as the running balance.
+        let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
+            OCRObservationFixture(
+                text: "16-JUL-2026 4309379 PAGO TRANSFERENCIA SPEI HORA 12:10:44 30.00",
+                x: 0.02,
+                y: 0.80,
+                width: 0.80
+            ),
+            OCRObservationFixture(text: "5,559.79", x: 0.30, y: 0.80, width: 0.55),
+        ], fileName: "sample-bank-period-3.pdf")
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].amount, Decimal(string: "-30.00")!)
+        XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 1_000 })
+    }
+
+    func testAmexOCRUsesLocalAmountAfterForeignCurrencyConversion() {
+        let rows = FinanceStore.amexOCRRowsForTesting([
+            // Cover/header content must not become a movement merely because
+            // it contains a cutoff date and payment amount.
+            OCRObservationFixture(page: 0, text: "Estado de Cuenta", x: 0.05, y: 0.92, width: 0.30),
+            OCRObservationFixture(page: 0, text: "27-Ago-2026", x: 0.40, y: 0.84, width: 0.14),
+            // Page 2 starts the actual transaction table.
+            OCRObservationFixture(page: 1, text: "Fecha y Detalle de las operaciones", x: 0.05, y: 0.92, width: 0.40),
+            OCRObservationFixture(page: 1, text: "5 de Agosto", x: 0.05, y: 0.82, width: 0.16),
+            OCRObservationFixture(page: 1, text: "SUPERMERCADO", x: 0.18, y: 0.82, width: 0.28),
+            OCRObservationFixture(page: 1, text: "123.45", x: 0.86, y: 0.82, width: 0.08),
+            OCRObservationFixture(page: 1, text: "6 de Agosto", x: 0.05, y: 0.70, width: 0.16),
+            OCRObservationFixture(page: 1, text: "BOLD CO S A S", x: 0.18, y: 0.70, width: 0.28),
+            OCRObservationFixture(page: 1, text: "Peso Colombiano", x: 0.18, y: 0.66, width: 0.24),
+            OCRObservationFixture(page: 1, text: "183,600.00", x: 0.70, y: 0.66, width: 0.12),
+            OCRObservationFixture(page: 1, text: "TC:0.00562", x: 0.70, y: 0.62, width: 0.12),
+            OCRObservationFixture(page: 1, text: "1,031.17", x: 0.86, y: 0.58, width: 0.10),
+        ], fileName: "28_jul_2026_-_27_ago_2026.pdf")
+
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows[0].amount, Decimal(string: "-123.45")!)
+        XCTAssertEqual(rows[1].amount, Decimal(string: "-1031.17")!)
+        XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 2_000 })
+    }
+
+    func testAmexOCRUsesRightmostLocalAmountWhenVisionReturnsWholeRow() {
+        // A few Vision revisions return the merchant, source currency, TC and
+        // local amount as one observation. The parser must use the visual
+        // right-hand amount rather than the last numeric token in the string.
+        let rows = FinanceStore.amexOCRRowsForTesting([
+            OCRObservationFixture(page: 1, text: "Fecha y Detalle de las operaciones", x: 0.05, y: 0.92, width: 0.40),
+            OCRObservationFixture(
+                page: 1,
+                text: "6 de Agosto BOLD CO S A S MEDELLIN 1,031.17 Peso Colombiano 183,600.00 TC:0.00562",
+                x: 0.02,
+                y: 0.82,
+                width: 0.96
+            ),
+        ], fileName: "28_jul_2026_-_27_ago_2026.pdf")
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].amount, Decimal(string: "-1031.17")!)
+        XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 2_000 })
+    }
+
+    func testAmexOCRUsesConvertedAmountWhenSourceCurrencyPrecedesIt() {
+        // This is the actual order printed by the Amex statement: source
+        // currency, source amount, exchange rate, then the local MXN amount.
+        // The source amount must never become the consolidated expense.
+        let rows = FinanceStore.amexOCRRowsForTesting([
+            OCRObservationFixture(page: 4, text: "Fecha y Detalle de las operaciones", x: 0.05, y: 0.92, width: 0.40),
+            OCRObservationFixture(
+                page: 4,
+                text: "6 de Agosto BOLD CO S A S MEDELLIN",
+                x: 0.02,
+                y: 0.82,
+                width: 0.48
+            ),
+            OCRObservationFixture(page: 4, text: "Peso Colombiano", x: 0.18, y: 0.78, width: 0.24),
+            OCRObservationFixture(page: 4, text: "183,600.00", x: 0.70, y: 0.78, width: 0.12),
+            OCRObservationFixture(page: 4, text: "TC:0.00562", x: 0.70, y: 0.74, width: 0.12),
+            OCRObservationFixture(page: 4, text: "1,031.17", x: 0.86, y: 0.70, width: 0.10),
+        ], fileName: "28_jul_2026_-_27_ago_2026.pdf")
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].amount, Decimal(string: "-1031.17")!)
+        XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 2_000 })
+    }
+
+    func testAmexOCRDropsForeignRowWhenLocalMXNAmountIsMissing() {
+        // A source-currency amount without its converted MXN value is not a
+        // usable purchase. It must remain unresolved instead of becoming a
+        // six-figure charge in the ledger.
+        let rows = FinanceStore.amexOCRRowsForTesting([
+            OCRObservationFixture(page: 1, text: "Fecha y Detalle de las operaciones", x: 0.05, y: 0.92, width: 0.40),
+            OCRObservationFixture(page: 1, text: "6 de Agosto BOLD CO S A S MEDELLIN", x: 0.02, y: 0.82, width: 0.48),
+            OCRObservationFixture(page: 1, text: "Peso Colombiano 183,600.00 TC:0.00562", x: 0.18, y: 0.78, width: 0.30),
+        ], fileName: "28_jul_2026_-_27_ago_2026.pdf")
+
+        XCTAssertTrue(rows.isEmpty)
     }
 
     func testSantanderOCRCalibratesShiftedColumnsFromHeader() {

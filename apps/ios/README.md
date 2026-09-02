@@ -113,11 +113,30 @@ publicar. La primera build que instala esta herramienta se ejecuta con la
 opción de bootstrap del workflow; después la compuerta vuelve a exigir un
 informe certificado de al menos 10 estados únicos.
 
+Para una auditoría con expectativas doradas, el runner nativo admite además
+`MARCELITO_PDF_CORPUS_MANIFEST` apuntando a un JSON privado fuera del checkout.
+Ese manifiesto puede reutilizar el formato de
+`tests/fixtures/pdf-corpus-attachments.json` (SHA-256, `emisor:últimos4`, tipo,
+estado, filas y controles); la versión declarada debe ser igual a
+`FinanceStore.readerVersion`. El script resuelve la ruta, exige que el conjunto
+de nombres coincida con los PDFs y valida los controles con PDFKit + Vision:
+
+```bash
+MARCELITO_PDF_CORPUS_DIR=/ruta/privada/estados \
+MARCELITO_PDF_CORPUS_MANIFEST=/ruta/privada/corpus-ios.json \
+MARCELITO_PDF_CORPUS_VERIFY=1 \
+./apps/ios/scripts/run-native-corpus.sh
+```
+
+El fixture público sigue siendo el predeterminado cuando no se define la
+variable. Ninguno de estos modos copia PDFs, descripciones o importes privados
+al repositorio.
+
 La autenticación usa Keychain y Face ID. La aplicación inicia sin movimientos de muestra: importa tus PDFs desde Archivos, revisa banco, periodo y movimientos, y los guarda solo en ese dispositivo. Los estados escaneados pueden quedar pendientes de revisión sin inventar filas.
 
 Movimientos y estados de cuenta se persisten localmente, se evita volver a contar el mismo archivo y las categorías se pueden corregir desde el detalle de cada movimiento. El menú de Inicio permite eliminar la cuenta y todos los datos locales.
 
-En Cuentas > Movimientos puedes abrir la configuración de clasificación asistida. La clave de OpenCode Zen se guarda en el llavero del iPhone y solo se usa después de confirmar el envío de movimientos pendientes. El selector de la app contiene únicamente modelos gratuitos (`mimo-v2.5-free`, `deepseek-v4-flash-free`, `north-mini-code-free`, `nemotron-3-ultra-free` y `big-pickle`).
+En Cuentas > Movimientos puedes abrir la configuración de clasificación asistida. La clave de OpenCode Zen se guarda en el llavero del iPhone y solo se usa después de confirmar el envío de movimientos pendientes. El selector de la app contiene únicamente modelos gratuitos compatibles con el endpoint de chat (`mimo-v2.5-free`, `ling-3.0-flash-fin-free`, `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free` y `big-pickle`).
 
 Los PDFs importados se conservan en Application Support del dispositivo para que cada tarjeta de Documentos importados pueda abrir el archivo original sin mostrar nombres parseados en la pantalla principal. Vision conserva la página y la confianza real de cada observación OCR; si una fila queda por debajo del umbral, el estado requiere revisión y no entra en los KPI. Cuando el documento concilia pero la evidencia institucional del emisor es provisional, puedes confirmar manualmente el banco mostrado; esa liberación queda registrada como confirmación humana independiente de la aceptación automática.
 

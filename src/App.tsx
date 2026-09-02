@@ -38,6 +38,8 @@ import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, 
 import { prepareStoredLedger } from "./statementMigration";
 import { clearWebErrorDiagnostics, readWebErrorDiagnostics, type WebErrorDiagnostic } from "./WebErrorBoundary";
 import { clearImportedPdfs, openImportedPdf, saveImportedPdf } from "./documentStore";
+import { extractionToImportResult, requestMultimodalExtraction, requestMultimodalReaderPreflight, MultimodalReaderError } from "./multimodalReader";
+import type { MultimodalReaderPreflightResult } from "./multimodalReader";
 import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
@@ -47,6 +49,8 @@ const statementStorageKey = "marcelito-statements.v1";
 const categoryRulesStorageKey = "marcelito-category-rules.v1";
 const goalsStorageKey = "marcelito-goals.v1";
 const auditStorageKey = "marcelito-audit.last.v1";
+const multimodalReaderEndpoint = (import.meta.env.VITE_STATEMENT_READER_URL ?? "").trim();
+const multimodalReaderPreflightTimeoutMs = 120_000;
 type LocalAccount = { username: string; passwordHash: string };
 
 function latestStatementFor(statements: Statement[]) {
@@ -133,6 +137,9 @@ function exportAuditDiagnostics(metrics: ReturnType<typeof buildFinanceMetrics>,
       period: statement.period,
       fileName: statement.fileName,
       mode: statement.mode,
+      extractionProvider: statement.extractionProvider,
+      extractionModel: statement.extractionModel,
+      extractionPromptVersion: statement.extractionPromptVersion,
       status: statement.status,
       transactionCount: statement.transactionCount,
       reconciliationStatus: statement.reconciliationStatus,
@@ -289,7 +296,7 @@ function AuthGate({ onEnter }: { onEnter: (name: string) => void }) {
           <button className="text-button" type="button" onClick={() => { setMode(mode === "login" ? "create" : "login"); setError(""); }}>
             {mode === "login" ? "Crear un usuario" : "Ya tengo un usuario"}
           </button>
-          <p className="privacy-note"><ShieldCheck size={17} /> <span>Marcelito no envía tus estados de cuenta a servicios externos.</span> <a href="/privacy.html">Política de privacidad</a></p>
+          <p className="privacy-note"><ShieldCheck size={17} /> <span>Marcelito procesa tus estados localmente por defecto; cualquier lector seguro externo requiere tu autorización.</span> <a href="/privacy.html">Política de privacidad</a></p>
         </form>
       </section>
     </main>
@@ -305,6 +312,10 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   const [goals, setGoals] = useState<FinancialGoal[]>(() => readStored(goalsStorageKey, []));
   const [lastAuditRun, setLastAuditRun] = useState<AuditRunRecord | null>(() => readStored<AuditRunRecord | null>(auditStorageKey, null));
   const [importOpen, setImportOpen] = useState(false);
+  const [readerPreflight, setReaderPreflight] = useState<MultimodalReaderPreflightResult | null>(null);
+  const [readerPreflightBusy, setReaderPreflightBusy] = useState(false);
+  const [readerPreflightError, setReaderPreflightError] = useState("");
+  const readerAuthorization = useRef("");
   const reduceMotion = useReducedMotion();
   const latestStatement = latestStatementFor(statements);
   const pipeline = useMemo(() => runTransactionPipeline(transactions, statements), [transactions, statements]);
@@ -389,6 +400,9 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       fileSizeBytes: commit.fileSizeBytes,
       pageCount: commit.pageCount,
       readerVersion: commit.readerVersion ?? PDF_READER_VERSION,
+      extractionProvider: commit.extractionProvider,
+      extractionModel: commit.extractionModel,
+      extractionPromptVersion: commit.extractionPromptVersion,
       importedAt,
       mode: commit.mode,
       transactionCount: importedTransactions.length,
@@ -411,6 +425,12 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       || commit.source === "Desconocido"
       || commit.kind === "unknown"
       || commit.sourceDetection?.status !== "verified"
+      // A multimodal reader keeps mode="text" for compatibility with the
+      // existing import contract, but its visual confidence is still a hard
+      // quality gate. Keep the persisted status aligned with the dashboard
+      // eligibility boundary so a weak remote read is never displayed as
+      // ready before the next render/migration pass.
+      || !hasSufficientOcrQuality(statement)
       // Browser OCR currently returns flattened text without coordinates;
       // keep scanned imports provisional until the user confirms their rows.
       || commit.mode === "ocr"
@@ -447,6 +467,34 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       : item));
   }
 
+  async function runReaderPreflight() {
+    if (!multimodalReaderEndpoint || readerPreflightBusy) return;
+    const token = readerAuthorization.current
+      || window.prompt("Token temporal del lector seguro (no se guardará en este dispositivo):")?.trim()
+      || "";
+    if (!token) {
+      setReaderPreflightError("Se necesita autorización temporal para probar el lector seguro.");
+      return;
+    }
+    readerAuthorization.current = token;
+    setReaderPreflightBusy(true);
+    setReaderPreflightError("");
+    try {
+      const result = await requestMultimodalReaderPreflight({
+        endpoint: multimodalReaderEndpoint,
+        enabled: true,
+        authorization: `Bearer ${token}`,
+        timeoutMs: multimodalReaderPreflightTimeoutMs,
+      });
+      setReaderPreflight(result);
+    } catch (error) {
+      setReaderPreflight(null);
+      setReaderPreflightError(error instanceof MultimodalReaderError ? error.message : "No se pudo comprobar el lector seguro.");
+    } finally {
+      setReaderPreflightBusy(false);
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -477,7 +525,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
         {initialLedger.quarantinedMovementCount > 0 && <div className="provisional-banner migration-notice" role="status"><Warning size={18} /><span>Se retiraron {initialLedger.quarantinedMovementCount} movimiento{initialLedger.quarantinedMovementCount === 1 ? "" : "s"} generado{initialLedger.quarantinedMovementCount === 1 ? "" : "s"} por una versión anterior del lector. Vuelve a importar esos estados para reconstruirlos con las reglas actuales.</span></div>}
         <AnimatePresence mode="wait">
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
-            {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => setImportOpen(true)} />}
+            {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => setImportOpen(true)} onRunReaderPreflight={multimodalReaderEndpoint ? runReaderPreflight : undefined} readerPreflight={readerPreflight} readerPreflightBusy={readerPreflightBusy} readerPreflightError={readerPreflightError} />}
             {section === "Gastos" && <Expenses transactions={ledgerTransactions} statements={statements} metrics={metrics} onImport={() => setImportOpen(true)} />}
             {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onOpenStatement={(statement) => openImportedPdf(statement.sourceFingerprint)} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
             {section === "Patrimonio" && <NetWorth metrics={metrics} />}
@@ -487,7 +535,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       <nav className="mobile-nav" aria-label="Navegación principal móvil">
         {navItems.map(({ label, icon: Icon }) => <button key={label} className={section === label ? "active" : ""} onClick={() => setSection(label)}><Icon size={21} weight={section === label ? "fill" : "regular"} /><span>{label}</span></button>)}
       </nav>
-      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onSave={saveImport} categoryRules={categoryRules} />
+      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onSave={saveImport} categoryRules={categoryRules} readerPreflightReady={readerPreflight !== null} />
     </div>
   );
 }
@@ -495,7 +543,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
 type DashboardMetricKey = "patrimony" | "cash" | "debt" | "expense" | "flow";
 type MetricSeriesPoint = { key: string; label: string; value: number };
 
-function Home({ transactions, statements, metrics, goals, setGoals, auditRun, onImport }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; goals: FinancialGoal[]; setGoals: React.Dispatch<React.SetStateAction<FinancialGoal[]>>; auditRun: AuditRunRecord | null; onImport: () => void }) {
+function Home({ transactions, statements, metrics, goals, setGoals, auditRun, onImport, onRunReaderPreflight, readerPreflight, readerPreflightBusy, readerPreflightError }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; goals: FinancialGoal[]; setGoals: React.Dispatch<React.SetStateAction<FinancialGoal[]>>; auditRun: AuditRunRecord | null; onImport: () => void; onRunReaderPreflight?: () => void; readerPreflight: MultimodalReaderPreflightResult | null; readerPreflightBusy: boolean; readerPreflightError: string }) {
   const [selectedMetric, setSelectedMetric] = useState<DashboardMetricKey | null>(null);
   if (!transactions.length && !statements.length) return <RealDataEmpty onImport={onImport} />;
 
@@ -534,7 +582,7 @@ function Home({ transactions, statements, metrics, goals, setGoals, auditRun, on
         <GoalsPanel metrics={metrics} goals={goals} setGoals={setGoals} />
       </>}
       <DataQualityIndicator metrics={metrics} />
-      <AuditDiagnostics metrics={metrics} statements={statements} auditRun={auditRun} />
+      <AuditDiagnostics metrics={metrics} statements={statements} auditRun={auditRun} onRunReaderPreflight={onRunReaderPreflight} readerPreflight={readerPreflight} readerPreflightBusy={readerPreflightBusy} readerPreflightError={readerPreflightError} />
     </>
   );
 }
@@ -820,12 +868,12 @@ function DebtBreakdown({ metrics }: { metrics: ReturnType<typeof buildFinanceMet
   return <section className="debt-breakdown" aria-label="Desglose de deuda"><div><span>Saldo total de deuda</span><strong>{displayMoney(metrics.debtTotal)}</strong><small>Tarjetas y créditos al último corte</small></div><div><span>Pago próximo</span><strong>{displayMoney(metrics.latestPaymentDue)}</strong><small>Mínimo + MSI del estado</small></div><div><span>Pago para no generar intereses</span><strong>{displayMoney(metrics.latestPaymentForNoInterest)}</strong><small>Importe del estado</small></div><div><span>MSI pendientes</span><strong>{displayMoney(metrics.latestMsiPending)}</strong><small>{metrics.latestMsiInstallmentsCount ? `${metrics.latestMsiInstallmentsCount} mensualidades` : "Principal diferido"}</small></div></section>;
 }
 
-function AuditDiagnostics({ metrics, statements, auditRun }: { metrics: ReturnType<typeof buildFinanceMetrics>; statements: Statement[]; auditRun: AuditRunRecord | null }) {
+function AuditDiagnostics({ metrics, statements, auditRun, onRunReaderPreflight, readerPreflight, readerPreflightBusy, readerPreflightError }: { metrics: ReturnType<typeof buildFinanceMetrics>; statements: Statement[]; auditRun: AuditRunRecord | null; onRunReaderPreflight?: () => void; readerPreflight: MultimodalReaderPreflightResult | null; readerPreflightBusy: boolean; readerPreflightError: string }) {
   const audit = metrics.audit;
   const [runtimeErrors, setRuntimeErrors] = useState<WebErrorDiagnostic[]>(() => readWebErrorDiagnostics());
   return <details className="audit-diagnostics">
      <summary><div><strong>Auditoría de importación y conciliación</strong><span>Diagnóstico temporal reproducible · {audit.stages.join(" → ")}</span></div><b>{audit.periods.length} periodos</b></summary>
-    <div className="audit-actions"><button type="button" className="text-button" onClick={() => exportAuditDiagnostics(metrics, statements, auditRun)}><DownloadSimple size={15} /> Descargar diagnóstico JSON</button><span>No incluye descripciones ni importes individuales.</span>{runtimeErrors.length > 0 && <button type="button" className="text-button" onClick={() => { clearWebErrorDiagnostics(); setRuntimeErrors([]); }}>Limpiar errores de interfaz</button>}</div>
+    <div className="audit-actions"><button type="button" className="text-button" onClick={() => exportAuditDiagnostics(metrics, statements, auditRun)}><DownloadSimple size={15} /> Descargar diagnóstico JSON</button><span>No incluye descripciones ni importes individuales.</span>{onRunReaderPreflight && <><button type="button" className="text-button" onClick={onRunReaderPreflight} disabled={readerPreflightBusy}><ShieldCheck size={15} />{readerPreflightBusy ? "Comprobando lector…" : "Probar lector avanzado"}</button>{readerPreflight && <span className="reader-preflight-ok" role="status">Lector listo · {readerPreflight.model}</span>}{readerPreflightError && <span className="reader-preflight-error" role="status">{readerPreflightError}</span>}</>}{runtimeErrors.length > 0 && <button type="button" className="text-button" onClick={() => { clearWebErrorDiagnostics(); setRuntimeErrors([]); }}>Limpiar errores de interfaz</button>}</div>
     {runtimeErrors.length > 0 && <div className="runtime-diagnostics" role="status"><strong>{runtimeErrors.length} error{runtimeErrors.length === 1 ? "" : "es"} de interfaz registrado{runtimeErrors.length === 1 ? "" : "s"}</strong>{runtimeErrors.slice(-3).reverse().map((entry) => <div className="runtime-diagnostic-row" key={entry.eventId}><span>{new Intl.DateTimeFormat("es-MX", { dateStyle: "short", timeStyle: "short" }).format(new Date(entry.recordedAt))}</span><code>{entry.eventId}</code><p>{entry.message || "Error sin mensaje"}</p></div>)}</div>}
     {auditRun && <div className="audit-run-meta"><span>Auditoría {auditRun.id} · {auditRun.trigger} · libro {auditRun.ledgerFingerprint}{auditRun.sourceFingerprints?.length ? ` · PDF${auditRun.sourceFingerprints.length === 1 ? "" : "s"} ${auditRun.sourceFingerprints.map((fingerprint) => fingerprint.slice(0, 8)).join(", ")}` : ""}{auditRun.readerVersions?.length ? ` · lector ${auditRun.readerVersions.join(", ")}` : ""}{auditRun.quarantinedMovementCount ? ` · ${auditRun.quarantinedMovementCount} fila${auditRun.quarantinedMovementCount === 1 ? "" : "s"} heredada${auditRun.quarantinedMovementCount === 1 ? "" : "s"} en cuarentena` : ""}</span><b className={`audit-status-${auditRun.status}`}>{auditRun.status === "passed" ? "Verificado" : auditRun.status === "warning" ? "Advertencias" : "Bloqueado"}</b></div>}
     {audit.criticalIssues.length > 0 && <div className="audit-critical">{audit.criticalIssues.join(" · ")}</div>}
@@ -1189,7 +1237,7 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   return <div className="empty-state"><ListMagnifyingGlass size={32} /><h3>{title}</h3><p>{body}</p></div>;
 }
 
-function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean; onClose: () => void; onSave: (commit: ImportCommit) => void; categoryRules: CategoryRules }) {
+function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightReady }: { open: boolean; onClose: () => void; onSave: (commit: ImportCommit) => void; categoryRules: CategoryRules; readerPreflightReady: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [stage, setStage] = useState<"pick" | "processing" | "review" | "error">("pick");
   const [progress, setProgress] = useState(0);
@@ -1201,6 +1249,9 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
   const [reviewKind, setReviewKind] = useState<StatementKind>("unknown");
   const [error, setError] = useState("");
   const initialCategories = useRef<Record<string, string>>({});
+  const selectedFile = useRef<File | null>(null);
+  const readerAuthorization = useRef("");
+  const readerConsent = useRef(false);
 
   if (open && dialog.current && !dialog.current.open) dialog.current.showModal();
   if (!open && dialog.current?.open) dialog.current.close();
@@ -1208,6 +1259,9 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
   async function handleFile(file?: File) {
     if (!file) return;
     if (file.type !== "application/pdf" && !file.name.toLowerCase().endsWith(".pdf")) { setError("Selecciona un archivo PDF válido."); setStage("error"); return; }
+    selectedFile.current = file;
+    readerConsent.current = false;
+    readerAuthorization.current = "";
     setStage("processing"); setProgress(0); setProgressLabel("Cargando estado de cuenta…"); setError("");
     try {
       const inspected = await inspectPdf(file, (value, label) => { setProgress(value); setProgressLabel(label); });
@@ -1226,6 +1280,62 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
         ? cause.message
         : "No pudimos leer este PDF. El archivo no se modificó; intenta con otra copia.";
       setError(safeMessage); setStage("error");
+    }
+  }
+
+  async function retryWithMultimodalReader() {
+    const file = selectedFile.current;
+    if (!file || !multimodalReaderEndpoint) return;
+    if (!readerPreflightReady) {
+      setError("Primero comprueba el lector avanzado desde Resumen → Diagnóstico → Probar lector avanzado. No se enviará ningún PDF hasta validar el proveedor.");
+      setStage("error");
+      return;
+    }
+    if (!readerConsent.current) {
+      const confirmed = window.confirm("El lector avanzado enviará temporalmente este PDF a un proveedor externo. Los modelos gratuitos de Zen pueden tener políticas de uso de datos distintas al lector local. ¿Quieres continuar?");
+      if (!confirmed) {
+        setError("No se envió el PDF. Puedes continuar con la revisión local.");
+        setStage("error");
+        return;
+      }
+      readerConsent.current = true;
+    }
+    const token = readerAuthorization.current || window.prompt("Token temporal del lector seguro (no se guardará en este dispositivo):")?.trim() || "";
+    if (!token) {
+      setError("Se necesita autorización temporal para enviar este PDF al lector seguro.");
+      setStage("error");
+      return;
+    }
+    readerAuthorization.current = token;
+    setStage("processing"); setProgress(12); setProgressLabel("Enviando el PDF al lector seguro…"); setError("");
+    try {
+      const response = await requestMultimodalExtraction(file, {
+        endpoint: multimodalReaderEndpoint,
+        enabled: true,
+        authorization: `Bearer ${token}`,
+        timeoutMs: 180_000,
+      });
+      setProgress(82); setProgressLabel("Validando filas y conciliando totales…");
+      const inspected = extractionToImportResult(response.extraction, file, {
+        sourceFingerprint: response.sourceFingerprint,
+        model: response.model,
+        // Preserve any known issuer from the local header, even when it is
+        // still review-level. A remote model must not replace a BBVA PDF by
+        // “Santander” just because that brand appears in a transfer row.
+        sourceHint: result?.sourceDetection && result.sourceDetection.source !== "Desconocido"
+          ? result.sourceDetection
+          : undefined,
+      });
+      void saveImportedPdf(inspected.sourceFingerprint, file);
+      const withLearnedCategories = inspected.transactions.map((item) => {
+        const learned = categoryFromRules(item.description, categoryRules);
+        return learned ? { ...item, category: learned, confidence: 1 } : item;
+      });
+      initialCategories.current = Object.fromEntries(withLearnedCategories.map((item) => [item.id, item.category]));
+      setResult({ ...inspected, transactions: withLearnedCategories }); setItems(withLearnedCategories); setSummary(inspected.summary ?? {}); setReviewSource(inspected.source); setReviewKind(inspected.kind); setProgress(100); setProgressLabel("Lectura avanzada terminada"); setStage("review");
+    } catch (cause) {
+      const message = cause instanceof MultimodalReaderError ? cause.message : "El lector seguro no pudo completar la extracción.";
+      setError(message); setStage("error");
     }
   }
 
@@ -1272,7 +1382,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
     } : current);
   }
 
-  function resetAndClose() { setStage("pick"); setProgress(0); setProgressLabel(""); setResult(null); setItems([]); setSummary({}); setReviewSource("Desconocido"); setReviewKind("unknown"); setError(""); initialCategories.current = {}; onClose(); }
+  function resetAndClose() { setStage("pick"); setProgress(0); setProgressLabel(""); setResult(null); setItems([]); setSummary({}); setReviewSource("Desconocido"); setReviewKind("unknown"); setError(""); initialCategories.current = {}; selectedFile.current = null; readerAuthorization.current = ""; readerConsent.current = false; onClose(); }
 
   function updateSummary(key: keyof StatementSummary, value: string) {
     setSummary((current) => {
@@ -1300,11 +1410,11 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
   }));
   const selectionChanged = Boolean(result && (reviewKind !== result.kind || reviewSource.trim() !== result.source));
   return <dialog ref={dialog} className="import-dialog" onCancel={(event) => { event.preventDefault(); resetAndClose(); }}><div className="dialog-head"><div><span className="dialog-icon"><FilePdf size={21} /></span><div><h2>Importar estado de cuenta</h2><p>El archivo se procesa localmente y conserva su origen.</p></div></div><button className="icon-button" aria-label="Cerrar" onClick={resetAndClose}><X size={20} /></button></div>
-    {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se detectarán banco, periodo y movimientos. Los estados escaneados se leen con OCR y quedan pendientes de confirmación.</span><span className="file-button">Elegir archivo</span></label>}
+    {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se detectarán banco, periodo y movimientos. Los estados escaneados se leen con OCR y quedan pendientes de confirmación.</span>{multimodalReaderEndpoint && <small>Si la lectura local no concilia, podrás autorizar un lector seguro como respaldo.</small>}<span className="file-button">Elegir archivo</span></label>}
     {stage === "processing" && <div className="processing-state" role="status" aria-live="polite" aria-busy="true"><div className="loading-orbit" aria-hidden="true"><CircleNotch size={34} className="spinner" /><span className="loading-pulse"><i /><i /><i /></span></div><h3>{progressLabel || "Cargando estado de cuenta…"}</h3><p>Estamos leyendo y conciliando tu estado. No cierres esta ventana.</p><div className="progress-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div><small>{progress}% completado</small></div>}
-    {stage === "error" && <div className="error-state"><Warning size={34} /><h3>No pudimos completar la importación</h3><p>{error}</p><button className="secondary-button" onClick={() => setStage("pick")}>Intentar de nuevo</button></div>}
-    {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Origen detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.mode === "text" ? "Lectura directa" : "OCR en el dispositivo"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div>{result.mode === "ocr" && <div><span>Confianza OCR</span><strong>{Math.round((result.ocrConfidence ?? 0) * 100)}%</strong></div>}</div><div className={`reconciliation-callout ${currentReconciliation?.status ?? "pending"}`} role="status"><div><strong>{currentReconciliation?.status === "valid" ? "Importación conciliada" : currentReconciliation?.status === "invalid" ? "Importación bloqueada" : "Conciliación pendiente"}</strong><p>{currentReconciliation?.status === "valid" ? "Las filas extraídas coinciden con los totales declarados por el estado." : currentReconciliation?.reason ?? "Completa o revisa los totales declarados antes de guardar."}</p></div><small>{currentReconciliation ? `Tolerancia ±${currentReconciliation.tolerance.toFixed(2)}${reconciliationCountLabel(currentReconciliation)}` : ""}</small></div><div className="review-source-editor"><label><span>Nombre que se guardará</span><input value={reviewSource} onChange={(event) => setReviewSource(event.target.value as StatementSource)} placeholder="Ej. Santander, Nómina o Banco personal" /></label><label><span>Tipo de archivo</span><select value={reviewKind} onChange={(event) => setReviewKind(event.target.value as StatementKind)}><option value="card">Tarjeta de crédito</option><option value="bank">Cuenta bancaria</option><option value="unknown">No identificado</option></select></label>{selectionChanged && <button type="button" className="text-button" onClick={reparseWithSelection}>Releer filas con esta configuración</button>}<p>Corrige el origen aquí si el PDF usa una marca o formato que todavía no conocemos. Las categorías que ajustes se recordarán para el siguiente mes.</p></div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>Marcelito convirtió sus páginas a imagen y ejecutó OCR en tu navegador. Confirma los importes y agrega cualquier movimiento que no se haya reconocido.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
-      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "No se puede guardar hasta conciliar el estado" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: reviewSource.trim() || "Desconocido", accountKey: result.accountKey, kind: reviewKind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, mode: result.mode, transactions: validItems.map((item) => ({ ...item, account: reviewSource.trim() || item.account })) , summary, reconciliation: currentReconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Corregir conciliación para guardar" : validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado conciliado"}</button></div></div>}
+    {stage === "error" && <div className="error-state"><Warning size={34} /><h3>No pudimos completar la importación</h3><p>{error}</p><button className="secondary-button" onClick={() => setStage("pick")}>Intentar de nuevo</button>{multimodalReaderEndpoint && selectedFile.current && <button className="primary-button" onClick={retryWithMultimodalReader}>Reintentar con lector seguro</button>}</div>}
+    {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Origen detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.extractionProvider === "multimodal" ? "Lector multimodal" : result.mode === "text" ? "Lectura directa" : "OCR en el dispositivo"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div>{result.mode === "ocr" && <div><span>Confianza OCR</span><strong>{Math.round((result.ocrConfidence ?? 0) * 100)}%</strong></div>}</div><div className={`reconciliation-callout ${currentReconciliation?.status ?? "pending"}`} role="status"><div><strong>{currentReconciliation?.status === "valid" ? "Importación conciliada" : currentReconciliation?.status === "invalid" ? "Importación bloqueada" : "Conciliación pendiente"}</strong><p>{currentReconciliation?.status === "valid" ? "Las filas extraídas coinciden con los totales declarados por el estado." : currentReconciliation?.reason ?? "Completa o revisa los totales declarados antes de guardar."}</p></div><small>{currentReconciliation ? `Tolerancia ±${currentReconciliation.tolerance.toFixed(2)}${reconciliationCountLabel(currentReconciliation)}` : ""}</small>{multimodalReaderEndpoint && result.extractionProvider !== "multimodal" && <button className="secondary-button" onClick={retryWithMultimodalReader}>Releer con lector seguro</button>}</div><div className="review-source-editor"><label><span>Nombre que se guardará</span><input value={reviewSource} onChange={(event) => setReviewSource(event.target.value as StatementSource)} placeholder="Ej. Santander, Nómina o Banco personal" /></label><label><span>Tipo de archivo</span><select value={reviewKind} onChange={(event) => setReviewKind(event.target.value as StatementKind)}><option value="card">Tarjeta de crédito</option><option value="bank">Cuenta bancaria</option><option value="unknown">No identificado</option></select></label>{selectionChanged && <button type="button" className="text-button" onClick={reparseWithSelection}>Releer filas con esta configuración</button>}<p>Corrige el origen aquí si el PDF usa una marca o formato que todavía no conocemos. Las categorías que ajustes se recordarán para el siguiente mes.</p></div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>Marcelito convirtió sus páginas a imagen y ejecutó OCR en tu navegador. Confirma los importes y agrega cualquier movimiento que no se haya reconocido.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
+      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "No se puede guardar hasta conciliar el estado" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: reviewSource.trim() || "Desconocido", accountKey: result.accountKey, kind: reviewKind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, extractionProvider: result.extractionProvider, extractionModel: result.extractionModel, extractionPromptVersion: result.extractionPromptVersion, mode: result.mode, transactions: validItems.map((item) => ({ ...item, account: reviewSource.trim() || item.account })) , summary, reconciliation: currentReconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Corregir conciliación para guardar" : validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado conciliado"}</button></div></div>}
     {stage === "review" && result && <StatementSummaryForm source={reviewSource} kind={reviewKind} summary={summary} onChange={updateSummary} />}
   </dialog>;
 }

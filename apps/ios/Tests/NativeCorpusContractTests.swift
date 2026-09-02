@@ -9,6 +9,107 @@ import XCTest
 /// the same PDFDocument + Vision path used by the app, unlike the web corpus
 /// evaluator which intentionally stops at `ocr-required` for scans.
 final class NativeCorpusContractTests: XCTestCase {
+    /// A private corpus may carry its golden expectations in a file outside
+    /// the repository.  The public fixture below stays synthetic, while a
+    /// macOS/iPhone run can point at a local manifest containing hashes and
+    /// issuer controls for real statements.  No PDF bytes or descriptions
+    /// are read from the manifest.
+    private struct ExternalManifest: Decodable {
+        struct Summary: Decodable {
+            let previousBalance: Decimal?
+            let cashBalance: Decimal?
+            let depositTotal: Decimal?
+            let withdrawalTotal: Decimal?
+            let chargeTotal: Decimal?
+            let paymentTotal: Decimal?
+            let creditLimit: Decimal?
+            let creditAvailable: Decimal?
+            let debtBalance: Decimal?
+            let paymentForNoInterest: Decimal?
+            let minimumPlusMsi: Decimal?
+            let msiPending: Decimal?
+
+            private enum CodingKeys: String, CodingKey {
+                case previousBalance, cashBalance, depositTotal, withdrawalTotal,
+                     chargeTotal, paymentTotal, creditLimit, creditAvailable,
+                     debtBalance, paymentForNoInterest, minimumPlusMsi, msiPending,
+                     extractedPreviousBalance, extractedCashBalance,
+                     extractedDepositTotal, extractedWithdrawalTotal,
+                     extractedChargeTotal, extractedPaymentTotal,
+                     extractedCreditLimit, extractedCreditAvailable,
+                     extractedDebtBalance, extractedPaymentForNoInterest,
+                     extractedMinimumPlusMsi, extractedMsiPending
+            }
+
+            init(from decoder: Decoder) throws {
+                let container = try decoder.container(keyedBy: CodingKeys.self)
+                func parseDecimal(_ raw: String) -> Decimal? {
+                    let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !value.isEmpty else { return nil }
+                    let comma = value.lastIndex(of: ",")
+                    let dot = value.lastIndex(of: ".")
+                    let normalized: String
+                    if let comma, let dot {
+                        normalized = comma > dot
+                            ? value.replacingOccurrences(of: ".", with: "").replacingOccurrences(of: ",", with: ".")
+                            : value.replacingOccurrences(of: ",", with: "")
+                    } else if let comma {
+                        let decimals = value.distance(from: comma, to: value.endIndex) - 1
+                        normalized = (decimals == 1 || decimals == 2)
+                            ? value.replacingOccurrences(of: ",", with: ".")
+                            : value.replacingOccurrences(of: ",", with: "")
+                    } else {
+                        normalized = value
+                    }
+                    return Decimal(string: normalized, locale: Locale(identifier: "en_US_POSIX"))
+                }
+                func decodeDecimal(_ keys: [CodingKeys]) -> Decimal? {
+                    for key in keys {
+                        do {
+                            if let value = try container.decodeIfPresent(Decimal.self, forKey: key) {
+                                return value
+                            }
+                        } catch { }
+                        do {
+                            if let value = try container.decodeIfPresent(String.self, forKey: key),
+                               let parsed = parseDecimal(value) {
+                                return parsed
+                            }
+                        } catch { }
+                    }
+                    return nil
+                }
+                previousBalance = decodeDecimal([.previousBalance, .extractedPreviousBalance])
+                cashBalance = decodeDecimal([.cashBalance, .extractedCashBalance])
+                depositTotal = decodeDecimal([.depositTotal, .extractedDepositTotal])
+                withdrawalTotal = decodeDecimal([.withdrawalTotal, .extractedWithdrawalTotal])
+                chargeTotal = decodeDecimal([.chargeTotal, .extractedChargeTotal])
+                paymentTotal = decodeDecimal([.paymentTotal, .extractedPaymentTotal])
+                creditLimit = decodeDecimal([.creditLimit, .extractedCreditLimit])
+                creditAvailable = decodeDecimal([.creditAvailable, .extractedCreditAvailable])
+                debtBalance = decodeDecimal([.debtBalance, .extractedDebtBalance])
+                paymentForNoInterest = decodeDecimal([.paymentForNoInterest, .extractedPaymentForNoInterest])
+                minimumPlusMsi = decodeDecimal([.minimumPlusMsi, .extractedMinimumPlusMsi])
+                msiPending = decodeDecimal([.msiPending, .extractedMsiPending])
+            }
+        }
+
+        struct File: Decodable {
+            let file: String
+            let sourceFingerprint: String
+            let source: String
+            let accountKey: String?
+            let kind: String
+            let status: String
+            let rows: Int?
+            let summary: Summary?
+        }
+
+        let schemaVersion: Int?
+        let readerVersion: String?
+        let files: [File]
+    }
+
     private struct Expectation {
         let sourceFingerprint: String
         let source: String
@@ -84,6 +185,101 @@ final class NativeCorpusContractTests: XCTestCase {
         "sample-bank-bbva.pdf": Expectation(sourceFingerprint: String(repeating: "2", count: 64), source: "BBVA", accountKey: "bbva:3001", kind: .bank, status: .valid, rows: 11, depositTotal: 1_950, withdrawalTotal: 2_205.87),
     ]
 
+    private func expectationsForRun() throws -> [String: Expectation] {
+        guard let rawPath = ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_MANIFEST"],
+              !rawPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return expectations
+        }
+
+        let manifestURL = URL(fileURLWithPath: rawPath)
+        let data = try Data(contentsOf: manifestURL, options: .mappedIfSafe)
+        let manifest = try JSONDecoder().decode(ExternalManifest.self, from: data)
+        if let schemaVersion = manifest.schemaVersion, schemaVersion != 1 {
+            throw NSError(
+                domain: "NativeCorpusManifest",
+                code: 6,
+                userInfo: [NSLocalizedDescriptionKey: "schemaVersion no compatible en el manifiesto privado."]
+            )
+        }
+        if let readerVersion = manifest.readerVersion,
+           readerVersion != FinanceStore.readerVersion {
+            throw NSError(
+                domain: "NativeCorpusManifest",
+                code: 7,
+                userInfo: [NSLocalizedDescriptionKey: "El manifiesto usa \(readerVersion), pero el lector actual es \(FinanceStore.readerVersion)."]
+            )
+        }
+        guard !manifest.files.isEmpty else {
+            throw NSError(
+                domain: "NativeCorpusManifest",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "El manifiesto privado no contiene archivos."]
+            )
+        }
+
+        var decoded: [String: Expectation] = [:]
+        for entry in manifest.files {
+            let file = entry.file.trimmingCharacters(in: .whitespacesAndNewlines)
+            let fingerprint = entry.sourceFingerprint.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !file.isEmpty,
+                  fingerprint.range(of: #"^[a-f0-9]{64}$"#, options: .regularExpression) != nil,
+                  decoded[file] == nil,
+                  let kind = StatementKind(rawValue: entry.kind),
+                  let status = StatementReconciliationStatus(rawValue: entry.status) else {
+                throw NSError(
+                    domain: "NativeCorpusManifest",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Entrada inválida en el manifiesto privado: \(entry.file)."]
+                )
+            }
+            let normalizedSource = entry.source.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedSource.isEmpty, normalizedSource != "Desconocido" else {
+                throw NSError(
+                    domain: "NativeCorpusManifest",
+                    code: 3,
+                    userInfo: [NSLocalizedDescriptionKey: "Falta el emisor de \(entry.file)."]
+                )
+            }
+            if let accountKey = entry.accountKey,
+               accountKey.range(of: #"^[a-z0-9]+:\d{4}$"#, options: [.regularExpression, .caseInsensitive]) == nil {
+                throw NSError(
+                    domain: "NativeCorpusManifest",
+                    code: 4,
+                    userInfo: [NSLocalizedDescriptionKey: "La cuenta de \(entry.file) debe usar emisor:últimos4."]
+                )
+            }
+            if status == .valid, (entry.rows == nil || (entry.rows ?? -1) < 0) {
+                throw NSError(
+                    domain: "NativeCorpusManifest",
+                    code: 5,
+                    userInfo: [NSLocalizedDescriptionKey: "Un golden válido necesita rows entero en \(entry.file)."]
+                )
+            }
+            let summary = entry.summary
+            decoded[file] = Expectation(
+                sourceFingerprint: fingerprint,
+                source: normalizedSource,
+                accountKey: entry.accountKey ?? "",
+                kind: kind,
+                status: status,
+                rows: entry.rows ?? 0,
+                previousBalance: summary?.previousBalance,
+                cashBalance: summary?.cashBalance,
+                depositTotal: summary?.depositTotal,
+                withdrawalTotal: summary?.withdrawalTotal,
+                chargeTotal: summary?.chargeTotal,
+                paymentTotal: summary?.paymentTotal,
+                creditLimit: summary?.creditLimit,
+                creditAvailable: summary?.creditAvailable,
+                debtBalance: summary?.debtBalance,
+                paymentForNoInterest: summary?.paymentForNoInterest,
+                minimumPlusMsi: summary?.minimumPlusMsi,
+                msiPending: summary?.msiPending
+            )
+        }
+        return decoded
+    }
+
     private func fingerprint(_ file: URL) throws -> String {
         let data = try Data(contentsOf: file, options: .mappedIfSafe)
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -114,6 +310,13 @@ final class NativeCorpusContractTests: XCTestCase {
         }
 
         let directory = URL(fileURLWithPath: rawDirectory, isDirectory: true)
+        let runExpectations: [String: Expectation]
+        do {
+            runExpectations = try expectationsForRun()
+        } catch {
+            XCTFail("No se pudo leer MARCELITO_PDF_CORPUS_MANIFEST: \(error.localizedDescription)")
+            return
+        }
         let files = try FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey],
@@ -122,7 +325,7 @@ final class NativeCorpusContractTests: XCTestCase {
         .filter { $0.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame }
         .sorted { $0.lastPathComponent < $1.lastPathComponent }
 
-        XCTAssertEqual(Set(files.map(\.lastPathComponent)), Set(expectations.keys), "El corpus nativo debe contener exactamente los PDFs del manifiesto.")
+        XCTAssertEqual(Set(files.map(\.lastPathComponent)), Set(runExpectations.keys), "El corpus nativo debe contener exactamente los PDFs del manifiesto.")
 
         let store = FinanceStore()
         defer { store.clearLocalData() }
@@ -133,7 +336,7 @@ final class NativeCorpusContractTests: XCTestCase {
         var unresolvedOCR = 0
 
         for file in files {
-            guard let expected = expectations[file.lastPathComponent] else { continue }
+            guard let expected = runExpectations[file.lastPathComponent] else { continue }
             let actualFingerprint = try fingerprint(file)
             let fileSizeBytes = (try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
             XCTAssertEqual(actualFingerprint, expected.sourceFingerprint, file.lastPathComponent + " no coincide con el PDF dorado")
@@ -304,10 +507,11 @@ final class NativeCorpusContractTests: XCTestCase {
         let automaticAcceptancePrecision = precisionDenominator > 0
             ? Double(goldenAutoAccepted) / Double(precisionDenominator)
             : 0
-        let expectedValidCount = expectations.values.filter { $0.status == .valid }.count
-        let expectedPendingCount = expectations.values.filter { $0.status != .valid }.count
-        let exactCorpus = Set(files.map(\.lastPathComponent)) == Set(expectations.keys)
-        let certified = exactCorpus
+        let expectedValidCount = runExpectations.values.filter { $0.status == .valid }.count
+        let expectedPendingCount = runExpectations.values.filter { $0.status != .valid }.count
+        let exactCorpus = Set(files.map(\.lastPathComponent)) == Set(runExpectations.keys)
+        let certified = runExpectations.count >= 10
+            && exactCorpus
             && expectedPendingCount == 0
             && goldenFalseAccepted == 0
             && goldenAutoAccepted == expectedValidCount

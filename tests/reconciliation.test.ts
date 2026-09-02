@@ -2,9 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { adaptiveOcrScale, detectAccountKey, detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
-import { buildFinanceMetrics, hasVerifiedSourceEvidence, isStatementEligibleForDashboard } from "../src/finance.ts";
+import { buildFinanceMetrics, hasSufficientOcrQuality, hasVerifiedSourceEvidence, isStatementEligibleForDashboard } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
 import { prepareStoredLedger, prepareStoredStatements } from "../src/statementMigration.ts";
+import { MULTIMODAL_READER_VERSION } from "../src/multimodalReader.ts";
 import type { Statement, Transaction } from "../src/types.ts";
 
 const bank = (id: string, source: string, period: string): Statement => ({
@@ -125,11 +126,24 @@ test("la compuerta OCR se conserva al recalcular la vista de revisión", () => {
   assert.equal(gateOcrReconciliation(base, "text", 0.1).status, "valid");
 });
 
+test("la extracción multimodal no puede saltarse el umbral visual usando modo texto", () => {
+  const statement: Statement = {
+    ...bank("bbva-multimodal-quality", "BBVA", "agosto 2026"),
+    extractionProvider: "multimodal",
+    // A remote reader can preserve mode=text for compatibility; its own
+    // confidence and page evidence must still pass the visual gate.
+    ocrConfidence: 0.87,
+    ocrPageConfidences: [0.99],
+  };
+  assert.equal(hasSufficientOcrQuality(statement), false);
+  assert.equal(hasSufficientOcrQuality({ ...statement, ocrConfidence: 0.90, ocrPageConfidences: [0.80] }), true);
+});
+
 test("la escala OCR adaptativa mejora páginas bancarias sin desbordar memoria", () => {
   const bankPageScale = adaptiveOcrScale(612, 792);
-  assert.ok(bankPageScale > 2 && bankPageScale <= 3);
+  assert.ok(bankPageScale > 2 && bankPageScale <= 3.1);
   assert.equal(adaptiveOcrScale(10_000, 10_000), 0.75);
-  assert.equal(adaptiveOcrScale(Number.NaN, Number.POSITIVE_INFINITY), 3);
+  assert.equal(adaptiveOcrScale(Number.NaN, Number.POSITIVE_INFINITY), 3.1);
 });
 
 test("una capa de texto administrativo larga no desactiva el OCR visual", () => {
@@ -139,6 +153,17 @@ test("una capa de texto administrativo larga no desactiva el OCR visual", () => 
 
 test("una tabla estructurada larga conserva la lectura directa", () => {
   const table = `${"Información del estado ".repeat(30)}\nDetalle de Movimientos Realizados\n23/JUL 22/JUL SUPERMERCADO 120.00 3,469.63`;
+  assert.equal(shouldUseOCR(table), false);
+});
+
+test("una tabla Amex multilinea conserva la lectura directa", () => {
+  const table = [
+    "Información del estado ".repeat(30),
+    "Fecha y Detalle de las operaciones Importe en MN.",
+    "5 de Agosto AMAZON MX",
+    "RFC123456789 /REFABC123",
+    "123.45",
+  ].join("\n");
   assert.equal(shouldUseOCR(table), false);
 });
 
@@ -898,6 +923,20 @@ test("la conciliación de tarjeta usa nuevas transacciones antes que el total co
   assert.equal(reconcileStatementImport("card", summary, rows).status, "valid");
 });
 
+test("la conciliación de tarjeta bloquea una deuda que no cuadra con límite y disponible", () => {
+  const summary = {
+    newTransactions: 100,
+    creditLimit: 10_000,
+    creditAvailable: 9_000,
+    debtBalance: 900,
+  };
+  const rows = extractTransactions("01/08/2026 COMPRA 100.00", "Amex", "sample-card-period-identity.pdf", "card");
+  const reconciliation = reconcileStatementImport("card", summary, rows);
+  assert.equal(reconciliation.status, "invalid");
+  assert.equal(reconciliation.creditIdentityDifference, 100);
+  assert.match(reconciliation.reason ?? "", /identidad de crédito/);
+});
+
 test("la conciliación Amex usa subtotales nacional y extranjero como gasto real", () => {
   const summary = parseStatementSummary([
     "Nuevas transacciones: 3,317.75",
@@ -1579,6 +1618,42 @@ test("la migración conserva filas del lector actual que esperan revisión OCR",
   assert.deepEqual(prepared.transactions.map((row) => row.id), ["ocr-row"]);
   assert.equal(prepared.statements[0]?.reconciliationStatus, "pending");
   assert.equal(prepared.statements[0]?.reconciliation?.reason, "OCR provisional");
+});
+
+test("la migración conserva estados del lector multimodal actual", () => {
+  const statement = {
+    ...bank("bbva-multimodal", "BBVA", "agosto 2026"),
+    readerVersion: MULTIMODAL_READER_VERSION,
+    extractionProvider: "multimodal" as const,
+    mode: "text" as const,
+    status: "ready" as const,
+    reconciliationStatus: "valid" as const,
+    reconciliation: { status: "valid" as const, tolerance: 0.05 },
+    sourceDetection: {
+      source: "BBVA" as const,
+      confidence: 1,
+      status: "verified" as const,
+      evidence: ["encabezado institucional BBVA"],
+      ignoredBodyMentions: [],
+    },
+    ocrConfidence: 0.99,
+    ocrPageConfidences: [0.99],
+  };
+  const row = movement({
+    id: "multimodal-row",
+    date: "10 ago 2026",
+    description: "COMPRA MULTIMODAL",
+    account: "BBVA",
+    amount: -100,
+    flow: "expense",
+    statementId: statement.id,
+  });
+
+  const prepared = prepareStoredLedger([statement], [row]);
+  assert.equal(prepared.quarantinedMovementCount, 0);
+  assert.equal(prepared.statements[0]?.status, "ready");
+  assert.equal(prepared.statements[0]?.reconciliationStatus, "valid");
+  assert.deepEqual(prepared.transactions.map((item) => item.id), ["multimodal-row"]);
 });
 
 test("la auditoría conserva el conteo de filas PDF heredadas en cuarentena", () => {
