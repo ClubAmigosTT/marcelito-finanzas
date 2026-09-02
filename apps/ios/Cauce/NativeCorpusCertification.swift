@@ -145,6 +145,10 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
     let reconciliationReason: String?
     let rows: [OCRRowDiagnostic]
 
+    private enum CodingKeys: String, CodingKey {
+        case file, sourceFileName, source, mode, status, reconciliationReason, rows
+    }
+
     var id: String { file }
 }
 
@@ -154,13 +158,28 @@ struct NativeCorpusDiagnosticReport: Codable {
     let readerVersion: String
     let files: [NativeCorpusDiagnosticFile]
 
+    private enum CodingKeys: String, CodingKey {
+        case schemaVersion, generatedAt, readerVersion, files
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(generatedAt, forKey: .generatedAt)
+        try container.encode(readerVersion, forKey: .readerVersion)
+        // Keep row evidence in the private export explicitly. The public
+        // certification report uses a different encoder and intentionally
+        // omits this field.
+        try container.encode(files, forKey: .files)
+    }
+
     func writeTemporaryFile() throws -> URL {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         let data = try encoder.encode(self)
         let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("marcelito-native-corpus-row-diagnostics.json")
+            .appendingPathComponent("marcelito-native-corpus-row-diagnostics-\(UUID().uuidString).json")
         try data.write(to: url, options: [.atomic])
         return url
     }
