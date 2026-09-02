@@ -511,8 +511,7 @@ struct NativeCorpusCertificationView: View {
                     Label("Elegir PDFs", systemImage: "folder")
                         .frame(maxWidth: .infinity, minHeight: 42)
                 }
-                .buttonStyle(.bordered)
-                .tint(Color.marcelitoNavy)
+                .buttonStyle(.marcelitoSecondary)
 
                 Button {
                     runCertification()
@@ -525,8 +524,7 @@ struct NativeCorpusCertificationView: View {
                         // label color from `.tint` automatically.
                         .foregroundStyle(Color.marcelitoCream)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.marcelitoNavy)
+                .buttonStyle(.marcelitoPrimary)
                 .disabled(selectedFiles.isEmpty || isRunning)
             }
             if ZenAPIKeyStore.apiKey == nil {
@@ -617,8 +615,7 @@ struct NativeCorpusCertificationView: View {
                     Label("Compartir informe JSON", systemImage: "square.and.arrow.up")
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.marcelitoNavy)
+                .buttonStyle(.marcelitoPrimary)
             }
             if let diagnosticExportURL {
                 Text("El diagnóstico por fila contiene el texto OCR, la columna y el importe seleccionados para cada fila. Compártelo solo para depurar tus propios estados.")
@@ -628,8 +625,7 @@ struct NativeCorpusCertificationView: View {
                     Label("Compartir diagnóstico por fila", systemImage: "list.bullet.rectangle.portrait")
                         .frame(maxWidth: .infinity, minHeight: 42)
                 }
-                .buttonStyle(.bordered)
-                .tint(Color.marcelitoNavy)
+                .buttonStyle(.marcelitoSecondary)
             }
         }
         .foregroundStyle(Color.marcelitoNavy)

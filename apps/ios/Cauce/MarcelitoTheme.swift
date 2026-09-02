@@ -85,3 +85,60 @@ extension View {
         modifier(MarcelitoCardModifier(fill: fill, radius: radius, padding: padding))
     }
 }
+
+/// Primary action treatment with an explicit foreground color. Relying on
+/// SwiftUI's automatic contrast for `.borderedProminent` can produce dark
+/// labels over the navy tint on some iOS versions and accessibility settings.
+struct MarcelitoPrimaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.headline)
+            .foregroundStyle(Color.marcelitoCream)
+            .frame(maxWidth: .infinity, minHeight: 48)
+            .padding(.horizontal, 18)
+            .background(
+                Color.marcelitoNavyDeep.opacity(configuration.isPressed ? 0.88 : 1),
+                in: Capsule()
+            )
+            .overlay {
+                Capsule()
+                    .stroke(Color.white.opacity(0.22), lineWidth: 1)
+            }
+            .shadow(color: Color.marcelitoNavy.opacity(0.14), radius: 10, y: 5)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .opacity(isEnabled ? 1 : 0.52)
+            .animation(.easeOut(duration: 0.16), value: configuration.isPressed)
+    }
+}
+
+/// Secondary action treatment for glass surfaces. The label is always the
+/// deep navy token so it remains legible on light and translucent backgrounds.
+struct MarcelitoSecondaryButtonStyle: ButtonStyle {
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .font(.headline)
+            .foregroundStyle(Color.marcelitoNavyDeep)
+            .frame(maxWidth: .infinity, minHeight: 48)
+            .padding(.horizontal, 18)
+            .background(.thinMaterial, in: Capsule())
+            .overlay {
+                Capsule()
+                    .stroke(Color.marcelitoNavyDeep.opacity(0.30), lineWidth: 1)
+            }
+            .opacity(isEnabled ? (configuration.isPressed ? 0.72 : 1) : 0.52)
+            .scaleEffect(configuration.isPressed ? 0.98 : 1)
+            .animation(.easeOut(duration: 0.16), value: configuration.isPressed)
+    }
+}
+
+extension ButtonStyle where Self == MarcelitoPrimaryButtonStyle {
+    static var marcelitoPrimary: MarcelitoPrimaryButtonStyle { .init() }
+}
+
+extension ButtonStyle where Self == MarcelitoSecondaryButtonStyle {
+    static var marcelitoSecondary: MarcelitoSecondaryButtonStyle { .init() }
+}
