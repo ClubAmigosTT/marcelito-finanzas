@@ -186,6 +186,10 @@ struct OCRRowDiagnostic: Codable, Identifiable {
     let reason: String
     let accepted: Bool
 
+    private enum CodingKeys: String, CodingKey {
+        case id, page, rawText, selectedColumn, selectedAmount, direction, reason, accepted
+    }
+
     init(
         id: String = UUID().uuidString,
         page: Int?,
@@ -204,6 +208,18 @@ struct OCRRowDiagnostic: Codable, Identifiable {
         self.direction = direction
         self.reason = reason
         self.accepted = accepted
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(id, forKey: .id)
+        try container.encodeIfPresent(page, forKey: .page)
+        try container.encode(rawText, forKey: .rawText)
+        try container.encodeIfPresent(selectedColumn, forKey: .selectedColumn)
+        try container.encodeIfPresent(selectedAmount, forKey: .selectedAmount)
+        try container.encodeIfPresent(direction, forKey: .direction)
+        try container.encode(reason, forKey: .reason)
+        try container.encode(accepted, forKey: .accepted)
     }
 }
 
@@ -5772,10 +5788,14 @@ final class FinanceStore {
         let flow: FlowKind
         if explicitOwnTransfer {
             flow = .transfer
-        } else if let balanceDelta {
+        } else if shouldUseBalanceDelta, let balanceDelta {
             // The balance equation wins over wording when Vision has
             // flattened the row. A positive delta is an incoming deposit;
-            // a negative delta is an outgoing charge/payment.
+            // a negative delta is an outgoing charge/payment. If the
+            // calibrated movement column disagrees with the delta (for
+            // example because a page skipped a row), retain the explicit
+            // column/description direction instead of turning a withdrawal
+            // into an income.
             flow = balanceDelta > 0
                 ? .income
                 : (isCardPayment ? .debt : .expense)
