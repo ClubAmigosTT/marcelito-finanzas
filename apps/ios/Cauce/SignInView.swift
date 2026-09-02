@@ -1,33 +1,22 @@
 import SwiftUI
 
+/// Local-only gate for the personal finance book. Face ID is the normal path;
+/// the fallback is revealed only when biometrics are unavailable or have
+/// failed repeatedly.
 struct SignInView: View {
     @Environment(AuthenticationModel.self) private var auth
-
-    private enum AuthMode: String, CaseIterable, Identifiable, Hashable {
-        case login
-        case create
-
-        var id: String { rawValue }
-    }
-
-    @State private var mode: AuthMode = .login
-    @State private var username = ""
-    @State private var password = ""
-
-    private var isCreating: Bool { mode == .create }
+    @State private var fallbackPassword = ""
 
     var body: some View {
-        @Bindable var auth = auth
-
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 28) {
                     VStack(alignment: .leading, spacing: 14) {
-                        Image(systemName: "waveform.path.ecg.rectangle.fill")
+                        Image(systemName: "faceid")
                             .font(.system(size: 24, weight: .semibold))
                             .foregroundStyle(Color.marcelitoCream)
                             .frame(width: 52, height: 52)
-                            .background(Color.marcelitoNavy, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                            .background(Color.marcelitoNavyDeep, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
                         Text("Marcelito")
                             .font(.system(.largeTitle, design: .rounded).weight(.bold))
@@ -37,32 +26,45 @@ struct SignInView: View {
                             .foregroundStyle(Color.marcelitoNavyMid)
                     }
 
-                    Picker("Acceso", selection: $mode) {
-                        Text("Entrar").tag(AuthMode.login)
-                        Text("Crear usuario").tag(AuthMode.create)
-                    }
-                    .pickerStyle(.segmented)
-                    .accessibilityLabel("Tipo de acceso")
-
                     VStack(alignment: .leading, spacing: 16) {
-                        Text(isCreating ? "Crea tu acceso" : "Bienvenido de vuelta")
+                        Label("Acceso protegido", systemImage: "lock.shield.fill")
                             .font(.title2.weight(.semibold))
                             .foregroundStyle(Color.marcelitoNavyDeep)
 
-                        VStack(spacing: 12) {
-                            TextField("Usuario", text: $username)
-                                .textContentType(.username)
+                        Text(auth.requiresFallback
+                            ? "Face ID no está disponible ahora. Usa tu clave de respaldo para continuar."
+                            : "Face ID se solicitará automáticamente para desbloquear tus finanzas.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+
+                        if auth.requiresFallback {
+                            SecureField("Clave de respaldo", text: $fallbackPassword)
+                                .textContentType(.password)
                                 .textInputAutocapitalization(.never)
                                 .autocorrectionDisabled()
                                 .padding(.horizontal, 14)
                                 .frame(minHeight: 52)
-                                .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                                .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
 
-                            SecureField(isCreating ? "Crea una contraseña" : "Contraseña", text: $password)
-                                .textContentType(isCreating ? .newPassword : .password)
-                                .padding(.horizontal, 14)
-                                .frame(minHeight: 52)
-                                .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            Button {
+                                auth.unlockWithFallback(fallbackPassword)
+                                fallbackPassword = ""
+                            } label: {
+                                Label("Desbloquear", systemImage: "lock.open.fill")
+                            }
+                            .buttonStyle(.marcelitoPrimary)
+                        } else {
+                            Button {
+                                Task { await auth.unlockWithFaceID() }
+                            } label: {
+                                Label("Entrar con Face ID", systemImage: "faceid")
+                            }
+                            .buttonStyle(.marcelitoPrimary)
+
+                            Button("Usar clave de respaldo") {
+                                auth.showFallback()
+                            }
+                            .buttonStyle(.marcelitoSecondary)
                         }
 
                         if let message = auth.message {
@@ -72,31 +74,9 @@ struct SignInView: View {
                                 .fixedSize(horizontal: false, vertical: true)
                         }
 
-                        Button {
-                            if isCreating {
-                                auth.createAccount(username: username, password: password)
-                            } else {
-                                auth.signIn(username: username, password: password)
-                            }
-                        } label: {
-                            Text(isCreating ? "Crear acceso" : "Entrar")
-                                .font(.headline)
-                                .frame(maxWidth: .infinity, minHeight: 50)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(Color.marcelitoNavy)
-
-                        if !isCreating {
-                            Button {
-                                Task { await auth.unlockWithFaceID() }
-                            } label: {
-                                Label("Entrar con Face ID", systemImage: "faceid")
-                                    .font(.headline)
-                                    .frame(maxWidth: .infinity, minHeight: 50)
-                            }
-                            .buttonStyle(.bordered)
-                            .tint(Color.marcelitoNavy)
-                        }
+                        Text("La sesión se bloquea al salir de la aplicación. Tus credenciales permanecen en el Keychain de este iPhone.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
                     .marcelitoCard(fill: Color.marcelitoCreamTint, radius: 18, padding: 20)
                 }
@@ -108,9 +88,8 @@ struct SignInView: View {
             .background(MarcelitoAmbientBackground())
             .foregroundStyle(Color.marcelitoNavy)
             .toolbar(.hidden, for: .navigationBar)
-            .onChange(of: mode) { _, _ in
-                auth.message = nil
-                password = ""
+            .task {
+                await auth.unlockAutomatically()
             }
         }
     }

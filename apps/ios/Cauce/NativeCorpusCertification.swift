@@ -450,7 +450,13 @@ struct NativeCorpusCertificationView: View {
                 allowsMultipleSelection: true,
                 onCompletion: handleSelection
             )
-            .sheet(isPresented: $isAISettingsPresented) {
+            .sheet(isPresented: $isAISettingsPresented, onDismiss: {
+                // Refresh the local state after the settings sheet writes the
+                // Keychain/UserDefaults values. Without this, returning from
+                // the first configuration left the certifier showing the old
+                // Vision-only action until the whole screen was recreated.
+                useAIFallback = ZenStatementReaderSettings.isEnabled && ZenAPIKeyStore.apiKey != nil
+            }) {
                 AISettingsView()
             }
             .alert("No se pudo ejecutar la certificación", isPresented: Binding(
@@ -505,8 +511,7 @@ struct NativeCorpusCertificationView: View {
                     Label("Elegir PDFs", systemImage: "folder")
                         .frame(maxWidth: .infinity, minHeight: 42)
                 }
-                .buttonStyle(.bordered)
-                .tint(Color.marcelitoNavy)
+                .buttonStyle(.marcelitoSecondary)
 
                 Button {
                     runCertification()
@@ -519,8 +524,7 @@ struct NativeCorpusCertificationView: View {
                         // label color from `.tint` automatically.
                         .foregroundStyle(Color.marcelitoCream)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.marcelitoNavy)
+                .buttonStyle(.marcelitoPrimary)
                 .disabled(selectedFiles.isEmpty || isRunning)
             }
             if ZenAPIKeyStore.apiKey == nil {
@@ -529,10 +533,19 @@ struct NativeCorpusCertificationView: View {
                 }
                 .buttonStyle(.borderless)
             } else {
-                Toggle("Usar IA si Vision no concilia", isOn: $useAIFallback)
-                    .onChange(of: useAIFallback) { _, enabled in
-                        ZenStatementReaderSettings.isEnabled = enabled
+                HStack(spacing: 12) {
+                    Toggle("Usar IA si Vision no concilia", isOn: $useAIFallback)
+                        .onChange(of: useAIFallback) { _, enabled in
+                            ZenStatementReaderSettings.isEnabled = enabled
+                        }
+                    Button {
+                        isAISettingsPresented = true
+                    } label: {
+                        Image(systemName: "slider.horizontal.3")
+                            .accessibilityLabel("Editar configuración de OpenCode Zen")
                     }
+                    .buttonStyle(.borderless)
+                }
                 Text("Al activarlo, un PDF bloqueado puede enviarse a Zen. La respuesta seguirá sujeta a conciliación exacta y nunca entra directamente a los KPI.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -602,8 +615,7 @@ struct NativeCorpusCertificationView: View {
                     Label("Compartir informe JSON", systemImage: "square.and.arrow.up")
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(Color.marcelitoNavy)
+                .buttonStyle(.marcelitoPrimary)
             }
             if let diagnosticExportURL {
                 Text("El diagnóstico por fila contiene el texto OCR, la columna y el importe seleccionados para cada fila. Compártelo solo para depurar tus propios estados.")
@@ -613,8 +625,7 @@ struct NativeCorpusCertificationView: View {
                     Label("Compartir diagnóstico por fila", systemImage: "list.bullet.rectangle.portrait")
                         .frame(maxWidth: .infinity, minHeight: 42)
                 }
-                .buttonStyle(.bordered)
-                .tint(Color.marcelitoNavy)
+                .buttonStyle(.marcelitoSecondary)
             }
         }
         .foregroundStyle(Color.marcelitoNavy)

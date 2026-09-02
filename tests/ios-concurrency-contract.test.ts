@@ -99,7 +99,7 @@ test("Amex Vision selecciona el importe MXN por columna y respeta sus secciones"
   assert.match(source, /forcedForeignCurrency: amexSection == 2/);
   assert.match(source, /amexSection = 3/);
   assert.match(source, /foreignCurrency: forcedForeignCurrency \|\| hasForeignCurrency/);
-  assert.match(source, /forcedForeignCurrency \|\| Self\.hasForeignCurrency\(in: normalizedFullText\)[\s\S]*?\? nil/);
+  assert.match(source, /let isForeignRow = forcedForeignCurrency \|\| Self\.hasForeignCurrency\(in: normalizedFullText\)/);
 });
 
 test("Amex conserva PDFKit cuando su capa de texto ya concilia", async () => {

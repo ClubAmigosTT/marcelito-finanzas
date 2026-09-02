@@ -68,13 +68,13 @@ struct HomeView: View {
             } label: {
                 Label("Diagnóstico", systemImage: "stethoscope")
             }
-            Button("Eliminar cuenta", role: .destructive) {
+            Button("Borrar datos del dispositivo", role: .destructive) {
                 isDeleteConfirmationPresented = true
             }
         } label: {
             Image(systemName: "ellipsis.circle")
         }
-        .accessibilityLabel("Opciones de cuenta")
+        .accessibilityLabel("Opciones de datos")
     }
     var body: some View {
         NavigationStack {
@@ -121,17 +121,17 @@ struct HomeView: View {
                 DiagnosticsView()
             }
             .confirmationDialog(
-                "Eliminar cuenta",
+                "Borrar datos del dispositivo",
                 isPresented: $isDeleteConfirmationPresented,
                 titleVisibility: .visible
             ) {
-                Button("Eliminar cuenta y datos", role: .destructive) {
+                Button("Borrar datos", role: .destructive) {
                     store.clearLocalData()
                     auth.deleteAccount()
                 }
                 Button("Cancelar", role: .cancel) { }
             } message: {
-                Text("Se borrarán tu usuario, movimientos y estados importados de este dispositivo. Esta acción no se puede deshacer.")
+                Text("Se borrarán tus movimientos, estados importados y configuración de acceso de este dispositivo. Esta acción no se puede deshacer.")
             }
             .task {
                 await rebuildPendingLedgerIfNeeded()
@@ -529,8 +529,7 @@ private struct EmptyDataCard: View {
             Text("Marcelito no carga cifras de muestra. Importa un PDF mensual de cualquier banco o tarjeta para guardar cuenta, periodo y movimientos en este dispositivo.")
                 .foregroundStyle(.secondary)
             Button("Importar primer estado", action: importAction)
-                .buttonStyle(.borderedProminent)
-                .tint(Color.marcelitoNavy)
+                .buttonStyle(.marcelitoPrimary)
                 .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

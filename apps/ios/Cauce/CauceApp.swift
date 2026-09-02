@@ -30,6 +30,7 @@ struct MarcelitoApp: App {
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background {
                     DiagnosticsRecorder.markBackground()
+                    authModel.lock()
                 } else if phase == .active {
                     financeStore.runAutomaticAudit(trigger: "foreground")
                 }
