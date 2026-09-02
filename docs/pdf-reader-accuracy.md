@@ -75,6 +75,10 @@ gasto real sin separar esas secciones.
 - Cada fila también conserva un fragmento de origen acotado y, cuando existe
   OCR visual, sus coordenadas normalizadas. La vista de detalle permite
   inspeccionar esta evidencia sin guardar el PDF completo dentro del libro.
+- La lectura directa de PDFKit conserva un marcador de página interno antes de
+  unir el texto. Por eso las filas de PDFs con texto seleccionable mantienen la
+  misma trazabilidad de página que las filas Vision; si una capa no concilia,
+  se reintenta visualmente en lugar de aceptar una fila sin contexto.
 - La certificación exige evidencia completa por fila: método, página, confianza
   finita y fragmento de origen no vacío. Si falta uno de estos campos, la fila
   puede permanecer visible para revisión, pero el estado no cuenta como

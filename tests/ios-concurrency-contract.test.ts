@@ -63,6 +63,15 @@ test("una capa de texto no conciliada fuerza una recuperación visual", async ()
   assert.match(source, /let text = usedOCR \? ocrText : extractedText/);
 });
 
+test("la lectura directa conserva la página de cada fila", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  // PDFKit flattens page strings by default. The sentinel must be inserted
+  // before parsing so direct PDF-text rows satisfy the same evidence contract
+  // as Vision rows and remain inspectable in the audit screen.
+  assert.ok(source.includes(String.raw`return "__PDF_PAGE_\(index + 1)__\n\(pageText)"`));
+  assert.match(source, /let pageMarkerRegex = try\? NSRegularExpression\(pattern: #"\^__pdf_page_\(\\d\+\)__\$"#/);
+});
+
 test("el corpus nativo admite manifiesto privado fuera del repositorio", async () => {
   const [nativeCorpus, runner] = await Promise.all([
     readFile(nativeCorpusPath, "utf8"),

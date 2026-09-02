@@ -2769,8 +2769,18 @@ final class FinanceStore {
             throw FinanceImportError.documentTooManyPages
         }
 
+        // Keep a page sentinel in the selectable-text path as well as in the
+        // Vision path. Without it, PDFKit's joined string left every direct
+        // row with `page == nil`; the accounting result could reconcile but
+        // the evidence gate then quarantined the entire statement. The
+        // parser treats these sentinels as structural markers and carries the
+        // real 1-based page into each movement's provenance.
         let extractedText = (0..<document.pageCount)
-            .compactMap { document.page(at: $0)?.string }
+            .compactMap { index -> String? in
+                guard let pageText = document.page(at: index)?.string,
+                      !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return "__PDF_PAGE_\(index + 1)__\n\(pageText)"
+            }
             .joined(separator: "\n")
         let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
 
