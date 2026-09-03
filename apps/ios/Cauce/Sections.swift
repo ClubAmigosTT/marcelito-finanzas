@@ -54,7 +54,14 @@ struct MovementsView: View {
 
     private var pendingForAI: [Movement] {
         store.movements.filter {
-            $0.flow == .expense && ["Por revisar", "Sin categoría"].contains($0.category)
+            guard $0.flow == .expense,
+                  ["Por revisar", "Sin categoría"].contains($0.category) else { return false }
+            switch $0.kind {
+            case .cardPayment?, .bankTransfer?, .refund?, .credit?:
+                return false
+            default:
+                return true
+            }
         }
     }
 
@@ -164,7 +171,7 @@ struct MovementsView: View {
                 }
                 Button("Cancelar", role: .cancel) { }
             } message: {
-                Text("Se enviarán al modelo gratuito de OpenCode Zen el comercio, cuenta, importe y fecha de estos movimientos. No se envían PDFs ni movimientos ya clasificados.")
+                Text("Se enviarán al modelo gratuito de OpenCode Zen únicamente el comercio, importe y fecha de estos gastos. No se envían cuentas, PDFs, saldos, ingresos, transferencias ni movimientos ya clasificados.")
             }
             .alert("Clasificación lista", isPresented: Binding(
                 get: { aiMessage != nil },

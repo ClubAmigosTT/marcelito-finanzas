@@ -433,7 +433,9 @@ function emptyAuditPeriod(key: string, label: string): AuditPeriod {
 
 function isSpend(transaction: Transaction) {
   const kind = kindFromText(transaction);
-  return transaction.flow === "expense" && !["cardPayment", "bankTransfer", "refund"].includes(kind);
+  // Credits are issuer adjustments, not purchases. Keep them out even if a
+  // legacy import attached the wrong expense flow to the row.
+  return transaction.flow === "expense" && !["cardPayment", "bankTransfer", "refund", "credit"].includes(kind);
 }
 
 function isIncome(transaction: Transaction, statements: Statement[]) {
@@ -496,6 +498,7 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
       ...transaction,
       description,
       normalizedDescription,
+      merchantNormalized: transaction.merchantNormalized || normalizedDescription,
       deduplicationKey: `${baseDeduplicationKey}|ocurrencia:${occurrence}`,
       validationStatus: status.status,
     };

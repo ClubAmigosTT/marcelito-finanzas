@@ -363,7 +363,6 @@ extension FinanceStore {
     /// without touching movements, statements or the canonical ledger.
     func certifyNativeCorpus(
         from urls: [URL],
-        allowMultimodalFallback: Bool = false,
         progress: ((Int, Int, String) -> Void)? = nil
     ) async -> NativeCorpusCertificationReport {
         let sortedURLs = urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
@@ -379,7 +378,6 @@ extension FinanceStore {
                 let summary = try await inspectPDFAsync(
                     from: url,
                     allowOCR: true,
-                    allowMultimodalFallback: allowMultimodalFallback,
                     stage: { stage in
                         progress?(index, sortedURLs.count, "\(url.lastPathComponent): \(stage)")
                     }
@@ -453,7 +451,6 @@ struct NativeCorpusCertificationView: View {
     @State private var isImporterPresented = false
     @State private var isAISettingsPresented = false
     @State private var selectedFiles: [URL] = []
-    @State private var useAIFallback = ZenStatementReaderSettings.isEnabled && ZenAPIKeyStore.apiKey != nil
     @State private var isRunning = false
     @State private var progress = 0.0
     @State private var status = "Selecciona los 10 estados validados para ejecutar Vision en este iPhone."
@@ -495,13 +492,7 @@ struct NativeCorpusCertificationView: View {
                 allowsMultipleSelection: true,
                 onCompletion: handleSelection
             )
-            .sheet(isPresented: $isAISettingsPresented, onDismiss: {
-                // Refresh the local state after the settings sheet writes the
-                // Keychain/UserDefaults values. Without this, returning from
-                // the first configuration left the certifier showing the old
-                // Vision-only action until the whole screen was recreated.
-                useAIFallback = ZenStatementReaderSettings.isEnabled && ZenAPIKeyStore.apiKey != nil
-            }) {
+            .sheet(isPresented: $isAISettingsPresented) {
                 AISettingsView()
             }
             .alert("No se pudo ejecutar la certificación", isPresented: Binding(
@@ -522,7 +513,7 @@ struct NativeCorpusCertificationView: View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Certificación privada en el dispositivo", systemImage: "checkmark.shield.fill")
                 .font(.headline)
-            Text("El lector intenta primero PDFKit y Vision dentro del iPhone. Si activas el respaldo con IA, solo los estados que no concilien se enviarán directamente a OpenCode Zen; el informe exportado contiene únicamente hashes y resultados de calidad.")
+            Text("El lector usa PDFKit y Vision dentro del iPhone. OpenCode Zen no recibe PDFs: se usa opcionalmente después para clasificar gastos ya conciliados. El informe exportado contiene únicamente hashes y resultados de calidad.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Text("Se requieren al menos \(NativeCorpusCertificationReport.minimumFileCount) archivos únicos para habilitar la compuerta de publicación.")
@@ -561,7 +552,7 @@ struct NativeCorpusCertificationView: View {
                 Button {
                     runCertification()
                 } label: {
-                    Label(useAIFallback ? "Ejecutar lector" : "Ejecutar Vision", systemImage: "viewfinder")
+                    Label("Ejecutar Vision", systemImage: "viewfinder")
                         .frame(maxWidth: .infinity, minHeight: 42)
                         // The parent card sets a navy foreground style. Keep
                         // the prominent action legible on its navy fill on
@@ -579,10 +570,8 @@ struct NativeCorpusCertificationView: View {
                 .buttonStyle(.borderless)
             } else {
                 HStack(spacing: 12) {
-                    Toggle("Usar IA si Vision no concilia", isOn: $useAIFallback)
-                        .onChange(of: useAIFallback) { _, enabled in
-                            ZenStatementReaderSettings.isEnabled = enabled
-                        }
+                    Text("Zen disponible solo para clasificar gastos")
+                        .font(.subheadline)
                     Button {
                         isAISettingsPresented = true
                     } label: {
@@ -591,7 +580,7 @@ struct NativeCorpusCertificationView: View {
                     }
                     .buttonStyle(.borderless)
                 }
-                Text("Al activarlo, un PDF bloqueado puede enviarse a Zen. La respuesta seguirá sujeta a conciliación exacta y nunca entra directamente a los KPI.")
+                Text("La lectura y conciliación de PDFs siempre se ejecutan localmente. Zen recibe únicamente descripciones, fechas e importes de gastos ya validados; nunca recibe el PDF ni puede cambiar cifras contables.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -707,13 +696,10 @@ struct NativeCorpusCertificationView: View {
         status = "Preparando el corpus…"
         Task { @MainActor in
             let result = await store.certifyNativeCorpus(
-                from: selectedFiles,
-                allowMultimodalFallback: useAIFallback
+                from: selectedFiles
             ) { completed, total, fileName in
                 progress = total == 0 ? 0 : Double(completed) / Double(total)
-                status = useAIFallback
-                    ? "Leyendo \(fileName) con Vision y respaldo IA…"
-                    : "Leyendo \(fileName) con Vision…"
+                status = "Leyendo \(fileName) con Vision…"
             }
             report = result
             progress = 1

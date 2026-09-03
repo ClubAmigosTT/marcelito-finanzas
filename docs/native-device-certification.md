@@ -1,18 +1,17 @@
 # Certificación del lector sin Mac
 
 Marcelito puede certificar el lector nativo directamente en un iPhone. La
-herramienta usa el mismo PDFKit + Vision de producción y, si el usuario lo
-activa, el respaldo multimodal de Zen. Trabaja sobre una selección temporal de
-estados y no escribe movimientos en el libro canónico.
+herramienta usa el mismo PDFKit + Vision de producción, siempre dentro del
+dispositivo. Trabaja sobre una selección temporal de estados y no escribe
+movimientos en el libro canónico. OpenCode Zen no participa en la lectura ni en
+la conciliación de PDFs; se reserva para clasificar gastos después.
 
 ## Ejecutar en el iPhone
 
 1. Abre **Resumen → Opciones → Diagnóstico → Certificar estados con Vision**.
 2. Selecciona los 10 estados validados desde Archivos.
-3. Si quieres el respaldo externo, configura OpenCode Zen y activa **Usar IA
-   si Vision no concilia**. Los PDFs que ya concilien localmente no se envían.
-4. Pulsa **Ejecutar lector** y espera a que termine cada PDF.
-5. Solo se acepta un corpus con al menos 10 archivos únicos, todos conciliados,
+3. Pulsa **Ejecutar Vision** y espera a que termine cada PDF.
+4. Solo se acepta un corpus con al menos 10 archivos únicos, todos conciliados,
    emisor verificado, sin revisión pendiente, OCR ≥ 88% y página más débil ≥
    78%. Para Santander también deben estar calibradas las columnas.
 6. Comparte **informe JSON** y guárdalo como
@@ -88,8 +87,8 @@ filas, controles de saldo y conciliación, y conserva el `.xcresult` para
 reproducir un fallo. El fixture sintético público se sigue usando cuando no
 se define `MARCELITO_PDF_CORPUS_MANIFEST`.
 
-Sin respaldo externo, los estados permanecen en el iPhone. Con Zen activado,
-solo los documentos que no concilien localmente salen temporalmente del
-dispositivo. El JSON se puede revisar antes de publicarlo. Si un archivo falla,
-corrígelo o vuelve a seleccionarlo; nunca se debe marcar `certified`
-manualmente.
+Los estados permanecen en el iPhone durante toda la certificación. El JSON se
+puede revisar antes de publicarlo. Si un archivo falla, corrígelo o vuelve a
+seleccionarlo; nunca se debe marcar `certified` manualmente. Zen solo puede
+recibir posteriormente descripciones, fechas e importes de gastos ya
+conciliados desde la pantalla de Movimientos, nunca el PDF.

@@ -6,17 +6,18 @@ services:
     staticPublishPath: dist
     pullRequestPreviewsEnabled: true
     envVars:
-      # The browser only receives the public reader URL. Provider credentials
-      # stay on the separate API service below.
-      - key: VITE_STATEMENT_READER_URL
-        value: https://marcelito-statement-reader.onrender.com/api/statement-reader
+      # The browser only receives the public classifier URL. Provider
+      # credentials stay on the separate API service below; PDFs remain local.
+      - key: VITE_TRANSACTION_CLASSIFIER_URL
+        value: https://marcelito-statement-reader.onrender.com/api/transaction-classifier
     routes:
       - type: rewrite
         source: /*
         destination: /index.html
 
-  # Isolated backend for the opt-in multimodal PDF reader. It never stores
-  # documents and does not share the static site's build environment.
+  # Isolated backend for optional post-reconciliation expense classification.
+  # The current app sends no PDFs; the old service name/domain is retained so
+  # existing deployments do not need a DNS migration.
   - type: web
     runtime: node
     plan: free

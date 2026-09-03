@@ -4,9 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       reader_url:
-        description: "URL pública del endpoint /api/statement-reader"
+        description: "URL pública del endpoint /api/transaction-classifier"
         required: false
-        default: "https://marcelito-statement-reader.onrender.com/api/statement-reader"
+        default: "https://marcelito-statement-reader.onrender.com/api/transaction-classifier"
         type: string
 
 permissions:
@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   verify:
-    name: Verificar lector remoto sin datos reales
+    name: Verificar clasificador remoto sin datos reales
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:

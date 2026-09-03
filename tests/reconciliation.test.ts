@@ -5,7 +5,6 @@ import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPip
 import { buildFinanceMetrics, hasSufficientOcrQuality, hasVerifiedSourceEvidence, isStatementEligibleForDashboard } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
 import { prepareStoredLedger, prepareStoredStatements } from "../src/statementMigration.ts";
-import { MULTIMODAL_READER_VERSION } from "../src/multimodalReader.ts";
 import type { Statement, Transaction } from "../src/types.ts";
 
 const bank = (id: string, source: string, period: string): Statement => ({
@@ -328,6 +327,24 @@ test("matching no convierte un crédito de tarjeta en pago sin evidencia", () =>
   assert.equal(result.transactions.find((row) => row.id === "bank-charge")?.reconciledAs, undefined);
   const metrics = buildFinanceMetrics(rows, statements, result);
   assert.equal(metrics.consolidatedRealSpend, 1000);
+});
+
+test("un crédito legado con signo de egreso nunca se cuenta como gasto", () => {
+  const statements = [card("amex", "Amex", "agosto 2026", 5000)];
+  const rows = [movement({
+    id: "legacy-credit",
+    date: "10 ago 2026",
+    description: "AJUSTE DE CREDITO",
+    account: "Amex",
+    amount: -250,
+    flow: "expense",
+    kind: "credit",
+    statementId: "amex",
+  })];
+  const result = runTransactionPipeline(rows, statements);
+  const metrics = buildFinanceMetrics(rows, statements, result);
+  assert.equal(metrics.consolidatedRealSpend, 0);
+  assert.equal(result.audit.expenseAmount, 0);
 });
 
 test("un SPEI saliente sin contraparte propia se conserva como gasto real", () => {
@@ -1620,10 +1637,10 @@ test("la migración conserva filas del lector actual que esperan revisión OCR",
   assert.equal(prepared.statements[0]?.reconciliation?.reason, "OCR provisional");
 });
 
-test("la migración conserva estados del lector multimodal actual", () => {
+test("la migración pone en cuarentena estados producidos por el lector multimodal legado", () => {
   const statement = {
     ...bank("bbva-multimodal", "BBVA", "agosto 2026"),
-    readerVersion: MULTIMODAL_READER_VERSION,
+    readerVersion: "multimodal-reader-2026.09.01.3",
     extractionProvider: "multimodal" as const,
     mode: "text" as const,
     status: "ready" as const,
@@ -1650,10 +1667,10 @@ test("la migración conserva estados del lector multimodal actual", () => {
   });
 
   const prepared = prepareStoredLedger([statement], [row]);
-  assert.equal(prepared.quarantinedMovementCount, 0);
-  assert.equal(prepared.statements[0]?.status, "ready");
-  assert.equal(prepared.statements[0]?.reconciliationStatus, "valid");
-  assert.deepEqual(prepared.transactions.map((item) => item.id), ["multimodal-row"]);
+  assert.equal(prepared.quarantinedMovementCount, 1);
+  assert.equal(prepared.statements[0]?.status, "review");
+  assert.equal(prepared.statements[0]?.reconciliationStatus, "pending");
+  assert.deepEqual(prepared.transactions.map((item) => item.id), []);
 });
 
 test("la auditoría conserva el conteo de filas PDF heredadas en cuarentena", () => {

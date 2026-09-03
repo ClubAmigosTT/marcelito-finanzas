@@ -19,9 +19,9 @@ const OCR_MIN_PAGE_CONFIDENCE = 0.78;
 export function hasSufficientOcrQuality(statement: Statement) {
   // Treat malformed/legacy runtime data as unsafe instead of assuming that a
   // missing mode means a trustworthy text-layer extraction.
-  // Multimodal output is visual/model-assisted even when the import result
-  // keeps `mode: "text"` for backwards compatibility. It must therefore
-  // prove its own confidence instead of taking the text-layer fast path.
+  // A legacy multimodal import is visual/model-assisted even when the old
+  // result kept `mode: "text"`. It must prove its own confidence and is kept
+  // quarantined until re-imported with the local reader.
   if (statement.extractionProvider === "multimodal") {
     const average = statement.ocrConfidence;
     const pages = statement.ocrPageConfidences;
@@ -365,7 +365,10 @@ function isRealIncomeTransaction(transaction: Transaction, statements: Statement
 
 export function isSpendTransaction(transaction: Transaction) {
   const kind = inferTransactionKind(transaction);
-  return transaction.flow === "expense" && !["cardPayment", "bankTransfer", "refund"].includes(kind);
+  // A credit/issuer adjustment is not a purchase, even if an old import
+  // attached an expense flow to it. Keep the dashboard aligned with the
+  // reconciliation layer's spend definition.
+  return transaction.flow === "expense" && !["cardPayment", "bankTransfer", "refund", "credit"].includes(kind);
 }
 
 function isTravelTransaction(transaction: Transaction) {

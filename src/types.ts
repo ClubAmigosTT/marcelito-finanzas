@@ -34,10 +34,9 @@ export type SourceDetectionStatus = "verified" | "review" | "unknown";
 /**
  * How a transaction was read from its source document.
  *
- * `multimodal` is intentionally separate from the local PDF text/OCR paths:
- * it identifies a schema-constrained external reader, which still has to
- * pass the same validation and reconciliation gates before reaching the
- * canonical ledger.
+ * `multimodal` is retained only so old persisted imports can be quarantined
+ * and migrated. New imports must use the local PDF text/OCR paths; Zen is an
+ * optional post-reconciliation classifier, not a PDF reader.
  */
 export type ExtractionMethod = "pdf-text" | "ocr" | "multimodal" | "manual";
 
@@ -112,6 +111,15 @@ export type Transaction = {
   statementId?: string;
   /** Canonical merchant/concept used for reconciliation and grouping. */
   normalizedDescription?: string;
+  /** Merchant label produced by deterministic rules or optional Zen enrichment. */
+  merchantNormalized?: string;
+  /** Provenance of the optional merchant/category enrichment. */
+  classificationProvider?: "rules" | "zen";
+  classificationConfidence?: number;
+  classificationReason?: string;
+  /** Analytics flags; never change the accounting direction or amount. */
+  recurring?: boolean;
+  extraordinary?: boolean;
   /** Stable identity across overlapping statements and repeated imports. */
   deduplicationKey?: string;
   validationStatus?: TransactionValidationStatus;
@@ -174,7 +182,7 @@ export type ImportResult = {
   pageCount?: number;
   /** Exact reader revision that produced this extraction. */
   readerVersion?: string;
-  /** Proveedor de extracción (local o lector multimodal seguro). */
+  /** Proveedor de extracción; `multimodal` solo identifica una importación legacy. */
   extractionProvider?: ExtractionProvider;
   /** Modelo remoto utilizado, si aplica; nunca contiene credenciales. */
   extractionModel?: string;
@@ -211,7 +219,7 @@ export type Statement = {
   pageCount?: number;
   /** Exact reader revision that produced this statement. */
   readerVersion?: string;
-  /** Proveedor de extracción (local o lector multimodal seguro). */
+  /** Proveedor de extracción; `multimodal` solo identifica una importación legacy. */
   extractionProvider?: ExtractionProvider;
   /** Modelo remoto utilizado, si aplica; nunca contiene credenciales. */
   extractionModel?: string;

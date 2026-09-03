@@ -67,7 +67,7 @@ cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
   --manifest tests/fixtures/pdf-corpus-attachments.json \
-  --reader-version ios-reader-2026.09.03.29 \
+  --reader-version ios-reader-2026.09.03.30 \
   --require-certified
 ```
 
@@ -146,7 +146,7 @@ La autenticación usa Keychain y Face ID. La aplicación inicia sin movimientos 
 
 Movimientos y estados de cuenta se persisten localmente, se evita volver a contar el mismo archivo y las categorías se pueden corregir desde el detalle de cada movimiento. El menú de Inicio permite eliminar la cuenta y todos los datos locales.
 
-En Cuentas > Movimientos puedes abrir la configuración de clasificación asistida. La clave de OpenCode Zen se guarda en el llavero del iPhone y solo se usa después de confirmar el envío de movimientos pendientes. El selector de la app contiene únicamente modelos gratuitos compatibles con el endpoint de chat (`mimo-v2.5-free`, `ling-3.0-flash-fin-free`, `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free` y `big-pickle`).
+En Cuentas > Movimientos puedes abrir la configuración de clasificación asistida. La clave de OpenCode Zen se guarda en el llavero del iPhone y solo se usa después de confirmar el envío de gastos pendientes. Zen recibe comercio, importe y fecha, nunca cuentas, saldos, ingresos, transferencias ni PDFs. El selector de la app contiene únicamente modelos gratuitos compatibles con el endpoint de chat (`mimo-v2.5-free`, `ling-3.0-flash-fin-free`, `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free` y `big-pickle`).
 
 Los PDFs importados se conservan en Application Support del dispositivo para que cada tarjeta de Documentos importados pueda abrir el archivo original sin mostrar nombres parseados en la pantalla principal. Vision conserva la página y la confianza real de cada observación OCR; si una fila queda por debajo del umbral, el estado requiere revisión y no entra en los KPI. Cuando el documento concilia pero la evidencia institucional del emisor es provisional, puedes confirmar manualmente el banco mostrado; esa liberación queda registrada como confirmación humana independiente de la aceptación automática.
 
