@@ -109,6 +109,33 @@ test("conserva comercios cortos cuando la evidencia contiene su nombre", () => {
   assert.equal(result.rows[0].description, "KFC");
 });
 
+test("normaliza booleanos de moneda inequívocos y bloquea valores ambiguos", () => {
+  const valid = bankExtraction();
+  const normalized = validateMultimodalExtraction({
+    ...valid,
+    rows: valid.rows.map((row, index) => ({
+      ...row,
+      foreign_currency: index === 0 ? "nacional" : "1",
+    })),
+  });
+  assert.equal(normalized.rows[0].foreign_currency, false);
+  assert.equal(normalized.rows[1].foreign_currency, true);
+  assert.throws(
+    () => validateMultimodalExtraction({
+      ...valid,
+      rows: [{ ...valid.rows[0], foreign_currency: "sin dato" }],
+    }),
+    (error: unknown) => error instanceof MultimodalReaderError && error.code === "invalid_payload",
+  );
+  assert.throws(
+    () => validateMultimodalExtraction({
+      ...valid,
+      rows: [{ ...valid.rows[0], foreign_currency: 0.5 }],
+    }),
+    (error: unknown) => error instanceof MultimodalReaderError && error.code === "invalid_payload",
+  );
+});
+
 test("convierte centavos, conserva evidencia y reconcilia antes de entregar el resultado", () => {
   const result = extractionToImportResult({ ...bankExtraction(), source: "BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE" }, { name: "BBVA agosto.pdf", size: 1200 });
   assert.equal(result.source, "BBVA");

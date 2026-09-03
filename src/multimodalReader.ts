@@ -218,8 +218,40 @@ function nullableIntegerField(value: unknown, path: string, min: number, max: nu
 }
 
 function booleanField(value: unknown, path: string) {
-  if (typeof value !== "boolean") fail(path, "se esperaba booleano");
-  return value;
+  if (typeof value === "boolean") return value;
+  // A few OpenAI-compatible gateways have serialized a schema boolean as an
+  // exact 0/1 or as a textual label. Normalize only unambiguous values at the
+  // trust boundary; fractions, null and arbitrary labels stay blocked so a
+  // foreign purchase cannot silently enter the domestic subtotal.
+  if (typeof value === "number" && Number.isInteger(value) && (value === 0 || value === 1)) return value === 1;
+  if (typeof value === "string") {
+    switch (value.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")) {
+      case "true":
+      case "1":
+      case "yes":
+      case "si":
+      case "extranjera":
+      case "extranjero":
+      case "foreign":
+      case "usd":
+      case "eur":
+      case "cop":
+      case "cad":
+      case "gbp":
+        return true;
+      case "false":
+      case "0":
+      case "no":
+      case "nacional":
+      case "domestica":
+      case "domestic":
+      case "mxn":
+        return false;
+      default:
+        break;
+    }
+  }
+  fail(path, "se esperaba booleano o una representación inequívoca");
 }
 
 function nullableBooleanField(value: unknown, path: string) {

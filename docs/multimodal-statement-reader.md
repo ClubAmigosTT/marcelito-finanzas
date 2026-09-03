@@ -25,6 +25,12 @@ la versión del contrato/modelo y ejecuta `reconcileStatementImport`. Un
 resultado del proveedor que no concilia queda bloqueado y no puede alimentar
 el libro canónico.
 
+La frontera de confianza acepta únicamente representaciones inequívocas del
+campo `foreign_currency`: el booleano JSON esperado y, para gateways
+compatibles que lo serializan de forma incorrecta, `0`/`1` o etiquetas explícitas
+como `nacional`/`extranjera`. Valores nulos, fraccionarios o desconocidos se
+rechazan; nunca se adivina la moneda para hacer que una conciliación cierre.
+
 La confianza del proveedor también se trata como una compuerta, aunque la
 respuesta conserve `mode: "text"` para compatibilidad con el importador
 existente: el proxy y el cliente exigen una media mínima de 88% y una media
