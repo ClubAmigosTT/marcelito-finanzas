@@ -246,14 +246,14 @@ crédito disponible, deuda comprometida, pago para no generar intereses, mínimo
 más MSI y principal MSI pendiente; estos controles son independientes de las
 filas para evitar que una deuda mal extraída pase por una conciliación parcial.
 
-La capa multimodal opcional ya está implementada en
-`server/statement-reader.mjs`. Recibe el PDF completo en un proxy autenticado,
-exige el contrato JSON estricto y devuelve únicamente la extracción validada y
-su huella. La aplicación no la activa por defecto: requiere configurar
-`VITE_STATEMENT_READER_URL` y una autorización temporal. La plantilla
-`.env.example` muestra los nombres de variables sin contener secretos; la
-certificación de precisión sigue pendiente de ejecutar el proxy con un modelo
-visual y un corpus privado.
+La lectura remota de PDFs quedó retirada del flujo actual. La ruta histórica del
+proxy se conserva únicamente para compatibilidad con builds antiguos y no debe
+configurarse desde la aplicación nueva. El endpoint opcional de la aplicación
+es `VITE_TRANSACTION_CLASSIFIER_URL` (con alias temporal
+`VITE_STATEMENT_READER_URL`) y recibe solo gastos ya conciliados para sugerir
+comercio, categoría, recurrencia y viajes. No recibe PDFs, saldos, cuentas ni
+decide transferencias; el contrato está documentado en
+`docs/transaction-classifier.md`.
 El proxy aplica además la misma compuerta de confianza visual que el cliente:
 media de filas ≥88% y media mínima por página ≥78%; por eso un modelo no puede
 declarar `mode: "text"` para eludir una lectura multimodal débil. La pantalla

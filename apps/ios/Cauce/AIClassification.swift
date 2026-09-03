@@ -143,9 +143,8 @@ enum ZenExpenseClassifier {
         let input = movements.map { movement in
             [
                 "id": movement.id.uuidString,
-                "comercio": movement.title,
-                "cuenta": movement.account,
-                "importe_mxn": NSDecimalNumber(decimal: movement.amount).stringValue,
+                "comercio": String(movement.title.prefix(240)),
+                "importe_mxn": NSDecimalNumber(decimal: movement.amount < 0 ? -movement.amount : movement.amount).stringValue,
                 "fecha": ISO8601DateFormatter().string(from: movement.date)
             ]
         }
@@ -154,7 +153,7 @@ enum ZenExpenseClassifier {
         let inputJSON = String(data: inputData, encoding: .utf8) ?? "[]"
         let categories = allowedCategories.joined(separator: ", ")
         let system = """
-        Eres el clasificador de gastos de una app financiera. Clasifica cada movimiento usando solo estas categorías: \(categories). No clasifiques ingresos ni transferencias: esos movimientos no deben enviarse a esta función. Identifica si pertenece a un viaje. Conserva exactamente cada id. Responde únicamente un arreglo JSON, sin markdown, con objetos de la forma {\"id\":\"UUID\",\"category\":\"Categoría\",\"travelRelated\":true|false}.
+        Eres el clasificador de gastos de una app financiera. Clasifica cada movimiento usando solo estas categorías: \(categories). No clasifiques ingresos, reembolsos, pagos de tarjeta ni transferencias: esos movimientos no deben enviarse a esta función. No recibes ni debes solicitar PDFs, cuentas, números de tarjeta, saldos o metadatos del estado. Identifica si pertenece a un viaje. Conserva exactamente cada id. Responde únicamente un arreglo JSON, sin markdown, con objetos de la forma {\"id\":\"UUID\",\"category\":\"Categoría\",\"travelRelated\":true|false}.
         """
         let user = "Clasifica estos movimientos pendientes:\n\(inputJSON)"
         let requestBody = Request(
@@ -195,7 +194,7 @@ enum ZenExpenseClassifier {
 
         let requested = Set(movements.map(\.id))
         var seen = Set<UUID>()
-        return payloads.compactMap { (payload: ClassificationPayload) -> AIClassification? in
+        let parsed = payloads.compactMap { (payload: ClassificationPayload) -> AIClassification? in
             guard let movementID = UUID(uuidString: payload.id),
                   requested.contains(movementID),
                   seen.insert(movementID).inserted,
@@ -206,6 +205,13 @@ enum ZenExpenseClassifier {
                 travelRelated: payload.travelRelated ?? (category == "Viajes")
             )
         }
+        // A partial answer is not safe to apply: it makes the UI look as if
+        // every pending expense was classified while silently leaving gaps.
+        // Require exactly one valid result for every requested movement.
+        guard parsed.count == movements.count, seen.count == movements.count else {
+            throw ClassificationError.invalidResponse
+        }
+        return parsed
     }
 
     private static func extractJSON(from content: String) -> String? {
@@ -288,7 +294,6 @@ struct AISettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var apiKey = ZenAPIKeyStore.apiKey ?? ""
     @State private var selectedModel = ZenAPIKeyStore.selectedModel
-    @State private var statementReaderEnabled = ZenStatementReaderSettings.isEnabled
     @State private var errorMessage: String?
 
     var body: some View {
@@ -303,8 +308,7 @@ struct AISettingsView: View {
                             Text(model.name).tag(model.id)
                         }
                     }
-                    Toggle("Usar IA cuando Vision no concilie", isOn: $statementReaderEnabled)
-                    Text("La clave se guarda en el llavero de este iPhone. La clasificación envía movimientos pendientes; el lector con IA envía el PDF completo solo cuando la lectura privada no concilia y esta opción está activa.")
+                    Text("La clave se guarda en el llavero de este iPhone. Zen solo recibe descripciones, importes y fechas de gastos ya conciliados para sugerir comercio, categoría y si pertenecen a un viaje. Nunca recibe PDFs ni saldos.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -312,7 +316,6 @@ struct AISettingsView: View {
                     Button("Guardar configuración") {
                         do {
                             try ZenAPIKeyStore.save(apiKey: apiKey, model: selectedModel)
-                            ZenStatementReaderSettings.isEnabled = statementReaderEnabled
                             dismiss()
                         } catch {
                             errorMessage = error.localizedDescription
@@ -322,8 +325,6 @@ struct AISettingsView: View {
                     if ZenAPIKeyStore.apiKey != nil {
                         Button("Eliminar clave", role: .destructive) {
                             ZenAPIKeyStore.delete()
-                            ZenStatementReaderSettings.isEnabled = false
-                            statementReaderEnabled = false
                             apiKey = ""
                         }
                         .frame(maxWidth: .infinity)

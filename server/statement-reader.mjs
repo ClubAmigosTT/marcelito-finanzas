@@ -9,11 +9,14 @@ import path from "node:path";
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_REQUEST_BYTES = 28 * 1024 * 1024;
 const SCHEMA_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "schemas", "statement-extraction.schema.json");
+const CLASSIFIER_SCHEMA_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "schemas", "transaction-classification.schema.json");
 const DEFAULT_PORT = 8787;
 const DEFAULT_RATE_LIMIT_PER_MINUTE = 10;
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 2;
 const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
+const TRANSACTION_CLASSIFIER_VERSION = "transaction-classifier-2026.09.03.1";
+const TRANSACTION_CLASSIFIER_PROMPT_VERSION = "expense-classification-v1";
 const MIN_MULTIMODAL_AVERAGE_CONFIDENCE = 0.88;
 const MIN_MULTIMODAL_PAGE_CONFIDENCE = 0.78;
 const ZEN_HOSTS = new Set(["opencode.ai", "www.opencode.ai"]);
@@ -78,6 +81,21 @@ Reglas obligatorias:
 - En estados bancarios, lee los totales declarados de depósitos/retiros y sus conteos. En tarjetas, lee saldo/deuda, límite, disponible, pago mínimo, pago para no generar intereses y MSI si aparecen. Los importes del resumen también son centavos enteros.
 - Si un subtotal está impreso como crédito (CR), conserva domestic_transaction_total_is_credit=true. No sumes dos veces subtotales y totales.
 - Devuelve todas las propiedades requeridas por el esquema; usa null cuando un campo no esté impreso o no sea legible. No añadas propiedades adicionales.`;
+
+// This prompt is deliberately not a document-reading prompt. The only input
+// is a previously validated canonical row, and the output is enrichment for
+// analytics. It is never allowed to change date, amount, direction, flow or
+// transaction kind.
+const CLASSIFIER_PROMPT = `Eres un clasificador de gastos personales. Recibirás únicamente filas ya extraídas, validadas y conciliadas por Marcelito; nunca recibirás un PDF. Devuelve exclusivamente JSON con una clasificación por cada índice.
+
+Reglas obligatorias:
+- Clasifica únicamente el comercio/concepto y señales analíticas. No cambies ni repitas importes, fechas, dirección, flujo o tipo contable.
+- Usa una sola categoría útil de esta lista: Viajes, Transporte, Salud, Comidas, Alimentos, Entretenimiento, Educación, Mascotas, Hogar, Servicios, Compras, Finanzas o Sin categoría.
+- merchant debe ser un nombre corto y estable del comercio, sin referencias, RFC, autorizaciones, números de cuenta ni folios.
+- recurring=true solo si el concepto parece repetirse con periodicidad (suscripción, renta, servicio, cuota o comercio recurrente). extraordinary=true para viajes, eventos o compras claramente atípicas; no marques ambos salvo que sea imprescindible.
+- travel=true solo cuando el movimiento esté relacionado con un viaje, alojamiento, transporte de viaje o actividad turística.
+- Si no hay evidencia suficiente, usa Sin categoría y requires_review=true. No inventes una explicación; reason debe ser breve y basada en el texto recibido.
+- Devuelve exactamente una propiedad por índice y no añadas propiedades adicionales.`;
 
 const PREFLIGHT_EXPECTED = {
   source: "PREFLIGHT BANK",
@@ -651,13 +669,145 @@ async function callProvider({ pdf, fileName, env, fetchImpl, schema, prompt = RE
   return { extraction: validateModelShape(parseModelJson(extractOutputText(body))), model };
 }
 
+const classifierInputFields = ["index", "date", "description", "amount_cents", "category", "flow", "kind", "travel"];
+const classifierOutputFields = ["index", "merchant", "category", "recurring", "extraordinary", "travel", "confidence", "reason", "requires_review"];
+const classifierFlows = new Set(["expense", "income", "transfer", "debt"]);
+const classifierKinds = new Set(["purchase", "cardPayment", "bankTransfer", "income", "credit", "refund", "msi", "interest", "fee", "other"]);
+const classifierExpenseKinds = new Set(["purchase", "msi", "interest", "fee", "other"]);
+const classifierCategories = new Set([
+  "Viajes", "Transporte", "Salud", "Comidas", "Alimentos", "Entretenimiento", "Educación",
+  "Mascotas", "Hogar", "Servicios", "Compras", "Finanzas", "Sin categoría",
+]);
+
+function validClassifierText(value, min, max) {
+  return typeof value === "string" && value.trim().length >= min && value.trim().length <= max;
+}
+
+function normalizeClassifierCategory(value) {
+  const normalized = String(value ?? "").trim().toLocaleLowerCase("es-MX");
+  return [...classifierCategories].find((candidate) => candidate.toLocaleLowerCase("es-MX") === normalized);
+}
+
+function validateClassifierRows(value) {
+  if (!Array.isArray(value) || value.length > 500) throw new Error("request_invalid");
+  return value.map((row, index) => {
+    if (!row || typeof row !== "object" || Array.isArray(row) || !hasOnlyFields(row, classifierInputFields)) throw new Error("request_invalid");
+    if (row.index !== index || !validClassifierText(row.date, 3, 48) || !validClassifierText(row.description, 3, 240) || administrativeRowPattern.test(row.description)) throw new Error("request_invalid");
+    if (!Number.isInteger(row.amount_cents) || row.amount_cents < 1 || row.amount_cents > 1_000_000_000_000) throw new Error("request_invalid");
+    // Zen is an enrichment service for already-recognized expenses only. The
+    // accounting pipeline, not the model, owns income, refunds, card
+    // payments, debt credits and transfers between accounts.
+    if (row.flow !== "expense" || !classifierExpenseKinds.has(row.kind) || !classifierFlows.has(row.flow) || !classifierKinds.has(row.kind) || typeof row.travel !== "boolean") throw new Error("request_out_of_scope");
+    if (!validClassifierText(row.category, 2, 40)) throw new Error("request_invalid");
+    return row;
+  });
+}
+
+function validateClassifierModel(value, rows) {
+  if (!value || typeof value !== "object" || Array.isArray(value) || !hasOnlyFields(value, ["classifications"])) throw new Error("classifier_invalid_shape");
+  if (!Array.isArray(value.classifications) || value.classifications.length !== rows.length) throw new Error("classifier_invalid_shape");
+  const seen = new Set();
+  const normalized = value.classifications.map((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item) || !hasOnlyFields(item, classifierOutputFields)) throw new Error("classifier_invalid_shape");
+    if (!Number.isInteger(item.index) || item.index < 0 || item.index >= rows.length || seen.has(item.index)) throw new Error("classifier_invalid_shape");
+    seen.add(item.index);
+    if (!validClassifierText(item.merchant, 2, 120) || administrativeRowPattern.test(item.merchant)) throw new Error("classifier_invalid_shape");
+    const category = normalizeClassifierCategory(item.category);
+    if (!category || !["boolean"].includes(typeof item.recurring) || !["boolean"].includes(typeof item.extraordinary) || !["boolean"].includes(typeof item.travel)) throw new Error("classifier_invalid_shape");
+    if (typeof item.confidence !== "number" || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) throw new Error("classifier_invalid_shape");
+    if (!validClassifierText(item.reason, 2, 240) || typeof item.requires_review !== "boolean") throw new Error("classifier_invalid_shape");
+    return { ...item, category };
+  });
+  if (seen.size !== rows.length) throw new Error("classifier_invalid_shape");
+  return normalized.sort((left, right) => left.index - right.index);
+}
+
+async function callClassifierProvider({ rows, env, fetchImpl, schema, prompt = CLASSIFIER_PROMPT }) {
+  const apiKey = String(env.STATEMENT_READER_API_KEY ?? env.OPENAI_API_KEY ?? "").trim();
+  const model = String(env.STATEMENT_READER_MODEL ?? env.OPENAI_STATEMENT_MODEL ?? "").trim();
+  const endpoint = String(env.STATEMENT_READER_PROVIDER_URL ?? "https://api.openai.com/v1/responses").trim();
+  let providerUrl;
+  try {
+    providerUrl = new URL(endpoint);
+  } catch {
+    throw new Error("provider_not_configured");
+  }
+  if (providerUrl.protocol !== "https:" || !apiKey || !model) throw new Error("provider_not_configured");
+  if (ZEN_HOSTS.has(providerUrl.hostname.toLowerCase()) && (!isZenFreeModel(model) || !zenTransportMatches(providerUrl, model))) throw new Error("provider_not_configured");
+  const maxOutputTokens = positiveInt(env.STATEMENT_READER_CLASSIFIER_MAX_OUTPUT_TOKENS ?? env.STATEMENT_READER_MAX_OUTPUT_TOKENS, 16_384, 50_000);
+  const structuredSchema = Object.fromEntries(Object.entries(schema).filter(([key]) => key !== "$schema" && key !== "$id"));
+  const chatCompletionsEndpoint = /\/chat\/completions\/?$/i.test(providerUrl.pathname);
+  const inputText = `${prompt}\n\nFilas a clasificar (JSON de entrada, no lo repitas en la salida):\n${JSON.stringify(rows)}`;
+  const plainJsonPrompt = `${inputText}\n\nContrato: devuelve únicamente {"classifications":[...]} y no incluyas propiedades adicionales.`;
+  const requestBody = (includeStructuredOutput) => chatCompletionsEndpoint
+    ? {
+      model,
+      temperature: 0,
+      max_tokens: maxOutputTokens,
+      messages: [{ role: "user", content: [{ type: "text", text: includeStructuredOutput ? inputText : plainJsonPrompt }] }],
+      ...(includeStructuredOutput ? { response_format: { type: "json_schema", json_schema: { name: "transaction_classification", strict: true, schema: structuredSchema } } } : {}),
+    }
+    : {
+      model,
+      store: false,
+      max_output_tokens: maxOutputTokens,
+      input: [{ role: "user", content: [{ type: "input_text", text: includeStructuredOutput ? inputText : plainJsonPrompt }] }],
+      ...(includeStructuredOutput ? { text: { format: { type: "json_schema", name: "transaction_classification", strict: true, schema: structuredSchema } } } : {}),
+    };
+  const requestProvider = async (includeStructuredOutput) => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), positiveInt(env.STATEMENT_READER_PROVIDER_TIMEOUT_MS, DEFAULT_PROVIDER_TIMEOUT_MS, 300_000));
+    try {
+      return await fetchImpl(providerUrl, {
+        method: "POST",
+        headers: { authorization: `Bearer ${apiKey}`, "content-type": "application/json" },
+        body: JSON.stringify(requestBody(includeStructuredOutput)),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") throw new Error("provider_timeout");
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  };
+  let response;
+  let body;
+  try {
+    response = await requestProvider(true);
+    body = await response.json();
+  } catch (error) {
+    if (error?.message === "provider_timeout") throw error;
+    throw new Error("provider_invalid_response");
+  }
+  if (!response.ok && shouldRetryWithoutStructuredOutput(response, body)) {
+    try {
+      response = await requestProvider(false);
+      body = await response.json();
+    } catch (error) {
+      if (error?.message === "provider_timeout") throw error;
+      throw new Error("provider_invalid_response");
+    }
+  }
+  if (!response.ok) {
+    const errorType = typeof body?.error?.type === "string" ? body.error.type : "provider_error";
+    throw new Error(`provider_${errorType}`);
+  }
+  return { classifications: validateClassifierModel(parseModelJson(extractOutputText(body)), rows), model };
+}
+
 /**
- * Creates the isolated PDF reader proxy. It has no persistence and never
- * returns the source document; only the validated extraction crosses back to
- * the client. Set STATEMENT_READER_TOKEN and an exact allowed origin before
- * exposing it outside localhost.
+ * Creates the isolated statement service. The legacy PDF-reader route has no
+ * persistence and never returns the source document; the current classifier
+ * route accepts only validated expense rows. Set STATEMENT_READER_TOKEN and
+ * an exact allowed origin before exposing it outside localhost.
  */
-export function createStatementReaderServer({ env = process.env, fetchImpl = fetch, schema = JSON.parse(readFileSync(SCHEMA_PATH, "utf8")) } = {}) {
+export function createStatementReaderServer({
+  env = process.env,
+  fetchImpl = fetch,
+  schema = JSON.parse(readFileSync(SCHEMA_PATH, "utf8")),
+  classifierSchema = JSON.parse(readFileSync(CLASSIFIER_SCHEMA_PATH, "utf8")),
+} = {}) {
   const rateState = new Map();
   let activeRequests = 0;
   return createServer(async (req, res) => {
@@ -680,7 +830,9 @@ export function createStatementReaderServer({ env = process.env, fetchImpl = fet
     }
     const isExtractionRoute = req.method === "POST" && pathname === "/api/statement-reader";
     const isPreflightRoute = req.method === "POST" && pathname === "/api/statement-reader/preflight";
-    if (!isExtractionRoute && !isPreflightRoute) {
+    const isClassifierRoute = req.method === "POST" && pathname === "/api/transaction-classifier";
+    const isClassifierPreflightRoute = req.method === "POST" && pathname === "/api/transaction-classifier/preflight";
+    if (!isExtractionRoute && !isPreflightRoute && !isClassifierRoute && !isClassifierPreflightRoute) {
       json(res, 404, { error: "not_found" }, headers);
       return;
     }
@@ -732,6 +884,43 @@ export function createStatementReaderServer({ env = process.env, fetchImpl = fet
           }, headers);
           return;
         }
+        if (isClassifierPreflightRoute) {
+          // The classifier preflight contains no PDF and no financial data. It
+          // proves that the configured free Zen model can return the small
+          // enrichment contract before a user authorizes a real batch.
+          const rows = [{
+            index: 0,
+            date: "2026-01-15",
+            description: "PREFLIGHT CLASIFICACION",
+            amount_cents: 1234,
+            category: "Sin categoría",
+            flow: "expense",
+            kind: "purchase",
+            travel: false,
+          }];
+          const result = await callClassifierProvider({ rows, env, fetchImpl, schema: classifierSchema });
+          validateClassifierModel({ classifications: result.classifications }, rows);
+          json(res, 200, {
+            status: "ready",
+            model: result.model,
+            contract: "transaction-classification.v1",
+          }, headers);
+          return;
+        }
+        if (isClassifierRoute) {
+          if (!payload || typeof payload !== "object") throw new Error("request_invalid");
+          if (payload.classifierVersion !== TRANSACTION_CLASSIFIER_VERSION
+            || payload.promptVersion !== TRANSACTION_CLASSIFIER_PROMPT_VERSION) throw new Error("request_invalid");
+          const rows = validateClassifierRows(payload.rows);
+          const result = await callClassifierProvider({ rows, env, fetchImpl, schema: classifierSchema });
+          json(res, 200, {
+            classifications: result.classifications,
+            model: result.model,
+            provider: "zen",
+            version: TRANSACTION_CLASSIFIER_VERSION,
+          }, headers);
+          return;
+        }
         if (!payload || typeof payload !== "object" || typeof payload.fileName !== "string" || payload.fileName.length < 1 || payload.fileName.length > 240) throw new Error("request_invalid");
         const pdf = decodePdf(payload.pdfBase64);
         const result = await callProvider({ pdf, fileName: path.basename(payload.fileName), env, fetchImpl, schema });
@@ -743,7 +932,8 @@ export function createStatementReaderServer({ env = process.env, fetchImpl = fet
         // Do not echo model/provider details or source text. A request id can be
         // added by the reverse proxy for operational tracing without logging the
         // financial document.
-        json(res, status, { error: status === 503 ? "reader_not_configured" : status === 502 ? "provider_unavailable" : "reader_rejected" }, headers);
+        const service = isClassifierRoute || isClassifierPreflightRoute ? "classifier" : "reader";
+        json(res, status, { error: status === 503 ? `${service}_not_configured` : status === 502 ? `${service}_unavailable` : `${service}_rejected` }, headers);
       }
     } finally {
       activeRequests -= 1;
@@ -755,6 +945,6 @@ if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.me
   const port = Number(process.env.PORT ?? DEFAULT_PORT);
   const server = createStatementReaderServer();
   server.listen(port, "0.0.0.0", () => {
-    console.log(`statement reader listening on ${port}`);
+    console.log(`statement service listening on ${port}`);
   });
 }

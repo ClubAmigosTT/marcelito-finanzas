@@ -330,8 +330,7 @@ final class NativeCorpusContractTests: XCTestCase {
         for file in files {
             let result = try await store.inspectPDFAsync(
                 from: file,
-                allowOCR: true,
-                allowMultimodalFallback: false
+                allowOCR: true
             )
             XCTAssertNotEqual(result.source, "Desconocido", file.lastPathComponent + " no identificó el emisor")
             XCTAssertGreaterThan(result.pageCount ?? 0, 0, file.lastPathComponent + " no tiene páginas")

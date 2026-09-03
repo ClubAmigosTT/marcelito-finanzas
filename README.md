@@ -17,10 +17,13 @@ La carpeta `tests/fixtures` contiene únicamente controles sintéticos. Los
 documentos reales deben mantenerse fuera del repositorio y pasar por la
 compuerta de conciliación antes de alimentar cualquier KPI.
 
-El lector web multimodal es un respaldo opcional para PDFs que la lectura local
-no logra conciliar. Se activa solo con `VITE_STATEMENT_READER_URL` y una
-autorización temporal en la pantalla de importación; el proxy y su configuración
-segura están documentados en [docs/multimodal-statement-reader.md](docs/multimodal-statement-reader.md).
+La lectura de PDFs es siempre local: PDF.js/Tesseract en web y PDFKit/Vision en
+iOS. El endpoint opcional configurado con `VITE_TRANSACTION_CLASSIFIER_URL`
+(`VITE_STATEMENT_READER_URL` se conserva solo como alias de builds anteriores)
+se usa únicamente como clasificador posterior de gastos ya conciliados
+(comercio, categoría, recurrencia y viajes); nunca recibe PDFs, cuentas, saldos
+ni decide ingresos o transferencias. Su contrato y configuración segura están
+documentados en [docs/transaction-classifier.md](docs/transaction-classifier.md).
 
 ## iOS
 

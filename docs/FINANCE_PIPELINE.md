@@ -3,13 +3,19 @@
 Marcelito calcula los KPI desde un libro mayor canónico. Cada importación pasa por
 este orden, antes de que cualquier cifra llegue al dashboard:
 
-`extraer → validar → normalizar → deduplicar → matching entre cuentas → clasificar → conciliar → calcular`
+`extraer → validar → normalizar → deduplicar → matching entre cuentas → clasificar contablemente → conciliar → calcular → enriquecer con Zen (opcional)`
+
+La etapa `clasificar` tiene dos capas separadas: las reglas locales determinan
+flujo, tipo contable y matching; Zen es opcional y solo enriquece gastos que ya
+pasaron la conciliación. Si Zen falla, devuelve una respuesta parcial o sugiere
+una categoría inválida, se descarta la respuesta completa y el libro no cambia.
 
 ## Reglas de calidad
 
 - Una fila importada necesita fecha válida, importe distinto de cero, descripción con texto de comercio y dirección (entrada o salida). Encabezados, totales, RFC, CLABE, saldos y metadatos administrativos se rechazan.
 - La identidad base de una operación es `cuenta + fecha canónica + importe en centavos + concepto normalizado + tipo + flujo`. Se conserva más de una operación idéntica dentro del mismo estado (pueden ser compras reales); al comparar estados se añade el ordinal de ocurrencia para eliminar el solapamiento sin borrar una segunda compra legítima idéntica.
 - Una salida bancaria y entrada bancaria propia del mismo importe en ±2 días se concilian como `internalTransfer`. Una salida bancaria y el movimiento equivalente de una tarjeta se concilian como `cardPayment`. Ambos quedan fuera de ingresos y gasto consolidado.
+- Las transferencias propias y los pagos de tarjeta nunca se envían a Zen. El clasificador recibe únicamente descripción, fecha, importe en centavos, categoría actual y señales mínimas de un gasto; no recibe PDF, cuenta, saldo ni metadatos del estado.
 - El gasto se suma por la fecha del movimiento y por el periodo seleccionado; nunca se suman todos los resúmenes de todos los PDFs. Los resúmenes se usan como respaldo de saldos de tarjeta cuando no hay filas válidas.
 - La deuda procede de tarjetas/créditos: saldo al corte, saldo revolvente y MSI pendientes se mantienen separados del efectivo bancario.
 - En cuentas bancarias, la suma de filas positivas y negativas debe coincidir con los depósitos y retiros declarados (±$0.05); si no, la importación queda bloqueada. En tarjetas se concilian cargos y pagos contra el resumen del emisor.
@@ -41,4 +47,4 @@ En iOS, Resumen, Gastos, Cuentas, Patrimonio y sus tendencias leen el mismo arre
 - La auditoría automática corre al finalizar una reconstrucción, después de una importación y al volver la app a primer plano. Persiste el identificador, disparador, versión del libro, porcentaje conciliado, conteo de problemas y estado `Verificado`, `Advertencias` o `Bloqueado`; también conserva cuántas filas PDF heredadas fueron retiradas en cuarentena durante la migración.
 - Un estado de auditoría crítico bloquea KPI e históricos. Las correcciones automáticas se limitan a normalización, deduplicación y matching inequívoco; importes o fechas ambiguos quedan en cuarentena.
 
-Las pruebas reproducibles se ejecutan con `node --experimental-strip-types --test tests/reconciliation.test.ts` y cubren encabezados numéricos, compras idénticas, traslados propios, pagos de Amex y estados traslapados.
+Las pruebas reproducibles se ejecutan con `node --experimental-strip-types --test` (la lista completa está en `package.json`) y cubren encabezados numéricos, compras idénticas, traslados propios, pagos de Amex, estados traslapados y el contrato de Zen. La suite actual pasa 185 pruebas.

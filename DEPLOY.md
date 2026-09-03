@@ -5,40 +5,43 @@
 - Web: https://marcelito-finanzas.onrender.com
 - Repositorio privado: https://github.com/ClubAmigosTT/marcelito-finanzas
 - Render publica el sitio estático desde `main` y, mediante el mismo Blueprint,
-  puede levantar el proxy aislado `marcelito-statement-reader`.
+  puede levantar el servicio aislado `marcelito-statement-reader` (el nombre se
+  conserva para no romper el dominio existente).
 - Los estados de cuenta se procesan localmente; no se suben al servidor.
 
-## Lector avanzado opcional
+## Clasificador Zen opcional
 
-El Blueprint incluye un segundo servicio Node en el plan gratuito. Solo se
-activa para un PDF concreto cuando el usuario elige releerlo con el lector
-seguro. Antes de desplegarlo, configura en el servicio
-`marcelito-statement-reader` los secretos `STATEMENT_READER_API_KEY` (la clave
-del proveedor) y `STATEMENT_READER_TOKEN` (un token largo aleatorio para la
-app). Nunca los pongas en `render.yaml`, `VITE_*`, el repositorio ni la app
-móvil. El modelo inicial es `muse-spark-1.2-contributor-free` a través de Zen;
-si ese modelo no acepta PDF/visión o salida estructurada, cambia únicamente
-`STATEMENT_READER_MODEL` y verifica el modelo antes de usar estados reales.
+El Blueprint incluye un segundo servicio Node en el plan gratuito. La app solo
+lo usa después de una conciliación local válida para sugerir comercio,
+categoría, recurrencia y viajes. No recibe PDFs, OCR, cuentas, saldos ni decide
+ingresos, transferencias, reembolsos o pagos de tarjeta. Antes de desplegarlo,
+configura en `marcelito-statement-reader` los secretos
+`STATEMENT_READER_API_KEY` (clave del proveedor) y `STATEMENT_READER_TOKEN` (un
+token largo aleatorio para la app). Nunca los pongas en `render.yaml`,
+`VITE_*`, el repositorio ni la app móvil. Usa un modelo gratuito de la
+allowlist del servidor, por ejemplo `mimo-v2.5-free` o
+`muse-spark-1.2-contributor-free` según el transporte compatible.
 
 El endpoint `/health` debe responder `configured: true`. Si responde `false`,
-la aplicación conserva el lector local y no envía ningún PDF.
+la aplicación conserva la clasificación local y no envía ningún dato.
 En la primera comprobación la app tolera hasta 120 segundos para permitir el
-arranque en frío del servicio gratuito. El botón **Probar lector avanzado**
-debe mostrar `Lector listo · <modelo>` antes de releer un estado real.
+arranque en frío del servicio gratuito. El botón **Probar clasificador Zen**
+debe mostrar `Clasificador listo · <modelo>` antes de autorizar un lote real.
 Si el gateway rechaza el formato `json_schema`, el proxy hace un único
 reintento en JSON directo y vuelve a aplicar la validación completa; ninguna
-respuesta que no concilie llega al libro canónico.
+respuesta incompleta o con campos contables se descarta completa.
 
 Para verificar el servicio sin subir un estado, ejecuta desde una máquina con
 acceso al endpoint:
 
 ```text
-$env:STATEMENT_READER_URL="https://marcelito-statement-reader.onrender.com/api/statement-reader"; $env:STATEMENT_READER_TOKEN="<token-temporal>"; npm run reader:verify
+$env:STATEMENT_READER_URL="https://marcelito-statement-reader.onrender.com/api/transaction-classifier"; $env:STATEMENT_READER_TOKEN="<token-temporal>"; npm run reader:verify
 ```
 
 El comando solo consulta `/health` y `/preflight`; no requiere ni acepta una
 ruta a PDFs reales.
-También puedes ejecutar el workflow manual **Statement Reader Verify** en
+También puedes ejecutar el workflow manual **Statement Reader Verify** (el
+nombre se conserva por compatibilidad; verifica el clasificador) en
 GitHub Actions. Configura `STATEMENT_READER_TOKEN` como secreto del repositorio
 y deja la URL propuesta por defecto; el workflow instala dependencias, consulta
 salud y ejecuta el mismo preflight sin imprimir el token.

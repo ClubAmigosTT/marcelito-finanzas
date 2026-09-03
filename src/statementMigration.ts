@@ -1,12 +1,14 @@
 import { PDF_READER_VERSION } from "./pdfImport.ts";
-import { MULTIMODAL_READER_VERSION } from "./multimodalReader.ts";
 import { hasSufficientOcrQuality, hasVerifiedSourceEvidence } from "./finance.ts";
 import type { Statement, Transaction } from "./types.ts";
 
 const MIGRATION_TOLERANCE = 0.05;
 
 function isSupportedReaderVersion(version: string | undefined, currentReaderVersion: string) {
-  return version === currentReaderVersion || version === MULTIMODAL_READER_VERSION;
+  // Only the current local reader can feed the active ledger. A legacy
+  // multimodal extraction may remain visible as metadata, but its rows are
+  // quarantined until the original PDF is re-read locally.
+  return version === currentReaderVersion;
 }
 
 /**

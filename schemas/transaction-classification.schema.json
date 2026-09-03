@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://marcelito-finanzas.local/schemas/transaction-classification.v1.json",
+  "title": "Marcelito transaction classification v1",
+  "description": "Optional enrichment for already validated ledger rows. It cannot change accounting fields.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "classifications": {
+      "type": "array",
+      "maxItems": 500,
+      "items": {
+        "$ref": "#/$defs/classification"
+      }
+    }
+  },
+  "required": ["classifications"],
+  "$defs": {
+    "classification": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "index": { "type": "integer", "minimum": 0, "maximum": 499 },
+        "merchant": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "category": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "recurring": { "type": "boolean" },
+        "extraordinary": { "type": "boolean" },
+        "travel": { "type": "boolean" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reason": { "type": "string", "minLength": 2, "maxLength": 240 },
+        "requires_review": { "type": "boolean" }
+      },
+      "required": [
+        "index",
+        "merchant",
+        "category",
+        "recurring",
+        "extraordinary",
+        "travel",
+        "confidence",
+        "reason",
+        "requires_review"
+      ]
+    }
+  }
+}

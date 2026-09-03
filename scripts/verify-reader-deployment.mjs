@@ -42,19 +42,23 @@ async function fetchJson(url, init, fetchImpl, timeoutMs) {
 }
 
 /**
- * Verifies an already deployed reader without uploading a user document.
- * Health proves that server-side secrets exist; the synthetic preflight proves
- * PDF ingestion and the extraction contract. No secret is returned or logged.
+ * Verifies the isolated service without uploading a user document. The
+ * historical /api/statement-reader path checks the PDF contract for older
+ * clients; the current /api/transaction-classifier path checks the small Zen
+ * enrichment contract. No secret or user data is returned or logged.
  */
 export async function verifyReaderDeployment({ endpoint, token, fetchImpl = fetch, timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
   if (!String(token ?? "").trim()) throw new Error("Falta STATEMENT_READER_TOKEN.");
   const parsedEndpoint = secureEndpoint(endpoint);
   const readerPath = endpointPath(parsedEndpoint);
   const healthUrl = new URL("/health", parsedEndpoint.origin).toString();
-  const preflightUrl = `${parsedEndpoint.origin}${readerPath}/preflight`;
+  const baseReaderPath = readerPath.replace(/\/preflight$/i, "");
+  const preflightUrl = `${parsedEndpoint.origin}${baseReaderPath}/preflight`;
+  const isClassifier = /\/api\/transaction-classifier$/i.test(baseReaderPath);
+  const expectedContract = isClassifier ? "transaction-classification.v1" : "statement-extraction.v1";
   const health = await fetchJson(healthUrl, { method: "GET", headers: { accept: "application/json" } }, fetchImpl, timeoutMs);
   if (!health.response.ok || health.body?.status !== "ok" || health.body?.configured !== true) {
-    throw new Error("El servicio del lector no está configurado (health no confirmó configured=true).");
+    throw new Error("El servicio no está configurado (health no confirmó configured=true).");
   }
   const preflight = await fetchJson(preflightUrl, {
     method: "POST",
@@ -65,10 +69,10 @@ export async function verifyReaderDeployment({ endpoint, token, fetchImpl = fetc
     body: "{}",
   }, fetchImpl, timeoutMs);
   const model = typeof preflight.body?.model === "string" ? preflight.body.model.trim() : "";
-  if (!preflight.response.ok || preflight.body?.status !== "ready" || preflight.body?.contract !== "statement-extraction.v1" || !model) {
-    throw new Error("El preflight no confirmó PDF + contrato JSON del proveedor.");
+  if (!preflight.response.ok || preflight.body?.status !== "ready" || preflight.body?.contract !== expectedContract || !model) {
+    throw new Error(`El preflight no confirmó el contrato JSON esperado (${expectedContract}).`);
   }
-  return { health: { status: "ok", configured: true }, preflight: { status: "ready", model, contract: "statement-extraction.v1" } };
+  return { health: { status: "ok", configured: true }, preflight: { status: "ready", model, contract: expectedContract } };
 }
 
 if (process.argv[1] && new URL(`file://${process.argv[1].replace(/\\/g, "/")}`).pathname.endsWith("/verify-reader-deployment.mjs")) {

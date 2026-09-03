@@ -6,7 +6,6 @@ const rootTabPath = new URL("../apps/ios/Cauce/RootTabView.swift", import.meta.u
 const sectionsPath = new URL("../apps/ios/Cauce/Sections.swift", import.meta.url);
 const modelsPath = new URL("../apps/ios/Cauce/Models.swift", import.meta.url);
 const aiClassificationPath = new URL("../apps/ios/Cauce/AIClassification.swift", import.meta.url);
-const statementReaderAIPath = new URL("../apps/ios/Cauce/StatementReaderAI.swift", import.meta.url);
 const certificationViewPath = new URL("../apps/ios/Cauce/NativeCorpusCertification.swift", import.meta.url);
 const nativeCorpusPath = new URL("../apps/ios/Tests/NativeCorpusContractTests.swift", import.meta.url);
 const nativeCorpusRunnerPath = new URL("../apps/ios/scripts/run-native-corpus.sh", import.meta.url);
@@ -164,43 +163,27 @@ test("el clasificador iOS divide lotes y filtra respuestas fuera de alcance", as
   assert.match(source, /maxTokens: 2000/);
 });
 
-test("iOS usa Zen solo como respaldo opt-in y conserva la conciliación como compuerta", async () => {
-  const [models, reader, settings, certification] = await Promise.all([
+test("iOS usa Zen solo para enriquecer gastos después de la lectura local", async () => {
+  const [models, settings, certification] = await Promise.all([
     readFile(modelsPath, "utf8"),
-    readFile(statementReaderAIPath, "utf8"),
     readFile(aiClassificationPath, "utf8"),
     readFile(certificationViewPath, "utf8"),
   ]);
-  assert.match(settings, /Toggle\("Usar IA cuando Vision no concilie"/);
-  assert.match(models, /localSummary\.reconciliation\?\.status != \.valid \|\| localSummary\.requiresReview/);
-  assert.match(models, /ZenStatementReader\.extract\(/);
-  assert.match(models, /let remoteSummary = inspectionSummary/);
-  assert.match(reader, /static let model = "muse-spark-1\.2-contributor-free"/);
-  assert.match(reader, /minimumAverageConfidence = 0\.88/);
-  assert.match(reader, /minimumPageConfidence = 0\.78/);
-  assert.match(reader, /evidenceContainsDescription/);
-  assert.match(reader, /evidenceContainsAmount/);
-  assert.match(reader, /"type": "json_schema"/);
-  assert.match(reader, /structuredOutput: true/);
-  assert.match(reader, /structuredOutput: false/);
-  assert.match(reader, /fallbackFailed/);
-  assert.match(reader, /decodingReason/);
-  assert.match(models, /multimodalFallbackAttempted/);
-  assert.match(certification, /IA multimodal falló/);
+  assert.doesNotMatch(settings, /Toggle\("Usar IA cuando Vision no concilie"/);
+  assert.match(settings, /Nunca recibe PDFs ni saldos/);
+  assert.match(models, /stage\?\("Lectura local lista; conciliando contra los totales/);
+  assert.doesNotMatch(models, /ZenStatementReader/);
+  assert.doesNotMatch(certification, /allowMultimodalFallback/);
+  assert.match(certification, /OpenCode Zen no recibe PDFs/);
+  assert.match(models, /Legacy compatibility markers/);
+  assert.match(certification, /multimodalFallbackAttempted/);
   assert.match(certification, /static let targetPrecision = 0\.97/);
-  assert.match(certification, /allowMultimodalFallback: useAIFallback/);
   assert.match(certification, /cada archivo aceptado debe conciliar al 100%/);
 });
 
-test("el lector iOS normaliza booleanos compatibles sin adivinar moneda", async () => {
-  const source = await readFile(statementReaderAIPath, "utf8");
-  // Zen-compatible gateways have returned 0/1 or textual booleans despite
-  // the requested JSON schema. Only exact, unambiguous representations may
-  // cross the boundary; null, fractions and arbitrary labels remain errors.
-  assert.match(source, /init\(from decoder: Decoder\) throws/);
-  assert.match(source, /decode\(Int\.self\).*decoded == 0 \|\| decoded == 1/);
-  assert.match(source, /decode\(Double\.self\).*decoded == 0 \|\| decoded == 1/);
-  assert.match(source, /"extranjera", "extranjero", "foreign"/);
-  assert.match(source, /"nacional", "domestica", "doméstica", "domestic"/);
-  assert.match(source, /no se puede inferir/);
+test("el clasificador iOS no envía cuentas ni documentos", async () => {
+  const source = await readFile(aiClassificationPath, "utf8");
+  assert.doesNotMatch(source, /"cuenta"\s*:/);
+  assert.match(source, /No recibes ni debes solicitar PDFs/);
+  assert.match(source, /guard parsed\.count == movements\.count/);
 });
