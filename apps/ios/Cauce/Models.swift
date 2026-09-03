@@ -630,7 +630,7 @@ final class FinanceStore {
     // Bump the reader revision whenever extraction rules change. Existing
     // PDF-derived rows then trigger the canonical rebuild on next launch and
     // cannot remain silently backed by the previous OCR decisions.
-    static let readerVersion = "ios-reader-2026.09.02.28"
+    static let readerVersion = "ios-reader-2026.09.03.29"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"

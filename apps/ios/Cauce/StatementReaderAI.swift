@@ -136,6 +136,64 @@ struct ZenStatementRowPayload: Decodable, Sendable {
         case amountCents = "amount_cents"
         case foreignCurrency = "foreign_currency"
     }
+
+    /// OpenAI-compatible gateways sometimes serialize a boolean field as the
+    /// JSON number `0`/`1` or as the strings `"false"`/`"true"` even when the
+    /// requested schema says `boolean`. Those representations are
+    /// unambiguous, so normalize them at the boundary. Unknown values (and
+    /// `null`) deliberately remain hard failures: guessing the currency
+    /// section could move a foreign purchase into the domestic subtotal and
+    /// make the financial reconciliation look correct when it is not.
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        date = try container.decode(String.self, forKey: .date)
+        description = try container.decode(String.self, forKey: .description)
+        amountCents = try container.decode(Int64.self, forKey: .amountCents)
+        direction = try container.decode(String.self, forKey: .direction)
+        kind = try container.decode(String.self, forKey: .kind)
+        page = try container.decode(Int.self, forKey: .page)
+        evidence = try container.decode(String.self, forKey: .evidence)
+        confidence = try container.decode(Double.self, forKey: .confidence)
+
+        let value = try container.superDecoder(forKey: .foreignCurrency)
+        let single = try value.singleValueContainer()
+        if let decoded = try? single.decode(Bool.self) {
+            foreignCurrency = decoded
+            return
+        }
+        if let decoded = try? single.decode(Int.self), decoded == 0 || decoded == 1 {
+            foreignCurrency = decoded == 1
+            return
+        }
+        // Some JSON bridges materialize an integral numeric boolean as a
+        // Double (for example `0.0`/`1.0`). Accept only those exact values;
+        // fractional numbers remain invalid rather than becoming a guessed
+        // currency classification.
+        if let decoded = try? single.decode(Double.self), decoded == 0 || decoded == 1 {
+            foreignCurrency = decoded == 1
+            return
+        }
+        if let decoded = try? single.decode(String.self) {
+            switch decoded.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+            case "true", "1", "yes", "si", "sí":
+                foreignCurrency = true
+                return
+            case "extranjera", "extranjero", "foreign", "usd", "eur", "cop", "cad", "gbp":
+                foreignCurrency = true
+                return
+            case "false", "0", "no", "nacional", "domestica", "doméstica", "domestic", "mxn":
+                foreignCurrency = false
+                return
+            default:
+                break
+            }
+        }
+        throw DecodingError.dataCorruptedError(
+            forKey: .foreignCurrency,
+            in: container,
+            debugDescription: "foreign_currency debe ser booleano, 0/1 o true/false; no se puede inferir"
+        )
+    }
 }
 
 struct ZenStatementExtraction: Decodable, Sendable {
@@ -293,7 +351,7 @@ enum ZenStatementReader {
 
     summary debe contener siempre estas propiedades, usando null cuando no estén impresas: previous_balance_cents, statement_balance_cents, debt_balance_cents, new_transactions_cents, payments_cents, credits_cents, payments_credits_cents, new_charges_cents, interest_cents, fees_cents, credit_limit_cents, credit_available_cents, minimum_payment_cents, minimum_plus_msi_cents, payment_for_no_interest_cents, cash_balance_cents, msi_original_deferred_cents, msi_pending_cents, revolving_balance_cents, msi_installments, msi_monthly_load_cents, domestic_transaction_total_cents, domestic_transaction_total_is_credit, foreign_transaction_total_cents, deposit_total_cents, withdrawal_total_cents, deposit_count y withdrawal_count.
 
-    Cada elemento de rows debe contener exactamente: date, description, amount_cents, direction, kind, foreign_currency, page, evidence y confidence. kind solo puede ser purchase, cardPayment, bankTransfer, income, credit, refund, msi, interest, fee u other. evidence debe ser un fragmento literal corto de la fila que incluya descripción e importe.
+    Cada elemento de rows debe contener exactamente: date, description, amount_cents, direction, kind, foreign_currency, page, evidence y confidence. kind solo puede ser purchase, cardPayment, bankTransfer, income, credit, refund, msi, interest, fee u other. evidence debe ser un fragmento literal corto de la fila que incluya descripción e importe. foreign_currency debe ser siempre el booleano JSON literal true o false (nunca null, texto, número, etiqueta de moneda ni objeto); usa false para una fila nacional y true solo cuando la fila esté dentro de la sección de moneda extranjera o muestre claramente una moneda distinta.
 
     Reglas obligatorias:
     - Identifica el emisor únicamente por encabezado, razón social, dominio o logotipo institucional; una contraparte mencionada en un movimiento no es el emisor.

@@ -72,6 +72,7 @@ Reglas obligatorias:
 - No conviertas en movimientos encabezados, pies, referencias, cuentas, CLABE, RFC, certificados, folios, autorizaciones, fechas de corte, saldos, subtotales, totales, límites, crédito disponible ni texto administrativo.
 - No inventes ni corrijas importes. Los importes son centavos enteros absolutos; la dirección determina el signo. Si un dato no se puede leer con seguridad, usa null en el resumen o no incluyas la fila.
 - Conserva página y un fragmento breve y literal de evidencia de la fila. La evidencia no puede ser una explicación inventada.
+- foreign_currency debe ser siempre el booleano JSON literal true o false (nunca null, texto, número, etiqueta de moneda ni objeto); usa false para una fila nacional y true solo dentro de una sección de moneda extranjera o cuando la fila muestre claramente una moneda distinta.
 - Devuelve las filas ordenadas por página y fecha, una sola vez por operación. No combines dos filas ni dupliques una operación porque aparezca en una página de continuación.
 - Clasifica cada fila como purchase, cardPayment, bankTransfer, income, credit, refund, msi, interest, fee u other. Un pago de una cuenta bancaria a una tarjeta es cardPayment; una transferencia entre cuentas propias es bankTransfer; un reembolso es refund; ninguno de ellos es gasto ordinario.
 - En estados bancarios, lee los totales declarados de depósitos/retiros y sus conteos. En tarjetas, lee saldo/deuda, límite, disponible, pago mínimo, pago para no generar intereses y MSI si aparecen. Los importes del resumen también son centavos enteros.
@@ -348,6 +349,42 @@ function evidenceContainsAmountAnchor(amountCents, evidence) {
     .some((value) => value === expected);
 }
 
+function normalizeBoolean(value) {
+  if (typeof value === "boolean") return value;
+  // Keep the provider boundary strict while accepting the exact coercions
+  // observed in OpenAI-compatible gateways. Never infer a currency section
+  // from null, a fraction or an unknown label.
+  if (typeof value === "number" && Number.isInteger(value) && (value === 0 || value === 1)) return value === 1;
+  if (typeof value === "string") {
+    switch (value.trim().toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "")) {
+      case "true":
+      case "1":
+      case "yes":
+      case "si":
+      case "extranjera":
+      case "extranjero":
+      case "foreign":
+      case "usd":
+      case "eur":
+      case "cop":
+      case "cad":
+      case "gbp":
+        return true;
+      case "false":
+      case "0":
+      case "no":
+      case "nacional":
+      case "domestica":
+      case "domestic":
+      case "mxn":
+        return false;
+      default:
+        break;
+    }
+  }
+  return undefined;
+}
+
 /**
  * Keep the provider boundary aligned with the client/dashboard gate. A model
  * response is not trustworthy merely because every field has the right JSON
@@ -419,7 +456,9 @@ function validateModelShape(value) {
     if (!(["in", "out"].includes(row.direction)) || !Number.isInteger(row.page) || row.page < 1 || row.page > value.page_count) throw new Error("model_invalid_shape");
     if (["income", "credit", "refund"].includes(row.kind) && row.direction !== "in") throw new Error("model_invalid_shape");
     if (["purchase", "msi", "interest", "fee"].includes(row.kind) && row.direction !== "out") throw new Error("model_invalid_shape");
-    if (typeof row.foreign_currency !== "boolean" || typeof row.evidence !== "string" || row.evidence.trim().length < 3 || row.evidence.length > 500 || typeof row.confidence !== "number" || !Number.isFinite(row.confidence) || row.confidence < 0 || row.confidence > 1) throw new Error("model_invalid_shape");
+    const normalizedForeignCurrency = normalizeBoolean(row.foreign_currency);
+    if (normalizedForeignCurrency === undefined || typeof row.evidence !== "string" || row.evidence.trim().length < 3 || row.evidence.length > 500 || typeof row.confidence !== "number" || !Number.isFinite(row.confidence) || row.confidence < 0 || row.confidence > 1) throw new Error("model_invalid_shape");
+    row.foreign_currency = normalizedForeignCurrency;
     if (!evidenceContainsDescriptionAnchor(row.description, row.evidence)) throw new Error("model_invalid_shape");
     if (!evidenceContainsAmountAnchor(row.amount_cents, row.evidence)) throw new Error("model_invalid_shape");
   }

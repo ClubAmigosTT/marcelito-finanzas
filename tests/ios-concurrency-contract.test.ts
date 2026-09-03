@@ -191,3 +191,16 @@ test("iOS usa Zen solo como respaldo opt-in y conserva la conciliación como com
   assert.match(certification, /allowMultimodalFallback: useAIFallback/);
   assert.match(certification, /cada archivo aceptado debe conciliar al 100%/);
 });
+
+test("el lector iOS normaliza booleanos compatibles sin adivinar moneda", async () => {
+  const source = await readFile(statementReaderAIPath, "utf8");
+  // Zen-compatible gateways have returned 0/1 or textual booleans despite
+  // the requested JSON schema. Only exact, unambiguous representations may
+  // cross the boundary; null, fractions and arbitrary labels remain errors.
+  assert.match(source, /init\(from decoder: Decoder\) throws/);
+  assert.match(source, /decode\(Int\.self\).*decoded == 0 \|\| decoded == 1/);
+  assert.match(source, /decode\(Double\.self\).*decoded == 0 \|\| decoded == 1/);
+  assert.match(source, /"extranjera", "extranjero", "foreign"/);
+  assert.match(source, /"nacional", "domestica", "doméstica", "domestic"/);
+  assert.match(source, /no se puede inferir/);
+});
