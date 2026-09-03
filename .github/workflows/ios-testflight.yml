@@ -428,7 +428,7 @@ jobs:
           });
           NODE
 
-      - name: Asociar build al grupo interno de TestFlight
+      - name: Asociar build a los grupos de testers de TestFlight
         env:
           ASC_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
           ASC_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
@@ -437,110 +437,7 @@ jobs:
           ASC_BUILD_NUMBER: ${{ github.run_number }}
           ASC_TESTFLIGHT_GROUP_NAME: Marcelito - Pruebas internas
         shell: bash
-        run: |
-          set -euo pipefail
-          node <<'NODE'
-          const crypto = require("node:crypto");
-
-          const base64Url = (value) => Buffer.from(value).toString("base64")
-            .replace(/=/g, "")
-            .replace(/\+/g, "-")
-            .replace(/\//g, "_");
-          const privateKey = (process.env.ASC_PRIVATE_KEY || "")
-            .replace(/\r\n/g, "\n")
-            .replace(/\\n/g, "\n");
-
-          function makeToken() {
-            const now = Math.floor(Date.now() / 1000);
-            const header = base64Url(JSON.stringify({
-              alg: "ES256",
-              kid: process.env.ASC_KEY_ID,
-              typ: "JWT",
-            }));
-            const payload = base64Url(JSON.stringify({
-              iss: process.env.ASC_ISSUER_ID,
-              iat: now - 30,
-              exp: now + 540,
-              aud: "appstoreconnect-v1",
-            }));
-            const signer = crypto.createSign("SHA256");
-            signer.update(`${header}.${payload}`);
-            signer.end();
-            const signature = signer.sign({
-              key: crypto.createPrivateKey(privateKey),
-              dsaEncoding: "ieee-p1363",
-            });
-            return `${header}.${payload}.${base64Url(signature)}`;
-          }
-
-          async function request(path, options = {}) {
-            const response = await fetch(`https://api.appstoreconnect.apple.com${path}`, {
-              ...options,
-              headers: {
-                Authorization: `Bearer ${makeToken()}`,
-                Accept: "application/json",
-                ...(options.body ? { "Content-Type": "application/json" } : {}),
-                ...(options.headers || {}),
-              },
-            });
-            const body = await response.text();
-            let parsed;
-            try {
-              parsed = body ? JSON.parse(body) : null;
-            } catch {
-              parsed = body;
-            }
-            if (!response.ok) {
-              const detail = typeof parsed === "string" ? parsed : JSON.stringify(parsed);
-              throw new Error(`HTTP ${response.status}: ${detail.slice(0, 500)}`);
-            }
-            return parsed;
-          }
-
-          (async () => {
-            const targetBuild = String(process.env.ASC_BUILD_NUMBER);
-            const appResponse = await request(
-              `/v1/apps?filter[bundleId]=${encodeURIComponent(process.env.ASC_BUNDLE_ID)}&limit=1`,
-            );
-            const app = appResponse.data?.[0];
-            if (!app) throw new Error("La app aún no aparece en App Store Connect");
-
-            const buildsResponse = await request(
-              `/v1/builds?filter[app]=${encodeURIComponent(app.id)}&sort=-uploadedDate&limit=50`,
-            );
-            const build = (buildsResponse.data || []).find(
-              (item) => String(item.attributes?.version) === targetBuild,
-            );
-            if (!build) throw new Error(`No se encontró el build ${targetBuild} en App Store Connect`);
-
-            const groupsResponse = await request(
-              `/v1/betaGroups?filter[app]=${encodeURIComponent(app.id)}&limit=50`,
-            );
-            const groups = groupsResponse.data || [];
-            const targetName = process.env.ASC_TESTFLIGHT_GROUP_NAME;
-            const group = groups.find((item) => item.attributes?.name === targetName)
-              || groups.find((item) => item.attributes?.isInternalGroup === true);
-            if (!group) throw new Error(`No se encontró el grupo interno "${targetName}"`);
-
-            const relationship = await request(
-              `/v1/betaGroups/${encodeURIComponent(group.id)}/relationships/builds?limit=200`,
-            );
-            const alreadyAssigned = (relationship.data || []).some((item) => item.id === build.id);
-            if (alreadyAssigned) {
-              console.log(`El build ${targetBuild} ya está asignado a "${group.attributes?.name}".`);
-              return;
-            }
-
-            await request(`/v1/betaGroups/${encodeURIComponent(group.id)}/relationships/builds`, {
-              method: "POST",
-              body: JSON.stringify({ data: [{ type: "builds", id: build.id }] }),
-            });
-            console.log(`Build ${targetBuild} asignado a "${group.attributes?.name}".`);
-          })().catch((error) => {
-            console.error(error.message);
-            process.exit(1);
-          });
-          NODE
+        run: node scripts/associate-testflight-build.mjs
 
       - name: Escribir resumen
         if: success()

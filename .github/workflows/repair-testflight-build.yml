@@ -1,0 +1,45 @@
+name: Reparar distribución de TestFlight
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_number:
+        description: "Número de build ya procesado por Apple (por ejemplo, 61)"
+        required: true
+        default: "61"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  repair:
+    name: Asociar build existente a sus grupos
+    if: github.repository == 'ClubAmigosTT/marcelito-finanzas'
+    environment:
+      name: testflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      ASC_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+      ASC_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+      ASC_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+      ASC_BUNDLE_ID: mx.marcelito.personal
+      ASC_BUILD_NUMBER: ${{ inputs.build_number }}
+      ASC_TESTFLIGHT_GROUP_NAME: Marcelito - Pruebas internas
+    steps:
+      - name: Descargar el repositorio
+        uses: actions/checkout@v4
+
+      - name: Validar y reparar distribución
+        run: node scripts/associate-testflight-build.mjs
+
+      - name: Escribir resumen
+        if: success()
+        run: |
+          {
+            echo "## Distribución de TestFlight reparada"
+            echo ""
+            echo "Build: $ASC_BUILD_NUMBER"
+            echo "Se verificó la asociación con los grupos existentes de testers."
+          } >> "$GITHUB_STEP_SUMMARY"
