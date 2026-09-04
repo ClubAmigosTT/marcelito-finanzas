@@ -1019,8 +1019,12 @@ final class FinanceStore {
         value < 0 ? -value : value
     }
 
-    var movements: [Movement]
-    var statements: [StatementRecord]
+    var movements: [Movement] {
+        didSet { invalidateDerivedProjections() }
+    }
+    var statements: [StatementRecord] {
+        didSet { invalidateDerivedProjections() }
+    }
     private(set) var ledgerVersion: UUID
     private(set) var lastAuditRun: LedgerAuditRun?
 
