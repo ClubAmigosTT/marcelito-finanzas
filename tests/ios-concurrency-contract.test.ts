@@ -75,6 +75,21 @@ test("volver al frente no ejecuta una auditoría síncrona ni congela las pesta�
   assert.match(models, /@ObservationIgnored private var ledgerQualityCache/);
 });
 
+test("la auditoría iOS separa revisión canónica de cuarentena", async () => {
+  const [models, diagnostics, rootTab] = await Promise.all([
+    readFile(modelsPath, "utf8"),
+    readFile(new URL("../apps/ios/Cauce/Diagnostics.swift", import.meta.url), "utf8"),
+    readFile(rootTabPath, "utf8"),
+  ]);
+  assert.match(models, /let reviewRows = canonical\.filter/);
+  assert.match(models, /quarantinedMovementCount: quarantined\.count/);
+  assert.match(models, /reviewTotal: review\.reduce/);
+  assert.match(diagnostics, /Por revisar \(canónicos\)/);
+  assert.match(diagnostics, /Movimientos en cuarentena/);
+  assert.match(diagnostics, /audit\.quarantinedRows/);
+  assert.match(rootTab, /por revisar en el libro canónico/);
+});
+
 test("Vision tiene fallback de idiomas cuando el dispositivo no expone etiquetas regionales", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /run\(languages: \["es-MX", "en-US"\]\)/);

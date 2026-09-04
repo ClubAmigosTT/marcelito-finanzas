@@ -654,6 +654,12 @@ struct LedgerQualityBanner: View {
                 Text(percentText)
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
+                Text("\(Int(store.ledgerQuality.reviewPercent.rounded()))% por revisar en el libro canónico · \(store.ledgerQuality.reviewMovementCount) movimientos · \(money(store.ledgerQuality.reviewAmount))")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(store.ledgerQuality.reviewMovementCount > 0 ? Color.marcelitoAmber : .secondary)
+                Text("\(store.ledgerQuality.quarantinedMovementCount) en cuarentena · \(money(store.ledgerQuality.quarantinedAmount)) · \(store.ledgerQuality.quarantinedStatementCount) estado(s) bloqueado(s)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(store.ledgerQuality.quarantinedMovementCount > 0 ? Color.marcelitoAmber : .secondary)
                 if store.dashboardIsProvisional {
                     Text("Desbloqueo manual activo · KPI provisionales")
                         .font(.caption2.weight(.semibold))
@@ -676,6 +682,10 @@ struct LedgerQualityBanner: View {
         )
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Calidad de datos \(percentText)\(store.dashboardIsProvisional ? ". KPI provisionales por desbloqueo manual" : "")")
+    }
+
+    private func money(_ value: Decimal) -> String {
+        value.formatted(.currency(code: "MXN").precision(.fractionLength(2)))
     }
 }
 
