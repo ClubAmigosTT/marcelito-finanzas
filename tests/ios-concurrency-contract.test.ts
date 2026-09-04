@@ -38,6 +38,21 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
   assert.match(models, /FinanceStore\(reconciliationOnly: true\)/);
   assert.match(models, /One atomic in-memory commit followed by one envelope write/);
   assert.match(models, /normalizedLedgerReaderVersionKey/);
+
+  // A reader migration must not perform normalization or serialize the
+  // complete envelope synchronously from FinanceStore.init(). The old build
+  // did exactly that and starved SwiftUI before the first frame appeared.
+  const migrationBlock = models.match(
+    /let normalizedReaderVersion[\s\S]*?refreshCanonicalRebuildStatus\(\)/
+  )?.[0];
+  assert.ok(migrationBlock, "la migración de lector debe dejar una señal explícita");
+  assert.doesNotMatch(migrationBlock, /normalizeStoredLedger\(\)/);
+  assert.doesNotMatch(migrationBlock, /\bpersist\(/);
+  assert.match(migrationBlock, /defaults\.set\(false, forKey: canonicalRebuildKey\)/);
+  assert.match(models, /guard !canonicalRebuildPending else \{ return false \}/);
+  assert.match(app, /phase == \.active, !financeStore\.hasCanonicalRebuildPending/);
+  assert.match(models, /normalizeAfterImport: Bool = true/);
+  assert.match(models, /normalizeAfterImport: false/);
 });
 
 test("la auditoría de foreground no se repite para el mismo libro", async () => {

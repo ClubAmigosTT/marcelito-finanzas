@@ -31,7 +31,7 @@ struct MarcelitoApp: App {
                 if phase == .background {
                     DiagnosticsRecorder.markBackground()
                     authModel.lock()
-                } else if phase == .active {
+                } else if phase == .active, !financeStore.hasCanonicalRebuildPending {
                     // Foreground transitions are common when Face ID unlocks
                     // the app. Reuse the audit for the current ledger instead
                     // of normalizing and serializing every time the scene

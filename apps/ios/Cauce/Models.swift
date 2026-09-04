@@ -646,7 +646,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-2026.09.04.32"
+    static let readerVersion = "ios-reader-2026.09.04.33"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -1169,6 +1169,14 @@ final class FinanceStore {
     /// based on a guess, and any blocking issue remains visible to the UI.
     @discardableResult
     func runAutomaticAuditIfNeeded(trigger: String = "foreground") -> LedgerAuditRun? {
+        // A reader migration deliberately quarantines the previous ledger.
+        // Do not start a full normalization/audit pass from a scene or import
+        // callback while the user is still on the first frame after launch.
+        // The explicit rebuild action owns this work and will run the audit
+        // after it commits the candidate envelope.
+        if canonicalRebuildPending && trigger != "manual-rebuild" {
+            return lastAuditRun
+        }
         if let lastAuditRun,
            lastAuditRun.ledgerVersion == ledgerVersion,
            lastAuditRun.readerVersion == Self.readerVersion {
@@ -1183,7 +1191,12 @@ final class FinanceStore {
     @discardableResult
     func runAutomaticAudit(trigger: String = "foreground") -> LedgerAuditRun {
         let startedAt = Date()
-        normalizeStoredLedger()
+        // Never normalize the legacy snapshot as a side effect of launch or
+        // a foreground transition.  Rebuilds normalize the scratch ledger
+        // once, then this audit normalizes the freshly committed generation.
+        if !canonicalRebuildPending {
+            normalizeStoredLedger()
+        }
         let quality = ledgerQuality
         let status: LedgerAuditStatus = quality.isBlocking
             ? .blocked
@@ -1613,7 +1626,8 @@ final class FinanceStore {
     }
 
     private func isEligibleStatement(_ statement: StatementRecord) -> Bool {
-        isCurrentReader(statement)
+        guard !canonicalRebuildPending else { return false }
+        return isCurrentReader(statement)
             && statement.reconciliation?.status == .valid
             && statement.source.trimmingCharacters(in: .whitespacesAndNewlines)
                 .caseInsensitiveCompare("Desconocido") != .orderedSame
@@ -2274,10 +2288,25 @@ final class FinanceStore {
         // the main thread. Keep a one-time migration marker for old builds,
         // then defer any expensive repair to the explicit refresh action.
         let normalizedReaderVersion = defaults.string(forKey: normalizedLedgerReaderVersionKey)
+        let hasStoredSources = !statements.isEmpty || !storedPDFURLs.isEmpty
         if !loadedAtomicEnvelope || normalizedReaderVersion != Self.readerVersion {
-            normalizeStoredLedger()
-            persist()
-            defaults.set(Self.readerVersion, forKey: normalizedLedgerReaderVersionKey)
+            if hasStoredSources {
+                // Older builds may have persisted administrative PDF text as
+                // movements. Quarantine that snapshot immediately, but leave
+                // the expensive parse/dedupe/matching pass to the explicit
+                // rebuild so cold launch can render its first frame quickly.
+                defaults.set(false, forKey: canonicalRebuildKey)
+                defaults.removeObject(forKey: canonicalRebuildReaderVersionKey)
+                defaults.removeObject(forKey: normalizedLedgerReaderVersionKey)
+                DiagnosticsRecorder.record(
+                    stage: "store.migration.pending",
+                    message: "Se detectó un libro de una versión anterior; la reconstrucción canónica quedó pendiente."
+                )
+            } else {
+                // A fresh/empty install has nothing to migrate. Persist only
+                // this tiny marker; never serialize a large ledger here.
+                defaults.set(Self.readerVersion, forKey: normalizedLedgerReaderVersionKey)
+            }
         }
         refreshCanonicalRebuildStatus()
         DiagnosticsRecorder.record(
@@ -2827,7 +2856,8 @@ final class FinanceStore {
                     from: url,
                     allowOCR: true,
                     preserveExistingOnEmpty: false,
-                    requireValidReconciliation: true
+                    requireValidReconciliation: true,
+                    normalizeAfterImport: false
                 )
                 if result.reconciliation?.status == .valid && !result.requiresReview {
                     importedCount += 1
@@ -2860,6 +2890,12 @@ final class FinanceStore {
         if Task.isCancelled {
             return abortAfterCancellation()
         }
+
+        // Importing into the scratch store is intentionally append-only. The
+        // previous implementation ran the O(n²) overlap/matching pass after
+        // every PDF, which made a multi-statement refresh look frozen. Run it
+        // once after all files have been extracted instead.
+        scratch.normalizeStoredLedger()
 
         guard failedCount == 0 else {
             defaults.removeObject(forKey: rebuildStateKey)
@@ -3464,7 +3500,8 @@ final class FinanceStore {
         _ extraction: PDFImportExtraction,
         url: URL,
         preserveExistingOnEmpty: Bool,
-        requireValidReconciliation: Bool
+        requireValidReconciliation: Bool,
+        normalizeAfterImport: Bool = true
     ) throws -> ImportSummary {
         let documentData = extraction.documentData
         let sourceFingerprint = extraction.sourceFingerprint
@@ -3631,7 +3668,9 @@ final class FinanceStore {
         } else {
             statements.insert(statement, at: 0)
         }
-        normalizeStoredLedger()
+        if normalizeAfterImport {
+            normalizeStoredLedger()
+        }
         lastImportedFile = url.lastPathComponent
         persist(markingChange: true)
         if !isReconciliationOnly {
@@ -3641,7 +3680,7 @@ final class FinanceStore {
             // current generation complete when no legacy statement remains;
             // otherwise the first import on a clean install would immediately
             // ask the user to rebuild the same PDF a second time.
-            if !statements.contains(where: { !isCurrentReader($0) }) {
+            if !canonicalRebuildPending && !statements.contains(where: { !isCurrentReader($0) }) {
                 defaults.set(true, forKey: canonicalRebuildKey)
                 defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
                 defaults.set(true, forKey: numericRepairKey)
@@ -3727,6 +3766,7 @@ final class FinanceStore {
         requireValidReconciliation: Bool = false,
         sourceOverride: String? = nil,
         kindOverride: StatementKind? = nil,
+        normalizeAfterImport: Bool = true,
         stage: ((String) -> Void)? = nil
     ) async throws -> ImportSummary {
         let didStartAccessing = url.startAccessingSecurityScopedResource()
@@ -3765,7 +3805,8 @@ final class FinanceStore {
             extraction,
             url: url,
             preserveExistingOnEmpty: preserveExistingOnEmpty,
-            requireValidReconciliation: requireValidReconciliation
+            requireValidReconciliation: requireValidReconciliation,
+            normalizeAfterImport: normalizeAfterImport
         )
     }
 
