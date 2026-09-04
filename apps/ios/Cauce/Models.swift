@@ -635,7 +635,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-2026.09.03.31"
+    static let readerVersion = "ios-reader-2026.09.04.32"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4199,7 +4199,10 @@ final class FinanceStore {
         ), let shortMonthDateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
         ), let textDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s+(?:de\s*)?[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s+(?:de\s+)?\d{4})?"#
+            // Vision can collapse the separator/space in a short date
+            // (for example `OBIAGO`). Keep the compact form anchored to a
+            // Spanish month name so merchant text cannot become a row date.
+            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})(?:\s+|(?=(?:ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)))(?:de\s*)?(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)(?:\s+(?:de\s+)?\d{4})?(?![A-Za-z])"#
         ), let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         ) else { return [] }
