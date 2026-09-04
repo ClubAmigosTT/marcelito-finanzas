@@ -39,6 +39,13 @@ struct HomeView: View {
     @ViewBuilder
     private var homeContent: some View {
         LazyVStack(alignment: .leading, spacing: 18) {
+            if store.hasCanonicalRebuildPending {
+                PendingLedgerRefreshCard {
+                    Task { @MainActor in
+                        await rebuildPendingLedgerIfNeeded()
+                    }
+                }
+            }
             if hasData {
                 NetWorthSummary(store: store)
                 LedgerQualityBanner(store: store)
@@ -62,6 +69,15 @@ struct HomeView: View {
             } else {
                 ForEach(store.statements.prefix(4)) { statement in
                     Label("\(statement.source) · \(conciseStatementPeriod(statement))", systemImage: statement.requiresReview ? "exclamationmark.triangle" : "checkmark.circle")
+                }
+            }
+            if store.hasCanonicalRebuildPending {
+                Button {
+                    Task { @MainActor in
+                        await rebuildPendingLedgerIfNeeded()
+                    }
+                } label: {
+                    Label("Actualizar estados importados", systemImage: "arrow.clockwise")
                 }
             }
             Button {
@@ -142,9 +158,6 @@ struct HomeView: View {
             } message: {
                 Text("Se borrarán tus movimientos, estados importados y configuración de acceso de este dispositivo. Esta acción no se puede deshacer.")
             }
-            .task {
-                await rebuildPendingLedgerIfNeeded()
-            }
         }
     }
 
@@ -201,6 +214,7 @@ struct HomeView: View {
                 importStatus = "Listo"
                 isImporting = false
                 importReport = ImportReport(fileCount: urls.count, items: items)
+                store.runAutomaticAuditIfNeeded(trigger: "import")
                 DiagnosticsRecorder.record(
                     stage: "import.done",
                     message: "Importación terminada: \(items.filter { $0.errorMessage == nil }.count)/\(urls.count) archivo(s) procesado(s)."
@@ -219,7 +233,7 @@ struct HomeView: View {
 
     @MainActor
     private func rebuildPendingLedgerIfNeeded() async {
-        guard store.hasCanonicalRebuildPending else { return }
+        guard store.hasCanonicalRebuildPending, !isImporting else { return }
         isImporting = true
         importProgress = 0
         importStatus = "Reconstruyendo el libro canónico…"
@@ -237,7 +251,7 @@ struct HomeView: View {
         }
         await Task.yield()
         isImporting = false
-        store.runAutomaticAudit(trigger: "launch")
+        store.runAutomaticAuditIfNeeded(trigger: "manual-rebuild")
     }
 }
 
@@ -544,6 +558,28 @@ private struct EmptyDataCard: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .foregroundStyle(Color.marcelitoNavy)
         .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 18)
+    }
+}
+
+private struct PendingLedgerRefreshCard: View {
+    let refreshAction: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Label("Estados pendientes de actualizar", systemImage: "arrow.triangle.2.circlepath")
+                .font(.headline)
+                .foregroundStyle(Color.marcelitoNavy)
+            Text("Tus últimos datos guardados siguen disponibles. La lectura de PDFs se hará solo cuando la solicites y no bloqueará la entrada a la app.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Actualizar estados ahora", action: refreshAction)
+                .buttonStyle(.marcelitoSecondary)
+                .padding(.top, 2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .foregroundStyle(Color.marcelitoNavy)
+        .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 20, padding: 16)
     }
 }
 

@@ -551,6 +551,16 @@ struct CanonicalRebuildResult {
     let invalidCount: Int
 }
 
+/// The launch path intentionally has only three cheap states.  A pending
+/// rebuild is a user-visible condition, not a reason to block the first
+/// screen or to start OCR while SwiftUI is mounting the tab hierarchy.
+enum LedgerRefreshState: Equatable {
+    case ready
+    case pending
+    case refreshing
+    case failed
+}
+
 /// Resultado inmutable de la fase pesada de lectura. PDFKit y Vision se
 /// ejecutan fuera del actor de interfaz y solo este snapshot cruza de vuelta
 /// para escribir el libro canónico.
@@ -630,8 +640,9 @@ private struct LedgerEnvelope: Codable {
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
     // Bump the reader revision whenever extraction rules change. Existing
-    // PDF-derived rows then trigger the canonical rebuild on next launch and
-    // cannot remain silently backed by the previous OCR decisions.
+    // PDF-derived rows then appear as a pending refresh and cannot remain
+    // silently backed by the previous OCR decisions. The refresh is explicit
+    // so a reader migration never blocks app launch.
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
@@ -645,6 +656,7 @@ final class FinanceStore {
     private let canonicalRebuildKey = "marcelito.canonicalRebuild.v1"
     private let canonicalRebuildReaderVersionKey = "marcelito.canonicalRebuild.readerVersion.v1"
     private let canonicalRebuildExpectedCountKey = "marcelito.canonicalRebuild.expectedCount.v1"
+    private let normalizedLedgerReaderVersionKey = "marcelito.ledger.normalizedReaderVersion.v1"
     private let ledgerEnvelopeKey = "marcelito.ledger.active.v1"
     private let ledgerBackupKey = "marcelito.ledger.backup.v1"
     private let rebuildStateKey = "marcelito.ledger.rebuildState.v1"
@@ -652,7 +664,14 @@ final class FinanceStore {
     private let manualDashboardUnlockKey = "marcelito.dashboard.manualUnlock.v1"
     private let ledgerSchemaVersion = 1
     private let statementFilesDirectoryName = "ImportedStatements"
+    /// Parser-only scratch stores are used to build a candidate ledger without
+    /// touching the live UserDefaults snapshot.  This is also what makes a
+    /// rebuild atomic from the UI's point of view.
+    private let isReconciliationOnly: Bool
     private var repairInProgress = false
+    private var activeRebuildTask: Task<CanonicalRebuildResult, Never>? = nil
+    private(set) var ledgerRefreshState: LedgerRefreshState = .ready
+    private(set) var canonicalRebuildPending = false
 
     /// Runs the same text-layer reader path used during import, without
     /// touching UserDefaults or the canonical ledger. The test target uses
@@ -1143,6 +1162,19 @@ final class FinanceStore {
         persist()
         runAutomaticAudit(trigger: "manual-unlock")
         return true
+    }
+
+    /// Re-runs the complete set of cheap local controls and persists the
+    /// result. This is intentionally deterministic: it never mutates a row
+    /// based on a guess, and any blocking issue remains visible to the UI.
+    @discardableResult
+    func runAutomaticAuditIfNeeded(trigger: String = "foreground") -> LedgerAuditRun? {
+        if let lastAuditRun,
+           lastAuditRun.ledgerVersion == ledgerVersion,
+           lastAuditRun.readerVersion == Self.readerVersion {
+            return lastAuditRun
+        }
+        return runAutomaticAudit(trigger: trigger)
     }
 
     /// Re-runs the complete set of cheap local controls and persists the
@@ -2206,13 +2238,16 @@ final class FinanceStore {
 
     init() {
         let defaults = UserDefaults.standard
+        isReconciliationOnly = false
         manualDashboardUnlockEnabled = defaults.bool(forKey: manualDashboardUnlockKey)
+        var loadedAtomicEnvelope = false
         if let data = defaults.data(forKey: ledgerEnvelopeKey),
            let envelope = try? JSONDecoder().decode(LedgerEnvelope.self, from: data),
            envelope.schemaVersion == ledgerSchemaVersion {
             movements = envelope.movements
             statements = envelope.statements
             ledgerVersion = envelope.version
+            loadedAtomicEnvelope = true
         } else {
             // One-time compatibility path for versions that stored the two
             // arrays separately. The next persist() writes the atomic envelope.
@@ -2233,8 +2268,18 @@ final class FinanceStore {
         lastAuditRun = defaults.data(forKey: auditRunKey).flatMap { try? JSONDecoder().decode(LedgerAuditRun.self, from: $0) }
         lastImportedFile = defaults.string(forKey: importKey)
         recoverInterruptedRebuildIfNeeded()
-        normalizeStoredLedger()
-        persist()
+        // The active envelope is already normalized at every successful
+        // commit. Re-running the complete dedupe/matching pass synchronously
+        // on every cold start made opening the app compete with SwiftUI for
+        // the main thread. Keep a one-time migration marker for old builds,
+        // then defer any expensive repair to the explicit refresh action.
+        let normalizedReaderVersion = defaults.string(forKey: normalizedLedgerReaderVersionKey)
+        if !loadedAtomicEnvelope || normalizedReaderVersion != Self.readerVersion {
+            normalizeStoredLedger()
+            persist()
+            defaults.set(Self.readerVersion, forKey: normalizedLedgerReaderVersionKey)
+        }
+        refreshCanonicalRebuildStatus()
         DiagnosticsRecorder.record(
             stage: "store.init",
             message: "Libro \(ledgerVersion.uuidString.prefix(8)) cargado: \(statements.count) estado(s), \(movements.count) movimiento(s)."
@@ -2245,6 +2290,7 @@ final class FinanceStore {
     /// read or write UserDefaults: PDF extraction can call this from a detached
     /// background task while the live store is committing a ledger snapshot.
     private init(reconciliationOnly: Bool) {
+        isReconciliationOnly = reconciliationOnly
         movements = []
         statements = []
         ledgerVersion = UUID()
@@ -2266,7 +2312,7 @@ final class FinanceStore {
             }
             UserDefaults.standard.set(rules, forKey: categoryRulesKey)
         }
-        persist()
+        persist(markingChange: true)
     }
 
     func applyAIClassifications(_ classifications: [AIClassification]) {
@@ -2291,7 +2337,7 @@ final class FinanceStore {
             }
         }
         UserDefaults.standard.set(rules, forKey: categoryRulesKey)
-        persist()
+        persist(markingChange: true)
     }
 
     func updateClassification(for movement: Movement, kind: MovementKind, travelRelated: Bool) {
@@ -2306,7 +2352,7 @@ final class FinanceStore {
         default:
             movements[index].flow = .expense
         }
-        persist()
+        persist(markingChange: true)
     }
 
     func updateStatementSummary(for statement: StatementRecord, summary: StatementSummaryRecord) {
@@ -2320,7 +2366,7 @@ final class FinanceStore {
         )
         statements[index].requiresReview = statements[index].reconciliation?.status != .valid
             || (statements[index].sourceDetection?.status != .verified && statements[index].issuerConfirmedByUser != true)
-        persist()
+        persist(markingChange: true)
     }
 
     /// Explicitly releases a reconciled statement from the review quarantine.
@@ -2361,7 +2407,7 @@ final class FinanceStore {
             )
         }
         statements[index].requiresReview = false
-        persist()
+        persist(markingChange: true)
         _ = runAutomaticAudit(trigger: "review")
         return true
     }
@@ -2389,7 +2435,7 @@ final class FinanceStore {
                 movements[movementIndex].account = cleaned
             }
         }
-        persist()
+        persist(markingChange: true)
     }
 
     func addMovement(
@@ -2413,7 +2459,7 @@ final class FinanceStore {
             ),
             at: 0
         )
-        persist()
+        persist(markingChange: true)
     }
 
     func clearLocalData() {
@@ -2423,6 +2469,8 @@ final class FinanceStore {
         lastAuditRun = nil
         lastImportedFile = nil
         manualDashboardUnlockEnabled = false
+        canonicalRebuildPending = false
+        ledgerRefreshState = .ready
         persist()
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: movementKey)
@@ -2433,6 +2481,7 @@ final class FinanceStore {
         defaults.removeObject(forKey: canonicalRebuildKey)
         defaults.removeObject(forKey: canonicalRebuildReaderVersionKey)
         defaults.removeObject(forKey: canonicalRebuildExpectedCountKey)
+        defaults.removeObject(forKey: normalizedLedgerReaderVersionKey)
         defaults.removeObject(forKey: ledgerEnvelopeKey)
         defaults.removeObject(forKey: ledgerBackupKey)
         defaults.removeObject(forKey: rebuildStateKey)
@@ -2467,19 +2516,33 @@ final class FinanceStore {
     }
 
     var hasCanonicalRebuildPending: Bool {
+        canonicalRebuildPending
+    }
+
+    /// Recomputes the cheap rebuild decision only when the ledger changes or
+    /// during initialization. SwiftUI may evaluate `hasCanonicalRebuildPending`
+    /// dozens of times while a tab is mounting; it must not enumerate the PDF
+    /// directory on every body pass.
+    private func refreshCanonicalRebuildStatus() {
         let defaults = UserDefaults.standard
         let hasSources = !statements.isEmpty || !storedPDFURLs.isEmpty
         // A statement imported after the last rebuild can still carry an
         // older reader revision. Treat that as a rebuild trigger even when
         // the previous rebuild was marked complete.
         let hasOutdatedStatement = statements.contains { !isCurrentReader($0) }
-        if hasOutdatedStatement && hasSources { return true }
-        return Self.needsCanonicalRebuild(
+        let pending: Bool
+        if hasOutdatedStatement && hasSources {
+            pending = true
+        } else {
+            pending = Self.needsCanonicalRebuild(
             completed: defaults.bool(forKey: canonicalRebuildKey),
             completedReaderVersion: defaults.string(forKey: canonicalRebuildReaderVersionKey),
             currentReaderVersion: Self.readerVersion,
             hasSources: hasSources
-        )
+            )
+        }
+        canonicalRebuildPending = pending
+        ledgerRefreshState = pending ? .pending : .ready
     }
 
     private func currentEnvelope() -> LedgerEnvelope {
@@ -2494,7 +2557,7 @@ final class FinanceStore {
 
     /// If the process died during a rebuild, discard its partial writes and
     /// restore the last complete snapshot. `canonicalRebuildKey` remains false
-    /// so the next foreground launch retries the rebuild from the PDFs.
+    /// so the next explicit refresh can retry the rebuild from the PDFs.
     private func recoverInterruptedRebuildIfNeeded() {
         let defaults = UserDefaults.standard
         guard defaults.string(forKey: rebuildStateKey) == "inProgress",
@@ -2578,6 +2641,7 @@ final class FinanceStore {
             defaults.set(true, forKey: numericRepairKey)
             defaults.set("complete", forKey: rebuildStateKey)
             defaults.removeObject(forKey: ledgerBackupKey)
+            refreshCanonicalRebuildStatus()
             DiagnosticsRecorder.record(stage: "rebuild.done", message: "No había PDFs locales para reconstruir; el libro quedó limpio.")
             return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
         }
@@ -2627,6 +2691,7 @@ final class FinanceStore {
         defaults.set("complete", forKey: rebuildStateKey)
         defaults.removeObject(forKey: ledgerBackupKey)
         persist()
+        refreshCanonicalRebuildStatus()
         DiagnosticsRecorder.record(
             stage: "rebuild.done",
             message: "Reconstrucción terminada: \(importedCount) válido(s), \(invalidCount) bloqueado(s), \(movements.count) movimiento(s) canónicos."
@@ -2634,11 +2699,40 @@ final class FinanceStore {
         return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount)
     }
 
-    /// Async counterpart used by the launch UI. File hashing, PDFKit and
-    /// Vision all stay off the main actor; only the guarded ledger mutations
-    /// happen as the async task resumes on its caller's actor.
+    /// A user-requested refresh is single-flight.  SwiftUI can mount more
+    /// than one copy of a tab while authentication and scene transitions are
+    /// settling; all callers await the same task instead of starting a second
+    /// PDFKit/Vision pass.
+    @MainActor
     @discardableResult
     func rebuildCanonicalLedgerIfNeededAsync(
+        progress: ((Int, Int, String) -> Void)? = nil
+    ) async -> CanonicalRebuildResult {
+        if let activeRebuildTask {
+            return await activeRebuildTask.value
+        }
+        guard hasCanonicalRebuildPending else {
+            ledgerRefreshState = .ready
+            return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
+        }
+
+        let task = Task { [weak self] in
+            guard let self else {
+                return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
+            }
+            return await self.performCanonicalRebuildIfNeededAsync(progress: progress)
+        }
+        activeRebuildTask = task
+        let result = await task.value
+        activeRebuildTask = nil
+        return result
+    }
+
+    /// Builds a complete candidate ledger in a scratch store and swaps it in
+    /// only after every PDF has returned.  The previous snapshot therefore
+    /// remains usable while a refresh is running or if one file fails.
+    @MainActor
+    private func performCanonicalRebuildIfNeededAsync(
         progress: ((Int, Int, String) -> Void)? = nil
     ) async -> CanonicalRebuildResult {
         let defaults = UserDefaults.standard
@@ -2646,7 +2740,13 @@ final class FinanceStore {
             return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
         }
         repairInProgress = true
-        defer { repairInProgress = false }
+        ledgerRefreshState = .refreshing
+        defer {
+            repairInProgress = false
+            if ledgerRefreshState == .refreshing {
+                ledgerRefreshState = canonicalRebuildPending ? .pending : .ready
+            }
+        }
 
         let storedURLs = storedPDFURLs
         let knownStatements = statements
@@ -2660,7 +2760,8 @@ final class FinanceStore {
             }
         }.value
         guard !Task.isCancelled else {
-            return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
+            ledgerRefreshState = .pending
+            return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: 0, invalidCount: candidates.count)
         }
 
         let statementKeys = Set(knownStatements.map { statement in
@@ -2668,33 +2769,44 @@ final class FinanceStore {
         })
         defaults.set(max(candidates.count, statementKeys.count), forKey: canonicalRebuildExpectedCountKey)
 
+        // Keep a recovery marker for a process kill, but do not clear or
+        // rewrite the live envelope.  The scratch store below is disposable.
         if let backupData = try? JSONEncoder().encode(currentEnvelope()) {
             defaults.set(backupData, forKey: ledgerBackupKey)
         }
         defaults.set("inProgress", forKey: rebuildStateKey)
 
-        movements = movements.filter { $0.statementId == nil }
-        statements = []
-        normalizeStoredLedger()
-        persist()
+        let scratch = FinanceStore(reconciliationOnly: true)
+        scratch.movements = movements.filter { $0.statementId == nil }
+        scratch.statements = []
+        scratch.lastImportedFile = lastImportedFile
+        scratch.normalizeStoredLedger()
 
         func abortAfterCancellation() -> CanonicalRebuildResult {
-            recoverInterruptedRebuildIfNeeded()
+            defaults.removeObject(forKey: rebuildStateKey)
+            defaults.removeObject(forKey: ledgerBackupKey)
+            canonicalRebuildPending = true
+            ledgerRefreshState = .pending
             DiagnosticsRecorder.record(
                 level: "error",
                 stage: "rebuild.cancelled",
-                message: "Reconstrucción cancelada; se restauró el último libro completo."
+                message: "Reconstrucción cancelada; se conservó el último libro completo."
             )
             return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: 0, invalidCount: candidates.count)
         }
 
         guard !candidates.isEmpty else {
-            defaults.set(true, forKey: canonicalRebuildKey)
-            defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
-            defaults.set(true, forKey: numericRepairKey)
-            defaults.set("complete", forKey: rebuildStateKey)
+            // Missing source files are not a reason to delete the last usable
+            // ledger. Leave the snapshot intact and ask the user to reimport.
+            defaults.removeObject(forKey: rebuildStateKey)
             defaults.removeObject(forKey: ledgerBackupKey)
-            DiagnosticsRecorder.record(stage: "rebuild.done", message: "No había PDFs locales para reconstruir; el libro quedó limpio.")
+            canonicalRebuildPending = true
+            ledgerRefreshState = .failed
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "rebuild.empty",
+                message: "No se encontraron PDFs locales; se conservó el libro anterior."
+            )
             return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
         }
 
@@ -2704,13 +2816,14 @@ final class FinanceStore {
         )
         var importedCount = 0
         var invalidCount = 0
+        var failedCount = 0
         for (index, url) in candidates.enumerated() {
             if Task.isCancelled {
                 return abortAfterCancellation()
             }
             progress?(index, candidates.count, url.lastPathComponent)
             do {
-                let result = try await importPDFAsync(
+                let result = try await scratch.importPDFAsync(
                     from: url,
                     allowOCR: true,
                     preserveExistingOnEmpty: false,
@@ -2731,12 +2844,15 @@ final class FinanceStore {
                     )
                 }
             } catch {
-                invalidCount += 1
+                failedCount += 1
                 DiagnosticsRecorder.record(
                     level: "error",
                     stage: "rebuild.error",
                     message: "No se pudo reconstruir \(url.lastPathComponent): \(error.localizedDescription)"
                 )
+                if Task.isCancelled {
+                    return abortAfterCancellation()
+                }
             }
             progress?(index + 1, candidates.count, url.lastPathComponent)
             await Task.yield()
@@ -2744,12 +2860,36 @@ final class FinanceStore {
         if Task.isCancelled {
             return abortAfterCancellation()
         }
+
+        guard failedCount == 0 else {
+            defaults.removeObject(forKey: rebuildStateKey)
+            defaults.removeObject(forKey: ledgerBackupKey)
+            canonicalRebuildPending = true
+            ledgerRefreshState = .failed
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "rebuild.failed",
+                message: "Se conservaron los datos anteriores porque falló la lectura de \(failedCount) PDF(s)."
+            )
+            return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount + failedCount)
+        }
+
+        // One atomic in-memory commit followed by one envelope write. Invalid
+        // statements still remain available for diagnostics, but no partial
+        // candidate state is ever rendered by the dashboard.
+        movements = scratch.movements
+        statements = scratch.statements
+        lastImportedFile = scratch.lastImportedFile ?? lastImportedFile
+        ledgerVersion = UUID()
+        normalizeStoredLedger()
+        persist()
         defaults.set(true, forKey: canonicalRebuildKey)
         defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
         defaults.set(true, forKey: numericRepairKey)
         defaults.set("complete", forKey: rebuildStateKey)
         defaults.removeObject(forKey: ledgerBackupKey)
-        persist()
+        refreshCanonicalRebuildStatus()
+        ledgerRefreshState = .ready
         DiagnosticsRecorder.record(
             stage: "rebuild.done",
             message: "Reconstrucción asíncrona terminada: \(importedCount) válido(s), \(invalidCount) bloqueado(s), \(movements.count) movimiento(s) canónicos."
@@ -2766,10 +2906,10 @@ final class FinanceStore {
         return !storedImportRepairCandidates.isEmpty
     }
 
-    /// Automatic repair is intentionally limited to the newest local state
-    /// for each account/kind. Older states stay available in Documentos
-    /// importados and can be re-read manually, while launch-time work remains
-    /// bounded and cannot run OCR over an entire archive.
+    /// Compatibility repair is intentionally limited to the newest local
+    /// state for each account/kind. Older states stay available in Documentos
+    /// importados and can be re-read manually. It is never invoked as a
+    /// launch side effect and cannot run OCR over an entire archive.
     private var storedImportRepairCandidates: [StatementRecord] {
         let eligible = statements.filter { statementFileURL(for: $0) != nil }
         var newestByAccount: [String: StatementRecord] = [:]
@@ -3448,8 +3588,20 @@ final class FinanceStore {
 
         movements.removeAll { $0.statementId == statementId }
         movements.insert(contentsOf: canonicalFresh.reversed(), at: 0)
-        let storedFileName = persistStatementFile(documentData, statementId: statementId)
-            ?? existingStatement?.localFileName
+        let storedFileName: String?
+        if isReconciliationOnly {
+            // A scratch rebuild already reads files from Application Support.
+            // Reusing the relative name avoids copying every PDF a second
+            // time while the candidate ledger is being assembled.
+            let candidateName = URL(fileURLWithPath: url.lastPathComponent).lastPathComponent
+            let candidateURL = statementFilesDirectoryURL.appendingPathComponent(candidateName, isDirectory: false)
+            storedFileName = FileManager.default.fileExists(atPath: candidateURL.path)
+                ? candidateName
+                : existingStatement?.localFileName
+        } else {
+            storedFileName = persistStatementFile(documentData, statementId: statementId)
+                ?? existingStatement?.localFileName
+        }
         let statement = StatementRecord(
             id: statementId,
             source: source,
@@ -3481,8 +3633,22 @@ final class FinanceStore {
         }
         normalizeStoredLedger()
         lastImportedFile = url.lastPathComponent
-        persist()
-        UserDefaults.standard.set(lastImportedFile, forKey: importKey)
+        persist(markingChange: true)
+        if !isReconciliationOnly {
+            let defaults = UserDefaults.standard
+            defaults.set(lastImportedFile, forKey: importKey)
+            // A normal import already produced current-reader rows. Mark the
+            // current generation complete when no legacy statement remains;
+            // otherwise the first import on a clean install would immediately
+            // ask the user to rebuild the same PDF a second time.
+            if !statements.contains(where: { !isCurrentReader($0) }) {
+                defaults.set(true, forKey: canonicalRebuildKey)
+                defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
+                defaults.set(true, forKey: numericRepairKey)
+                defaults.set(Self.readerVersion, forKey: normalizedLedgerReaderVersionKey)
+            }
+            refreshCanonicalRebuildStatus()
+        }
 
         return ImportSummary(
             source: source,
@@ -3732,7 +3898,11 @@ final class FinanceStore {
         )
     }
 
-    private func persist() {
+    private func persist(markingChange: Bool = false) {
+        guard !isReconciliationOnly else { return }
+        if markingChange {
+            ledgerVersion = UUID()
+        }
         let defaults = UserDefaults.standard
         guard let envelopeData = try? JSONEncoder().encode(currentEnvelope()) else { return }
         // The envelope is the authoritative pointer. Keep the old keys for a
