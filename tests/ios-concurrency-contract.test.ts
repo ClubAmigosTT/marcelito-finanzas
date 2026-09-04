@@ -21,6 +21,10 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
   assert.match(rootTab, /await store\.rebuildCanonicalLedgerIfNeededAsync\s*\{/);
   assert.doesNotMatch(rootTab, /try store\.importPDF\(/);
   assert.doesNotMatch(rootTab, /store\.rebuildCanonicalLedgerIfNeeded\s*\{/);
+  // Opening Resumen must hydrate the persisted envelope only. A full PDF
+  // rebuild is an explicit action, never a view-appearance side effect.
+  assert.doesNotMatch(rootTab, /\.task\s*\{\s*await rebuildPendingLedgerIfNeeded\(\)/);
+  assert.match(rootTab, /PendingLedgerRefreshCard/);
 
   assert.match(sections, /try await store\.importPDFAsync\(/);
   assert.doesNotMatch(sections, /try store\.importPDF\(/);
@@ -29,6 +33,22 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
   assert.match(models, /Task\.detached\(priority: \.userInitiated\)/);
   assert.match(models, /func importPDFAsync[\s\S]*?try Task\.checkCancellation\(\)[\s\S]*?try Task\.checkCancellation\(\)/);
   assert.match(models, /func rebuildCanonicalLedgerIfNeededAsync\(/);
+  assert.match(models, /private var activeRebuildTask: Task<CanonicalRebuildResult, Never>\? = nil/);
+  assert.match(models, /private func performCanonicalRebuildIfNeededAsync\(/);
+  assert.match(models, /FinanceStore\(reconciliationOnly: true\)/);
+  assert.match(models, /One atomic in-memory commit followed by one envelope write/);
+  assert.match(models, /normalizedLedgerReaderVersionKey/);
+});
+
+test("la auditoría de foreground no se repite para el mismo libro", async () => {
+  const [app, models] = await Promise.all([
+    readFile(new URL("../apps/ios/Cauce/CauceApp.swift", import.meta.url), "utf8"),
+    readFile(modelsPath, "utf8"),
+  ]);
+  assert.match(app, /runAutomaticAuditIfNeeded\(trigger: "foreground"\)/);
+  assert.match(models, /func runAutomaticAuditIfNeeded\(trigger: String = "foreground"\)/);
+  assert.match(models, /lastAuditRun\.ledgerVersion == ledgerVersion/);
+  assert.match(models, /lastAuditRun\.readerVersion == Self\.readerVersion/);
 });
 
 test("Vision tiene fallback de idiomas cuando el dispositivo no expone etiquetas regionales", async () => {
