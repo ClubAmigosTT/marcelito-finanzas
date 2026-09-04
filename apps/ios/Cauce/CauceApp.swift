@@ -31,12 +31,15 @@ struct MarcelitoApp: App {
                 if phase == .background {
                     DiagnosticsRecorder.markBackground()
                     authModel.lock()
-                } else if phase == .active, !financeStore.hasCanonicalRebuildPending {
-                    // Foreground transitions are common when Face ID unlocks
-                    // the app. Reuse the audit for the current ledger instead
-                    // of normalizing and serializing every time the scene
-                    // becomes active.
-                    financeStore.runAutomaticAuditIfNeeded(trigger: "foreground")
+                } else if phase == .active {
+                    // Returning from the app switcher must never run a
+                    // synchronous reconciliation/serialization pass. The
+                    // previous callback competed with the first SwiftUI
+                    // frame and could make the app appear frozen or be killed
+                    // by iOS while the user changed tabs. Audits already run
+                    // after imports, rebuilds and explicit corrections; the
+                    // diagnostic screen remains the explicit foreground
+                    // refresh point.
                 }
             }
         }

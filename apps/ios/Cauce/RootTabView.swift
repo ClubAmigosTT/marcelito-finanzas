@@ -4,16 +4,37 @@ import Foundation
 import Charts
 
 struct RootTabView: View {
+    private enum Tab: Hashable {
+        case summary
+        case expenses
+        case accounts
+        case patrimony
+    }
+
+    @State private var selectedTab: Tab = .summary
+
     var body: some View {
-        TabView {
-            HomeView()
+        TabView(selection: $selectedTab) {
+            DeferredTab {
+                HomeView()
+            }
                 .tabItem { Label("Resumen", systemImage: "house.fill") }
-            ExpensesView()
+                .tag(Tab.summary)
+            DeferredTab {
+                ExpensesView()
+            }
                 .tabItem { Label("Gastos", systemImage: "chart.pie.fill") }
-            AccountsView()
+                .tag(Tab.expenses)
+            DeferredTab {
+                AccountsView()
+            }
                 .tabItem { Label("Cuentas", systemImage: "creditcard.fill") }
-            NetWorthView()
+                .tag(Tab.accounts)
+            DeferredTab {
+                NetWorthView()
+            }
                 .tabItem { Label("Patrimonio", systemImage: "chart.line.uptrend.xyaxis") }
+                .tag(Tab.patrimony)
         }
         .tint(Color.marcelitoNavy)
         .toolbarBackground(.ultraThinMaterial, for: .tabBar)
@@ -252,6 +273,37 @@ struct HomeView: View {
         await Task.yield()
         isImporting = false
         store.runAutomaticAuditIfNeeded(trigger: "manual-rebuild")
+    }
+}
+
+/// Keeps non-selected tabs out of the first render. SwiftUI can otherwise
+/// evaluate every tab's body while the root is mounting; with a large ledger
+/// that means several full projections and charts compete for the main actor
+/// before the user has asked to see them.
+private struct DeferredTab<Content: View>: View {
+    @State private var isLoaded = false
+    private let content: () -> Content
+
+    init(@ViewBuilder content: @escaping () -> Content) {
+        self.content = content
+    }
+
+    var body: some View {
+        Group {
+            if isLoaded {
+                content()
+            } else {
+                Color.clear
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .task {
+                        // Yield once so the selected tab's shell can render
+                        // before its financial projections are evaluated.
+                        await Task.yield()
+                        isLoaded = true
+                    }
+                    .accessibilityHidden(true)
+            }
+        }
     }
 }
 

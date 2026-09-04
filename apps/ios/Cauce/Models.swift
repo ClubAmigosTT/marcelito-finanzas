@@ -673,6 +673,28 @@ final class FinanceStore {
     private(set) var ledgerRefreshState: LedgerRefreshState = .ready
     private(set) var canonicalRebuildPending = false
 
+    /// SwiftUI may ask the same derived projection many times while a tab is
+    /// mounting. Keep those scans tied to the immutable ledger generation so
+    /// a tab switch does not repeatedly walk every movement and statement.
+    /// The caches are observation-ignored because changing a cache must never
+    /// trigger another view update.
+    private struct DerivedProjectionCache<Value> {
+        let ledgerVersion: UUID
+        let manualDashboardUnlockEnabled: Bool
+        let canonicalRebuildPending: Bool
+        let value: Value
+
+        func matches(ledgerVersion: UUID, manualDashboardUnlockEnabled: Bool, canonicalRebuildPending: Bool) -> Bool {
+            self.ledgerVersion == ledgerVersion
+                && self.manualDashboardUnlockEnabled == manualDashboardUnlockEnabled
+                && self.canonicalRebuildPending == canonicalRebuildPending
+        }
+    }
+
+    @ObservationIgnored private var eligibleMovementsCache: DerivedProjectionCache<[Movement]>?
+    @ObservationIgnored private var periodMetricsCache: DerivedProjectionCache<[StatementMetric]>?
+    @ObservationIgnored private var ledgerQualityCache: DerivedProjectionCache<LedgerQuality>?
+
     /// Runs the same text-layer reader path used during import, without
     /// touching UserDefaults or the canonical ledger. The test target uses
     /// this to lock down issuer detection and administrative-row rejection.
@@ -1039,6 +1061,14 @@ final class FinanceStore {
     /// historical charts. A statement that has not reconciled is visible in
     /// diagnostics, but cannot silently feed executive figures.
     var ledgerQuality: LedgerQuality {
+        if let cached = ledgerQualityCache,
+           cached.matches(
+               ledgerVersion: ledgerVersion,
+               manualDashboardUnlockEnabled: manualDashboardUnlockEnabled,
+               canonicalRebuildPending: canonicalRebuildPending
+           ) {
+            return cached.value
+        }
         let validated = statements.filter(isEligibleStatement)
         let invalid = statements.filter { $0.reconciliation?.status == .invalid }
         let pending = statements.filter { !isEligibleStatement($0) && $0.reconciliation?.status != .invalid }
@@ -1099,7 +1129,7 @@ final class FinanceStore {
         } else {
             message = nil
         }
-        return LedgerQuality(
+        let value = LedgerQuality(
             statementCount: statementCount,
             validatedStatementCount: validated.count,
             invalidStatementCount: invalid.count,
@@ -1116,6 +1146,13 @@ final class FinanceStore {
             isBlocking: blocking,
             message: message
         )
+        ledgerQualityCache = DerivedProjectionCache(
+            ledgerVersion: ledgerVersion,
+            manualDashboardUnlockEnabled: manualDashboardUnlockEnabled,
+            canonicalRebuildPending: canonicalRebuildPending,
+            value: value
+        )
+        return value
     }
 
     /// True while a quality issue is still present but the user explicitly
@@ -1303,11 +1340,19 @@ final class FinanceStore {
     /// Import order is not a financial ordering: importing May after August
     /// must never make May look like the current balance.
     var periodMetrics: [StatementMetric] {
+        if let cached = periodMetricsCache,
+           cached.matches(
+               ledgerVersion: ledgerVersion,
+               manualDashboardUnlockEnabled: manualDashboardUnlockEnabled,
+               canonicalRebuildPending: canonicalRebuildPending
+           ) {
+            return cached.value
+        }
         // Only reconciled statements participate automatically. When the user
         // explicitly enables the manual unlock, current-reader rows and issuer
         // balances are visible as provisional values; the quality gate below
         // remains unchanged and continues to report the statement as blocked.
-        statements
+        let value = statements
             .filter(isDashboardStatement)
             .map { calculateMetric(for: $0) }
             .sorted { left, right in
@@ -1318,6 +1363,13 @@ final class FinanceStore {
                 let rightImported = statements.first(where: { $0.id == right.id })?.importedAt ?? .distantPast
                 return leftImported > rightImported
             }
+        periodMetricsCache = DerivedProjectionCache(
+            ledgerVersion: ledgerVersion,
+            manualDashboardUnlockEnabled: manualDashboardUnlockEnabled,
+            canonicalRebuildPending: canonicalRebuildPending,
+            value: value
+        )
+        return value
     }
     var cardPeriodMetrics: [StatementMetric] { periodMetrics.filter { $0.kind == .card } }
     var cardPeriodCount: Int { Set(cardPeriodMetrics.map { periodKey($0.period) }).count }
@@ -1665,7 +1717,22 @@ final class FinanceStore {
     }
 
     private var eligibleMovements: [Movement] {
-        movements.filter(isEligibleMovement)
+        if let cached = eligibleMovementsCache,
+           cached.matches(
+               ledgerVersion: ledgerVersion,
+               manualDashboardUnlockEnabled: manualDashboardUnlockEnabled,
+               canonicalRebuildPending: canonicalRebuildPending
+           ) {
+            return cached.value
+        }
+        let value = movements.filter(isEligibleMovement)
+        eligibleMovementsCache = DerivedProjectionCache(
+            ledgerVersion: ledgerVersion,
+            manualDashboardUnlockEnabled: manualDashboardUnlockEnabled,
+            canonicalRebuildPending: canonicalRebuildPending,
+            value: value
+        )
+        return value
     }
 
     private func movementKind(_ movement: Movement) -> MovementKind {
@@ -2060,6 +2127,7 @@ final class FinanceStore {
         }
         movements = canonical
         reconcileStoredMovements()
+        invalidateDerivedProjections()
     }
 
     private func isValidStoredMovement(_ movement: Movement) -> Bool {
@@ -3939,11 +4007,18 @@ final class FinanceStore {
         )
     }
 
+    private func invalidateDerivedProjections() {
+        eligibleMovementsCache = nil
+        periodMetricsCache = nil
+        ledgerQualityCache = nil
+    }
+
     private func persist(markingChange: Bool = false) {
         guard !isReconciliationOnly else { return }
         if markingChange {
             ledgerVersion = UUID()
         }
+        invalidateDerivedProjections()
         let defaults = UserDefaults.standard
         guard let envelopeData = try? JSONEncoder().encode(currentEnvelope()) else { return }
         // The envelope is the authoritative pointer. Keep the old keys for a
