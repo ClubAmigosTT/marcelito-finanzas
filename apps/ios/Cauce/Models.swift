@@ -3010,7 +3010,14 @@ final class FinanceStore {
             // rows with `Total Nuevos Cargos` would therefore reject a
             // perfectly reconciled PDF whenever the MSI schedule is present.
             if let expectedNewTransactions = summary.newTransactions {
-                let regularTransactions = regular.reduce(Decimal(0)) { $0 + absolute($1.amount) }
+                // `Nuevas transacciones` is the current-period purchase
+                // subtotal.  Keep MSI, interest, fees and payments out of this
+                // comparison so the statement's separate sections cannot
+                // inflate the subtotal (and avoid relying on a scope-local
+                // `regular` collection that is not available here).
+                let regularTransactions = validRows
+                    .filter { movementKind($0) == .purchase }
+                    .reduce(Decimal(0)) { $0 + absolute($1.amount) }
                 if absolute(regularTransactions - absolute(expectedNewTransactions)) > tolerance {
                     mismatches.append("nuevas transacciones: extraído \(regularTransactions) vs declarado \(absolute(expectedNewTransactions))")
                 }
