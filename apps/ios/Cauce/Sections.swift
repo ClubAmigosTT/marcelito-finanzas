@@ -464,6 +464,11 @@ struct ExpensesView: View {
             } else if groups.isEmpty {
                 ContentUnavailableView("Sin gastos", systemImage: "chart.pie", description: Text("Importa un estado de cuenta para construir tus categorías reales."))
             } else {
+                if store.dashboardIsProvisional {
+                    Section {
+                        LedgerQualityBanner(store: store)
+                    }
+                }
                 identifiedExpensesSection
                 readingSection
                 reconciliationSection
@@ -832,7 +837,7 @@ struct AccountsView: View {
         NavigationStack {
             List {
                 Section("Cuentas") {
-                    if store.dashboardIsBlocked {
+                    if store.dashboardIsBlocked || store.dashboardIsProvisional {
                         LedgerQualityBanner(store: store)
                     }
                     ForEach(displayedAccounts) { account in
@@ -967,12 +972,19 @@ private struct AccountDetailView: View {
     private var trendSection: some View {
         if store.dashboardIsBlocked {
             HistoricalDashboardBlockedCard(store: store)
-        } else if trend.isEmpty {
-            Text("Aún no hay suficientes cortes para mostrar una tendencia.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
         } else {
-            AccountEvolutionChart(points: trend, source: source, kind: kind)
+            VStack(alignment: .leading, spacing: 12) {
+                if store.dashboardIsProvisional {
+                    LedgerQualityBanner(store: store)
+                }
+                if trend.isEmpty {
+                    Text("Aún no hay suficientes cortes para mostrar una tendencia.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } else {
+                    AccountEvolutionChart(points: trend, source: source, kind: kind)
+                }
+            }
         }
     }
 
@@ -1303,6 +1315,10 @@ struct NetWorthView: View {
                     Section {
                         LedgerQualityBanner(store: store)
                         HistoricalDashboardBlockedCard(store: store)
+                    }
+                } else if store.dashboardIsProvisional {
+                    Section {
+                        LedgerQualityBanner(store: store)
                     }
                 }
                 Section {

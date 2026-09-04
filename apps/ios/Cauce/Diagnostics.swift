@@ -104,6 +104,7 @@ struct DiagnosticsView: View {
     @State private var copied = false
     @State private var events = DiagnosticsRecorder.events
     @State private var isNativeCorpusPresented = false
+    @State private var isSettingsPresented = false
 
     var body: some View {
         NavigationStack {
@@ -151,6 +152,12 @@ struct DiagnosticsView: View {
                     LabeledContent("Movimientos canónicos", value: "\(store.ledgerQuality.movementCount)")
                     LabeledContent("Importes fuera de rango", value: "\(store.ledgerQuality.absurdMovementCount)")
                     LabeledContent("Filas con evidencia", value: "\(Int(store.ledgerQuality.evidencePercent.rounded()))%")
+                    if store.dashboardIsProvisional {
+                        Label("Desbloqueo manual activo: los KPI son provisionales.", systemImage: "lock.open.trianglebadge.exclamationmark")
+                            .font(.caption)
+                            .foregroundStyle(Color.marcelitoAmber)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                     if store.ledgerQuality.missingEvidenceCount > 0 {
                         Text("\(store.ledgerQuality.missingEvidenceCount) movimiento(s) importado(s) sin página, confianza o fragmento de origen completo.")
                             .font(.caption)
@@ -355,6 +362,11 @@ struct DiagnosticsView: View {
                         } label: {
                             Label("Copiar registro", systemImage: "doc.on.doc")
                         }
+                        Button {
+                            isSettingsPresented = true
+                        } label: {
+                            Label("Ajustes", systemImage: "gearshape")
+                        }
                         Button("Limpiar registro", role: .destructive) {
                             DiagnosticsRecorder.clear()
                             events = []
@@ -372,6 +384,9 @@ struct DiagnosticsView: View {
             }
             .sheet(isPresented: $isNativeCorpusPresented) {
                 NativeCorpusCertificationView()
+            }
+            .sheet(isPresented: $isSettingsPresented) {
+                SettingsView()
             }
         }
     }

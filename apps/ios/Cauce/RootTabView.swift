@@ -32,6 +32,7 @@ struct HomeView: View {
     @State private var importProgress = 0
     @State private var importStatus = "Preparando…"
     @State private var isDiagnosticsPresented = false
+    @State private var isSettingsPresented = false
 
     private var hasData: Bool { !store.movements.isEmpty || !store.statements.isEmpty }
 
@@ -67,6 +68,11 @@ struct HomeView: View {
                 isDiagnosticsPresented = true
             } label: {
                 Label("Diagnóstico", systemImage: "stethoscope")
+            }
+            Button {
+                isSettingsPresented = true
+            } label: {
+                Label("Ajustes", systemImage: "gearshape")
             }
             Button("Borrar datos del dispositivo", role: .destructive) {
                 isDeleteConfirmationPresented = true
@@ -119,6 +125,9 @@ struct HomeView: View {
             }
             .sheet(isPresented: $isDiagnosticsPresented) {
                 DiagnosticsView()
+            }
+            .sheet(isPresented: $isSettingsPresented) {
+                SettingsView()
             }
             .confirmationDialog(
                 "Borrar datos del dispositivo",
@@ -541,24 +550,31 @@ private struct EmptyDataCard: View {
 struct LedgerQualityBanner: View {
     let store: FinanceStore
 
+    private var isWarning: Bool { store.dashboardIsBlocked || store.dashboardIsProvisional }
+
     private var percentText: String {
         "\(Int(store.ledgerQuality.reconciledPercent.rounded()))% conciliado · \(Int(store.ledgerQuality.evidencePercent.rounded()))% con evidencia"
     }
 
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
-            Image(systemName: store.dashboardIsBlocked ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                .foregroundStyle(store.dashboardIsBlocked ? Color.marcelitoAmber : Color.marcelitoSuccess)
+            Image(systemName: isWarning ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
+                .foregroundStyle(isWarning ? Color.marcelitoAmber : Color.marcelitoSuccess)
             VStack(alignment: .leading, spacing: 3) {
                 Text("Calidad de datos / conciliación")
                     .font(.caption.weight(.semibold))
                 Text(percentText)
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
+                if store.dashboardIsProvisional {
+                    Text("Desbloqueo manual activo · KPI provisionales")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.marcelitoAmber)
+                }
                 if let message = store.ledgerQuality.message {
                     Text(message)
                         .font(.caption2)
-                        .foregroundStyle(store.dashboardIsBlocked ? Color.marcelitoAmber : .secondary)
+                        .foregroundStyle(isWarning ? Color.marcelitoAmber : .secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
@@ -567,11 +583,11 @@ struct LedgerQualityBanner: View {
         .foregroundStyle(Color.marcelitoNavy)
         .padding(12)
         .background(
-            (store.dashboardIsBlocked ? Color.marcelitoAmber : Color.marcelitoSuccess).opacity(0.10),
+            (isWarning ? Color.marcelitoAmber : Color.marcelitoSuccess).opacity(0.10),
             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Calidad de datos \(percentText)")
+        .accessibilityLabel("Calidad de datos \(percentText)\(store.dashboardIsProvisional ? ". KPI provisionales por desbloqueo manual" : "")")
     }
 }
 
@@ -713,6 +729,11 @@ private struct NetWorthSummary: View {
                     Text("Patrimonio líquido")
                         .font(.subheadline.weight(.medium))
                     Spacer()
+                    if store.dashboardIsProvisional {
+                        Text("PROVISIONAL")
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(Color.marcelitoAmber)
+                    }
                     Image(systemName: "arrow.up.right")
                         .font(.subheadline.weight(.semibold))
                 }
@@ -942,6 +963,11 @@ struct MetricDetailSheet: View {
                         Label(metric.title, systemImage: metric.symbol)
                             .font(.headline)
                             .foregroundStyle(metric.color)
+                        if store.dashboardIsProvisional {
+                            Label("Valor provisional por desbloqueo manual", systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(Color.marcelitoAmber)
+                        }
                         Text(store.dashboardIsBlocked ? "Bloqueado" : (value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"))
                             .font(.system(.largeTitle, design: .rounded).weight(.bold))
                             .monospacedDigit()
