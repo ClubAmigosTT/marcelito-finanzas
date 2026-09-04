@@ -303,6 +303,105 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("saldo") })
     }
 
+    func testBBVASplitSummaryLinesUseTheDecimalTotalAndCount() {
+        // PDFKit frequently exposes the BBVA summary as three separate visual
+        // lines. The count must not be promoted to the declared amount, and
+        // the table rows must still reconcile against the issuer controls.
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE, GRUPO FINANCIERO BBVA MEXICO
+            Comportamiento
+            Saldo Anterior
+            3,589.63
+            Depósitos / Abonos (+)
+            2
+            19,500.00
+            Retiros / Cargos (-)
+            9
+            22,058.69
+            Saldo Final
+            1,030.94
+            Detalle de Movimientos Realizados
+            FECHA SALDO OPER LIQ DESCRIPCION REFERENCIA CARGOS ABONOS OPERACION LIQUIDACION
+            23/JUL
+            22/JUL
+            FACEBK *XR4NKVVF52
+            120.00
+            3,469.63
+            27/JUL
+            27/JUL
+            SPEI RECIBIDO NVIO
+            15,000.00
+            18,469.63
+            29/JUL
+            29/JUL
+            SPEI ENVIADO STP
+            13,000.00
+            5,469.63
+            30/JUL
+            30/JUL
+            SPEI ENVIADO STP
+            500.00
+            30/JUL
+            29/JUL
+            TELEF MOVIS MC INSURGE
+            100.00
+            4,869.63
+            03/AGO
+            04/AGO
+            PAGO CUENTA DE TERCERO
+            3,253.00
+            1,616.63
+            05/AGO
+            05/AGO
+            SPEI RECIBIDO SANTANDER
+            4,500.00
+            6,116.63
+            06/AGO
+            06/AGO
+            RETIRO CAJERO AUTOMATICO
+            4,515.83
+            1,600.80
+            07/AGO
+            07/AGO
+            COMISION CAJERO RED
+            60.23
+            1,530.94
+            07/AGO
+            07/AGO
+            IVA REP TARJ TIT
+            9.63
+            1,530.94
+            10/AGO
+            10/AGO
+            SPEI ENVIADO STP
+            500.00
+            1,030.94
+            TOTAL IMPORTE CARGOS
+            22,058.69
+            TOTAL MOVIMIENTOS CARGOS
+            9
+            TOTAL IMPORTE ABONOS
+            19,500.00
+            TOTAL MOVIMIENTOS ABONOS
+            2
+            """,
+            fileName: "BBVA-agosto-2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.depositTotal, Decimal(string: "19500.00"))
+        XCTAssertEqual(snapshot.summary?.withdrawalTotal, Decimal(string: "22058.69"))
+        XCTAssertEqual(snapshot.summary?.depositCount, 2)
+        XCTAssertEqual(snapshot.summary?.withdrawalCount, 9)
+        XCTAssertEqual(snapshot.movements.count, 11)
+        let reconciliation = FinanceStore.reconcileStatementForTesting(
+            kind: .bank,
+            summary: snapshot.summary,
+            movements: snapshot.movements
+        )
+        XCTAssertEqual(reconciliation.status, .valid, reconciliation.reason ?? "")
+    }
+
     func testAmexLimitAndAvailableProduceCommittedDebt() {
         let text = """
         American Express
@@ -1165,6 +1264,284 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(store.statements[0].issuerConfirmedByUser == true)
         XCTAssertFalse(store.dashboardIsBlocked)
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
+    }
+
+    func testManualDashboardUnlockIsExplicitAndProvisional() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statement = StatementRecord(
+            id: UUID(),
+            source: "BBVA",
+            period: "agosto 2026",
+            fileName: "estado-bbva.pdf",
+            importedAt: .now,
+            transactionCount: 1,
+            requiresReview: true,
+            kind: .bank,
+            summary: StatementSummaryRecord(cashBalance: Decimal(string: "1030.94")),
+            reconciliation: StatementReconciliationRecord(
+                status: .invalid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05),
+                reason: "control de prueba"
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "BBVA",
+                confidence: 0.999,
+                status: .verified,
+                evidence: ["encabezado institucional BBVA"],
+                ignoredBodyMentions: []
+            ),
+            readerVersion: FinanceStore.readerVersion
+        )
+        store.statements = [statement]
+
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertFalse(store.dashboardIsProvisional)
+        XCTAssertTrue(store.setManualDashboardUnlock(true))
+        XCTAssertFalse(store.dashboardIsBlocked)
+        XCTAssertTrue(store.dashboardIsProvisional)
+        XCTAssertEqual(store.periodMetrics.count, 1)
+        XCTAssertTrue(store.setManualDashboardUnlock(false))
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertFalse(store.dashboardIsProvisional)
+    }
+
+    func testManualDashboardUnlockCannotRunWithoutImportedStatements() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+
+        XCTAssertFalse(store.setManualDashboardUnlock(true))
+        XCTAssertEqual(store.ledgerQuality.statementCount, 0)
+        XCTAssertFalse(store.dashboardIsProvisional)
+        XCTAssertFalse(store.manualDashboardUnlockEnabled)
+    }
+
+    func testOverlappingStatementsCollapseOnlyTheRepeatedCanonicalOccurrence() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+
+        let firstID = UUID()
+        let secondID = UUID()
+        let sourceEvidence = SourceDetectionEvidence(
+            source: "BBVA",
+            confidence: 0.999,
+            status: .verified,
+            evidence: ["encabezado institucional BBVA"],
+            ignoredBodyMentions: []
+        )
+        let first = StatementRecord(
+            id: firstID,
+            source: "BBVA",
+            accountKey: "bbva:4922",
+            period: "01/08/2026 - 31/08/2026",
+            fileName: "bbva-agosto.pdf",
+            importedAt: Date(timeIntervalSince1970: 1),
+            transactionCount: 1,
+            requiresReview: true,
+            kind: .bank,
+            sourceDetection: sourceEvidence,
+            readerVersion: FinanceStore.readerVersion
+        )
+        let second = StatementRecord(
+            id: secondID,
+            source: "BBVA",
+            accountKey: "bbva:4922",
+            period: "15/08/2026 - 14/09/2026",
+            fileName: "bbva-traslapado.pdf",
+            importedAt: Date(timeIntervalSince1970: 2),
+            transactionCount: 1,
+            requiresReview: true,
+            kind: .bank,
+            sourceDetection: sourceEvidence,
+            readerVersion: FinanceStore.readerVersion
+        )
+        let duplicateDate = Calendar(identifier: .gregorian).date(from: DateComponents(year: 2026, month: 8, day: 20))!
+        let firstMovement = Movement(
+            id: UUID(),
+            date: duplicateDate,
+            title: "OXXO",
+            account: "BBVA",
+            category: "Comidas",
+            amount: Decimal(string: "-100.00")!,
+            flow: .expense,
+            statementId: firstID,
+            kind: .purchase
+        )
+        let secondMovement = Movement(
+            id: UUID(),
+            date: duplicateDate,
+            title: "OXXO",
+            account: "BBVA",
+            category: "Comidas",
+            amount: Decimal(string: "-100.00")!,
+            flow: .expense,
+            statementId: secondID,
+            kind: .purchase
+        )
+        store.statements = [first, second]
+        store.movements = [firstMovement, secondMovement]
+        _ = store.runAutomaticAudit(trigger: "overlap-test")
+
+        XCTAssertEqual(store.movements.count, 1)
+        XCTAssertEqual(store.movements.first?.statementId, firstID)
+    }
+
+    func testSantanderAmexPaymentMatchesAcrossThreePostingDays() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+
+        let bankID = UUID()
+        let cardID = UUID()
+        let bankEvidence = SourceDetectionEvidence(
+            source: "Santander",
+            confidence: 0.999,
+            status: .verified,
+            evidence: ["encabezado institucional Santander"],
+            ignoredBodyMentions: []
+        )
+        let cardEvidence = SourceDetectionEvidence(
+            source: "Amex",
+            confidence: 0.999,
+            status: .verified,
+            evidence: ["encabezado institucional Amex"],
+            ignoredBodyMentions: []
+        )
+        store.statements = [
+            StatementRecord(
+                id: bankID,
+                source: "Santander",
+                accountKey: "santander:1234",
+                period: "01/07/2026 - 31/07/2026",
+                fileName: "santander-julio.pdf",
+                importedAt: .now,
+                transactionCount: 1,
+                requiresReview: true,
+                kind: .bank,
+                sourceDetection: bankEvidence,
+                readerVersion: FinanceStore.readerVersion
+            ),
+            StatementRecord(
+                id: cardID,
+                source: "Amex",
+                accountKey: "amex:1003",
+                period: "28/06/2026 - 27/07/2026",
+                fileName: "amex-julio.pdf",
+                importedAt: .now,
+                transactionCount: 1,
+                requiresReview: true,
+                kind: .card,
+                sourceDetection: cardEvidence,
+                readerVersion: FinanceStore.readerVersion
+            )
+        ]
+        let bankDate = Calendar(identifier: .gregorian).date(from: DateComponents(year: 2026, month: 7, day: 23))!
+        let cardDate = Calendar(identifier: .gregorian).date(from: DateComponents(year: 2026, month: 7, day: 20))!
+        store.movements = [
+            Movement(
+                date: bankDate,
+                title: "DOMICILIACION PAGO SERVICIO AMERICAN EXPRESS CO MEXICO SA DE CV",
+                account: "Santander",
+                category: "Finanzas",
+                amount: Decimal(string: "-15000.00")!,
+                flow: .expense,
+                statementId: bankID,
+                kind: .purchase
+            ),
+            Movement(
+                date: cardDate,
+                title: "GRACIAS POR SU PAGO EN LINEA",
+                account: "Amex",
+                category: "Finanzas",
+                amount: Decimal(string: "-15000.00")!,
+                flow: .debt,
+                statementId: cardID,
+                kind: .cardPayment
+            )
+        ]
+        _ = store.runAutomaticAudit(trigger: "card-payment-test")
+
+        let bankPayment = store.movements.first { $0.statementId == bankID }
+        XCTAssertEqual(bankPayment?.flow, .transfer)
+        XCTAssertEqual(bankPayment?.kind, .cardPayment)
+        XCTAssertEqual(store.movements.filter { $0.kind == .cardPayment }.count, 2)
+    }
+
+    func testOwnBankTransferMatchesOppositeDirectionalRowsWithoutCounterpartName() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+
+        let santanderID = UUID()
+        let bbvaID = UUID()
+        let evidence = SourceDetectionEvidence(
+            source: "Santander",
+            confidence: 0.999,
+            status: .verified,
+            evidence: ["encabezado institucional"],
+            ignoredBodyMentions: []
+        )
+        let bbvaEvidence = SourceDetectionEvidence(
+            source: "BBVA",
+            confidence: 0.999,
+            status: .verified,
+            evidence: ["encabezado institucional"],
+            ignoredBodyMentions: []
+        )
+        store.statements = [
+            StatementRecord(
+                id: santanderID,
+                source: "Santander",
+                accountKey: "santander:7707",
+                period: "01/08/2026 - 31/08/2026",
+                fileName: "santander-agosto.pdf",
+                importedAt: .now,
+                transactionCount: 1,
+                requiresReview: true,
+                kind: .bank,
+                sourceDetection: evidence,
+                readerVersion: FinanceStore.readerVersion
+            ),
+            StatementRecord(
+                id: bbvaID,
+                source: "BBVA",
+                accountKey: "bbva:4922",
+                period: "01/08/2026 - 31/08/2026",
+                fileName: "bbva-agosto.pdf",
+                importedAt: .now,
+                transactionCount: 1,
+                requiresReview: true,
+                kind: .bank,
+                sourceDetection: bbvaEvidence,
+                readerVersion: FinanceStore.readerVersion
+            )
+        ]
+        let outgoingDate = Calendar(identifier: .gregorian).date(from: DateComponents(year: 2026, month: 8, day: 20))!
+        let incomingDate = Calendar(identifier: .gregorian).date(from: DateComponents(year: 2026, month: 8, day: 21))!
+        store.movements = [
+            Movement(
+                date: outgoingDate,
+                title: "PAGO TRANSFERENCIA SPEI",
+                account: "Santander",
+                category: "Transferencia",
+                amount: Decimal(string: "-2500.00")!,
+                flow: .expense,
+                statementId: santanderID,
+                kind: .purchase
+            ),
+            Movement(
+                date: incomingDate,
+                title: "SPEI RECIBIDO",
+                account: "BBVA",
+                category: "Ingresos",
+                amount: Decimal(string: "2500.00")!,
+                flow: .income,
+                statementId: bbvaID,
+                kind: .income
+            )
+        ]
+        _ = store.runAutomaticAudit(trigger: "own-transfer-test")
+
+        XCTAssertEqual(store.movements.filter { $0.kind == .bankTransfer }.count, 2)
+        XCTAssertTrue(store.movements.allSatisfy { $0.flow == .transfer })
     }
 
     func testWeakVerifiedIssuerEvidenceCannotFeedNativeDashboard() {

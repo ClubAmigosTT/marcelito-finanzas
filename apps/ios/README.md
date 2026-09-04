@@ -67,7 +67,7 @@ cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
   --manifest tests/fixtures/pdf-corpus-attachments.json \
-  --reader-version ios-reader-2026.09.03.30 \
+  --reader-version ios-reader-2026.09.03.31 \
   --require-certified
 ```
 
@@ -143,6 +143,8 @@ variable. Ninguno de estos modos copia PDFs, descripciones o importes privados
 al repositorio.
 
 La autenticación usa Keychain y Face ID. La aplicación inicia sin movimientos de muestra: importa tus PDFs desde Archivos, revisa banco, periodo y movimientos, y los guarda solo en ese dispositivo. Los estados escaneados pueden quedar pendientes de revisión sin inventar filas.
+
+Si necesitas inspeccionar cifras mientras corriges un estado, abre **Resumen > Opciones > Ajustes** y elige **Desbloquear resultados provisionales**. La acción exige confirmación, queda registrada en Diagnóstico y solo permite ver datos del lector actual: no marca ningún PDF como conciliado, no elimina los errores de calidad y muestra la etiqueta **PROVISIONAL** en Resumen, Gastos, Patrimonio y gráficas. Usa **Volver a bloquear KPI** después de revisar el problema. No se puede activar sin al menos un estado importado.
 
 Movimientos y estados de cuenta se persisten localmente, se evita volver a contar el mismo archivo y las categorías se pueden corregir desde el detalle de cada movimiento. El menú de Inicio permite eliminar la cuenta y todos los datos locales.
 
