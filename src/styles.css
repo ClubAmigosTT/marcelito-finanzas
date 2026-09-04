@@ -509,15 +509,20 @@ body { background: var(--bg); color: var(--ink); }
 .split-bar { display: flex; height: 10px; margin-top: 17px; overflow: hidden; border-radius: 999px; background: var(--surface-raised); }
 .split-bar span:first-child { background: var(--navy); }
 .split-bar span:last-child { background: var(--navy-soft); }
-.data-quality { display: flex; align-items: center; justify-content: space-between; gap: 18px; margin-top: 18px; padding: 14px 17px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); }
-.data-quality > div { min-width: 0; display: grid; grid-template-columns: auto auto; align-items: baseline; column-gap: 10px; row-gap: 3px; }
-.data-quality > div span { color: var(--muted); font-size: 12px; font-weight: 700; }
-.data-quality > div strong { color: var(--navy); font-family: ui-monospace, monospace; font-size: 16px; }
-.data-quality > div small { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }
+.data-quality { display: grid; gap: 10px; margin-top: 18px; padding: 14px 17px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); }
+.quality-primary-metrics { min-width: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.quality-primary-metrics > div { min-width: 0; display: grid; grid-template-columns: auto auto; align-items: baseline; column-gap: 8px; row-gap: 3px; }
+.quality-primary-metrics span { color: var(--muted); font-size: 11px; font-weight: 700; }
+.quality-primary-metrics strong { color: var(--navy); font-family: ui-monospace, monospace; font-size: 16px; }
+.quality-primary-metrics small { grid-column: 1 / -1; color: var(--muted); font-size: 10px; line-height: 1.3; }
+.quality-secondary { display: flex; flex-wrap: wrap; gap: 5px 14px; color: var(--muted); font-size: 10px; line-height: 1.3; }
 .data-quality > p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.35; text-align: right; }
 .data-quality.has-alert { border-color: oklch(0.62 0.08 45); }
 .data-quality .quality-alert { color: var(--expense); font-weight: 700; }
 .data-quality .quality-ok { color: var(--navy-mid); }
+.quality-breakdown { display: flex; flex-wrap: wrap; gap: 6px 14px; align-items: baseline; margin: 14px 0 10px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-control); background: color-mix(in srgb, var(--surface) 82%, var(--navy) 18%); color: var(--muted); font-size: 11px; line-height: 1.35; }
+.quality-breakdown strong { color: var(--navy); }
+.quality-breakdown span + span { padding-left: 14px; border-left: 1px solid var(--line); }
 .audit-diagnostics { margin-top: 12px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); overflow: hidden; }
 .provisional-banner { display: flex; align-items: center; gap: 9px; margin-top: 16px; padding: 10px 13px; border: 1px solid color-mix(in srgb, var(--expense) 45%, var(--line)); border-radius: var(--radius-control); background: color-mix(in srgb, var(--expense) 8%, var(--surface)); color: var(--expense); font-size: 12px; font-weight: 700; }
 .migration-notice { margin: 16px 34px 0; }
@@ -646,7 +651,7 @@ body { background: var(--bg); color: var(--ink); }
   .expense-analysis-grid { grid-template-columns: 1fr; }
   .category-detail-grid { grid-template-columns: 1fr; gap: 12px; }
   .trend-values { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 12px; }
-  .data-quality { align-items: flex-start; flex-direction: column; }
+  .quality-primary-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .data-quality > p { text-align: left; }
   .audit-diagnostics summary { align-items: flex-start; }
   .debt-breakdown { grid-template-columns: 1fr 1fr; }
@@ -979,6 +984,8 @@ body {
 }
 
 @media (max-width: 560px) {
+  .quality-primary-metrics { grid-template-columns: 1fr; }
+  .quality-breakdown span + span { padding-left: 0; border-left: 0; }
   .page { padding-left: 14px; padding-right: 14px; }
   .summary-heading { margin-bottom: 18px; }
   .summary-heading h1 { font-size: 34px; }

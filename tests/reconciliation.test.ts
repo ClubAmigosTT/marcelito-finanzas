@@ -295,6 +295,40 @@ test("una coincidencia ambigua relevante queda en revisión y vuelve provisional
   assert.equal(buildFinanceMetrics(transactions, statements, result).isProvisional, true);
 });
 
+test("la calidad separa filas canónicas de PDFs en cuarentena", () => {
+  const statements = [
+    { ...bank("eligible", "BBVA", "agosto 2026"), transactionCount: 1 },
+    {
+      ...bank("blocked", "Santander", "agosto 2026"),
+      transactionCount: 3,
+      reconciliationStatus: "invalid" as const,
+      reconciliation: { status: "invalid" as const, tolerance: 0.05, reason: "totales no concilian" },
+    },
+  ];
+  const transactions = [
+    movement({ id: "eligible-row", date: "10 ago 2026", description: "SUPERMERCADO", account: "BBVA", amount: -100, flow: "expense", category: "Alimentos", statementId: "eligible" }),
+    movement({ id: "blocked-review-1", date: "11 ago 2026", description: "PAGO SIN CLASIFICAR", account: "Santander", amount: -200, flow: "expense", statementId: "blocked" }),
+    movement({ id: "blocked-review-2", date: "12 ago 2026", description: "OTRO PAGO SIN CLASIFICAR", account: "Santander", amount: -300, flow: "expense", statementId: "blocked" }),
+    movement({ id: "blocked-review-3", date: "13 ago 2026", description: "TERCER PAGO SIN CLASIFICAR", account: "Santander", amount: -400, flow: "expense", statementId: "blocked" }),
+  ];
+  const pipeline = runTransactionPipeline(transactions, statements);
+  const metrics = buildFinanceMetrics(transactions, statements, pipeline);
+
+  assert.equal(metrics.dataQuality.eligibleStatementCount, 1);
+  assert.equal(metrics.dataQuality.quarantinedStatementCount, 1);
+  assert.equal(metrics.dataQuality.reconciledPercent, 50);
+  assert.equal(metrics.dataQuality.eligibleMovementCount, 1);
+  assert.equal(metrics.dataQuality.classifiedCount, 1);
+  assert.equal(metrics.dataQuality.classifiedPercent, 100);
+  assert.equal(metrics.dataQuality.reviewCount, 0);
+  assert.equal(metrics.dataQuality.reviewPercent, 0);
+  assert.equal(metrics.dataQuality.reviewAmount, 0);
+  assert.equal(metrics.dataQuality.quarantinedMovementCount, 3);
+  assert.equal(metrics.dataQuality.quarantinedMovementAmount, 900);
+  assert.equal(metrics.dataQuality.rawReviewCount, 3);
+  assert.equal(metrics.dataQuality.blockedReasonCounts.reconciliation, 1);
+});
+
 test("matching no convierte un crédito de tarjeta en pago sin evidencia", () => {
   const statements = [
     bank("bbva", "BBVA", "agosto 2026"),

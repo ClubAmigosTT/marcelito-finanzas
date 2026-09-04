@@ -207,12 +207,39 @@ export type TravelTrip = {
 };
 
 export type DataQualityMetrics = {
+  /** Ratio of eligible (canonical) rows that have a deterministic category. */
   classifiedPercent: number;
   classifiedCount: number;
+  /** Denominator used by `classifiedPercent`: canonical rows only. */
   totalCount: number;
+  /** Raw import volume, including rows that are quarantined or rejected. */
+  importedCount: number;
+  /** Raw pipeline review count, retained for diagnostics only. */
+  rawReviewCount: number;
   reviewCount: number;
+  reviewPercent: number;
   relevantReviewCount: number;
+  reviewAmount: number;
+  eligibleStatementCount: number;
+  quarantinedStatementCount: number;
+  eligibleMovementCount: number;
+  eligibleClassifiedCount: number;
+  eligibleClassifiedPercent: number;
+  eligibleEvidencePercent: number;
+  canonicalCoveragePercent: number;
+  quarantinedMovementCount: number;
+  quarantinedMovementAmount: number;
+  blockedReasonCounts: {
+    reconciliation: number;
+    review: number;
+    ocr: number;
+    source: number;
+    evidence: number;
+    kind: number;
+  };
   reconciledPercent: number;
+  /** Row-level pipeline ratio kept for forensic diagnostics; not the KPI gate. */
+  rawReconciledPercent: number;
   evidencePercent: number;
   missingEvidenceCount: number;
   invalidCount: number;
@@ -1057,21 +1084,58 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     ? { label: "Gasto extraordinario", current: currentExtraordinary, previous: previousExtraordinary, delta: currentExtraordinary - previousExtraordinary }
     : undefined;
   const primaryCause = bestCategoryCause && extraordinaryCause && extraordinaryCause.delta > bestCategoryCause.delta ? extraordinaryCause : bestCategoryCause ?? extraordinaryCause;
-  const reviewItems = transactions.filter((transaction) => transaction.category === "Sin categoría" || (transaction.confidence ?? 1) < 0.75 || transaction.validationStatus === "review");
+  // Quality is reported in separate scopes.  A blocked PDF remains useful
+  // forensic evidence, but its rows must not inflate the actionable
+  // "por revisar" counter or lower the classification rate of the canonical
+  // ledger.  De-duplicate the observed rows by id because callers may inject a
+  // precomputed pipeline in addition to the raw import array.
+  const observedTransactions = Array.from(new Map(
+    [...inputTransactions, ...pipeline.transactions, ...pipeline.invalidTransactions, ...pipeline.duplicateTransactions]
+      .map((transaction) => [transaction.id, transaction] as const),
+  ).values());
+  const quarantinedTransactions = observedTransactions.filter((transaction) => Boolean(transaction.statementId && blockedStatementIds.has(transaction.statementId)));
+  const eligibleMovementCount = transactions.length;
+  const eligibleReviewItems = transactions.filter((transaction) => transaction.category === "Sin categoría" || (transaction.confidence ?? 1) < 0.75 || transaction.validationStatus === "review");
+  const eligibleClassifiedCount = Math.max(0, eligibleMovementCount - eligibleReviewItems.length);
+  const eligibleClassifiedPercent = eligibleMovementCount ? (eligibleClassifiedCount / eligibleMovementCount) * 100 : 100;
+  const eligibleEvidenceRows = transactions.filter((transaction) => Boolean(transaction.statementId) || transaction.extractionEvidence?.method === "pdf-text" || transaction.extractionEvidence?.method === "ocr");
+  const eligibleMissingEvidenceCount = eligibleEvidenceRows.filter((transaction) => !hasTraceableEvidence(transaction)).length;
+  const eligibleEvidencePercent = eligibleEvidenceRows.length ? ((eligibleEvidenceRows.length - eligibleMissingEvidenceCount) / eligibleEvidenceRows.length) * 100 : 100;
+  const importedCount = pipeline.audit.importedCount;
+  const canonicalCoveragePercent = importedCount ? (eligibleMovementCount / importedCount) * 100 : 100;
+  const blockedReasonCounts = {
+    reconciliation: new Set(blockedForReconciliation).size,
+    review: new Set(blockedForReview).size,
+    ocr: new Set(blockedForOcrQuality).size,
+    source: new Set(blockedForSourceEvidence).size,
+    evidence: new Set(blockedForExtractionEvidence).size,
+    kind: new Set(blockedForStatementKind).size,
+  };
   const dataQuality: DataQualityMetrics = {
-    classifiedPercent: pipeline.audit.classifiedPercent,
-    classifiedCount: Math.max(0, pipeline.audit.validCount - reviewItems.length),
-    totalCount: pipeline.audit.importedCount,
-    reviewCount: reviewItems.length,
-    relevantReviewCount: pipeline.audit.relevantReviewCount,
-    // A row-level reconciliation percentage can be 100% even when every row
-    // belongs to an OCR statement that is still provisional. Cap it with the
-    // statement-level eligibility rate so the visible quality indicator cannot
-    // report a healthy book while an entire document is blocked.
-    reconciledPercent: Math.min(
-      pipeline.audit.reconciledPercent,
-      statements.length ? ((statements.length - blockedStatementIds.size) / statements.length) * 100 : 100,
-    ),
+    classifiedPercent: eligibleClassifiedPercent,
+    classifiedCount: eligibleClassifiedCount,
+    totalCount: eligibleMovementCount,
+    importedCount,
+    rawReviewCount: pipeline.audit.reviewCount,
+    reviewCount: eligibleReviewItems.length,
+    reviewPercent: eligibleMovementCount ? (eligibleReviewItems.length / eligibleMovementCount) * 100 : 0,
+    relevantReviewCount: eligibleReviewItems.filter((transaction) => absolute(transaction.amount) >= 1000).length,
+    reviewAmount: sum(eligibleReviewItems.map((transaction) => absolute(transaction.amount))),
+    eligibleStatementCount: eligibleStatements.length,
+    quarantinedStatementCount: blockedStatementIds.size,
+    eligibleMovementCount,
+    eligibleClassifiedCount,
+    eligibleClassifiedPercent,
+    eligibleEvidencePercent,
+    canonicalCoveragePercent,
+    quarantinedMovementCount: quarantinedTransactions.length,
+    quarantinedMovementAmount: sum(quarantinedTransactions.map((transaction) => absolute(transaction.amount))),
+    blockedReasonCounts,
+    // This is intentionally a statement-level ratio.  The raw row ratio is
+    // retained separately so a large quarantined PDF cannot make the headline
+    // look like a mysterious "57%" without showing the affected states.
+    reconciledPercent: statements.length ? (eligibleStatements.length / statements.length) * 100 : 100,
+    rawReconciledPercent: pipeline.audit.reconciledPercent,
     evidencePercent: pipeline.audit.evidencePercent,
     missingEvidenceCount: pipeline.audit.missingEvidenceCount,
     invalidCount: pipeline.audit.invalidCount,

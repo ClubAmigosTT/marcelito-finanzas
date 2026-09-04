@@ -150,6 +150,9 @@ struct DiagnosticsView: View {
                     }
                     LabeledContent("Estados", value: "\(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount) conciliados")
                     LabeledContent("Movimientos canónicos", value: "\(store.ledgerQuality.movementCount)")
+                    LabeledContent("Por revisar (canónicos)", value: "\(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) · \(money(store.ledgerQuality.reviewAmount))")
+                    LabeledContent("Movimientos en cuarentena", value: "\(store.ledgerQuality.quarantinedMovementCount) · \(money(store.ledgerQuality.quarantinedAmount))")
+                    LabeledContent("Estados en cuarentena", value: "\(store.ledgerQuality.quarantinedStatementCount)")
                     LabeledContent("Importes fuera de rango", value: "\(store.ledgerQuality.absurdMovementCount)")
                     LabeledContent("Filas con evidencia", value: "\(Int(store.ledgerQuality.evidencePercent.rounded()))%")
                     if store.dashboardIsProvisional {
@@ -306,9 +309,12 @@ struct DiagnosticsView: View {
                                         .font(.caption2.weight(.semibold))
                                         .foregroundStyle(audit.reconciliation == .invalid ? Color.marcelitoDanger : (audit.requiresReview ? Color.marcelitoAmber : Color.marcelitoSuccess))
                                 }
-                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas\(duplicateSuffix)")
+                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas · \(audit.quarantinedRows) en cuarentena\(duplicateSuffix)")
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(.secondary)
+                                Text("Por revisar \(audit.reviewRows) · \(money(audit.reviewTotal))")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(audit.reviewRows > 0 ? Color.marcelitoAmber : .secondary)
                                 Text("Ingresos \(money(audit.incomeTotal)) · Gasto \(money(audit.expenseTotal)) · Reembolsos \(money(audit.refundTotal))")
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(Color.marcelitoNavyMid)

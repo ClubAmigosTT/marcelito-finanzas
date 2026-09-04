@@ -472,6 +472,8 @@ struct StatementAuditRow: Identifiable {
     let rejectedRows: Int
     let duplicateRows: Int?
     let reviewRows: Int
+    let reviewTotal: Decimal
+    let quarantinedRows: Int
     let incomeRows: Int
     let expenseRows: Int
     let transferRows: Int
@@ -534,6 +536,11 @@ struct LedgerQuality {
     let pendingStatementCount: Int
     let movementCount: Int
     let reviewMovementCount: Int
+    let reviewPercent: Double
+    let reviewAmount: Decimal
+    let quarantinedStatementCount: Int
+    let quarantinedMovementCount: Int
+    let quarantinedAmount: Decimal
     let absurdMovementCount: Int
     let reconciledPercent: Double
     let evidencePercent: Double
@@ -1076,7 +1083,14 @@ final class FinanceStore {
         let validated = statements.filter(isEligibleStatement)
         let invalid = statements.filter { $0.reconciliation?.status == .invalid }
         let pending = statements.filter { !isEligibleStatement($0) && $0.reconciliation?.status != .invalid }
-        let reviewCount = movements.filter { $0.category == "Por revisar" || $0.category == "Sin categoría" }.count
+        let canonical = reconciledMovements
+        let quarantined = quarantinedMovements
+        // "Por revisar" is an actionable canonical-ledger queue. Rows from an
+        // invalid/OCR-pending statement remain visible as quarantine evidence,
+        // but must not make the actionable review percentage look worse.
+        let reviewRows = canonical.filter { $0.category == "Por revisar" || $0.category == "Sin categoría" }
+        let reviewCount = reviewRows.count
+        let reviewAmount = reviewRows.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let absurdCount = movements.filter { abs($0.amount) >= 10_000_000 || !isValidStoredMovement($0) }.count
         let statementCount = statements.count
         let reconciledPercent = statementCount == 0 ? 100 : Double(validated.count) / Double(statementCount) * 100
@@ -1138,8 +1152,13 @@ final class FinanceStore {
             validatedStatementCount: validated.count,
             invalidStatementCount: invalid.count,
             pendingStatementCount: pending.count,
-            movementCount: reconciledMovements.count,
+            movementCount: canonical.count,
             reviewMovementCount: reviewCount,
+            reviewPercent: canonical.isEmpty ? 0 : Double(reviewCount) / Double(canonical.count) * 100,
+            reviewAmount: reviewAmount,
+            quarantinedStatementCount: max(0, statementCount - validated.count),
+            quarantinedMovementCount: quarantined.count,
+            quarantinedAmount: quarantined.reduce(Decimal(0)) { $0 + absolute($1.amount) },
             absurdMovementCount: absurdCount,
             reconciledPercent: reconciledPercent,
             evidencePercent: evidencePercent,
@@ -1396,12 +1415,12 @@ final class FinanceStore {
                     guard isValidStoredMovement(movement) else { return false }
                     return isEligibleStatement(statement)
                 }
-                let review = valid.filter { $0.category == "Por revisar" || $0.category == "Sin categoría" }
-                let income = valid.filter(isRealIncome)
-                let expenses = valid.filter(isSpend)
-                let transfers = valid.filter { movementKind($0) == .bankTransfer }
-                let cardPayments = valid.filter { movementKind($0) == .cardPayment }
-                let refunds = valid.filter { movementKind($0) == .refund }
+                let review = canonical.filter { $0.category == "Por revisar" || $0.category == "Sin categoría" }
+                let income = canonical.filter(isRealIncome)
+                let expenses = canonical.filter(isSpend)
+                let transfers = canonical.filter { movementKind($0) == .bankTransfer }
+                let cardPayments = canonical.filter { movementKind($0) == .cardPayment }
+                let refunds = canonical.filter { movementKind($0) == .refund }
                 let reconciliation = statement.reconciliation?.status
                 let duplicateRows: Int? = reconciliation == .valid
                     ? max(0, statement.transactionCount - canonical.count)
@@ -1416,6 +1435,8 @@ final class FinanceStore {
                     rejectedRows: max(0, statement.transactionCount - valid.count),
                     duplicateRows: duplicateRows,
                     reviewRows: review.count,
+                    reviewTotal: review.reduce(Decimal(0)) { $0 + absolute($1.amount) },
+                    quarantinedRows: max(0, linked.count - canonical.count),
                     incomeRows: income.count,
                     expenseRows: expenses.count,
                     transferRows: transfers.count,
