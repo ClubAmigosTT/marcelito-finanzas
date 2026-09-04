@@ -5,16 +5,18 @@ import { readFile } from "node:fs/promises";
 const rootTabPath = new URL("../apps/ios/Cauce/RootTabView.swift", import.meta.url);
 const sectionsPath = new URL("../apps/ios/Cauce/Sections.swift", import.meta.url);
 const modelsPath = new URL("../apps/ios/Cauce/Models.swift", import.meta.url);
+const appPath = new URL("../apps/ios/Cauce/CauceApp.swift", import.meta.url);
 const aiClassificationPath = new URL("../apps/ios/Cauce/AIClassification.swift", import.meta.url);
 const certificationViewPath = new URL("../apps/ios/Cauce/NativeCorpusCertification.swift", import.meta.url);
 const nativeCorpusPath = new URL("../apps/ios/Tests/NativeCorpusContractTests.swift", import.meta.url);
 const nativeCorpusRunnerPath = new URL("../apps/ios/scripts/run-native-corpus.sh", import.meta.url);
 
 test("la interfaz iOS usa importación y reconstrucción asíncronas", async () => {
-  const [rootTab, sections, models] = await Promise.all([
+  const [rootTab, sections, models, app] = await Promise.all([
     readFile(rootTabPath, "utf8"),
     readFile(sectionsPath, "utf8"),
     readFile(modelsPath, "utf8"),
+    readFile(appPath, "utf8"),
   ]);
 
   assert.match(rootTab, /try await store\.importPDFAsync\(/);
