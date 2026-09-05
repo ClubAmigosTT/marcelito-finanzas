@@ -71,7 +71,7 @@ struct HomeView: View {
                 NetWorthSummary(store: store)
                 LedgerQualityBanner(store: store)
                 MetricsStrip()
-                if store.dashboardIsBlocked {
+                if store.dashboardIsBlocked || store.operationalMetricsBlocked {
                     HistoricalDashboardBlockedCard(store: store)
                 } else {
                     CashFlowChart(store: store)
@@ -638,7 +638,9 @@ private struct PendingLedgerRefreshCard: View {
 struct LedgerQualityBanner: View {
     let store: FinanceStore
 
-    private var isWarning: Bool { store.dashboardIsBlocked || store.dashboardIsProvisional }
+    private var isWarning: Bool {
+        store.dashboardIsBlocked || store.dashboardIsProvisional || store.operationalMetricsBlocked
+    }
 
     private var percentText: String {
         "\(Int(store.ledgerQuality.reconciledPercent.rounded()))% conciliado · \(Int(store.ledgerQuality.evidencePercent.rounded()))% con evidencia"
@@ -692,14 +694,31 @@ struct LedgerQualityBanner: View {
 struct HistoricalDashboardBlockedCard: View {
     let store: FinanceStore
 
+    private var title: String {
+        store.operationalMetricsBlocked && !store.dashboardIsBlocked
+            ? "Analítica operativa bloqueada"
+            : "Histórico bloqueado"
+    }
+
+    private var explanation: String {
+        if store.operationalMetricsBlocked && !store.dashboardIsBlocked {
+            return store.ledgerQuality.message
+                ?? "Valida los estados de cuenta antes de usar gasto, flujo, categorías o tendencias."
+        }
+        return store.ledgerQuality.message
+            ?? "Valida los estados de cuenta antes de usar tendencias históricas."
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Histórico bloqueado", systemImage: "lock.fill")
+            Label(title, systemImage: "lock.fill")
                 .font(.subheadline.weight(.semibold))
-            Text(store.ledgerQuality.message ?? "Valida los estados de cuenta antes de usar tendencias históricas.")
+            Text(explanation)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("Los movimientos cuestionables se conservaron fuera del libro canónico.")
+            Text(store.operationalMetricsBlocked && !store.dashboardIsBlocked
+                ? "Los saldos y la deuda pueden seguir visibles; los KPI de gasto no usan filas en cuarentena."
+                : "Los movimientos cuestionables se conservaron fuera del libro canónico.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
@@ -751,7 +770,7 @@ private struct ImportProgressOverlay: View {
     }
 }
 
-enum DashboardMetric: String, Identifiable {
+enum DashboardMetric: String, Identifiable, Equatable {
     case patrimony
     case cash
     case debt
@@ -860,12 +879,13 @@ private struct NetWorthSummary: View {
 private struct DecisionMetricsView: View {
     @Environment(FinanceStore.self) private var store
 
-    private func money(_ value: Decimal?) -> String {
-        if store.dashboardIsBlocked { return "Bloqueado" }
+    private func money(_ value: Decimal?, operational: Bool = false) -> String {
+        if operational ? store.operationalMetricsBlocked : store.dashboardIsBlocked { return "Bloqueado" }
         return value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
     }
 
-    private func percent(_ value: Decimal?) -> String {
+    private func percent(_ value: Decimal?, operational: Bool = false) -> String {
+        if operational && store.operationalMetricsBlocked { return "Bloqueado" }
         guard let value else { return "Pendiente" }
         return "\(Int((NSDecimalNumber(decimal: value).doubleValue * 100).rounded()))%"
     }
@@ -875,18 +895,18 @@ private struct DecisionMetricsView: View {
             Text("Cálculos para decidir")
                 .font(.title3.weight(.bold))
                 .padding(.bottom, 6)
-            CalculationLine(label: "Gasto total de tarjeta", value: money(store.totalNewTransactions), detail: "Compras nuevas")
-            CalculationLine(label: "Promedio mensual", value: money(store.averageMonthlySpend), detail: "Compras / periodos")
-            CalculationLine(label: "Abonos reales", value: money(store.totalRealPayments), detail: "Pagos, sin créditos contables")
-            CalculationLine(label: "Saldo acumulado", value: money(store.accumulatedBalance), detail: "Cargos − abonos − créditos")
-            CalculationLine(label: "Porcentaje pagado", value: percent(store.paidPercent), detail: "Abonos / nuevos cargos")
-            CalculationLine(label: "Porcentaje pendiente", value: percent(store.pendingPercent), detail: "Saldo / nuevos cargos")
+            CalculationLine(label: "Gasto total de tarjeta", value: money(store.totalNewTransactions, operational: true), detail: "Compras nuevas conciliadas")
+            CalculationLine(label: "Promedio mensual", value: money(store.averageMonthlySpend, operational: true), detail: "Compras / periodos conciliados")
+            CalculationLine(label: "Abonos reales", value: money(store.totalRealPayments, operational: true), detail: "Pagos, sin créditos contables")
+            CalculationLine(label: "Saldo acumulado", value: money(store.accumulatedBalance, operational: true), detail: "Cargos − abonos − créditos")
+            CalculationLine(label: "Porcentaje pagado", value: percent(store.paidPercent, operational: true), detail: "Abonos / nuevos cargos")
+            CalculationLine(label: "Porcentaje pendiente", value: percent(store.pendingPercent, operational: true), detail: "Saldo / nuevos cargos")
             Divider().padding(.vertical, 4)
-            CalculationLine(label: "Gasto real consolidado", value: money(store.consolidatedRealSpend), detail: "Tarjeta + bancos, sin pagos propios")
-            CalculationLine(label: "Gasto de viaje", value: money(store.travelSpend), detail: store.travelPercent.map { "\(percent($0)) del consolidado" } ?? "Pendiente de identificar")
-            CalculationLine(label: "Gasto ordinario", value: money(store.ordinarySpend), detail: "Consolidado − viajes")
-            CalculationLine(label: "Flujo neto", value: money(store.netFlow), detail: "Ingresos reales − gastos reales")
-            CalculationLine(label: "Tasa de ahorro", value: percent(store.savingsRate), detail: "Flujo neto / ingresos")
+            CalculationLine(label: "Gasto real consolidado", value: money(store.consolidatedRealSpend, operational: true), detail: "Tarjeta + bancos, sin pagos propios")
+            CalculationLine(label: "Gasto de viaje", value: money(store.travelSpend, operational: true), detail: store.travelPercent.map { "\(percent($0, operational: true)) del consolidado" } ?? "Pendiente de identificar")
+            CalculationLine(label: "Gasto ordinario", value: money(store.ordinarySpend, operational: true), detail: "Consolidado − viajes")
+            CalculationLine(label: "Flujo neto", value: money(store.netFlow, operational: true), detail: "Ingresos reales − gastos reales")
+            CalculationLine(label: "Tasa de ahorro", value: percent(store.savingsRate, operational: true), detail: "Flujo neto / ingresos")
             Divider().padding(.vertical, 4)
             CalculationLine(label: "Utilización de crédito", value: percent(store.creditUtilizationRate), detail: store.creditUsed.map { "\(money($0)) utilizado" } ?? "Captura límite y disponible")
             CalculationLine(label: "Carga mensual MSI", value: money(store.latestMsiMonthlyLoad), detail: "Mensualidades activas")
@@ -930,17 +950,22 @@ private struct MetricsStrip: View {
     @Environment(FinanceStore.self) private var store
     @State private var selectedMetric: DashboardMetric?
 
-    private func money(_ value: Decimal?) -> String {
+    private func balanceMoney(_ value: Decimal?) -> String {
         if store.dashboardIsBlocked { return "Bloqueado" }
+        return value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
+    }
+
+    private func operationalMoney(_ value: Decimal?) -> String {
+        if store.operationalMetricsBlocked { return "Bloqueado" }
         return value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
     }
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-            MetricTile(title: "Efectivo disponible", value: money(store.cashAvailable), symbol: "wallet.pass.fill", color: Color.marcelitoNavyMid) { selectedMetric = .cash }
-            MetricTile(title: "Deuda total", value: money(store.debtTotal), symbol: "creditcard.fill", color: Color.marcelitoNavy) { selectedMetric = .debt }
-            MetricTile(title: "Gasto del mes", value: money(store.monthlyExpense), symbol: "receipt.fill", color: Color.marcelitoAmber) { selectedMetric = .expense }
-            MetricTile(title: "Flujo neto", value: money(store.monthlyNetFlow), symbol: "chart.line.uptrend.xyaxis", color: Color.marcelitoNavyMid) { selectedMetric = .flow }
+            MetricTile(title: "Efectivo disponible", value: balanceMoney(store.cashAvailable), symbol: "wallet.pass.fill", color: Color.marcelitoNavyMid) { selectedMetric = .cash }
+            MetricTile(title: "Deuda total", value: balanceMoney(store.debtTotal), symbol: "creditcard.fill", color: Color.marcelitoNavy) { selectedMetric = .debt }
+            MetricTile(title: "Gasto del mes", value: operationalMoney(store.monthlyExpense), symbol: "receipt.fill", color: Color.marcelitoAmber) { selectedMetric = .expense }
+            MetricTile(title: "Flujo neto", value: operationalMoney(store.monthlyNetFlow), symbol: "chart.line.uptrend.xyaxis", color: Color.marcelitoNavyMid) { selectedMetric = .flow }
         }
         .sheet(item: $selectedMetric) { metric in
             MetricDetailSheet(metric: metric, store: store)
@@ -1066,7 +1091,9 @@ struct MetricDetailSheet: View {
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(Color.marcelitoAmber)
                         }
-                        Text(store.dashboardIsBlocked ? "Bloqueado" : (value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"))
+                        Text((metric == .expense || metric == .flow) && store.operationalMetricsBlocked
+                            ? "Bloqueado"
+                            : (store.dashboardIsBlocked ? "Bloqueado" : (value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")))
                             .font(.system(.largeTitle, design: .rounded).weight(.bold))
                             .monospacedDigit()
                             .foregroundStyle(Color.marcelitoNavy)
@@ -1075,7 +1102,7 @@ struct MetricDetailSheet: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    if store.dashboardIsBlocked {
+                    if store.dashboardIsBlocked || ((metric == .expense || metric == .flow) && store.operationalMetricsBlocked) {
                         HistoricalDashboardBlockedCard(store: store)
                     } else if trend.isEmpty {
                         Text("Aún no hay suficientes periodos para mostrar una tendencia.")

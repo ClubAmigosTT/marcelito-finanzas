@@ -402,6 +402,31 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(reconciliation.status, .valid, reconciliation.reason ?? "")
     }
 
+    func testBBVAFlattenedSelectableTableKeepsEachDateAnchoredRow() {
+        let text = """
+        Grupo Financiero BBVA BBVA México, Institución de Banca Múltiple
+        Periodo DEL 15/07/2026 AL 14/08/2026
+        Detalle de Movimientos Realizados FECHA SALDO OPER LIQ DESCRIPCION CARGOS ABONOS
+        23/JUL 22/JUL FACEBK *XR4NKVVF52 120.00 3,469.63
+        27/JUL 27/JUL SPEI RECIBIDONVIO 15,000.00 18,469.63
+        29/JUL 29/JUL SPEI ENVIADO STP 13,000.00 5,469.63
+        30/JUL 30/JUL TELEF MOVIS MC INSURGE 100.00 4,869.63
+        TOTAL IMPORTE CARGOS 13,220.00 TOTAL MOVIMIENTOS CARGOS 3
+        TOTAL IMPORTE ABONOS 15,000.00 TOTAL MOVIMIENTOS ABONOS 1
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "BBVA agosto .pdf"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertEqual(snapshot.movements.map { abs($0.amount) }, [120, 15_000, 13_000, 100])
+        XCTAssertEqual(snapshot.period, "15/07/2026 - 14/08/2026")
+        XCTAssertEqual(snapshot.summary?.depositTotal, Decimal(string: "15000.00"))
+        XCTAssertEqual(snapshot.summary?.withdrawalTotal, Decimal(string: "13220.00"))
+    }
+
     func testAmexLimitAndAvailableProduceCommittedDebt() {
         let text = """
         American Express
@@ -438,6 +463,45 @@ final class ReaderContractTests: XCTestCase {
 
         XCTAssertEqual(snapshot.summary?.minimumPlusMsi, 1_957.97)
         XCTAssertEqual(snapshot.summary?.paymentForNoInterest, 3_996.62)
+    }
+
+    func testLatestAmexEquationKeepsNoInterestAndMinimumPlusMsiSeparate() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            American Express
+            Resumen de Crédito Límite de Crédito Límite Disponible
+            a Agosto 27,2026 150,000.00 MN 99,632.79 MN
+            Saldo Actual / Saldo Anterior Pagos y Créditos Nuevos Cargos
+            Pago para no generar intereses Pago Mínimo
+            23,150.88 - 32,744.61 + 49,559.88 = 39,966.15 3,197.29
+            Pago mínimo más meses sin intereses: $19,579.69
+            Período de Facturación Del 28 de Julio al 27 de Agosto de 2026
+            """,
+            fileName: "28_jul_2026_-_27_ago_2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.creditLimit, 150_000)
+        XCTAssertEqual(snapshot.summary?.creditAvailable, Decimal(string: "99632.79"))
+        XCTAssertEqual(snapshot.summary?.paymentForNoInterest, Decimal(string: "39966.15"))
+        XCTAssertEqual(snapshot.summary?.minimumPlusMsi, Decimal(string: "19579.69"))
+        XCTAssertEqual(snapshot.period, "del 28 de julio al 27 de agosto de 2026")
+    }
+
+    func testBBVAPeriodUsesPrintedPeriodInsteadOfFilenameFallback() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            Grupo Financiero BBVA
+            BBVA México, Institución de Banca Múltiple
+            Periodo DEL 15/07/2026 AL 14/08/2026
+            Fecha de Corte 14/08/2026
+            Detalle de Movimientos Realizados
+            TOTAL IMPORTE CARGOS 22,058.69
+            TOTAL IMPORTE ABONOS 19,500.00
+            """,
+            fileName: "BBVA agosto .pdf"
+        )
+
+        XCTAssertEqual(snapshot.period, "15/07/2026 - 14/08/2026")
     }
 
     func testAmexSectionTotalsDoNotUseTheCutoffDayAsAmount() {
@@ -1304,6 +1368,54 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(store.setManualDashboardUnlock(false))
         XCTAssertTrue(store.dashboardIsBlocked)
         XCTAssertFalse(store.dashboardIsProvisional)
+    }
+
+    func testManualUnlockNeverPromotesQuarantinedRowsToOperationalMetrics() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let statementID = UUID()
+        let statement = StatementRecord(
+            id: statementID,
+            source: "BBVA",
+            period: "15/07/2026 - 14/08/2026",
+            fileName: "bbva-agosto.pdf",
+            importedAt: .now,
+            transactionCount: 1,
+            requiresReview: true,
+            kind: .bank,
+            summary: StatementSummaryRecord(cashBalance: Decimal(string: "1030.94")),
+            reconciliation: StatementReconciliationRecord(
+                status: .invalid,
+                tolerance: Decimal(string: "0.05") ?? Decimal(0.05),
+                reason: "control de prueba"
+            ),
+            sourceDetection: SourceDetectionEvidence(
+                source: "BBVA",
+                confidence: 0.999,
+                status: .verified,
+                evidence: ["encabezado institucional BBVA"],
+                ignoredBodyMentions: []
+            ),
+            readerVersion: FinanceStore.readerVersion
+        )
+        var movement = Movement(
+            date: .now,
+            title: "SUPERMERCADO DE PRUEBA",
+            account: "BBVA",
+            category: "Comidas",
+            amount: -250,
+            flow: .expense,
+            kind: .purchase
+        )
+        movement.statementId = statementID
+        store.statements = [statement]
+        store.movements = [movement]
+
+        XCTAssertTrue(store.setManualDashboardUnlock(true))
+        XCTAssertTrue(store.operationalMetricsBlocked)
+        XCTAssertEqual(store.consolidatedRealSpend, 0)
+        XCTAssertEqual(store.monthlyExpense, 0)
+        XCTAssertEqual(store.realIncome, 0)
     }
 
     func testManualDashboardUnlockCannotRunWithoutImportedStatements() {
