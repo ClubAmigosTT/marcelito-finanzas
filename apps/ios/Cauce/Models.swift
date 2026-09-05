@@ -389,6 +389,7 @@ struct ReaderParseSnapshot {
     let source: String
     let accountKey: String?
     let kind: StatementKind
+    let period: String
     let movements: [Movement]
     let summary: StatementSummaryRecord?
 }
@@ -653,7 +654,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-2026.09.04.33"
+    static let readerVersion = "ios-reader-2026.09.04.34"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -717,12 +718,26 @@ final class FinanceStore {
             : nil
         let kind = statementKind(from: text, source: source)
         let movements = parse(text: text, fileName: fileName, sourceHint: source)
-        let summary = summary(from: text, source: source)
+        // Keep the contract helper on the same repaired text path as a real
+        // PDF import. Amex's selectable layer can flatten section totals onto
+        // one line; production separates those sections before reading the
+        // equation and payment controls.
+        let summaryText: String
+        if source.localizedCaseInsensitiveContains("Amex") && kind == .card {
+            summaryText = Self.rebuildAmexSelectableLines(text)
+        } else if source.localizedCaseInsensitiveCompare("BBVA") == .orderedSame && kind == .bank {
+            summaryText = Self.rebuildBBVASelectableLines(text)
+        } else {
+            summaryText = text
+        }
+        let summary = summary(from: summaryText, source: source)
+        let period = periodLabel(from: text, fileName: fileName)
         return ReaderParseSnapshot(
             sourceDetection: detection,
             source: source,
             accountKey: accountKey,
             kind: kind,
+            period: period,
             movements: movements,
             summary: summary
         )
@@ -1183,6 +1198,13 @@ final class FinanceStore {
     /// `dashboardIsBlocked` so every screen can label the numbers instead of
     /// silently treating an override as a successful reconciliation.
     var dashboardIsProvisional: Bool { manualDashboardUnlockEnabled && ledgerQuality.isBlocking }
+
+    /// Operational analytics must never become numerically persuasive just
+    /// because the user enabled the manual dashboard preview.  Balance and
+    /// credit controls may remain visible as provisional snapshots, but spend,
+    /// income, categories, savings and trends require a fully reconciled
+    /// canonical ledger.
+    var operationalMetricsBlocked: Bool { ledgerQuality.isBlocking || canonicalRebuildPending }
 
     var dashboardIsBlocked: Bool { ledgerQuality.isBlocking && !manualDashboardUnlockEnabled }
 
@@ -1737,7 +1759,11 @@ final class FinanceStore {
     private func isEligibleMovement(_ movement: Movement) -> Bool {
         guard let statementId = movement.statementId else { return true }
         guard let statement = statements.first(where: { $0.id == statementId }) else { return false }
-        guard isDashboardStatement(statement), isValidStoredMovement(movement) else { return false }
+        // The manual dashboard unlock is intentionally not an accounting
+        // override.  It can expose issuer balances for inspection, but rows
+        // from an invalid/pending statement stay out of every operational
+        // aggregate until the issuer totals reconcile.
+        guard isEligibleStatement(statement), isValidStoredMovement(movement) else { return false }
         return true
     }
 
@@ -3543,13 +3569,17 @@ final class FinanceStore {
             return corrected
         }
         let period = Self.periodLabel(from: text, fileName: fileName)
-        // Keep summary extraction on the same repaired Amex layout used for
-        // rows. When PDFKit flattens the page, a single line containing every
-        // section would otherwise make `lastAmountOnLabel` pick the final MSI
-        // total for both domestic and foreign controls.
-        let summaryText = source.localizedCaseInsensitiveContains("Amex") && kind == .card
-            ? Self.rebuildAmexSelectableLines(text)
-            : text
+        // Keep summary extraction on the same repaired layout used for rows.
+        // When PDFKit flattens an Amex section or a BBVA table, a single line
+        // can make `lastAmountOnLabel` pick an unrelated amount/count.
+        let summaryText: String
+        if source.localizedCaseInsensitiveContains("Amex") && kind == .card {
+            summaryText = Self.rebuildAmexSelectableLines(text)
+        } else if source.localizedCaseInsensitiveCompare("BBVA") == .orderedSame && kind == .bank {
+            summaryText = Self.rebuildBBVASelectableLines(text)
+        } else {
+            summaryText = text
+        }
         let summary = Self.summary(from: summaryText, source: source)
         let ocrRejectedRowsNeedReview = usedOCR && rowDiagnostics.contains { !$0.accepted }
         let ocrFallbackNeedsReview = usedOCR && (
@@ -4482,6 +4512,91 @@ final class FinanceStore {
         return rebuilt
     }
 
+    /// PDFKit sometimes returns BBVA's entire movement table as one visual
+    /// line. Recreate only the row boundaries from date tokens before the
+    /// column-aware parser runs. This changes no text or amount; it merely
+    /// gives each operation the same line anchor that the PDF visibly has.
+    private static func rebuildBBVASelectableLines(_ text: String) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+        let patterns = [
+            #"(?i)(?<![A-Za-z0-9.,])\d{1,2}\s*[\/\-]\s*\d{1,2}\s*[\/\-]\s*\d{2,4}(?![A-Za-z0-9])"#,
+            #"(?i)(?<![A-Za-z0-9.,])\d{1,2}\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?![A-Za-z])"#,
+            #"(?i)(?<![A-Za-z0-9.,])\d{1,2}\s+(?:de\s+)?[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s+(?:de\s+)?\d{4})?(?![A-Za-z])"#
+        ]
+        // Do not split the period/cutoff dates in the administrative header.
+        // Start at the printed movement-table marker; otherwise `Periodo DEL
+        // 15/07/2026 AL 14/08/2026` can become a fake transaction before the
+        // first real row and consume the first balance token.
+        let tableStart: String.Index = {
+            let markers = [
+                #"(?i)detalle\s+de\s+movimientos(?:\s+realizados)?"#,
+                #"(?i)movimientos\s+realizados"#,
+                #"(?i)fecha\s+(?:saldo\s+)?oper\s+liq"#
+            ]
+            for marker in markers {
+                if let range = normalized.range(of: marker, options: .regularExpression) {
+                    return range.lowerBound
+                }
+            }
+            return normalized.startIndex
+        }()
+        let prefix = String(normalized[..<tableStart])
+        let body = String(normalized[tableStart...])
+        let original = body as NSString
+        let originalRange = NSRange(location: 0, length: original.length)
+        var matches: [NSRange] = []
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            matches.append(contentsOf: regex.matches(in: body, range: originalRange).map(\.range))
+        }
+        // BBVA places operation and settlement dates side by side. In a
+        // flattened PDFKit line they look like two row starts, but the second
+        // date belongs to the same operation. Start a new row only when there
+        // is non-whitespace content between consecutive date tokens; that
+        // content is the previous row's description/amount.
+        var positions = Set<Int>()
+        var previousDateEnd: Int?
+        for match in matches.sorted(by: { left, right in
+            if left.location != right.location { return left.location < right.location }
+            return left.length < right.length
+        }) {
+            guard let previousEnd = previousDateEnd else {
+                positions.insert(match.location)
+                previousDateEnd = NSMaxRange(match)
+                continue
+            }
+            guard match.location >= previousEnd else { continue }
+            let gap = original.substring(with: NSRange(location: previousEnd, length: match.location - previousEnd))
+            if !gap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                positions.insert(match.location)
+            }
+            previousDateEnd = max(previousEnd, NSMaxRange(match))
+        }
+        guard !positions.isEmpty else { return normalized }
+        var rebuilt = String()
+        var cursor = 0
+        for position in positions.sorted() {
+            guard position >= cursor, position <= original.length else { continue }
+            if position > cursor {
+                rebuilt += original.substring(with: NSRange(location: cursor, length: position - cursor))
+            }
+            if position > 0 {
+                let previous = original.substring(with: NSRange(location: position - 1, length: 1))
+                if previous != "\n" && !rebuilt.hasSuffix("\n") {
+                    rebuilt.append("\n")
+                }
+            }
+            cursor = position
+        }
+        if cursor < original.length {
+            rebuilt += original.substring(from: cursor)
+        }
+        return prefix + (prefix.isEmpty || prefix.hasSuffix("\n") ? "" : "\n") + rebuilt
+    }
+
     /// Deterministic PDFKit reader for BBVA's selectable table. The issuer
     /// prints the operation date and settlement date on separate lines, then
     /// the description, movement amount and one/two running balances. The old
@@ -4495,7 +4610,8 @@ final class FinanceStore {
         fileName: String,
         sourceHint: String?
     ) -> [Movement] {
-        let foldedDocument = text.folding(
+        let structuredText = rebuildBBVASelectableLines(text)
+        let foldedDocument = structuredText.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: .current
         )
@@ -4570,7 +4686,7 @@ final class FinanceStore {
                 }
         }
 
-        for rawLine in text.components(separatedBy: .newlines) {
+        for rawLine in structuredText.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
             guard line.count > 1 else { continue }
             let normalized = line.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
@@ -7463,7 +7579,9 @@ final class FinanceStore {
         // the declared amount.
         func lastAmountOnLabel(_ labels: [String]) -> Decimal? {
             let amountPattern = #"[-+]?\s*\$?\s*(?:\d{1,3}(?:[,.]\d{3})+|\d+)(?:[,.]\d{1,2})?"#
+            let decimalAmountPattern = #"[-+]?\s*\$?\s*(?:\d{1,3}(?:[,.]\d{3})+|\d+)[,.]\d{1,2}"#
             guard let amountRegex = try? NSRegularExpression(pattern: amountPattern) else { return nil }
+            let decimalRegex = try? NSRegularExpression(pattern: decimalAmountPattern)
             for line in normalized.components(separatedBy: .newlines) {
                 guard labels.contains(where: { line.contains($0) }) else { continue }
                 // A transaction description can itself contain "depósito" or
@@ -7473,8 +7591,21 @@ final class FinanceStore {
                     continue
                 }
                 let lineRange = NSRange(line.startIndex..<line.endIndex, in: line)
-                let matches = amountRegex.matches(in: line, range: lineRange)
+                // A fused summary row can end with the movement count:
+                // `TOTAL IMPORTE CARGOS 22,058.69 TOTAL MOVIMIENTOS CARGOS 9`.
+                // Prefer the last token that actually has cents before using
+                // a bare integer fallback; otherwise the count becomes the
+                // declared total and every row is rejected during control.
+                let matches = decimalRegex?.matches(in: line, range: lineRange) ?? []
                 if let match = matches.last,
+                   let valueRange = Range(match.range, in: line) {
+                    let raw = String(line[valueRange])
+                    if let value = parseAmount(raw) {
+                        return normalizeBareBankAmount(raw, value)
+                    }
+                }
+                let fallbackMatches = amountRegex.matches(in: line, range: lineRange)
+                if let match = fallbackMatches.last,
                    let valueRange = Range(match.range, in: line) {
                     let raw = String(line[valueRange])
                     if let value = parseAmount(raw) {
@@ -7717,10 +7848,36 @@ final class FinanceStore {
     private static func periodLabel(from text: String, fileName: String) -> String {
         let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
-        if let regex = try? NSRegularExpression(pattern: #"period(?:o|os)\s*(?:de\s+facturacion)?\s*[:-]?\s*([^\n]{8,80})"#),
+        // BBVA prints the authoritative range as Periodo DEL dd/mm/yyyy AL
+        // dd/mm/yyyy. Keep only the two date tokens: PDFKit can flatten the
+        // next heading on the same line, which used to produce "Sin periodo".
+        let dateToken = #"(?:\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}|\d{1,2}\s+(?:de\s+)?[a-z]{3,}(?:\s+de)?\s+\d{2,4})"#
+        let rangePattern = "(?is)(?:period(?:o|os)|per[ií]odo)(?:\\s+de\\s+facturacion)?\\s*[:\\-]?\\s*(?:del?\\s+)?(\(dateToken))\\s*(?:al|a|[-–])\\s*(\(dateToken))"
+        if let regex = try? NSRegularExpression(pattern: rangePattern),
+           let match = regex.firstMatch(in: normalized, range: range),
+           let firstRange = Range(match.range(at: 1), in: normalized),
+           let secondRange = Range(match.range(at: 2), in: normalized) {
+            let first = String(normalized[firstRange]).replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+            let second = String(normalized[secondRange]).replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+            return "\(first) - \(second)"
+        }
+        // Amex uses a prose range (Período de Facturación Del 28 de Julio al
+        // 27 de Agosto de 2026). Keep it compact; periodDate() still uses its
+        // final date for ordering.
+        if let regex = try? NSRegularExpression(pattern: #"period(?:o|os)\s*(?:de\s+facturacion)?\s*[:-]?\s*([^\r\n]{8,100})"#),
            let match = regex.firstMatch(in: normalized, range: range),
            let valueRange = Range(match.range(at: 1), in: normalized) {
-            return String(normalized[valueRange]).replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = String(normalized[valueRange])
+                .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !value.isEmpty { return value }
+        }
+        // A scan may expose only the cutoff header; it is still safer than an
+        // opaque filename and preserves chronological ordering.
+        if let regex = try? NSRegularExpression(pattern: #"fecha\s+de\s+corte\s*[:-]?\s*(\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4})"#),
+           let match = regex.firstMatch(in: normalized, range: range),
+           let valueRange = Range(match.range(at: 1), in: normalized) {
+            return "corte \(String(normalized[valueRange]))"
         }
         let normalizedFileName = fileName.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         if let fileMatch = try? NSRegularExpression(pattern: #"(?i)(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)[^\d]{0,8}20\d{2}"#) {

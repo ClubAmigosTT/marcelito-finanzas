@@ -456,7 +456,7 @@ struct ExpensesView: View {
     @ViewBuilder
     private var expenseRows: some View {
         List {
-            if store.dashboardIsBlocked {
+            if store.operationalMetricsBlocked {
                 Section {
                     LedgerQualityBanner(store: store)
                     HistoricalDashboardBlockedCard(store: store)
@@ -784,9 +784,10 @@ private struct AccountSummaryRow: View {
 
     private var detailText: String {
         guard kind == .card else { return "Cuenta de efectivo" }
-        let minimum = statement?.summary?.minimumPayment?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
+        let minimum = (statement?.summary?.minimumPlusMsi ?? statement?.summary?.minimumPayment)?
+            .formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
         let noInterest = metric?.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
-        return "Pago próximo: \(minimum) · No intereses: \(noInterest)"
+        return "Pago mínimo + MSI: \(minimum) · Pago para no intereses: \(noInterest)"
     }
 
     var body: some View {
@@ -923,6 +924,11 @@ private struct AccountDetailView: View {
         metrics.last
     }
 
+    private var latestStatement: StatementRecord? {
+        guard let latest else { return nil }
+        return store.statements.first(where: { $0.id == latest.id })
+    }
+
     private var balance: Decimal? {
         kind == .card ? latest?.debtBalance : latest?.cashBalance
     }
@@ -960,6 +966,13 @@ private struct AccountDetailView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Próxima decisión")
                     .font(.subheadline.weight(.semibold))
+                LabeledContent(
+                    "Pago mínimo + MSI",
+                    value: (latestStatement?.summary?.minimumPlusMsi
+                        ?? latestStatement?.summary?.minimumPayment)
+                        .map { $0.formatted(.currency(code: "MXN").precision(.fractionLength(0))) }
+                        ?? "Pendiente"
+                )
                 LabeledContent("Pago para no generar intereses", value: latest.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente")
             }
             .foregroundStyle(Color.marcelitoNavy)
@@ -970,7 +983,10 @@ private struct AccountDetailView: View {
 
     @ViewBuilder
     private var trendSection: some View {
-        if store.dashboardIsBlocked {
+        // Account balances can be inspected provisionally after the explicit
+        // manual unlock, but the historical trend is an operational KPI and
+        // must remain hidden until the canonical ledger is reconciled.
+        if store.dashboardIsBlocked || store.operationalMetricsBlocked {
             HistoricalDashboardBlockedCard(store: store)
         } else {
             VStack(alignment: .leading, spacing: 12) {
