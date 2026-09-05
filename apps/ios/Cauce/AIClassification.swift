@@ -112,6 +112,21 @@ enum ZenExpenseClassifier {
             throw ClassificationError.invalidModel
         }
         guard !movements.isEmpty else { return [] }
+        // This API is deliberately narrower than the UI's pending list. If a
+        // caller accidentally passes a quarantined row, income, refund, card
+        // payment or own-account transfer, fail closed before any description
+        // leaves the device.
+        guard movements.allSatisfy({ movement in
+            guard movement.flow == .expense else { return false }
+            switch movement.kind {
+            case .cardPayment?, .bankTransfer?, .refund?, .credit?:
+                return false
+            default:
+                return true
+            }
+        }) else {
+            throw ClassificationError.invalidResponse
+        }
 
         var classifications: [AIClassification] = []
         var start = 0

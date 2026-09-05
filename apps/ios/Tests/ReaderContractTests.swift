@@ -2,6 +2,42 @@ import XCTest
 @testable import Marcelito
 
 final class ReaderContractTests: XCTestCase {
+    func testRejectedStatementRowsNeverEnterOperationalLedger() {
+        XCTAssertFalse(FinanceStore.shouldPersistCanonicalRowsForTesting(
+            reconciliation: .invalid,
+            hasSummary: true,
+            kind: .bank,
+            sourceStatus: .verified,
+            ocrQualityNeedsReview: false
+        ))
+        XCTAssertFalse(FinanceStore.shouldPersistCanonicalRowsForTesting(
+            reconciliation: .valid,
+            hasSummary: true,
+            kind: .bank,
+            sourceStatus: .verified,
+            ocrQualityNeedsReview: true
+        ))
+        XCTAssertTrue(FinanceStore.shouldPersistCanonicalRowsForTesting(
+            reconciliation: .valid,
+            hasSummary: true,
+            kind: .bank,
+            sourceStatus: .verified,
+            ocrQualityNeedsReview: false
+        ))
+    }
+
+    func testUncategorisedAccountingRowsRemainEligibleForTotals() {
+        // Classification is an analytics enrichment step; it must not turn a
+        // numerically reconciled statement into a quarantined statement.
+        XCTAssertTrue(FinanceStore.shouldPersistCanonicalRowsForTesting(
+            reconciliation: .valid,
+            hasSummary: true,
+            kind: .card,
+            sourceStatus: .verified,
+            ocrQualityNeedsReview: false
+        ))
+    }
+
     func testCanonicalRebuildIsInvalidatedWhenReaderVersionChanges() {
         XCTAssertTrue(FinanceStore.needsCanonicalRebuild(
             completed: true,

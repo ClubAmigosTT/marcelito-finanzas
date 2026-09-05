@@ -186,6 +186,12 @@ struct DiagnosticsView: View {
                             Text("Filas reconstruidas: \(statement.transactionCount)")
                                 .font(.caption2.monospacedDigit())
                                 .foregroundStyle(.secondary)
+                            if let diagnosticCount = statement.rowDiagnostics?.count,
+                               diagnosticCount > 0 {
+                                Text("Diagnóstico por fila: \(diagnosticCount) decisión(es) conservadas fuera del libro")
+                                    .font(.caption2.monospacedDigit())
+                                    .foregroundStyle(Color.marcelitoNavyMid)
+                            }
                             if statement.issuerConfirmedByUser == true {
                                 Label("Emisor confirmado manualmente", systemImage: "person.crop.circle.badge.checkmark")
                                     .font(.caption2)
@@ -309,7 +315,7 @@ struct DiagnosticsView: View {
                                         .font(.caption2.weight(.semibold))
                                         .foregroundStyle(audit.reconciliation == .invalid ? Color.marcelitoDanger : (audit.requiresReview ? Color.marcelitoAmber : Color.marcelitoSuccess))
                                 }
-                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas · \(audit.quarantinedRows) en cuarentena\(duplicateSuffix)")
+                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas · \(audit.rejectedRows) rechazadas · \(audit.diagnosticRows) diagnosticadas · \(audit.quarantinedRows) en cuarentena\(duplicateSuffix)")
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(.secondary)
                                 Text("Por revisar \(audit.reviewRows) · \(money(audit.reviewTotal))")

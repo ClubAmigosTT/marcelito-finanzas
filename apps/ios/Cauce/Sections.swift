@@ -53,7 +53,10 @@ struct MovementsView: View {
     @State private var aiErrorMessage: String?
 
     private var pendingForAI: [Movement] {
-        store.movements.filter {
+        // Zen is enrichment for already accepted accounting rows only. A
+        // quarantined OCR row must never reach the provider, even when the
+        // user has enabled the provisional dashboard preview.
+        store.canonicalMovements.filter {
             guard $0.flow == .expense,
                   ["Por revisar", "Sin categoría"].contains($0.category) else { return false }
             switch $0.kind {
