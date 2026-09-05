@@ -346,6 +346,10 @@ struct StatementRecord: Identifiable, Codable {
     /// Original PDF metadata retained for reproducible import diagnostics.
     var fileSizeBytes: Int? = nil
     var pageCount: Int? = nil
+    /// Row-level decisions are diagnostic evidence, not accounting rows. They
+    /// remain attached to the statement so a rejected PDF can be debugged
+    /// after its provisional movements have been removed from the ledger.
+    var rowDiagnostics: [OCRRowDiagnostic]? = nil
 }
 
 struct ImportSummary {
@@ -472,6 +476,7 @@ struct StatementAuditRow: Identifiable {
     let validRows: Int
     let rejectedRows: Int
     let duplicateRows: Int?
+    let diagnosticRows: Int
     let reviewRows: Int
     let reviewTotal: Decimal
     let quarantinedRows: Int
@@ -654,7 +659,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-2026.09.04.34"
+    static let readerVersion = "ios-reader-2026.09.05.35"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -984,6 +989,24 @@ final class FinanceStore {
         return !completed || completedReaderVersion != currentReaderVersion
     }
 
+    /// Accounting acceptance is intentionally independent from expense
+    /// categorisation. A row can be uncategorised and still be numerically
+    /// trustworthy; conversely, a perfectly categorised OCR row is not safe
+    /// when the issuer controls or visual evidence failed.
+    static func shouldPersistCanonicalRowsForTesting(
+        reconciliation: StatementReconciliationStatus,
+        hasSummary: Bool,
+        kind: StatementKind,
+        sourceStatus: SourceDetectionStatus,
+        ocrQualityNeedsReview: Bool
+    ) -> Bool {
+        reconciliation == .valid
+            && hasSummary
+            && kind != .unknown
+            && sourceStatus == .verified
+            && !ocrQualityNeedsReview
+    }
+
     /// Reconciles one OCR bank amount against the running-balance delta. It is
     /// intentionally conservative: only a small OCR drift (≤ $2) or a clearly
     /// malformed magnitude may be repaired. Missing/ambiguous balances keep
@@ -1058,12 +1081,10 @@ final class FinanceStore {
     private(set) var manualDashboardUnlockEnabled: Bool
 
     /// `movements` is the persisted normalized ledger. Rows from a statement
-    /// that is still blocked are retained here as quarantine evidence so the
-    /// user can inspect the exact OCR decision, but they are not canonical
-    /// accounting rows. This distinction is important when the manual
-    /// dashboard unlock is active: provisional projections may be visible,
-    /// while the canonical count and audit trail still describe only rows
-    /// backed by a valid issuer reconciliation.
+    /// that is still blocked are not stored here; their bounded OCR decisions
+    /// live on the statement diagnostic record. This keeps the operational
+    /// ledger small and makes it impossible for a manual preview to mistake
+    /// rejected rows for accounting data.
     private var reconciledMovements: [Movement] {
         movements.filter { movement in
             guard isValidStoredMovement(movement) else { return false }
@@ -1075,9 +1096,9 @@ final class FinanceStore {
 
     var canonicalMovements: [Movement] { reconciledMovements }
 
-    /// Rows kept for forensic review but intentionally excluded from the
-    /// canonical accounting table. The ids are stable, so this projection is
-    /// safe to use from diagnostics without reparsing a PDF.
+    /// Defensive projection for manually inserted or legacy rows that do not
+    /// belong to the canonical accounting table. New rejected PDF rows are
+    /// not persisted; their evidence lives on StatementRecord.rowDiagnostics.
     var quarantinedMovements: [Movement] {
         let canonicalIDs = Set(reconciledMovements.map(\.id))
         return movements.filter { !canonicalIDs.contains($0.id) }
@@ -1100,9 +1121,9 @@ final class FinanceStore {
         let pending = statements.filter { !isEligibleStatement($0) && $0.reconciliation?.status != .invalid }
         let canonical = reconciledMovements
         let quarantined = quarantinedMovements
-        // "Por revisar" is an actionable canonical-ledger queue. Rows from an
-        // invalid/OCR-pending statement remain visible as quarantine evidence,
-        // but must not make the actionable review percentage look worse.
+        // "Por revisar" is an actionable canonical-ledger queue. Rejected
+        // statement rows are kept only as bounded diagnostics and therefore
+        // must not inflate the actionable review percentage.
         let reviewRows = canonical.filter { $0.category == "Por revisar" || $0.category == "Sin categoría" }
         let reviewCount = reviewRows.count
         let reviewAmount = reviewRows.reduce(Decimal(0)) { $0 + absolute($1.amount) }
@@ -1456,6 +1477,7 @@ final class FinanceStore {
                     validRows: valid.count,
                     rejectedRows: max(0, statement.transactionCount - valid.count),
                     duplicateRows: duplicateRows,
+                    diagnosticRows: statement.rowDiagnostics?.count ?? 0,
                     reviewRows: review.count,
                     reviewTotal: review.reduce(Decimal(0)) { $0 + absolute($1.amount) },
                     quarantinedRows: max(0, linked.count - canonical.count),
@@ -2121,11 +2143,10 @@ final class FinanceStore {
         // headings or running balances as if they were transactions.
         movements = movements.filter { movement in
             guard isValidStoredMovement(movement) else { return false }
-            // Keep rows from the current reader even when the issuer control
-            // is invalid/pending. They remain quarantined by
-            // `isEligibleMovement` but are needed for a manual forensic unlock
-            // and for the row-level diagnostic export. Old reader generations
-            // are still dropped so legacy bogus rows cannot be resurrected.
+            // Only rows from the current reader can survive a migration. Rows
+            // from invalid statements are never persisted by the import path;
+            // their bounded evidence lives on StatementRecord.rowDiagnostics.
+            // This prevents a diagnostic backlog from becoming a second ledger.
             guard let statementId = movement.statementId else { return true }
             guard let statement = statements.first(where: { $0.id == statementId }) else { return false }
             return isCurrentReader(statement)
@@ -2467,6 +2488,10 @@ final class FinanceStore {
         var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
         for classification in classifications {
             guard let index = movements.firstIndex(where: { $0.id == classification.movementID }) else { continue }
+            // Enrichment cannot promote or mutate a quarantined row. Only a
+            // movement already backed by an eligible statement may receive a
+            // category learned from Zen.
+            guard reconciledMovements.contains(where: { $0.id == classification.movementID }) else { continue }
             // A classifier response is enrichment only. Never let a stale or
             // malformed response reclassify income, refunds, card payments or
             // own-account transfers as ordinary spend.
@@ -3725,7 +3750,6 @@ final class FinanceStore {
             || detectedKind == .unknown
             || gatedReconciliation.status != .valid
             || sourceDetection.status != .verified
-            || fresh.contains { $0.category == "Por revisar" }
 
         // Re-importing the exact same bytes must not silently erase a prior
         // human issuer confirmation. The confirmation is scoped to the
@@ -3739,12 +3763,18 @@ final class FinanceStore {
             return existingStatement.issuerConfirmedByUser
         }()
 
-        // Store valid rows even when the statement is pending/invalid. The
-        // parent reconciliation status keeps them out of every aggregate by
-        // default, while the explicit manual unlock can expose them as
-        // provisional for diagnosis. Omitting them here made the unlock
-        // incapable of showing the exact rows that caused the mismatch.
-        let canonicalFresh = fresh
+        // The operational ledger contains only rows backed by a verified
+        // issuer control. Rejected or OCR-provisional rows are represented by
+        // the statement metadata and its row diagnostics, never by Movement
+        // records. This keeps quarantine forensic and prevents tab switches
+        // and KPI projections from scanning hundreds of unusable rows.
+        let canonicalFresh = Self.shouldPersistCanonicalRowsForTesting(
+            reconciliation: gatedReconciliation.status,
+            hasSummary: summary != nil,
+            kind: detectedKind,
+            sourceStatus: sourceDetection.status,
+            ocrQualityNeedsReview: ocrQualityNeedsReview
+        ) ? fresh : []
 
         movements.removeAll { $0.statementId == statementId }
         movements.insert(contentsOf: canonicalFresh.reversed(), at: 0)
@@ -3784,7 +3814,8 @@ final class FinanceStore {
             readerVersion: Self.readerVersion,
             extractionProvider: extraction.extractionProvider,
             fileSizeBytes: documentData.count,
-            pageCount: extraction.pageCount
+            pageCount: extraction.pageCount,
+            rowDiagnostics: extraction.rowDiagnostics
         )
         if let index = statements.firstIndex(where: { $0.id == statementId }) {
             statements[index] = statement
@@ -4033,7 +4064,6 @@ final class FinanceStore {
             || extraction.kind == .unknown
             || gatedReconciliation.status != .valid
             || extraction.sourceDetection.status != .verified
-            || fresh.contains { $0.category == "Por revisar" }
 
         return ImportSummary(
             source: extraction.source,
@@ -5744,6 +5774,43 @@ final class FinanceStore {
                 )
             }
         }
+
+        // Vision sometimes places the three header labels in separate OCR
+        // lines even though they are visibly one table header. Recover that
+        // page-local geometry without borrowing coordinates from another
+        // page. Requiring all three anchors and at least two date-shaped rows
+        // keeps a summary card or a footer from becoming a fake calibration.
+        for page in pages.keys.sorted() {
+            let pageObservations = pages[page] ?? []
+            let pageText = pageObservations
+                .map { normalizedLabel($0) }
+                .joined(separator: " ")
+            let dateLikeRows = pageObservations.filter {
+                $0.boundingBox.minX < 0.30
+                    && $0.text.range(of: #"(?i)\b[0-9OBI]{1,3}\s*[\/-]\s*(?:[0-9]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,})"#, options: .regularExpression) != nil
+            }.count
+            guard dateLikeRows >= 2,
+                  pageText.contains("cargo") || pageText.contains("retiro"),
+                  pageText.contains("abono") || pageText.contains("deposit") else { continue }
+            let charges = pageObservations.compactMap { anchorX($0, labels: chargesLabels) }
+            let deposits = pageObservations.compactMap { anchorX($0, labels: depositsLabels) }
+            let balances = pageObservations.compactMap { anchorX($0, labels: balanceLabels) }
+            guard let chargesX = charges.min(),
+                  let depositsX = deposits.filter({ $0 > chargesX }).min(),
+                  let balanceX = balances.filter({ $0 > depositsX }).max(),
+                  chargesX < depositsX,
+                  depositsX < balanceX else { continue }
+            let movementMinX = max(0.38, min(0.70, chargesX - 0.10))
+            let balanceMinX = max(0.76, min(0.97, depositsX + (balanceX - depositsX) * 0.42))
+            guard movementMinX < balanceMinX else { continue }
+            return BBVAOCRColumns(
+                chargesX: chargesX,
+                depositsX: depositsX,
+                balanceMinX: balanceMinX,
+                calibratedFromHeader: true,
+                reason: "columnas CARGOS/ABONOS/SALDO calibradas por encabezado distribuido de la página \(page + 1)"
+            )
+        }
         return .fallback
     }
 
@@ -5937,6 +6004,22 @@ final class FinanceStore {
         }
         guard !amountCandidates.isEmpty else { return nil }
 
+        let orderedAmountCandidates = amountCandidates.sorted { $0.order < $1.order }
+        // A collapsed Vision box can contain description + movement + saldo;
+        // in that shape token coordinates are not trustworthy. The final two
+        // monetary tokens are the only safe pair, exactly as in Santander:
+        // penultimate is the movement and final is the running balance.
+        let isWholeRowObservation = orderedAmountCandidates.count >= 2
+            && Set(orderedAmountCandidates.map(\.observationIndex)).count == 1
+        let geometrySpan = (orderedAmountCandidates.map(\.x).max() ?? 0)
+            - (orderedAmountCandidates.map(\.x).min() ?? 0)
+        let hasWideObservation = row.contains { $0.boundingBox.width >= 0.42 }
+        let isCollapsedRowGeometry = orderedAmountCandidates.count >= 2
+            && hasWideObservation
+            && geometrySpan < 0.24
+        let useCollapsedPair = isWholeRowObservation || isCollapsedRowGeometry
+        let collapsedMovement = useCollapsedPair ? orderedAmountCandidates.dropLast().last : nil
+        let collapsedBalance = useCollapsedPair ? orderedAmountCandidates.last : nil
         let movementCandidates = amountCandidates.filter { $0.x >= 0.36 && $0.x < columns.balanceMinX }
         let nearest: (CGFloat) -> OCRAmountCandidate? = { target in
             movementCandidates.min {
@@ -5948,9 +6031,17 @@ final class FinanceStore {
         }
         let chargeCandidate = nearest(columns.chargesX)
         let depositCandidate = nearest(columns.depositsX)
+        let semanticIncoming = normalizedFullText.contains("spei recibido")
+            || normalizedFullText.contains("transferencia recibida")
+            || normalizedFullText.contains("deposito")
+            || normalizedFullText.contains("abono")
+            || normalizedFullText.contains("nomina")
         let selected: OCRAmountCandidate?
         let selectedColumn: String
-        if let chargeCandidate, let depositCandidate {
+        if let collapsedMovement {
+            selected = collapsedMovement
+            selectedColumn = semanticIncoming ? "ABONOS (fila colapsada)" : "CARGOS (fila colapsada)"
+        } else if let chargeCandidate, let depositCandidate {
             if abs(chargeCandidate.x - columns.chargesX) <= abs(depositCandidate.x - columns.depositsX) {
                 selected = chargeCandidate
                 selectedColumn = "CARGOS"
@@ -5972,10 +6063,11 @@ final class FinanceStore {
         }
         guard let selected else { return nil }
 
-        let runningBalance = amountCandidates
-            .filter { $0.x >= columns.balanceMinX }
-            .sorted { $0.order < $1.order }
-            .first?.value
+        let runningBalance = collapsedBalance?.value
+            ?? amountCandidates
+                .filter { $0.x >= columns.balanceMinX }
+                .sorted { $0.order < $1.order }
+                .first?.value
         let titleParts = row
             .filter { $0.centerX >= 0.14 && $0.centerX < max(columns.chargesX - 0.02, 0.40) }
             .filter { observation in
@@ -6023,7 +6115,7 @@ final class FinanceStore {
             || titleNormalized.contains("recibido")
             || titleNormalized.contains("recibida")
             || titleNormalized.contains("ingreso")
-        let isDepositColumn = selectedColumn == "ABONOS"
+        let isDepositColumn = selectedColumn.hasPrefix("ABONOS")
         let flow: FlowKind
         if explicitOwnTransfer {
             flow = .transfer
@@ -6336,6 +6428,34 @@ final class FinanceStore {
                 break
             }
             if anchors != nil { break }
+        }
+
+        // On scanned Santander pages Vision may split the header into
+        // separate lines. Keep calibration page-local, but allow the labels
+        // to be distributed vertically when the page has several date rows.
+        // This is still deterministic: all three anchors must be ordered and
+        // the page must contain a real movement table signal.
+        for page in grouped.keys.sorted() {
+            let pageObservations = grouped[page] ?? []
+            let dateLikeRows = pageObservations.filter {
+                $0.boundingBox.minX < 0.24
+                    && $0.text.range(of: #"(?i)\b[0-9OBI]{1,3}\s*[\/-]\s*(?:[0-9]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,})"#, options: .regularExpression) != nil
+            }.count
+            guard dateLikeRows >= 2 else { continue }
+            let pageText = pageObservations.map { normalizedLabel($0) }.joined(separator: " ")
+            guard pageText.contains("deposit") || pageText.contains("abono") || pageText.contains("entrada"),
+                  pageText.contains("retiro") || pageText.contains("cargo") || pageText.contains("salida"),
+                  pageText.contains("saldo") || pageText.contains("balance") else { continue }
+            let deposits = pageObservations.compactMap { anchorX($0, labels: depositLabels) }
+            let withdrawals = pageObservations.compactMap { anchorX($0, labels: withdrawalLabels) }
+            let balances = pageObservations.compactMap { anchorX($0, labels: balanceLabels) }
+            guard let deposit = deposits.min(),
+                  let withdrawal = withdrawals.filter({ $0 > deposit }).min(),
+                  let balance = balances.filter({ $0 > withdrawal }).max(),
+                  deposit < withdrawal,
+                  withdrawal < balance else { continue }
+            anchors = (deposit, withdrawal, balance)
+            break
         }
 
         guard let anchors,
