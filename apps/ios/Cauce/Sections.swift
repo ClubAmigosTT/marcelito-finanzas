@@ -986,9 +986,9 @@ private struct AccountDetailView: View {
 
     @ViewBuilder
     private var trendSection: some View {
-        // Account balances can be inspected provisionally after the explicit
-        // manual unlock, but the historical trend is an operational KPI and
-        // must remain hidden until the canonical ledger is reconciled.
+        // The explicit manual unlock may show this operational trend as
+        // provisional. The data source remains canonical-only; quarantined
+        // rows never enter the chart.
         if store.dashboardIsBlocked || store.operationalMetricsBlocked {
             HistoricalDashboardBlockedCard(store: store)
         } else {

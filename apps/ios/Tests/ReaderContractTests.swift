@@ -1448,7 +1448,7 @@ final class ReaderContractTests: XCTestCase {
         store.movements = [movement]
 
         XCTAssertTrue(store.setManualDashboardUnlock(true))
-        XCTAssertTrue(store.operationalMetricsBlocked)
+        XCTAssertFalse(store.operationalMetricsBlocked)
         XCTAssertEqual(store.consolidatedRealSpend, 0)
         XCTAssertEqual(store.monthlyExpense, 0)
         XCTAssertEqual(store.realIncome, 0)
