@@ -34,7 +34,7 @@ struct SettingsView: View {
                         .foregroundStyle(Color.marcelitoNavy)
                     }
 
-                    Text("Permite mostrar Resumen, Gastos, Patrimonio y gráficas aunque existan estados no conciliados. No corrige ni certifica los datos: los valores se muestran como provisionales y la acción queda registrada en Diagnóstico.")
+                    Text("Permite mostrar Resumen, Gastos, Patrimonio y gráficas aunque existan estados no conciliados. Solo usa filas canónicas; las filas rechazadas o en cuarentena siguen fuera de los totales. No corrige ni certifica los datos: los valores se muestran como provisionales y la acción queda registrada en Diagnóstico.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -1220,12 +1220,14 @@ final class FinanceStore {
     /// silently treating an override as a successful reconciliation.
     var dashboardIsProvisional: Bool { manualDashboardUnlockEnabled && ledgerQuality.isBlocking }
 
-    /// Operational analytics must never become numerically persuasive just
-    /// because the user enabled the manual dashboard preview.  Balance and
-    /// credit controls may remain visible as provisional snapshots, but spend,
-    /// income, categories, savings and trends require a fully reconciled
-    /// canonical ledger.
-    var operationalMetricsBlocked: Bool { ledgerQuality.isBlocking || canonicalRebuildPending }
+    /// A manual unlock is an explicit request to inspect provisional analytics.
+    /// It does not promote rejected rows: every aggregate still reads only
+    /// `eligibleMovements`/`reconciledMovements`, while the UI labels the
+    /// result provisional and keeps the quality warning visible. A rebuild in
+    /// progress remains a hard stop because the canonical ledger is incomplete.
+    var operationalMetricsBlocked: Bool {
+        canonicalRebuildPending || (ledgerQuality.isBlocking && !manualDashboardUnlockEnabled)
+    }
 
     var dashboardIsBlocked: Bool { ledgerQuality.isBlocking && !manualDashboardUnlockEnabled }
 
