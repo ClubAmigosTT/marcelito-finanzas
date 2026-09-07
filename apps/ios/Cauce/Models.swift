@@ -6388,6 +6388,12 @@ final class FinanceStore {
 
         func isTotalBoundary(_ observation: OCRObservation) -> Bool {
             let normalized = schemaText(observation.text)
+            // Santander prints the opening control immediately below the red
+            // section title as "SALDO FINAL DEL PERIODO ANTERIOR". It is the
+            // starting balance, not the end of the movement table. Treating
+            // the shared prefix as a closing marker used to stop the parser
+            // before FECHA/FOLIO and produced exactly zero extracted rows.
+            if normalized.contains("saldo final del periodo anterior") { return false }
             if normalized.contains("saldo final del periodo") { return true }
             guard normalized == "total" || normalized.hasPrefix("total ") else { return false }
             let remainder = normalized.dropFirst("total".count).trimmingCharacters(in: .whitespaces)

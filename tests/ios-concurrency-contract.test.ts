@@ -185,6 +185,7 @@ test("Santander usa rectángulo y columnas fijas de la tabla", async () => {
   assert.match(source, /santander\.table-title-not-found/);
   assert.match(source, /santander\.column-header-not-found/);
   assert.match(source, /lineWindows\(on: page\)/);
+  assert.match(source, /if normalized\.contains\("saldo final del periodo anterior"\) \{ return false \}/);
   assert.match(source, /calibrationReason: "geometría fija de la tabla Carta Santander"/);
   assert.match(source, /movementMinX: tableX\(0\.610\)/);
   assert.match(source, /depositMaxX: tableX\(0\.742\)/);

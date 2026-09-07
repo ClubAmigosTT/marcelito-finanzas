@@ -1051,16 +1051,20 @@ final class ReaderContractTests: XCTestCase {
         let fixtures = [
             OCRObservationFixture(text: "Detalle de movimientos", x: 0.09, y: 0.96, width: 0.30),
             OCRObservationFixture(text: "cuenta de cheques", x: 0.09, y: 0.935, width: 0.24),
-            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.89, width: 0.06),
-            OCRObservationFixture(text: "F0LIO", x: 0.13, y: 0.89, width: 0.05),
-            OCRObservationFixture(text: "DESCRIPCIÓN", x: 0.20, y: 0.89, width: 0.14),
-            OCRObservationFixture(text: "DEP0SITO", x: 0.62, y: 0.865, width: 0.07),
-            OCRObservationFixture(text: "RETIRO", x: 0.74, y: 0.865, width: 0.06),
-            OCRObservationFixture(text: "SALDO", x: 0.86, y: 0.865, width: 0.06),
-            OCRObservationFixture(text: "16-JUL-2026", x: 0.05, y: 0.79, width: 0.08),
-            OCRObservationFixture(text: "PAGO TRANSFERENCIA SPEI", x: 0.20, y: 0.79, width: 0.28),
-            OCRObservationFixture(text: "30.00", x: 0.74, y: 0.79, width: 0.06),
-            OCRObservationFixture(text: "970.00", x: 0.86, y: 0.79, width: 0.08),
+            // This opening-control line is present in all four real PDFs. It
+            // shares its prefix with the true footer and must not terminate
+            // the table before the printed column header.
+            OCRObservationFixture(text: "SALDO FINAL DEL PERIODO ANTERIOR 1,000.00", x: 0.09, y: 0.91, width: 0.50),
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.865, width: 0.06),
+            OCRObservationFixture(text: "F0LIO", x: 0.13, y: 0.865, width: 0.05),
+            OCRObservationFixture(text: "DESCRIPCIÓN", x: 0.20, y: 0.865, width: 0.14),
+            OCRObservationFixture(text: "DEP0SITO", x: 0.62, y: 0.84, width: 0.07),
+            OCRObservationFixture(text: "RETIRO", x: 0.74, y: 0.84, width: 0.06),
+            OCRObservationFixture(text: "SALDO", x: 0.86, y: 0.84, width: 0.06),
+            OCRObservationFixture(text: "16-JUL-2026", x: 0.05, y: 0.76, width: 0.08),
+            OCRObservationFixture(text: "PAGO TRANSFERENCIA SPEI", x: 0.20, y: 0.76, width: 0.28),
+            OCRObservationFixture(text: "30.00", x: 0.74, y: 0.76, width: 0.06),
+            OCRObservationFixture(text: "970.00", x: 0.86, y: 0.76, width: 0.08),
             OCRObservationFixture(text: "TOTAL 0.00 30.00", x: 0.20, y: 0.15, width: 0.68),
         ]
 
