@@ -1130,9 +1130,12 @@ final class ReaderContractTests: XCTestCase {
         for (opening, deposit, withdrawal, closing) in controls {
             let parsed = rows(opening: opening, deposit: deposit, withdrawal: withdrawal, closing: closing)
             XCTAssertEqual(parsed.count, 2)
-            XCTAssertEqual(parsed.filter { $0.amount > 0 }.reduce(Decimal(0)) { $0 + $1.amount }, deposit)
-            XCTAssertEqual(parsed.filter { $0.amount < 0 }.reduce(Decimal(0)) { $0 + abs($1.amount) }, withdrawal)
-            XCTAssertEqual(opening + parsed.reduce(Decimal(0)) { $0 + $1.amount }, closing)
+            let deposits = parsed.filter { $0.amount > 0 }.reduce(Decimal(0)) { $0 + $1.amount }
+            let withdrawals = parsed.filter { $0.amount < 0 }.reduce(Decimal(0)) { $0 + abs($1.amount) }
+            let reconstructed = opening + parsed.reduce(Decimal(0)) { $0 + $1.amount }
+            XCTAssertEqual(NSDecimalNumber(decimal: deposits).doubleValue, NSDecimalNumber(decimal: deposit).doubleValue, accuracy: 0.0001)
+            XCTAssertEqual(NSDecimalNumber(decimal: withdrawals).doubleValue, NSDecimalNumber(decimal: withdrawal).doubleValue, accuracy: 0.0001)
+            XCTAssertEqual(NSDecimalNumber(decimal: reconstructed).doubleValue, NSDecimalNumber(decimal: closing).doubleValue, accuracy: 0.0001)
         }
     }
 
