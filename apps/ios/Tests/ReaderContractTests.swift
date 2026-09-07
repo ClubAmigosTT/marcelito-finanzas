@@ -1914,7 +1914,7 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
     }
 
-    func testWeakOCRCannotFeedNativeDashboardEvenWhenReviewFlagIsStale() {
+    func testWeakLegacyOCRCannotFeedNativeDashboardEvenWhenReviewFlagIsStale() {
         let store = FinanceStore()
         defer { store.clearLocalData() }
         let statement = StatementRecord(
@@ -1942,7 +1942,11 @@ final class ReaderContractTests: XCTestCase {
             ocrConfidence: 0.86,
             ocrPageConfidences: [0.86, 0.91],
             ocrColumnsCalibrated: true,
-            readerVersion: FinanceStore.readerVersion
+            // The current reader records deterministic, issuer-specific rows;
+            // an OCR confidence score is not a gate for those validated rows.
+            // This fixture represents a legacy OCR envelope, which must stay
+            // quarantined even if a stale persisted review flag says otherwise.
+            readerVersion: "ios-reader-legacy"
         )
         store.statements = [statement]
         store.movements = []
