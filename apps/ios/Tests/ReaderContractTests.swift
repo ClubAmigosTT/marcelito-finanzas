@@ -1387,7 +1387,7 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
     }
 
-    func testManualDashboardUnlockIsExplicitAndProvisional() {
+    func testManualDashboardUnlockIsRejectedAndNeverProvisional() {
         let store = FinanceStore()
         defer { store.clearLocalData() }
         let statement = StatementRecord(
@@ -1418,10 +1418,10 @@ final class ReaderContractTests: XCTestCase {
 
         XCTAssertTrue(store.dashboardIsBlocked)
         XCTAssertFalse(store.dashboardIsProvisional)
-        XCTAssertTrue(store.setManualDashboardUnlock(true))
-        XCTAssertFalse(store.dashboardIsBlocked)
-        XCTAssertTrue(store.dashboardIsProvisional)
-        XCTAssertEqual(store.periodMetrics.count, 1)
+        XCTAssertFalse(store.setManualDashboardUnlock(true))
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertFalse(store.dashboardIsProvisional)
+        XCTAssertEqual(store.periodMetrics.count, 0)
         XCTAssertTrue(store.setManualDashboardUnlock(false))
         XCTAssertTrue(store.dashboardIsBlocked)
         XCTAssertFalse(store.dashboardIsProvisional)
@@ -1468,8 +1468,8 @@ final class ReaderContractTests: XCTestCase {
         store.statements = [statement]
         store.movements = [movement]
 
-        XCTAssertTrue(store.setManualDashboardUnlock(true))
-        XCTAssertFalse(store.operationalMetricsBlocked)
+        XCTAssertFalse(store.setManualDashboardUnlock(true))
+        XCTAssertTrue(store.operationalMetricsBlocked)
         XCTAssertEqual(store.consolidatedRealSpend, 0)
         XCTAssertEqual(store.monthlyExpense, 0)
         XCTAssertEqual(store.realIncome, 0)
