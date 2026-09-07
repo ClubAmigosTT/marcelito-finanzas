@@ -2535,34 +2535,17 @@ final class FinanceStore {
         )
     }
 
-    /// Explicitly releases a reconciled statement from the review quarantine.
-    /// This is a human acknowledgement for OCR/low-confidence rows. It never
-    /// overrides an issuer-total mismatch; for a known issuer it records a
-    /// manual confirmation when automatic evidence is unavailable.
+    /// Manual review cannot release a statement from quarantine. Eligibility
+    /// is an immutable result of the issuer parser and its cent-level
+    /// reconciliation; retaining this method only keeps old call sites safe.
     @discardableResult
     func confirmStatementReviewed(_ statement: StatementRecord) -> Bool {
-        guard let index = statements.firstIndex(where: { $0.id == statement.id }) else { return false }
-        guard statements[index].reconciliation?.status == .valid else {
-            DiagnosticsRecorder.record(
-                level: "error",
-                stage: "statement.review.blocked",
-                message: "No se puede confirmar \(statements[index].fileName): la conciliación aún no es válida."
-            )
-            return false
-        }
-        let sourceIsVerified = hasVerifiedSourceEvidence(statements[index])
-        guard sourceIsVerified else {
-            DiagnosticsRecorder.record(
-                level: "error",
-                stage: "statement.review.blocked",
-                message: "No se puede confirmar \(statements[index].fileName): el emisor debe estar verificado por el documento."
-            )
-            return false
-        }
-        statements[index].requiresReview = false
-        persist(markingChange: true)
-        _ = runAutomaticAudit(trigger: "review")
-        return true
+        DiagnosticsRecorder.record(
+            level: "error",
+            stage: "statement.review.manual_confirmation_rejected",
+            message: "No se puede confirmar \(statement.fileName): la elegibilidad solo proviene del parser determinista y la conciliación exacta."
+        )
+        return false
     }
 
     func updateStatementSource(for statement: StatementRecord, to source: String, kind: StatementKind? = nil) {

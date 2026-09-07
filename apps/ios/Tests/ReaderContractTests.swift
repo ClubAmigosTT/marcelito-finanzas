@@ -1360,10 +1360,10 @@ final class ReaderContractTests: XCTestCase {
 
         XCTAssertTrue(store.dashboardIsBlocked)
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
-        XCTAssertTrue(store.confirmStatementReviewed(statement))
-        XCTAssertTrue(store.statements[0].issuerConfirmedByUser == true)
-        XCTAssertFalse(store.dashboardIsBlocked)
-        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
+        XCTAssertFalse(store.confirmStatementReviewed(statement))
+        XCTAssertNil(store.statements[0].issuerConfirmedByUser)
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
     }
 
     func testManualDashboardUnlockIsExplicitAndProvisional() {
