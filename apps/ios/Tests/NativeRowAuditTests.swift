@@ -54,7 +54,7 @@ final class NativeRowAuditTests: XCTestCase {
             if Decimal(string: wanted.signedAmount, locale: Locale(identifier: "en_US_POSIX")) != received.amount {
                 errors.append("\(prefix):signedAmount")
             }
-            if wanted.titleContains.isEmpty || !received.title.localizedCaseInsensitiveContains(wanted.titleContains) {
+            if wanted.titleContains.isEmpty || received.title.range(of: wanted.titleContains, options: [.caseInsensitive, .diacriticInsensitive]) == nil {
                 errors.append("\(prefix):description")
             }
         }

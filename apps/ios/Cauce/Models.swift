@@ -378,6 +378,8 @@ struct ImportSummary {
     /// Row-level visual decisions retained for the explicit private
     /// diagnostics export. Normal dashboard calculations ignore this field.
     var rowDiagnostics: [OCRRowDiagnostic] = []
+    /// Candidate rows for explicit private device audits only, including rejected statements.
+    var auditRows: [NativeAuditRow] = []
     /// Legacy compatibility markers. They remain false for new imports and
     /// allow old diagnostic envelopes to be displayed without reusing their
     /// rows as canonical data.
@@ -4147,6 +4149,7 @@ final class FinanceStore {
             fileSizeBytes: extraction.documentData.count,
             pageCount: extraction.pageCount,
             rowDiagnostics: extraction.rowDiagnostics,
+            auditRows: candidates.map(NativeAuditRow.init),
             multimodalFallbackAttempted: extraction.multimodalFallbackAttempted,
             multimodalFallbackError: extraction.multimodalFallbackError
         )
@@ -6701,8 +6704,10 @@ final class FinanceStore {
                 ? "par movimiento/saldo por geometría colapsada"
                 : "columna visual"
             selectionReason = "\(source); corrección por delta del saldo corrido; \(columns.calibrationReason)"
-        } else if let balanceDelta {
+        } else if let balanceDelta, deltaMatchesColumn {
             selectionReason = "importe dentro de la columna \(selectedColumn.lowercased()); ecuación del saldo corrido confirma delta \(NSDecimalNumber(decimal: balanceDelta).stringValue); \(columns.calibrationReason)"
+        } else if balanceDelta != nil {
+            selectionReason = "importe explícito conservado en \(selectedColumn.lowercased()); delta del saldo no coincide y no se usa para corregir la fila; \(columns.calibrationReason)"
         } else if useWholeRowPair {
             selectionReason = "penúltimo importe de la fila; último importe reservado para saldo corrido; \(columns.calibrationReason)"
         } else {

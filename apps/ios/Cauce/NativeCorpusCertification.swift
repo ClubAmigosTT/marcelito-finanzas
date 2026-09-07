@@ -150,6 +150,25 @@ struct NativeCorpusFileReport: Codable, Identifiable {
 
 /// Private, row-level companion to the redacted corpus report. It is intended
 /// for local debugging only and is never included in the publication JSON.
+struct NativeAuditRow: Codable {
+    let date: String
+    let page: Int?
+    let signedAmount: String
+    let title: String
+
+    init(_ movement: Movement) {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        date = formatter.string(from: movement.date)
+        page = movement.extractionEvidence?.page
+        signedAmount = NSDecimalNumber(decimal: movement.amount).stringValue
+        title = movement.title
+    }
+}
+
 struct NativeCorpusDiagnosticFile: Codable, Identifiable {
     let file: String
     let sourceFileName: String
@@ -160,10 +179,15 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
     let multimodalFallbackAttempted: Bool
     let multimodalFallbackError: String?
     let rows: [OCRRowDiagnostic]
+    let sourceFingerprint: String?
+    let accountKey: String?
+    let period: String?
+    let candidateRows: [NativeAuditRow]?
 
     private enum CodingKeys: String, CodingKey {
         case file, sourceFileName, source, mode, status, reconciliationReason,
-             multimodalFallbackAttempted, multimodalFallbackError, rows
+             multimodalFallbackAttempted, multimodalFallbackError, rows,
+             sourceFingerprint, accountKey, period, candidateRows
     }
 
     init(
@@ -175,7 +199,11 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
         reconciliationReason: String?,
         multimodalFallbackAttempted: Bool = false,
         multimodalFallbackError: String? = nil,
-        rows: [OCRRowDiagnostic]
+        rows: [OCRRowDiagnostic],
+        sourceFingerprint: String? = nil,
+        accountKey: String? = nil,
+        period: String? = nil,
+        candidateRows: [NativeAuditRow]? = nil
     ) {
         self.file = file
         self.sourceFileName = sourceFileName
@@ -186,6 +214,10 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
         self.multimodalFallbackAttempted = multimodalFallbackAttempted
         self.multimodalFallbackError = multimodalFallbackError
         self.rows = rows
+        self.sourceFingerprint = sourceFingerprint
+        self.accountKey = accountKey
+        self.period = period
+        self.candidateRows = candidateRows
     }
 
     var id: String { file }
@@ -201,6 +233,10 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
         try container.encode(multimodalFallbackAttempted, forKey: .multimodalFallbackAttempted)
         try container.encodeIfPresent(multimodalFallbackError, forKey: .multimodalFallbackError)
         try container.encode(rows, forKey: .rows)
+        try container.encodeIfPresent(sourceFingerprint, forKey: .sourceFingerprint)
+        try container.encodeIfPresent(accountKey, forKey: .accountKey)
+        try container.encodeIfPresent(period, forKey: .period)
+        try container.encodeIfPresent(candidateRows, forKey: .candidateRows)
     }
 }
 
@@ -253,6 +289,16 @@ struct NativeCorpusDiagnosticReport: Codable {
             ]
             if let reconciliationReason = file.reconciliationReason {
                 payload["reconciliationReason"] = reconciliationReason
+            }
+            if let fingerprint = file.sourceFingerprint { payload["sourceFingerprint"] = fingerprint }
+            if let account = file.accountKey { payload["accountKey"] = account }
+            if let period = file.period { payload["period"] = period }
+            if let candidates = file.candidateRows {
+                payload["candidateRows"] = candidates.map { row -> [String: Any] in
+                    var fields: [String: Any] = ["date": row.date, "signedAmount": row.signedAmount, "title": row.title]
+                    if let page = row.page { fields["page"] = page }
+                    return fields
+                }
             }
             return payload
         }
@@ -401,7 +447,11 @@ extension FinanceStore {
                         reconciliationReason: summary.reconciliation?.reason,
                         multimodalFallbackAttempted: summary.multimodalFallbackAttempted,
                         multimodalFallbackError: summary.multimodalFallbackError,
-                        rows: summary.rowDiagnostics
+                        rows: summary.rowDiagnostics,
+                        sourceFingerprint: summary.sourceFingerprint,
+                        accountKey: summary.accountKey,
+                        period: summary.period,
+                        candidateRows: summary.auditRows
                     )
                 )
             } catch is CancellationError {

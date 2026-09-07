@@ -57,6 +57,43 @@ reemplaza la reconstrucción completa por una actualización del libro por perio
 
 ## Estado de implementación
 
+### Auditoría desde Windows con un iPhone
+
+El exportador privado incluye ahora `sourceFingerprint`, cuenta enmascarada,
+periodo y `candidateRows` (fecha ISO local, página, importe con signo como texto
+y descripción). Son candidatos, incluso cuando el estado está bloqueado;
+no se incorporan por ello al libro canónico. El informe público no los incluye.
+
+Después de ejecutar el certificador en el iPhone, usar **Compartir diagnóstico
+por fila** y comparar localmente:
+
+```powershell
+node scripts/audit-native-rows.mjs private-corpus/independent-rows.json <exportacion-privada.json> ios-reader-2026.09.06.36
+```
+
+La comparación se hace por huella, no por nombre. Exige coincidencia de filas,
+signos, fechas, páginas, descripción y versión; rechaza archivos sin referencia,
+duplicados y exportaciones antiguas sin candidatos. Los importes se comparan en
+centavos enteros sin redondear. Solo imprime ordinales y campos discrepantes.
+Un resultado correcto no certifica clasificación, conciliación nativa ni toda
+la colección: se necesita además el informe de certificación y referencia
+completa. No subir estos dos archivos privados al repositorio ni a CI público.
+
+Referencia privada revisada: cuatro archivos BBVA y Santander de agosto. Este
+último requiere OCR en la extracción local comprobada; su referencia visual no
+se debe confundir con una validación de Vision. Los seis archivos restantes
+siguen pendientes de referencia independiente.
+
+La comparación local de Santander de agosto detectó dos importes alterados por
+un saldo OCR incorrecto: se compensaban en el total. Se eliminó del parser web
+la reparación de importes plausibles basada solo en diferencias pequeñas del
+saldo. Tras el cambio sus 43 filas coinciden con la referencia (fecha, página,
+importe y fragmento de descripción). La prueba sintética reproduce el fallo
+sin publicar cifras privadas. El parser nativo ya preservaba la columna
+explícita en esta situación; se corrigió su diagnóstico para no afirmar que
+el saldo confirma el importe cuando discrepa. Sigue pendiente probarlo sobre
+el original con Vision.
+
 - Lectura geométrica y caché: implementadas, sujetas a pruebas nativas.
 - Auditoría por filas y runner: implementados.
 - Referencia visual privada: iniciada; no representa todavía todo el corpus.

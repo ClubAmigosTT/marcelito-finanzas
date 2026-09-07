@@ -368,13 +368,19 @@ final class NativeCorpusContractTests: XCTestCase {
                     reason: "CARGOS determina salida",
                     accepted: true
                 )
-            ]
+            ],
+            sourceFingerprint: String(repeating: "a", count: 64),
+            accountKey: "bbva:1234",
+            period: "sample-period",
+            candidateRows: [NativeAuditRow(Movement(date: .now, title: "private candidate", account: "BBVA", category: "", amount: -120, flow: .expense))]
         )
         let report = NativeCorpusCertificationReport(files: [], diagnostics: [diagnostic])
         let publicJSON = try XCTUnwrap(report.jsonData)
         let publicText = try XCTUnwrap(String(data: publicJSON, encoding: .utf8))
         XCTAssertFalse(publicText.contains("23/JUL FACEBK"), "el informe público no debe exponer texto OCR")
         XCTAssertFalse(publicText.contains("selectedColumn"), "el informe público no debe exponer decisiones de fila")
+        XCTAssertFalse(publicText.contains("private candidate"))
+        XCTAssertFalse(publicText.contains("candidateRows"))
 
         let diagnosticURL = try report.writeDiagnosticsTemporaryFile()
         defer { try? FileManager.default.removeItem(at: diagnosticURL) }
@@ -388,6 +394,11 @@ final class NativeCorpusContractTests: XCTestCase {
         XCTAssertEqual(privateRow["rawText"] as? String, "23/JUL FACEBK 120.00 3,469.63")
         XCTAssertEqual(privateRow["selectedColumn"] as? String, "CARGOS")
         XCTAssertEqual(privateRow["selectedAmount"] as? String, "120")
+        XCTAssertEqual(privateFiles.first?["sourceFingerprint"] as? String, String(repeating: "a", count: 64))
+        let candidates = try XCTUnwrap(privateFiles.first?["candidateRows"] as? [[String: Any]])
+        XCTAssertEqual(candidates.first?["signedAmount"] as? String, "-120")
+        XCTAssertEqual(candidates.first?["title"] as? String, "private candidate")
+        XCTAssertEqual((candidates.first?["date"] as? String)?.count, 10)
     }
 
     func testValidatedCorpusThroughNativeReaderWhenProvided() throws {
