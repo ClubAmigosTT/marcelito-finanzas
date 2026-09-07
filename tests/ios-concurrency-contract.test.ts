@@ -182,6 +182,9 @@ test("Santander usa rectángulo y columnas fijas de la tabla", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /private static func parseSantanderTable\(/);
   assert.match(source, /let requiredLabels = \["fecha", "folio", "descripcion", "deposito", "retiro", "saldo"\]/);
+  assert.match(source, /santander\.table-title-not-found/);
+  assert.match(source, /santander\.column-header-not-found/);
+  assert.match(source, /lineWindows\(on: page\)/);
   assert.match(source, /calibrationReason: "geometría fija de la tabla Carta Santander"/);
   assert.match(source, /movementMinX: tableX\(0\.610\)/);
   assert.match(source, /depositMaxX: tableX\(0\.742\)/);

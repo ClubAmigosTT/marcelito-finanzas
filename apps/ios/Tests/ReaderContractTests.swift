@@ -1043,6 +1043,38 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(rows[0].title.localizedCaseInsensitiveContains("clave de rastreo"))
     }
 
+    func testSantanderTableAggregatesSplitTitleAndMultilineColumnHeader() {
+        // Vision on the real Santander scans can split both the red table
+        // title and the six printed column names even when page confidence is
+        // high. The deterministic parser must join only adjacent header lines
+        // and then keep using the fixed Carta grid for the money cells.
+        let fixtures = [
+            OCRObservationFixture(text: "Detalle de movimientos", x: 0.09, y: 0.96, width: 0.30),
+            OCRObservationFixture(text: "cuenta de cheques", x: 0.09, y: 0.935, width: 0.24),
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.89, width: 0.06),
+            OCRObservationFixture(text: "F0LIO", x: 0.13, y: 0.89, width: 0.05),
+            OCRObservationFixture(text: "DESCRIPCIÓN", x: 0.20, y: 0.89, width: 0.14),
+            OCRObservationFixture(text: "DEP0SITO", x: 0.62, y: 0.865, width: 0.07),
+            OCRObservationFixture(text: "RETIRO", x: 0.74, y: 0.865, width: 0.06),
+            OCRObservationFixture(text: "SALDO", x: 0.86, y: 0.865, width: 0.06),
+            OCRObservationFixture(text: "16-JUL-2026", x: 0.05, y: 0.79, width: 0.08),
+            OCRObservationFixture(text: "PAGO TRANSFERENCIA SPEI", x: 0.20, y: 0.79, width: 0.28),
+            OCRObservationFixture(text: "30.00", x: 0.74, y: 0.79, width: 0.06),
+            OCRObservationFixture(text: "970.00", x: 0.86, y: 0.79, width: 0.08),
+            OCRObservationFixture(text: "TOTAL 0.00 30.00", x: 0.20, y: 0.15, width: 0.68),
+        ]
+
+        let rows = FinanceStore.santanderTableRowsForTesting(
+            fixtures,
+            fileName: "estado-julio-2026.pdf",
+            openingBalance: Decimal(string: "1000.00")!
+        )
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].amount, Decimal(string: "-30.00")!)
+        XCTAssertEqual(rows[0].extractionEvidence?.selectedColumn, "RETIRO")
+    }
+
     func testSantanderTableRejectsARowWhosePrintedBalanceDoesNotMatchItsColumn() {
         let fixtures = [
             OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.09, y: 0.98, width: 0.42),
