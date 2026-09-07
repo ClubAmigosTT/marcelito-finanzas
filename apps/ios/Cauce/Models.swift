@@ -661,7 +661,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.07.3"
+    static let readerVersion = "ios-reader-deterministic-2026.09.07.4"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -6277,66 +6277,210 @@ final class FinanceStore {
             }
             return Calendar.current.component(.year, from: .now)
         }()
-        let ordered = observations.sorted {
-            $0.page == $1.page ? $0.centerY > $1.centerY : $0.page < $1.page
-        }
-        var scoped: [OCRObservation] = []
-        var inTable = false
-        for observation in ordered {
-            let normalized = observation.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-            if !inTable && normalized.contains("detalle de movimientos cuenta de cheques") {
-                inTable = true
-                continue
-            }
-            if inTable && (
-                normalized.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("total")
-                    || normalized.contains("total de movimientos")
-                    || normalized.contains("saldo final del periodo")
-            ) {
-                inTable = false
-                continue
-            }
-            if inTable { scoped.append(observation) }
-        }
-        guard !scoped.isEmpty else {
-            return SantanderOCRParseResult(movements: [], columnsCalibrated: false, diagnostics: [])
+        let requiredLabels = ["fecha", "folio", "descripcion", "deposito", "retiro", "saldo"]
+        func schemaText(_ value: String) -> String {
+            value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
         }
 
-        // Locate the complete six-column header on one page/visual line. The
-        // header only defines the table rectangle; the amount columns below
-        // are fixed fractions of that rectangle and are not recalibrated per
-        // page or from row contents.
-        let requiredLabels = ["fecha", "folio", "descripcion", "deposito", "retiro", "saldo"]
-        func compact(_ value: String) -> String {
-            value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-                .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
-        }
-        func headerFrame(for pageObservations: [OCRObservation]) -> (left: CGFloat, right: CGFloat)? {
-            let lines = pageObservations.reduce(into: [[OCRObservation]]()) { groups, observation in
-                if let index = groups.firstIndex(where: { abs(($0.first?.centerY ?? observation.centerY) - observation.centerY) <= 0.035 }) {
-                    groups[index].append(observation)
-                } else {
-                    groups.append([observation])
+        // Vision is allowed to split the red Santander title and the printed
+        // column header into several observations (and, on some iOS builds,
+        // two neighbouring baselines). Detect those known labels by joining
+        // only spatially adjacent lines. This is table-schema recognition,
+        // not a global number search, and it never changes the fixed x grid.
+        let layoutLines = ocrLines(from: observations)
+        func lineWindows(on page: Int, maximumLines: Int = 3, maximumSpan: CGFloat = 0.075) -> [[OCRObservation]] {
+            let pageLines = layoutLines
+                .filter { $0.page == page }
+                .sorted { $0.centerY > $1.centerY }
+            var windows: [[OCRObservation]] = []
+            for start in pageLines.indices {
+                var window: [OCRObservation] = []
+                for index in start..<min(start + maximumLines, pageLines.count) {
+                    let candidate = pageLines[index]
+                    guard let first = window.first else {
+                        window.append(candidate)
+                        windows.append(window)
+                        continue
+                    }
+                    guard first.centerY - candidate.centerY <= maximumSpan else { break }
+                    window.append(candidate)
+                    windows.append(window)
                 }
             }
-            for line in lines {
-                let lineText = compact(line.map(\.text).joined(separator: " "))
-                let hasAll = requiredLabels.allSatisfy { lineText.contains($0) }
-                guard hasAll else { continue }
-                let left = line.map(\.boundingBox.minX).min() ?? 0
-                let right = line.map { $0.boundingBox.maxX }.max() ?? 1
-                guard right > left else { continue }
-                return (max(0, left), min(1, right))
+            return windows
+        }
+
+        func hasTableTitle(_ value: String) -> Bool {
+            let normalized = schemaText(value)
+            return normalized.contains("detalle")
+                && normalized.contains("movim")
+                && normalized.contains("cuenta")
+                && normalized.contains("cheque")
+        }
+
+        func containsHeaderLabel(_ label: String, in value: String) -> Bool {
+            let compact = schemaText(value).replacingOccurrences(of: " ", with: "")
+            let aliases: [String]
+            switch label {
+            case "folio": aliases = ["folio", "f0lio"]
+            case "descripcion": aliases = ["descripcion", "descripci0n", "descrip"]
+            case "deposito": aliases = ["deposito", "dep0sito"]
+            case "retiro": aliases = ["retiro", "retlro"]
+            default: aliases = [label]
+            }
+            return aliases.contains { compact.contains($0) }
+        }
+
+        func diagnosticEvidence(matching terms: [String]) -> (page: Int?, text: String) {
+            let candidates = layoutLines.filter { line in
+                let normalized = schemaText(line.text)
+                return terms.contains { normalized.contains($0) }
+            }
+            let selected = candidates.isEmpty ? Array(layoutLines.prefix(8)) : Array(candidates.prefix(8))
+            return (
+                selected.first.map { $0.page + 1 },
+                selected.map { "p\($0.page + 1): \($0.text)" }.joined(separator: " | ")
+            )
+        }
+
+        struct TableAnchor {
+            let page: Int
+            let lowerY: CGFloat
+            let text: String
+        }
+
+        let pages = Set(observations.map(\.page)).sorted()
+        let titleAnchor: TableAnchor? = pages.compactMap { page in
+            lineWindows(on: page).compactMap { window -> TableAnchor? in
+                let text = window.map(\.text).joined(separator: " ")
+                guard hasTableTitle(text) else { return nil }
+                return TableAnchor(
+                    page: page,
+                    lowerY: window.map(\.boundingBox.minY).min() ?? 0,
+                    text: text
+                )
+            }.first
+        }.first
+
+        guard let titleAnchor else {
+            let evidence = diagnosticEvidence(matching: ["detalle", "movim", "cuenta", "cheque"])
+            return SantanderOCRParseResult(
+                movements: [],
+                columnsCalibrated: false,
+                diagnostics: [OCRRowDiagnostic(
+                    page: evidence.page,
+                    rawText: evidence.text,
+                    selectedColumn: "ENCABEZADO",
+                    reason: "santander.table-title-not-found: no se localizaron juntos los términos del título dentro de tres líneas adyacentes",
+                    accepted: false
+                )]
+            )
+        }
+
+        func isAfterTitle(_ observation: OCRObservation) -> Bool {
+            observation.page > titleAnchor.page
+                || (observation.page == titleAnchor.page
+                    && observation.boundingBox.maxY <= titleAnchor.lowerY + 0.012)
+        }
+
+        func isTotalBoundary(_ observation: OCRObservation) -> Bool {
+            let normalized = schemaText(observation.text)
+            // Santander prints the opening control immediately below the red
+            // section title as "SALDO FINAL DEL PERIODO ANTERIOR". It is the
+            // starting balance, not the end of the movement table. Treating
+            // the shared prefix as a closing marker used to stop the parser
+            // before FECHA/FOLIO and produced exactly zero extracted rows.
+            if normalized.contains("saldo final del periodo anterior") { return false }
+            if normalized.contains("saldo final del periodo") { return true }
+            guard normalized == "total" || normalized.hasPrefix("total ") else { return false }
+            let remainder = normalized.dropFirst("total".count).trimmingCharacters(in: .whitespaces)
+            return remainder.isEmpty || remainder.rangeOfCharacter(from: .letters) == nil
+        }
+
+        let endAnchor = observations
+            .filter(isAfterTitle)
+            .filter(isTotalBoundary)
+            .sorted {
+                $0.page == $1.page ? $0.centerY > $1.centerY : $0.page < $1.page
+            }
+            .first
+
+        guard let endAnchor else {
+            let evidence = diagnosticEvidence(matching: ["total", "saldo final", "periodo"])
+            return SantanderOCRParseResult(
+                movements: [],
+                columnsCalibrated: false,
+                diagnostics: [OCRRowDiagnostic(
+                    page: evidence.page,
+                    rawText: evidence.text,
+                    selectedColumn: "LÍMITE DE TABLA",
+                    reason: "santander.table-total-not-found: no se localizó el cierre TOTAL/SALDO FINAL de la tabla de cheques",
+                    accepted: false
+                )]
+            )
+        }
+
+        func isBeforeEnd(_ observation: OCRObservation) -> Bool {
+            observation.page < endAnchor.page
+                || (observation.page == endAnchor.page && observation.centerY > endAnchor.centerY)
+        }
+
+        let scoped = observations.filter { isAfterTitle($0) && isBeforeEnd($0) }
+        guard !scoped.isEmpty else {
+            return SantanderOCRParseResult(
+                movements: [],
+                columnsCalibrated: false,
+                diagnostics: [OCRRowDiagnostic(
+                    page: titleAnchor.page + 1,
+                    rawText: titleAnchor.text,
+                    selectedColumn: "RECTÁNGULO",
+                    reason: "santander.table-empty: el rectángulo entre el título y el total no contiene observaciones OCR",
+                    accepted: false
+                )]
+            )
+        }
+
+        // Locate the known six-label header across up to three neighbouring
+        // visual lines. It validates the Santander schema and vertical table
+        // start only; the money columns remain the fixed Carta fractions below.
+        let scopedLines = ocrLines(from: scoped)
+        func headerWindow(on page: Int) -> [OCRObservation]? {
+            let pageLines = scopedLines.filter { $0.page == page }.sorted { $0.centerY > $1.centerY }
+            for start in pageLines.indices {
+                var window: [OCRObservation] = []
+                for index in start..<min(start + 3, pageLines.count) {
+                    let candidate = pageLines[index]
+                    if let first = window.first, first.centerY - candidate.centerY > 0.075 { break }
+                    window.append(candidate)
+                    let text = window.map(\.text).joined(separator: " ")
+                    if requiredLabels.allSatisfy({ containsHeaderLabel($0, in: text) }) {
+                        return window
+                    }
+                }
             }
             return nil
         }
 
-        let byPage = Dictionary(grouping: scoped, by: \.page)
-        guard byPage.keys.sorted().contains(where: { page in
-            headerFrame(for: byPage[page] ?? []) != nil
-        }) else {
-            return SantanderOCRParseResult(movements: [], columnsCalibrated: false, diagnostics: [])
+        let header = pages.compactMap { page in headerWindow(on: page) }.first
+        guard header != nil else {
+            let evidence = diagnosticEvidence(matching: requiredLabels)
+            return SantanderOCRParseResult(
+                movements: [],
+                columnsCalibrated: false,
+                diagnostics: [OCRRowDiagnostic(
+                    page: evidence.page,
+                    rawText: evidence.text,
+                    selectedColumn: "COLUMNAS",
+                    reason: "santander.column-header-not-found: FECHA/FOLIO/DESCRIPCIÓN/DEPÓSITO/RETIRO/SALDO no quedaron demostradas dentro de tres líneas adyacentes",
+                    accepted: false
+                )]
+            )
         }
+
+        let byPage = Dictionary(grouping: scoped, by: \.page)
 
         // These four supplied statements use Santander's fixed Carta table:
         // the printed rectangle runs from x=0.045 through x=0.955.  Column
@@ -6427,6 +6571,15 @@ final class FinanceStore {
                     ))
                 }
             }
+        }
+        if diagnostics.isEmpty {
+            diagnostics.append(OCRRowDiagnostic(
+                page: titleAnchor.page + 1,
+                rawText: titleAnchor.text,
+                selectedColumn: "FECHA",
+                reason: "santander.no-date-rows: la tabla y sus columnas fueron localizadas, pero no se detectaron filas con fecha dentro de la columna fija",
+                accepted: false
+            ))
         }
         return SantanderOCRParseResult(movements: parsed, columnsCalibrated: true, diagnostics: diagnostics)
     }
@@ -6805,6 +6958,31 @@ final class FinanceStore {
             }
             for (matchOrder, match) in allMatches(in: observation.text, regex: amountRegex).enumerated() {
                 guard let value = parseAmount(match.text), abs(value) > 0, abs(value) < 10_000_000 else {
+                    continue
+                }
+                if requireFixedMovementColumn {
+                    // The deterministic Santander parser accepts a numeric
+                    // token without a native substring box only when Vision's
+                    // entire observation itself is wholly contained in one
+                    // printed money cell. It never estimates a cell from the
+                    // token's position in a page-wide OCR string.
+                    let containedInDeposit = observation.boundingBox.minX >= columns.movementMinX
+                        && observation.boundingBox.maxX <= columns.depositMaxX
+                    let containedInWithdrawal = observation.boundingBox.minX >= columns.depositMaxX
+                        && observation.boundingBox.maxX <= columns.balanceMinX
+                    let containedInBalance = observation.boundingBox.minX >= columns.balanceMinX
+                        && observation.boundingBox.maxX < 0.99
+                    guard containedInDeposit || containedInWithdrawal || containedInBalance else { continue }
+                    amountCandidates.append(
+                        OCRAmountCandidate(
+                            value: value,
+                            text: match.text,
+                            x: observation.centerX,
+                            order: observationOrder * 100 + matchOrder,
+                            observationIndex: observationOrder,
+                            characterOffset: match.range.location
+                        )
+                    )
                     continue
                 }
                 // Vision can return the complete Santander row as one

@@ -86,7 +86,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         ocrColumnsCalibrated = summary.ocrColumnsCalibrated
         reconciliationValid = summary.reconciliation?.status == .valid
         duplicate = false
-        errorCode = nil
+        errorCode = summary.rowDiagnostics.first(where: { !$0.accepted })?.reason
         reconciliationReason = summary.reconciliation?.reason
         multimodalFallbackAttempted = summary.multimodalFallbackAttempted
         multimodalFallbackError = summary.multimodalFallbackError
