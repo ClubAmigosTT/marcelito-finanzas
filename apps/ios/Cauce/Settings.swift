@@ -1,45 +1,27 @@
 import SwiftUI
 
-/// Ajustes locales del libro financiero. El desbloqueo manual es únicamente
-/// una salida controlada para inspección: no cambia la conciliación del emisor
-/// ni convierte filas provisionales en datos certificados.
+/// Ajustes de calidad del libro financiero. Los estados rechazados nunca
+/// pueden desbloquearse manualmente ni alimentar resultados provisionales.
 struct SettingsView: View {
     @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
-    @State private var showUnlockConfirmation = false
-    @State private var showUnlockError = false
 
     private var quality: LedgerQuality { store.ledgerQuality }
 
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    if store.manualDashboardUnlockEnabled {
-                        Label("Resultados provisionales desbloqueados", systemImage: "lock.open.trianglebadge.exclamationmark")
-                            .foregroundStyle(Color.marcelitoAmber)
+                Section("Resultados") {
+                    Label(
+                        quality.isBlocking ? "KPI bloqueados por conciliación" : "KPI respaldados por estados conciliados",
+                        systemImage: quality.isBlocking ? "lock.fill" : "checkmark.seal.fill"
+                    )
+                    .foregroundStyle(quality.isBlocking ? Color.marcelitoDanger : Color.marcelitoSuccess)
 
-                        Button {
-                            _ = store.setManualDashboardUnlock(false)
-                        } label: {
-                            Label("Volver a bloquear KPI", systemImage: "lock.fill")
-                        }
-                        .foregroundStyle(Color.marcelitoNavy)
-                    } else {
-                        Button {
-                            showUnlockConfirmation = true
-                        } label: {
-                            Label("Desbloquear resultados provisionales", systemImage: "lock.open.trianglebadge.exclamationmark")
-                        }
-                        .foregroundStyle(Color.marcelitoNavy)
-                    }
-
-                    Text("Permite mostrar Resumen, Gastos, Patrimonio y gráficas aunque existan estados no conciliados. Solo usa filas canónicas; las filas rechazadas o en cuarentena siguen fuera de los totales. No corrige ni certifica los datos: los valores se muestran como provisionales y la acción queda registrada en Diagnóstico.")
+                    Text("Solo los estados cuyo parser específico concilia exactamente contra los totales oficiales pueden entrar al libro canónico. No existe desbloqueo manual de resultados.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                } header: {
-                    Text("Resultados")
                 }
 
                 Section("Calidad actual") {
@@ -59,7 +41,7 @@ struct SettingsView: View {
                 }
 
                 Section("Privacidad") {
-                    Text("La preferencia se guarda solo en este iPhone. Los PDF, filas y credenciales no se envían al activar esta opción.")
+                    Text("Los PDF y sus filas permanecen en este iPhone. Un archivo rechazado conserva su diagnóstico, pero no sus filas dentro del libro canónico.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -71,25 +53,6 @@ struct SettingsView: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cerrar") { dismiss() }
                 }
-            }
-            .confirmationDialog(
-                "Desbloquear resultados provisionales",
-                isPresented: $showUnlockConfirmation,
-                titleVisibility: .visible
-            ) {
-                Button("Desbloquear", role: .destructive) {
-                    if !store.setManualDashboardUnlock(true) {
-                        showUnlockError = true
-                    }
-                }
-                Button("Cancelar", role: .cancel) { }
-            } message: {
-                Text("Los KPI podrán mostrar cifras de estados pendientes o inválidos. Verás una advertencia de provisionalidad; revisa Diagnóstico antes de tomar decisiones.")
-            }
-            .alert("No se pudo desbloquear", isPresented: $showUnlockError) {
-                Button("OK", role: .cancel) { }
-            } message: {
-                Text("Importa al menos un estado de cuenta y ejecuta la auditoría local antes de habilitar resultados provisionales.")
             }
         }
         .presentationDetents([.medium, .large])

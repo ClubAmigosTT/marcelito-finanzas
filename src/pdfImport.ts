@@ -1,9 +1,11 @@
 import type { ImportResult, SourceDetection, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types.ts";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
+import { parseDeterministicStatement, reconcileExactly } from "./issuerParsers/index.ts";
+import type { DocumentLayout, DocumentLayoutLine, DocumentLayoutPage } from "./issuerParsers/types.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-2026.09.06.10";
+export const PDF_READER_VERSION = "web-reader-deterministic-2026.09.07.1";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
@@ -28,6 +30,45 @@ export function rebuildPdfText(items: unknown[]) {
     .sort((a, b) => b.y - a.y)
     .map((row) => row.parts.sort((a, b) => a.x - b.x).map((part) => part.text).join(" "))
     .join("\n");
+}
+
+/** Preserves source columns so issuer parsers never infer direction from descriptions. */
+export function rebuildPdfLayout(items: unknown[], page: number, pageWidth: number): DocumentLayoutPage {
+  const rows: Array<{ y: number; words: DocumentLayoutLine["words"] }> = [];
+  (items as PdfTextItem[]).forEach((item) => {
+    if (!item.str?.trim() || !Array.isArray(item.transform)) return;
+    const sourceX = item.transform[4] ?? 0;
+    const y = item.transform[5] ?? 0;
+    let row = rows.find((candidate) => Math.abs(candidate.y - y) < 2.2);
+    if (!row) {
+      row = { y, words: [] };
+      rows.push(row);
+    }
+    row.words.push({ x: Math.max(0, Math.min(1, sourceX / Math.max(pageWidth, 1))), text: item.str.trim(), confidence: 1 });
+  });
+  return {
+    page,
+    lines: rows.sort((a, b) => b.y - a.y).map((row) => ({ page, words: row.words.sort((a, b) => a.x - b.x) })),
+  };
+}
+
+export function rebuildOcrLayout(tsv: string | null | undefined, page: number, pageWidth: number): DocumentLayoutPage {
+  const rows = new Map<string, DocumentLayoutLine["words"]>();
+  for (const raw of (tsv ?? "").split(/\r?\n/).slice(1)) {
+    const fields = raw.split("\t");
+    if (fields.length < 12 || fields[0] !== "5") continue;
+    const text = fields.slice(11).join("\t").trim();
+    if (!text) continue;
+    const key = fields.slice(1, 5).join(":");
+    const words = rows.get(key) ?? [];
+    words.push({
+      x: Math.max(0, Math.min(1, Number(fields[6]) / Math.max(pageWidth, 1))),
+      text,
+      confidence: Math.max(0, Math.min(1, Number(fields[10]) / 100)),
+    });
+    rows.set(key, words);
+  }
+  return { page, lines: [...rows.values()].map((words) => ({ page, words: words.sort((a, b) => a.x - b.x) })) };
 }
 
 function normalizeAmount(value: string) {
@@ -637,8 +678,10 @@ function sumAbsolute(values: number[]) {
  * are kept out of the ledger; pending imports remain visible but provisional.
  */
 export function reconcileStatementImport(kind: StatementKind, summary: StatementSummary | undefined, transactions: Transaction[]): StatementReconciliation {
-  const tolerance = 0.05;
-  if (!summary) return { status: "pending", tolerance, extractedMovementCount: transactions.length, reason: "El estado no contiene un resumen de totales" };
+  const exact = kind === "bank" || kind === "card" ? reconcileExactly(kind, summary, transactions) : undefined;
+  if (exact) return exact;
+  const tolerance = 0;
+  if (!summary) return { status: "invalid", tolerance, extractedMovementCount: transactions.length, reason: "Faltan los controles oficiales del estado" };
 
   if (kind === "bank") {
     const extractedDepositTotal = sumAbsolute(transactions.filter((transaction) => transaction.amount > 0).map((transaction) => transaction.amount));
@@ -765,7 +808,7 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       reason: invalid ? `Las filas no concilian con cargos/pagos del estado (cargos ${chargeDifference.toFixed(2)}, pagos ${paymentDifference.toFixed(2)}${sectionDifferences.length ? `, secciones ${sectionDifferences.join("; ")}` : ""})` : undefined,
     };
   }
-  return { status: "pending", tolerance, extractedMovementCount: transactions.length, reason: "Tipo de estado no identificado" };
+  return { status: "invalid", tolerance, extractedMovementCount: transactions.length, reason: "Tipo de estado no soportado por un parser determinista" };
 }
 
 /**
@@ -1281,13 +1324,14 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
     },
   });
   const pages: string[] = [];
+  const layoutPages: DocumentLayoutPage[] = [];
   const pageConfidences: number[] = [];
   const recognitionTimeoutMs = 45_000;
   const recognizeWithTimeout = async (image: HTMLCanvasElement) => {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        worker.recognize(image),
+        worker.recognize(image, {}, { text: true, tsv: true }),
         new Promise<never>((_, reject) => {
           timeoutId = setTimeout(
             () => reject(new Error("El OCR tardó demasiado en una página; intenta importar un PDF más ligero.")),
@@ -1320,6 +1364,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       await page.render({ canvas: null, canvasContext: context, viewport }).promise;
       const baseResult = await recognizeWithTimeout(canvas);
       let bestText = baseResult.data.text;
+      let bestTsv = baseResult.data.tsv;
       let confidence = Number(baseResult.data.confidence);
 
       // Low-confidence scans often have a gray background or faint table
@@ -1349,6 +1394,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
             if (Number.isFinite(enhancedConfidence) && enhancedConfidence > confidence) {
               confidence = enhancedConfidence;
               bestText = enhancedResult.data.text;
+              bestTsv = enhancedResult.data.tsv;
             }
           }
         } catch {
@@ -1364,6 +1410,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       // Keep explicit page sentinels so row reconstruction cannot cross page
       // boundaries or blend a movement with the following page's summary.
       pages.push(`__PDF_PAGE_${pageNumber}__\n${bestText}`);
+      layoutPages.push(rebuildOcrLayout(bestTsv, pageNumber, canvas.width));
       onProgress(88 + Math.round((pageNumber / document.numPages) * 10), `Reconociendo página ${pageNumber} de ${document.numPages}`);
       canvas.width = 0;
       canvas.height = 0;
@@ -1375,6 +1422,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
 
   return {
     text: pages.join("\n"),
+    layout: { pages: layoutPages } satisfies DocumentLayout,
     pageConfidences,
     confidence: pageConfidences.length
       ? pageConfidences.reduce((sum, value) => sum + value, 0) / pageConfidences.length
@@ -1426,6 +1474,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
       throw new Error("El PDF contiene más de 80 páginas. Importa un estado mensual a la vez para mantener segura la memoria.");
     }
     const pageTexts: string[] = [];
+    const textLayoutPages: DocumentLayoutPage[] = [];
 
   for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
     const page = await document.getPage(pageNumber);
@@ -1435,6 +1484,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
     // selectable text layer. The sentinel is consumed by extractTransactions
     // and never reaches a merchant description.
     pageTexts.push(`__PDF_PAGE_${pageNumber}__\n${rebuildPdfText(content.items)}`);
+    textLayoutPages.push(rebuildPdfLayout(content.items, pageNumber, page.getViewport({ scale: 1 }).width));
     onProgress(12 + Math.round((pageNumber / document.numPages) * 58), `Leyendo pagina ${pageNumber} de ${document.numPages}`);
     page.cleanup();
   }
@@ -1443,26 +1493,24 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   const mode = shouldUseOCR(extractedText) ? "ocr" : "text";
   const ocrResult = mode === "ocr" ? await recognizePdfText(document, onProgress) : undefined;
   const text = ocrResult?.text ?? extractedText;
+  const layout = ocrResult?.layout ?? { pages: textLayoutPages };
   const sourceDetection = detectSourceEvidence(text, file.name);
   const source = sourceDetection.source;
   const accountKey = detectAccountKey(text, source);
   const kind = detectStatementKind(text, source);
   onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
-  const parsed = parseImportedTransactions(text, source, file.name, kind, mode, ocrResult?.pageConfidences);
-  const summary = parseStatementSummary(text, kind);
-  const baseReconciliation = reconcileStatementImport(kind, summary, parsed);
-  // A matching total is necessary but not sufficient for automatic OCR
-  // acceptance: a scan can lose one row and still happen to reconcile after
-  // a coincidental amount. Keep the statement provisional when the visual
-  // signal is weak, and require a human confirmation before it can enter the
-  // canonical ledger. Text-layer imports are not affected by this gate.
-  const reconciliation = gateOcrReconciliation(
-    baseReconciliation,
-    mode,
-    ocrResult?.confidence,
-    ocrResult?.pageConfidences,
-  );
+  const deterministic = source === "Santander" || source === "BBVA" || source === "Amex"
+    ? parseDeterministicStatement({ source, fileName: file.name, mode, text, layout })
+    : undefined;
+  const parsed = deterministic?.transactions ?? [];
+  const summary = deterministic?.summary;
+  const reconciliation = deterministic?.reconciliation ?? {
+    status: "invalid" as const,
+    tolerance: 0,
+    extractedMovementCount: 0,
+    reason: "No existe un parser determinista para el emisor identificado",
+  };
   onProgress(100, "Listo para revisar");
 
     const result: ImportResult = {
@@ -1476,6 +1524,8 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
       fileSizeBytes: file.size,
       pageCount: document.numPages,
       readerVersion: PDF_READER_VERSION,
+      parserId: deterministic?.parserId,
+      sourceSection: deterministic?.sourceSection,
       mode,
       transactions: parsed,
       summary,

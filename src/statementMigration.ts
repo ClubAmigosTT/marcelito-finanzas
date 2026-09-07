@@ -3,7 +3,7 @@ import { defaultStatementKind, hasSufficientOcrQuality, hasVerifiedSourceEvidenc
 import { hasTraceableEvidence } from "./reconciliation.ts";
 import type { Statement, Transaction } from "./types.ts";
 
-const MIGRATION_TOLERANCE = 0.05;
+const MIGRATION_TOLERANCE = 0;
 
 function isSupportedReaderVersion(version: string | undefined, currentReaderVersion: string) {
   if (version === currentReaderVersion) return true;
@@ -64,8 +64,7 @@ export function prepareStoredStatements(
     // row into the canonical ledger would let a BBVA PDF masquerade as a
     // Santander account even when its totals happen to reconcile.
     const sourceNeedsReview = statement.status === "ready"
-      && !hasVerifiedSourceEvidence(statement)
-      && statement.issuerConfirmedByUser !== true;
+      && !hasVerifiedSourceEvidence(statement);
     const kindNeedsReview = statement.kind === "unknown";
     const ocrNeedsReview = !hasSufficientOcrQuality(statement);
     if (hasReconciliation && isCurrentReader && !sourceNeedsReview && !kindNeedsReview && !ocrNeedsReview) return statement;
@@ -117,7 +116,7 @@ export function prepareStoredLedger(
   const preparedStatements = initiallyPrepared.map((prepared, index) => {
     const original = statements[index];
     if (!original || !isSupportedReaderVersion(original.readerVersion, readerVersion)) return prepared;
-    if (!hasVerifiedSourceEvidence(original) && original.issuerConfirmedByUser !== true) return prepared;
+    if (!hasVerifiedSourceEvidence(original)) return prepared;
     if (original.kind === "unknown" || !hasSufficientOcrQuality(original)) return prepared;
     const linked = preparedTransactions.filter((transaction) => transaction.statementId === original.id);
     if (linked.some((transaction) => !hasTraceableEvidence(transaction))) return prepared;
@@ -138,7 +137,7 @@ export function prepareStoredLedger(
           || statement.reconciliationStatus !== "valid"
           || statement.reconciliation?.status !== "valid"
           || statement.status !== "ready"
-          || (!hasVerifiedSourceEvidence(statement) && statement.issuerConfirmedByUser !== true)
+          || !hasVerifiedSourceEvidence(statement)
           || statement.kind === "unknown"
           || !hasSufficientOcrQuality(statement);
       })

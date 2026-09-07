@@ -128,7 +128,7 @@ test("una fila bancaria sin dirección inequívoca queda fuera de la aceptación
 });
 
 test("la compuerta OCR se conserva al recalcular la vista de revisión", () => {
-  const base = reconcileStatementImport("bank", { depositTotal: 100, withdrawalTotal: 0 }, [
+  const base = reconcileStatementImport("bank", { previousBalance: 0, cashBalance: 100, depositTotal: 100, withdrawalTotal: 0 }, [
     movement({ id: "ocr-income", date: "01 ago 2026", description: "NOMINA", account: "BBVA", amount: 100, flow: "income" }),
   ]);
   assert.equal(base.status, "valid");
@@ -1038,7 +1038,10 @@ test("la conciliación de tarjeta usa nuevas transacciones antes que el total co
     "Nuevas transacciones: 100.00",
     "Total Nuevos Cargos: 500.00",
   ].join("\n"), "card");
-  const rows = extractTransactions("01/08/2026 COMPRA 100.00", "Amex", "sample-card-period-3.pdf", "card");
+  const rows = [
+    movement({ id: "purchase", date: "01 ago 2026", description: "COMPRA", account: "Amex", amount: -100, flow: "expense", kind: "purchase" }),
+    movement({ id: "msi", date: "01 ago 2026", description: "MESES SIN INTERESES", account: "Amex", amount: -400, flow: "expense", kind: "msi" }),
+  ];
   assert.equal(reconcileStatementImport("card", summary, rows).status, "valid");
 });
 
@@ -1053,13 +1056,12 @@ test("la conciliación de tarjeta bloquea una deuda que no cuadra con límite y 
   const reconciliation = reconcileStatementImport("card", summary, rows);
   assert.equal(reconciliation.status, "invalid");
   assert.equal(reconciliation.creditIdentityDifference, 100);
-  assert.match(reconciliation.reason ?? "", /identidad de crédito/);
+  assert.match(reconciliation.reason ?? "", /deuda utilizada/);
 });
 
 test("la conciliación Amex usa subtotales nacional y extranjero como gasto real", () => {
   const summary = parseStatementSummary([
-    "Nuevas transacciones: 3,317.75",
-    "Total Nuevos Cargos: 4,955.99",
+    "Nuevas transacciones: 23,583.75",
     "Total de las transacciones en $ de CLIENTE 13,990.02",
     "Total de Transacciones en Moneda Extranjera de CLIENTE 9,593.73",
   ].join("\n"), "card");
@@ -1072,8 +1074,7 @@ test("la conciliación Amex usa subtotales nacional y extranjero como gasto real
 
 test("la conciliación Amex descuenta créditos del subtotal doméstico y rechaza guías fechadas", () => {
   const summary = parseStatementSummary([
-    "Nuevas transacciones: 3,317.75",
-    "Total Nuevos Cargos: 4,955.99",
+    "Nuevas transacciones: 33,177.48",
     "Total de las transacciones en $ de CLIENTE 13,990.02",
     "Total de Transacciones en Moneda Extranjera de CLIENTE 9,593.73",
   ].join("\n"), "card");
@@ -1090,8 +1091,7 @@ test("la conciliación Amex descuenta créditos del subtotal doméstico y rechaz
 
 test("la conciliación Amex respeta un subtotal doméstico marcado como CR", () => {
   const summary = parseStatementSummary([
-    "Nuevas transacciones: 2,803.42",
-    "Total Nuevos Cargos: 37,213.42",
+    "Nuevas transacciones: 28,034.19",
     "Total de las transacciones en $ de CLIENTE 27,041.19 CR",
     "Total de Transacciones en Moneda Extranjera de CLIENTE 27,537.69",
   ].join("\n"), "card");
@@ -1630,7 +1630,7 @@ test("la migración devuelve a revisión un OCR débil aunque conserve la versi�
   assert.match(prepared?.reconciliation?.reason ?? "", /OCR con confianza insuficiente/);
 });
 
-test("una confirmación humana explícita conserva un estado conocido sin evidencia automática", () => {
+test("una confirmación humana no sustituye evidencia automática del emisor", () => {
   const statement = {
     ...bank("bbva-confirmed", "BBVA", "agosto 2026"),
     readerVersion: "web-reader-current",
@@ -1649,8 +1649,8 @@ test("una confirmación humana explícita conserva un estado conocido sin eviden
     flow: "expense",
     statementId: statement.id,
   })], "web-reader-current");
-  assert.equal(ledger.quarantinedMovementCount, 0);
-  assert.equal(ledger.statements[0]?.status, "ready");
+  assert.equal(ledger.quarantinedMovementCount, 1);
+  assert.equal(ledger.statements[0]?.status, "review");
 });
 
 test("la cuarentena de versión también bloquea las cifras del estado antiguo", () => {

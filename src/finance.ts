@@ -17,6 +17,9 @@ const OCR_MIN_PAGE_CONFIDENCE = 0.78;
  * older build, so every KPI boundary must re-check the same thresholds.
  */
 export function hasSufficientOcrQuality(statement: Statement) {
+  if (["santander-checking-v1", "bbva-movements-v1", "amex-operations-v1"].includes(statement.parserId ?? "")) {
+    return true;
+  }
   // Treat malformed/legacy runtime data as unsafe instead of assuming that a
   // missing mode means a trustworthy text-layer extraction.
   // A legacy multimodal import is visual/model-assisted even when the old
@@ -69,7 +72,7 @@ export function isStatementEligibleForDashboard(statement: Statement) {
   // Missing, weak, or mismatched evidence is not equivalent to a verified
   // issuer. Legacy records are migrated to review, but keep this direct
   // boundary strict too so programmatic callers cannot feed an unlabeled PDF.
-  if (!hasVerifiedSourceEvidence(statement) && statement.issuerConfirmedByUser !== true) return false;
+  if (!hasVerifiedSourceEvidence(statement)) return false;
   return true;
 }
 
@@ -771,7 +774,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   const blockedForSourceEvidence = statements
     .filter((statement) => {
       if (statement.source === "Desconocido") return true;
-      return Boolean(!hasVerifiedSourceEvidence(statement) && statement.issuerConfirmedByUser !== true);
+      return !hasVerifiedSourceEvidence(statement);
     })
     .map((statement) => statement.id);
   const blockedForStatementKind = statements

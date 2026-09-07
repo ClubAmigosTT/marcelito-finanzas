@@ -32,7 +32,7 @@ import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { categories } from "./data";
 import { createAuditRun } from "./audit";
 import { buildFinanceMetrics, defaultStatementKind, hasSufficientOcrQuality, isRealIncomeTransaction, isStatementEligibleForDashboard, isSpendTransaction, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
-import { gateOcrReconciliation, inspectPdf, parseImportedTransactions, PDF_READER_VERSION, reconcileStatementImport, parseStatementSummary } from "./pdfImport";
+import { inspectPdf, PDF_READER_VERSION } from "./pdfImport";
 import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
 import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey } from "./reconciliation";
 import { prepareStoredLedger } from "./statementMigration";
@@ -40,7 +40,7 @@ import { clearWebErrorDiagnostics, readWebErrorDiagnostics, type WebErrorDiagnos
 import { clearImportedPdfs, openImportedPdf, saveImportedPdf } from "./documentStore";
 import { requestTransactionClassification, requestTransactionClassifierPreflight, applyTransactionClassifications, TransactionClassifierError } from "./aiClassifier";
 import type { TransactionClassifierPreflightResult } from "./aiClassifier";
-import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction } from "./types";
+import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementReconciliation, StatementSource, Transaction } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
 const moneyPrecise = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 2 });
@@ -415,6 +415,8 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       fileSizeBytes: commit.fileSizeBytes,
       pageCount: commit.pageCount,
       readerVersion: commit.readerVersion ?? PDF_READER_VERSION,
+      parserId: commit.parserId,
+      sourceSection: commit.sourceSection,
       extractionProvider: commit.extractionProvider,
       extractionModel: commit.extractionModel,
       extractionPromptVersion: commit.extractionPromptVersion,
@@ -436,8 +438,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       : [statement, ...statements];
     const withoutPrevious = previous ? transactions.filter((item) => item.statementId !== statementId) : transactions;
     const importedPipeline = runTransactionPipeline([...importedTransactions, ...withoutPrevious], nextStatements);
-    const needsReview = importedTransactions.some((item) => item.category === "Sin categoría" || (item.confidence ?? 1) < 0.75)
-      || commit.source === "Desconocido"
+    const needsReview = commit.source === "Desconocido"
       || commit.kind === "unknown"
       || commit.sourceDetection?.status !== "verified"
       // A multimodal reader keeps mode="text" for compatibility with the
@@ -468,13 +469,11 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       && item.reconciliationStatus === "valid"
       && item.source !== "Desconocido"
       && item.kind !== "unknown"
+      && item.sourceDetection?.status === "verified"
       && hasSufficientOcrQuality(item)
       ? {
         ...item,
         status: "ready",
-        issuerConfirmedByUser: item.sourceDetection?.status === "verified"
-          ? item.issuerConfirmedByUser
-          : true,
       }
       : item));
   }
@@ -972,37 +971,6 @@ function CalculationRow({ label, value, detail, tone }: { label: string; value: 
   return <div className={`calculation-row${tone ? ` ${tone}` : ""}`}><div><span>{label}</span><small>{detail}</small></div><strong>{value}</strong></div>;
 }
 
-function StatementSummaryForm({ source, kind, summary, onChange }: { source: StatementSource; kind: Statement["kind"]; summary: StatementSummary; onChange: (key: keyof StatementSummary, value: string) => void }) {
-  const fields: Array<{ key: keyof StatementSummary; label: string; hint: string }> = [
-    { key: "previousBalance", label: "Saldo anterior", hint: "Corte previo" },
-    { key: "newTransactions", label: "Nuevas transacciones", hint: "Compras nuevas" },
-    { key: "payments", label: "Pagos realizados", hint: "Abonos reales" },
-    { key: "credits", label: "Créditos / abonos contables", hint: "No son pagos" },
-    { key: "newCharges", label: "Nuevos cargos del corte", hint: "Total del resumen" },
-    { key: "interest", label: "Intereses", hint: "Interés del periodo" },
-    { key: "fees", label: "Comisiones", hint: "Cargos y anualidad" },
-    { key: "statementBalance", label: source === "Amex" ? "Saldo nuevo" : "Saldo al corte", hint: "Saldo del estado" },
-    { key: "minimumPayment", label: "Pago mínimo", hint: "Pago requerido" },
-    { key: "minimumPlusMsi", label: "Pago mínimo + MSI", hint: "Pago próximo del estado" },
-    { key: "paymentForNoInterest", label: "Pago para no generar intereses", hint: "Importe del estado" },
-    ...(kind === "card" || source === "Amex" ? [
-      { key: "creditLimit" as keyof StatementSummary, label: "Límite de crédito", hint: "Línea autorizada" },
-      { key: "creditAvailable" as keyof StatementSummary, label: "Crédito disponible", hint: "Disponible al corte" },
-      { key: "debtBalance" as keyof StatementSummary, label: "Deuda al corte", hint: "Saldo usado" },
-      { key: "revolvingBalance" as keyof StatementSummary, label: "Saldo revolvente", hint: "Deuda fuera de MSI" },
-      { key: "msiPending" as keyof StatementSummary, label: "MSI pendientes", hint: "Principal diferido" },
-      { key: "msiOriginalDeferred" as keyof StatementSummary, label: "MSI original diferido", hint: "Principal pendiente" },
-      { key: "msiInstallments" as keyof StatementSummary, label: "Mensualidades MSI activas", hint: "Cantidad" },
-      { key: "msiMonthlyLoad" as keyof StatementSummary, label: "Carga mensual MSI", hint: "Total del corte" },
-    ] : [
-      { key: "cashBalance" as keyof StatementSummary, label: "Efectivo disponible", hint: "Saldo bancario" },
-      { key: "depositTotal" as keyof StatementSummary, label: "Depósitos / abonos", hint: "Total declarado" },
-      { key: "withdrawalTotal" as keyof StatementSummary, label: "Retiros / cargos", hint: "Total declarado" },
-    ]),
-  ];
-  return <details className="statement-summary-form"><summary>Completar datos del corte <span>Opcional, pero necesario para crédito y patrimonio</span></summary><p>Los importes detectados del PDF aparecen aquí para que puedas corregirlos. Si un campo no está en el estado, déjalo vacío.</p><div className="summary-field-grid">{fields.map((field) => <label key={String(field.key)}><span>{field.label}</span><small>{field.hint}</small><input type="number" step="0.01" value={typeof summary[field.key] === "number" ? Number(summary[field.key]) : ""} onChange={(event) => onChange(field.key, event.target.value)} placeholder="—" /></label>)}</div></details>;
-}
-
 function RealDataEmpty({ onImport }: { onImport: () => void }) {
   return <section className="real-data-empty"><div className="real-data-icon"><FilePdf size={32} /></div><h1>Empieza con tus estados reales</h1><p>Marcelito no carga cifras de muestra. Importa un PDF mensual y revisa banco, periodo, movimientos y categorías antes de guardarlo.</p><button className="primary-button" onClick={onImport}><UploadSimple size={18} />Importar primer estado</button><small>El archivo se procesa localmente y no se sube a ningún servidor.</small></section>;
 }
@@ -1308,7 +1276,6 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
         </article>;
       })}</div> : <EmptyState title="Aún no hay cuentas" body="Importa un estado de cuenta para construir tus saldos reales." />}
     </section>
-    {statements.some((statement) => statement.status === "review" && statement.reconciliationStatus === "valid" && statement.source !== "Desconocido" && statement.kind !== "unknown" && statement.sourceDetection?.status !== "verified") && <div className="provisional-banner" role="status"><Warning size={18} /><span>Hay estados conciliados que requieren confirmar el banco mostrado antes de entrar a los KPI.</span>{statements.filter((statement) => statement.status === "review" && statement.reconciliationStatus === "valid" && statement.source !== "Desconocido" && statement.kind !== "unknown" && statement.sourceDetection?.status !== "verified").map((statement) => <button key={statement.id} className="text-button" onClick={() => onMarkReviewed(statement.id)}>Confirmar {statement.source}</button>)}</div>}
     <details className="documents-panel">
       <summary><div><h2>Documentos importados</h2><span>{statements.length ? `${statements.length} archivos guardados localmente.` : "Aquí aparecerán tus PDFs revisados."}</span></div><strong>{statements.length}</strong></summary>
       <div className="documents-content">
@@ -1377,9 +1344,6 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
   const [progressLabel, setProgressLabel] = useState("");
   const [result, setResult] = useState<ImportResult | null>(null);
   const [items, setItems] = useState<Transaction[]>([]);
-  const [summary, setSummary] = useState<StatementSummary>({});
-  const [reviewSource, setReviewSource] = useState<StatementSource>("Desconocido");
-  const [reviewKind, setReviewKind] = useState<StatementKind>("unknown");
   const [error, setError] = useState("");
   const [classificationBusy, setClassificationBusy] = useState(false);
   const [classificationMessage, setClassificationMessage] = useState("");
@@ -1407,7 +1371,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
         return learned ? { ...item, category: learned, confidence: 1 } : item;
       });
       initialCategories.current = Object.fromEntries(withLearnedCategories.map((item) => [item.id, item.category]));
-      setResult({ ...inspected, transactions: withLearnedCategories }); setItems(withLearnedCategories); setSummary(inspected.summary ?? {}); setReviewSource(inspected.source); setReviewKind(inspected.kind); setStage("review");
+      setResult({ ...inspected, transactions: withLearnedCategories }); setItems(withLearnedCategories); setStage("review");
     } catch (cause) {
       const safeMessage = cause instanceof Error && cause.message.startsWith("El PDF")
         ? cause.message
@@ -1459,83 +1423,41 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
     }
   }
 
-  function updateItem(id: string, key: "description" | "category", value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, [key]: value } : item)); }
-  function updateAmount(id: string, value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, amount: Math.abs(Number(value) || 0) * (item.amount > 0 ? 1 : -1) } : item)); }
-  function addManualItem() { setItems((current) => [...current, { id: `manual-${Date.now()}`, date: "Sin fecha", description: "Movimiento por revisar", account: result?.source ?? "Desconocido", category: "Sin categoría", amount: -1, flow: "expense", confidence: 1 }]); }
+  function updateCategory(id: string, value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, category: value } : item)); }
 
-  function reparseWithSelection() {
-    if (!result?.extractedText) return;
-    const source = reviewSource.trim() || "Desconocido";
-    if (reviewKind === result.kind && source === result.source) return;
-    const parsed = parseImportedTransactions(
-      result.extractedText,
-      source,
-      result.fileName,
-      reviewKind,
-      result.mode,
-      result.ocrPageConfidences,
-    );
-    const withLearnedCategories = parsed.map((item) => {
-      const learned = categoryFromRules(item.description, categoryRules);
-      return learned ? { ...item, category: learned, confidence: 1 } : item;
-    });
-    const reparsedSummary = parseStatementSummary(result.extractedText, reviewKind);
-    const sourceDetection = result.sourceDetection && source !== result.sourceDetection.source
-      ? {
-        ...result.sourceDetection,
-        source,
-        confidence: 0,
-        status: "review" as const,
-        evidence: [...result.sourceDetection.evidence, "origen corregido por el usuario"],
-      }
-      : result.sourceDetection;
-    initialCategories.current = Object.fromEntries(withLearnedCategories.map((item) => [item.id, item.category]));
-    setItems(withLearnedCategories);
-    setSummary(reparsedSummary);
-    setResult((current) => current ? {
-      ...current,
-      source,
-      kind: reviewKind,
-      transactions: withLearnedCategories,
-      summary: reparsedSummary,
-      sourceDetection,
-    } : current);
-  }
-
-  function resetAndClose() { setStage("pick"); setProgress(0); setProgressLabel(""); setResult(null); setItems([]); setSummary({}); setReviewSource("Desconocido"); setReviewKind("unknown"); setError(""); setClassificationBusy(false); setClassificationMessage(""); initialCategories.current = {}; readerAuthorization.current = ""; readerConsent.current = false; onClose(); }
-
-  function updateSummary(key: keyof StatementSummary, value: string) {
-    setSummary((current) => {
-      const next = { ...current };
-      if (!value.trim()) delete next[key];
-      else next[key] = Number(value.replace(/,/g, "")) as never;
-      return next;
-    });
-  }
+  function resetAndClose() { setStage("pick"); setProgress(0); setProgressLabel(""); setResult(null); setItems([]); setError(""); setClassificationBusy(false); setClassificationMessage(""); initialCategories.current = {}; readerAuthorization.current = ""; readerConsent.current = false; onClose(); }
 
   const validItems = items.filter((item) => item.description.trim().length >= 3 && Number.isFinite(item.amount) && item.amount !== 0);
-  const currentReconciliation = result
-    ? gateOcrReconciliation(
-      reconcileStatementImport(reviewKind, summary, validItems),
-      result.mode,
-      result.ocrConfidence,
-      result.ocrPageConfidences,
-    )
-    : undefined;
+  // Reconciliation is immutable parser output. Category enrichment cannot
+  // rewrite amounts, issuer, statement controls, or acceptance state.
+  const currentReconciliation = result?.reconciliation;
   const reconciliationBlocked = Boolean(currentReconciliation && currentReconciliation.status !== "valid");
   const learnedCategories = Object.fromEntries(validItems.flatMap((item) => {
     const previous = initialCategories.current[item.id];
     const key = merchantKey(item.description);
     return key && previous && previous !== item.category && item.category !== "Sin categoría" ? [[key, item.category]] : [];
   }));
-  const selectionChanged = Boolean(result && (reviewKind !== result.kind || reviewSource.trim() !== result.source));
   return <dialog ref={dialog} className="import-dialog" onCancel={(event) => { event.preventDefault(); resetAndClose(); }}><div className="dialog-head"><div><span className="dialog-icon"><FilePdf size={21} /></span><div><h2>Importar estado de cuenta</h2><p>El archivo se procesa localmente y conserva su origen.</p></div></div><button className="icon-button" aria-label="Cerrar" onClick={resetAndClose}><X size={20} /></button></div>
-    {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se detectarán banco, periodo y movimientos. Los estados escaneados se leen con OCR local y quedan pendientes de confirmación.</span>{transactionClassifierEndpoint && <small>Zen no lee PDFs: solo podrá enriquecer categorías después de una conciliación local válida.</small>}<span className="file-button">Elegir archivo</span></label>}
+    {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se aceptan Santander, BBVA y American Express únicamente cuando sus filas concilian al centavo contra el total oficial.</span>{transactionClassifierEndpoint && <small>Zen no lee PDFs: solo podrá enriquecer categorías después de una conciliación local válida.</small>}<span className="file-button">Elegir archivo</span></label>}
     {stage === "processing" && <div className="processing-state" role="status" aria-live="polite" aria-busy="true"><div className="loading-orbit" aria-hidden="true"><CircleNotch size={34} className="spinner" /><span className="loading-pulse"><i /><i /><i /></span></div><h3>{progressLabel || "Cargando estado de cuenta…"}</h3><p>Estamos leyendo y conciliando tu estado. No cierres esta ventana.</p><div className="progress-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div><small>{progress}% completado</small></div>}
     {stage === "error" && <div className="error-state"><Warning size={34} /><h3>No pudimos completar la importación</h3><p>{error}</p><button className="secondary-button" onClick={() => setStage("pick")}>Intentar de nuevo</button></div>}
-    {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Origen detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.extractionProvider === "multimodal" ? "Lector multimodal legado" : result.mode === "text" ? "Lectura directa" : "OCR en el dispositivo"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div>{result.mode === "ocr" && <div><span>Confianza OCR</span><strong>{Math.round((result.ocrConfidence ?? 0) * 100)}%</strong></div>}</div><div className={`reconciliation-callout ${currentReconciliation?.status ?? "pending"}`} role="status"><div><strong>{currentReconciliation?.status === "valid" ? "Importación conciliada" : currentReconciliation?.status === "invalid" ? "Importación bloqueada" : "Conciliación pendiente"}</strong><p>{currentReconciliation?.status === "valid" ? "Las filas extraídas coinciden con los totales declarados por el estado." : currentReconciliation?.reason ?? "Completa o revisa los totales declarados antes de guardar."}</p></div><small>{currentReconciliation ? `Tolerancia ±${currentReconciliation.tolerance.toFixed(2)}${reconciliationCountLabel(currentReconciliation)}` : ""}</small></div><div className="review-source-editor"><label><span>Nombre que se guardará</span><input value={reviewSource} onChange={(event) => setReviewSource(event.target.value as StatementSource)} placeholder="Ej. Santander, Nómina o Banco personal" /></label><label><span>Tipo de archivo</span><select value={reviewKind} onChange={(event) => setReviewKind(event.target.value as StatementKind)}><option value="card">Tarjeta de crédito</option><option value="bank">Cuenta bancaria</option><option value="unknown">No identificado</option></select></label>{selectionChanged && <button type="button" className="text-button" onClick={reparseWithSelection}>Releer filas con esta configuración</button>}<p>Corrige el origen aquí si el PDF usa una marca o formato que todavía no conocemos. Las categorías que ajustes se recordarán para el siguiente mes.</p>{transactionClassifierEndpoint && currentReconciliation?.status === "valid" && validItems.length > 0 && <div className="classifier-callout"><div><strong>Clasificación opcional con Zen</strong><small>Envía solo filas ya conciliadas; no envía el PDF y no puede cambiar importes ni transferencias.</small></div><button type="button" className="secondary-button" onClick={classifyExpensesWithZen} disabled={classificationBusy || !readerPreflightReady}>{classificationBusy ? "Clasificando…" : "Clasificar gastos"}</button>{classificationMessage && <span role="status">{classificationMessage}</span>}</div>}</div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>Marcelito convirtió sus páginas a imagen y ejecutó OCR en tu navegador. Confirma los importes y agrega cualquier movimiento que no se haya reconocido.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
-      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "No se puede guardar hasta conciliar el estado" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: reviewSource.trim() || "Desconocido", accountKey: result.accountKey, kind: reviewKind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, extractionProvider: result.extractionProvider, extractionModel: result.extractionModel, extractionPromptVersion: result.extractionPromptVersion, mode: result.mode, transactions: validItems.map((item) => ({ ...item, account: reviewSource.trim() || item.account })) , summary, reconciliation: currentReconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Corregir conciliación para guardar" : validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado conciliado"}</button></div></div>}
-    {stage === "review" && result && <StatementSummaryForm source={reviewSource} kind={reviewKind} summary={summary} onChange={updateSummary} />}
+    {stage === "review" && result && <div className="review-state">
+      <div className="review-summary">
+        <div><span>Origen detectado</span><strong>{result.source}</strong></div>
+        <div><span>Periodo</span><strong>{result.period}</strong></div>
+        <div><span>Parser</span><strong>{result.parserId ?? "No compatible"}</strong></div>
+        <div><span>Sección</span><strong>{result.sourceSection ?? "No encontrada"}</strong></div>
+        <div><span>Movimientos</span><strong>{result.transactions.length}</strong></div>
+      </div>
+      <div className={`reconciliation-callout ${currentReconciliation?.status ?? "pending"}`} role="status">
+        <div><strong>{currentReconciliation?.status === "valid" ? "Importación conciliada al centavo" : "Importación rechazada"}</strong><p>{currentReconciliation?.status === "valid" ? "Las filas deterministas coinciden exactamente con los totales oficiales. Emisor, importes y controles no se pueden editar." : currentReconciliation?.reason ?? "El archivo no entrará al libro canónico."}</p></div>
+        <small>{currentReconciliation ? `Tolerancia ${currentReconciliation.tolerance.toFixed(2)}${reconciliationCountLabel(currentReconciliation)}` : ""}</small>
+      </div>
+      {transactionClassifierEndpoint && currentReconciliation?.status === "valid" && validItems.length > 0 && <div className="classifier-callout"><div><strong>Clasificación opcional con Zen</strong><small>Solo enriquece filas ya conciliadas; no puede cambiar importes, emisor ni aceptación.</small></div><button type="button" className="secondary-button" onClick={classifyExpensesWithZen} disabled={classificationBusy || !readerPreflightReady}>{classificationBusy ? "Clasificando…" : "Clasificar gastos"}</button>{classificationMessage && <span role="status">{classificationMessage}</span>}</div>}
+      {result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Lectura OCR con plantilla fija</strong><p>Solo se aceptaron filas dentro de la sección contractual del emisor. No se permiten correcciones manuales de importes; si el archivo no concilia, debe reimportarse.</p></div></div>}
+      {items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><strong>{item.description}</strong><small>{item.date} · página {item.extractionEvidence?.page ?? "—"}</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)} disabled={reconciliationBlocked}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><span className={item.amount > 0 ? "review-amount positive" : "review-amount"}>{moneyPrecise.format(item.amount)}</span></div>)}</div> : <EmptyState title="Importación rechazada" body="No se extrajeron movimientos contractuales. Este archivo no puede guardarse ni afectar los KPI." />}
+      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "El parser rechazó el estado; no admite desbloqueo manual" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: result.source, accountKey: result.accountKey, kind: result.kind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, parserId: result.parserId, sourceSection: result.sourceSection, extractionProvider: result.extractionProvider, extractionModel: result.extractionModel, extractionPromptVersion: result.extractionPromptVersion, mode: result.mode, transactions: validItems, summary: result.summary, reconciliation: result.reconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Estado rechazado" : `Guardar estado y ${validItems.length} movimientos`}</button></div>
+    </div>}
   </dialog>;
 }
 
