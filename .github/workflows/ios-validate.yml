@@ -30,6 +30,9 @@ jobs:
           xcodebuild -version
           swift --version
 
+      - name: Validar configuración del corpus privado
+        run: python3 apps/ios/scripts/test_configure_corpus_scheme.py
+
       - name: Instalar XcodeGen
         shell: bash
         run: brew install xcodegen

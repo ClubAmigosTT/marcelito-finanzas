@@ -9,8 +9,9 @@ fi
 corpus_dir="$(cd "$corpus_dir" && pwd)"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/../.." && pwd)"
-cd "$script_dir"
+ios_dir="$(cd "$script_dir/.." && pwd)"
+repo_root="$(cd "$ios_dir/../.." && pwd)"
+cd "$ios_dir"
 
 # A real/private corpus can provide its own golden manifest without placing
 # financial documents in the repository.  Resolve it before xcodebuild so the
@@ -52,6 +53,13 @@ if ! command -v xcodebuild >/dev/null 2>&1; then
 fi
 
 xcodegen generate --spec project.yml
+
+# xcodebuild's environment is not the test host's environment. Put the
+# private corpus paths explicitly in the generated TestAction so missing
+# propagation cannot silently turn real-file tests into XCTSkip.
+export MARCELITO_PDF_CORPUS_DIR="$corpus_dir"
+python3 "$script_dir/configure-corpus-scheme.py" \
+  "$ios_dir/Marcelito.xcodeproj/xcshareddata/xcschemes/Marcelito.xcscheme"
 
 destination="$(xcrun simctl list devices available | awk -F '[()]' '/iPhone/{print "platform=iOS Simulator,id=" $2; exit}')"
 if [[ -z "$destination" ]]; then
