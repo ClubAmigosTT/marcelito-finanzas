@@ -182,9 +182,28 @@ test("Santander usa rectángulo y columnas fijas de la tabla", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /private static func parseSantanderTable\(/);
   assert.match(source, /let requiredLabels = \["fecha", "folio", "descripcion", "deposito", "retiro", "saldo"\]/);
-  assert.match(source, /calibrationReason: "geometría fija relativa a la tabla Santander"/);
+  assert.match(source, /calibrationReason: "geometría fija de la tabla Carta Santander"/);
+  assert.match(source, /movementMinX: tableX\(0\.610\)/);
+  assert.match(source, /depositMaxX: tableX\(0\.742\)/);
+  assert.match(source, /balanceMinX: tableX\(0\.874\)/);
   assert.match(source, /requireFixedMovementColumn: true/);
-  assert.match(source, /let santanderResult = Self\.parseSantanderTable\(ocrObservations/);
+  assert.match(source, /requireBalanceEquation: true/);
+  assert.match(source, /let santanderResult = Self\.parseSantanderTable\(\s*ocrObservations/);
+});
+
+test("Santander conserva cajas nativas de fecha e importe", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /let dateBoxes: \[OCRTextBox\]/);
+  assert.match(source, /let amountBoxes: \[OCRTextBox\]/);
+  assert.match(source, /candidate\.boundingBox\(for: stringRange\)/);
+  assert.match(source, /observation\.dateBoxes\.first/);
+  assert.match(source, /if !observation\.amountBoxes\.isEmpty/);
+});
+
+test("Santander no inventa conteos a partir de días del periodo", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /if source\.localizedCaseInsensitiveCompare\("BBVA"\) == \.orderedSame \{\s*summary\.depositCount/);
+  assert.doesNotMatch(source, /if source\.localizedCaseInsensitiveCompare\("Santander"\).*summary\.depositCount/s);
 });
 
 test("BBVA exige calibración y dirección explícita por columna", async () => {

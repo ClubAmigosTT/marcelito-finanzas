@@ -1009,6 +1009,133 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 1_000 })
     }
 
+    func testSantanderTableUsesFixedPrintedColumnsAndExactRunningBalance() {
+        let fixtures = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.09, y: 0.98, width: 0.42),
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.92, width: 0.06),
+            OCRObservationFixture(text: "FOLIO", x: 0.13, y: 0.92, width: 0.05),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.20, y: 0.92, width: 0.14),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.62, y: 0.92, width: 0.07),
+            OCRObservationFixture(text: "RETIRO", x: 0.74, y: 0.92, width: 0.06),
+            OCRObservationFixture(text: "SALDO", x: 0.86, y: 0.92, width: 0.06),
+            OCRObservationFixture(text: "16-JUL-2026", x: 0.05, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "PAGO TRANSFERENCIA SPEI", x: 0.20, y: 0.82, width: 0.28),
+            OCRObservationFixture(text: "30.00", x: 0.74, y: 0.82, width: 0.06),
+            OCRObservationFixture(text: "970.00", x: 0.86, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "CLAVE DE RASTREO 123456", x: 0.20, y: 0.79, width: 0.30),
+            OCRObservationFixture(page: 1, text: "17-JUL-2026", x: 0.05, y: 0.82, width: 0.08),
+            OCRObservationFixture(page: 1, text: "ABONO PAGO DE NOMINA", x: 0.20, y: 0.82, width: 0.28),
+            OCRObservationFixture(page: 1, text: "500.00", x: 0.62, y: 0.82, width: 0.07),
+            OCRObservationFixture(page: 1, text: "1,470.00", x: 0.86, y: 0.82, width: 0.08),
+            OCRObservationFixture(page: 1, text: "TOTAL", x: 0.20, y: 0.15, width: 0.08),
+        ]
+
+        let rows = FinanceStore.santanderTableRowsForTesting(
+            fixtures,
+            fileName: "estado-julio-2026.pdf",
+            openingBalance: Decimal(string: "1000.00")!
+        )
+
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertEqual(rows.map(\.amount), [Decimal(string: "-30.00")!, Decimal(string: "500.00")!])
+        XCTAssertEqual(rows.map { $0.extractionEvidence?.selectedColumn }, ["RETIRO", "DEPÓSITO"])
+        XCTAssertEqual(rows.map { $0.extractionEvidence?.page }, [1, 2])
+        XCTAssertFalse(rows[0].title.localizedCaseInsensitiveContains("clave de rastreo"))
+    }
+
+    func testSantanderTableRejectsARowWhosePrintedBalanceDoesNotMatchItsColumn() {
+        let fixtures = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.09, y: 0.98, width: 0.42),
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.92, width: 0.06),
+            OCRObservationFixture(text: "FOLIO", x: 0.13, y: 0.92, width: 0.05),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.20, y: 0.92, width: 0.14),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.62, y: 0.92, width: 0.07),
+            OCRObservationFixture(text: "RETIRO", x: 0.74, y: 0.92, width: 0.06),
+            OCRObservationFixture(text: "SALDO", x: 0.86, y: 0.92, width: 0.06),
+            OCRObservationFixture(text: "16-JUL-2026", x: 0.05, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "PAGO TRANSFERENCIA", x: 0.20, y: 0.82, width: 0.25),
+            OCRObservationFixture(text: "30.00", x: 0.74, y: 0.82, width: 0.06),
+            OCRObservationFixture(text: "900.00", x: 0.86, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "TOTAL", x: 0.20, y: 0.15, width: 0.08),
+        ]
+
+        let rows = FinanceStore.santanderTableRowsForTesting(
+            fixtures,
+            fileName: "estado-julio-2026.pdf",
+            openingBalance: Decimal(string: "1000.00")!
+        )
+
+        XCTAssertTrue(rows.isEmpty)
+    }
+
+    func testSantanderSummaryDoesNotTreatDaysInPeriodAsMovementCounts() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            Banco Santander México, S.A., Institución de Banca Múltiple
+            Cuenta de cheques
+            Saldo inicial 55,627.93
+            Días del periodo 31
+            + Depósitos 36,187.42
+            - Retiros 64,161.11
+            = Saldo final 27,654.24
+            """,
+            fileName: "estado-agosto-2026.pdf",
+            sourceHint: "Santander"
+        )
+
+        XCTAssertEqual(snapshot.summary?.depositTotal, Decimal(string: "36187.42")!)
+        XCTAssertEqual(snapshot.summary?.withdrawalTotal, Decimal(string: "64161.11")!)
+        XCTAssertNil(snapshot.summary?.depositCount)
+        XCTAssertNil(snapshot.summary?.withdrawalCount)
+    }
+
+    func testSantanderFourStatementControlsReconcileAtCentPrecision() {
+        func rows(opening: Decimal, deposit: Decimal, withdrawal: Decimal, closing: Decimal) -> [Movement] {
+            func money(_ value: Decimal) -> String {
+                String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), NSDecimalNumber(decimal: value).doubleValue)
+            }
+            let afterDeposit = opening + deposit
+            let fixtures = [
+                OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.09, y: 0.98, width: 0.42),
+                OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.92, width: 0.06),
+                OCRObservationFixture(text: "FOLIO", x: 0.13, y: 0.92, width: 0.05),
+                OCRObservationFixture(text: "DESCRIPCION", x: 0.20, y: 0.92, width: 0.14),
+                OCRObservationFixture(text: "DEPOSITO", x: 0.62, y: 0.92, width: 0.07),
+                OCRObservationFixture(text: "RETIRO", x: 0.74, y: 0.92, width: 0.06),
+                OCRObservationFixture(text: "SALDO", x: 0.86, y: 0.92, width: 0.06),
+                OCRObservationFixture(text: "16-JUL-2026", x: 0.05, y: 0.82, width: 0.08),
+                OCRObservationFixture(text: "ABONO CONTROL", x: 0.20, y: 0.82, width: 0.20),
+                OCRObservationFixture(text: money(deposit), x: 0.62, y: 0.82, width: 0.08),
+                OCRObservationFixture(text: money(afterDeposit), x: 0.86, y: 0.82, width: 0.09),
+                OCRObservationFixture(text: "17-JUL-2026", x: 0.05, y: 0.72, width: 0.08),
+                OCRObservationFixture(text: "RETIRO CONTROL", x: 0.20, y: 0.72, width: 0.20),
+                OCRObservationFixture(text: money(withdrawal), x: 0.74, y: 0.72, width: 0.08),
+                OCRObservationFixture(text: money(closing), x: 0.86, y: 0.72, width: 0.09),
+                OCRObservationFixture(text: "TOTAL", x: 0.20, y: 0.15, width: 0.08),
+            ]
+            return FinanceStore.santanderTableRowsForTesting(
+                fixtures,
+                fileName: "estado-2026.pdf",
+                openingBalance: opening
+            )
+        }
+
+        let controls: [(Decimal, Decimal, Decimal, Decimal)] = [
+            (37075.03, 49222.45, 61676.00, 24621.48),
+            (24621.48, 98629.30, 35449.02, 87801.76),
+            (87801.76, 40833.38, 73007.21, 55627.93),
+            (55627.93, 36187.42, 64161.11, 27654.24),
+        ]
+
+        for (opening, deposit, withdrawal, closing) in controls {
+            let parsed = rows(opening: opening, deposit: deposit, withdrawal: withdrawal, closing: closing)
+            XCTAssertEqual(parsed.count, 2)
+            XCTAssertEqual(parsed.filter { $0.amount > 0 }.reduce(Decimal(0)) { $0 + $1.amount }, deposit)
+            XCTAssertEqual(parsed.filter { $0.amount < 0 }.reduce(Decimal(0)) { $0 + abs($1.amount) }, withdrawal)
+            XCTAssertEqual(opening + parsed.reduce(Decimal(0)) { $0 + $1.amount }, closing)
+        }
+    }
+
     func testAmexOCRUsesLocalAmountAfterForeignCurrencyConversion() {
         let rows = FinanceStore.amexOCRRowsForTesting([
             // Cover/header content must not become a movement merely because
