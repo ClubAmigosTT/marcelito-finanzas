@@ -378,6 +378,8 @@ struct ImportSummary {
     /// Row-level visual decisions retained for the explicit private
     /// diagnostics export. Normal dashboard calculations ignore this field.
     var rowDiagnostics: [OCRRowDiagnostic] = []
+    /// Candidate rows for explicit private device audits only, including rejected statements.
+    var auditRows: [NativeAuditRow] = []
     /// Legacy compatibility markers. They remain false for new imports and
     /// allow old diagnostic envelopes to be displayed without reusing their
     /// rows as canonical data.
@@ -577,8 +579,8 @@ enum LedgerRefreshState: Equatable {
 /// Resultado inmutable de la fase pesada de lectura. PDFKit y Vision se
 /// ejecutan fuera del actor de interfaz y solo este snapshot cruza de vuelta
 /// para escribir el libro canónico.
-private struct PDFImportExtraction: @unchecked Sendable {
-    let documentData: Data
+private struct PDFImportExtraction: Codable, @unchecked Sendable {
+    var documentData: Data
     let fileName: String
     let pageCount: Int
     let sourceFingerprint: String
@@ -659,7 +661,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-2026.09.05.35"
+    static let readerVersion = "ios-reader-2026.09.06.36"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -766,6 +768,16 @@ final class FinanceStore {
     }
 
 #if DEBUG
+    /// Real PDF audit seam: runs the production PDFKit/Vision extraction,
+    /// preserving rejected candidates for comparison against a private golden.
+    static func pdfRowSnapshotForTesting(data: Data, fileName: String) throws -> ReaderParseSnapshot {
+        let result = try extractPDF(data: data, fileName: fileName, allowOCR: true,
+                                    sourceOverride: nil, kindOverride: nil, learnedRules: [:])
+        return ReaderParseSnapshot(sourceDetection: result.sourceDetection, source: result.source,
+                                   accountKey: result.accountKey, kind: result.kind, period: result.period,
+                                   movements: result.candidates, summary: result.summary)
+    }
+
     /// Compact probe used by the native contract when a text-layer fixture
     /// fails. It is compiled only for tests/debug builds and never persisted
     /// or shown in the application; keeping it here makes a boolean gate
@@ -3449,7 +3461,7 @@ final class FinanceStore {
         // the evidence gate then quarantined the entire statement. The
         // parser treats these sentinels as structural markers and carries the
         // real 1-based page into each movement's provenance.
-        let extractedText = (0..<document.pageCount)
+        var extractedText = (0..<document.pageCount)
             .compactMap { index -> String? in
                 guard let pageText = document.page(at: index)?.string,
                       !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
@@ -3463,12 +3475,26 @@ final class FinanceStore {
         // page through Vision, prove that the text-only rows reconcile with
         // the issuer controls. This is the same safety rule used at commit
         // time, so a hidden administrative layer cannot win by accident.
-        let textLayerReconciles = Self.textLayerReconciles(
+        var textLayerReconciles = Self.textLayerReconciles(
             text: extractedText,
             fileName: fileName,
             sourceOverride: cleanedSourceOverride,
             kindOverride: kindOverride
         )
+
+        // Match the web reader's visual ordering before resorting to OCR.
+        // PDFKit's plain string can return columns in content-stream order.
+        // Only adopt the reconstructed layout when the unchanged accounting
+        // controls accept it; sorting is never itself proof of correctness.
+        if !textLayerReconciles {
+            let layoutText = SelectablePDFLayout.text(from: document)
+            if !layoutText.isEmpty, layoutText != extractedText,
+               Self.textLayerReconciles(text: layoutText, fileName: fileName,
+                                       sourceOverride: cleanedSourceOverride, kindOverride: kindOverride) {
+                extractedText = layoutText
+                textLayerReconciles = true
+            }
+        }
 
         // A short administrative layer is not a trustworthy movement table;
         // a structured layer that failed reconciliation is not trustworthy
@@ -3874,6 +3900,40 @@ final class FinanceStore {
         )
     }
 
+    private static func extractPDFUsingCache(
+        data: Data, fileName: String, allowOCR: Bool,
+        sourceOverride: String?, kindOverride: StatementKind?, learnedRules: [String: String]
+    ) throws -> PDFImportExtraction {
+        let fingerprint = pdfFingerprint(data)
+        let keyData = try JSONSerialization.data(withJSONObject: [
+            "reader": readerVersion, "fingerprint": fingerprint, "fileName": fileName,
+            "allowOCR": allowOCR, "source": sourceOverride ?? "",
+            "kind": kindOverride?.rawValue ?? "", "rules": learnedRules,
+        ], options: [.sortedKeys])
+        let key = pdfFingerprint(keyData)
+        let cache = PDFReadingCache.local
+        if var cached = cache?.load(PDFImportExtraction.self, key: key),
+           cached.sourceFingerprint == fingerprint {
+            cached.documentData = data
+            return cached
+        }
+        let result = try extractPDF(data: data, fileName: fileName, allowOCR: allowOCR,
+                                    sourceOverride: sourceOverride, kindOverride: kindOverride,
+                                    learnedRules: learnedRules)
+        // Keep uncertain readings out of the cache so an explicit retry always
+        // performs fresh extraction. Certification also bypasses this helper.
+        let reconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
+            kind: result.kind, summary: result.summary, movements: result.candidates)
+        if reconciliation.status == .valid, result.sourceDetection.status == .verified,
+           !result.ocrFallbackNeedsReview, !result.ocrColumnCalibrationNeedsReview,
+           !result.ocrConfidenceNeedsReview {
+            var compact = result
+            compact.documentData = Data() // Never duplicate the PDF in JSON.
+            cache?.store(compact, key: key)
+        }
+        return result
+    }
+
     func importPDF(
         from url: URL,
         allowOCR: Bool = true,
@@ -3896,7 +3956,7 @@ final class FinanceStore {
             throw FinanceImportError.unreadableDocument
         }
         let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
-        let extraction = try Self.extractPDF(
+        let extraction = try Self.extractPDFUsingCache(
             data: documentData,
             fileName: url.lastPathComponent,
             allowOCR: allowOCR,
@@ -3943,7 +4003,7 @@ final class FinanceStore {
         try Task.checkCancellation()
         let localExtraction = try await Task.detached(priority: .userInitiated) {
             try autoreleasepool {
-                try Self.extractPDF(
+                try Self.extractPDFUsingCache(
                     data: documentData,
                     fileName: fileName,
                     allowOCR: allowOCR,
@@ -4089,6 +4149,7 @@ final class FinanceStore {
             fileSizeBytes: extraction.documentData.count,
             pageCount: extraction.pageCount,
             rowDiagnostics: extraction.rowDiagnostics,
+            auditRows: candidates.map(NativeAuditRow.init),
             multimodalFallbackAttempted: extraction.multimodalFallbackAttempted,
             multimodalFallbackError: extraction.multimodalFallbackError
         )
@@ -6643,8 +6704,10 @@ final class FinanceStore {
                 ? "par movimiento/saldo por geometría colapsada"
                 : "columna visual"
             selectionReason = "\(source); corrección por delta del saldo corrido; \(columns.calibrationReason)"
-        } else if let balanceDelta {
+        } else if let balanceDelta, deltaMatchesColumn {
             selectionReason = "importe dentro de la columna \(selectedColumn.lowercased()); ecuación del saldo corrido confirma delta \(NSDecimalNumber(decimal: balanceDelta).stringValue); \(columns.calibrationReason)"
+        } else if balanceDelta != nil {
+            selectionReason = "importe explícito conservado en \(selectedColumn.lowercased()); delta del saldo no coincide y no se usa para corregir la fila; \(columns.calibrationReason)"
         } else if useWholeRowPair {
             selectionReason = "penúltimo importe de la fila; último importe reservado para saldo corrido; \(columns.calibrationReason)"
         } else {

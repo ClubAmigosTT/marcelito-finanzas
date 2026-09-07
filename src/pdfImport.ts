@@ -3,7 +3,7 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-2026.09.01.9";
+export const PDF_READER_VERSION = "web-reader-2026.09.06.10";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
@@ -1094,15 +1094,16 @@ export function extractTransactions(text: string, source: StatementSource, fileN
           && selectedCents.startsWith("1")
           && selectedCents.slice(1) === deltaCents;
         if (Number.isFinite(delta) && Math.abs(delta) > 0 && Math.abs(delta) < 100_000_000
-          // A running-balance delta can repair a one- or two-cent OCR typo.
-          // It can also recover a token whose separators were merged into a
+          // A balance can itself contain an OCR typo. Never rewrite a
+          // plausible explicit amount for a small delta discrepancy: two
+          // adjacent errors can cancel in totals while corrupting both rows.
+          // Recover only a token whose separators were merged into a
           // clearly impossible magnitude (for example 16,334.80 read as
           // 1,633,480), but only while the delta remains within the balance's
           // plausible scale. Never replace a normal amount with a drifting
           // OCR balance (common on scanned BBVA statements).
           && Math.abs(Math.abs(delta) - Math.abs(amountValue)) > 0.05
-          && (Math.abs(Math.abs(delta) - Math.abs(amountValue)) <= 2
-            || (malformedMagnitude && deltaMagnitude <= balanceScale * 1.25 + 0.05)
+          && ((malformedMagnitude && deltaMagnitude <= balanceScale * 1.25 + 0.05)
             || (fusedSeparator && deltaMagnitude <= balanceScale * 1.25 + 0.05)
             || (leadingOneConfusion && deltaMagnitude <= balanceScale * 1.25 + 0.05))) {
           amountValue = Math.abs(delta);

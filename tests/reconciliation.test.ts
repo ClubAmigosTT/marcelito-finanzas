@@ -7,6 +7,19 @@ import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
 import { prepareStoredLedger, prepareStoredStatements } from "../src/statementMigration.ts";
 import type { Statement, Transaction } from "../src/types.ts";
 
+test("un saldo OCR incorrecto no modifica dos importes explícitos que se compensan", () => {
+  const text = [
+    "Banco Santander México",
+    "PERIODO 01-JUL-2026 AL 31-JUL-2026",
+    "FECHA FOLIO DESCRIPCION DEPOSITO RETIRO SALDO",
+    "01-JUL-2026 1234567 CONSUMO LOCAL TIENDA 30.00 1000.00",
+    "02-JUL-2026 1234568 CONSUMO LOCAL TIENDA 90.00 909.40",
+    "03-JUL-2026 1234569 CARGO TRANSF RAPIDA SANTANDER 500.00 410.00",
+  ].join("\n");
+  const rows = extractTransactions(text, "Santander", "synthetic.pdf", "bank");
+  assert.deepEqual(rows.map(row => row.amount), [-30, -90, -500]);
+});
+
 const bank = (id: string, source: string, period: string): Statement => ({
   id,
   source,

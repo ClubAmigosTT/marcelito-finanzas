@@ -165,7 +165,7 @@ test("Amex conserva PDFKit cuando su capa de texto ya concilia", async () => {
   // OCR is a recovery path only. A reconciled Amex text layer must win so
   // PDFKit's native domestic/foreign/payment/MSI section boundaries are not
   // lost in a second, noisier Vision pass.
-  assert.match(source, /let textLayerReconciles = Self\.textLayerReconciles\(/);
+  assert.match(source, /var textLayerReconciles = Self\.textLayerReconciles\(/);
   assert.match(source, /let isAmexLayout = source\.localizedCaseInsensitiveContains\("Amex"\)[\s\S]*?Self\.rebuildAmexSelectableLines/);
   assert.match(source, /let shouldAttemptOCR = allowOCR && !textLayerReconciles/);
 });
