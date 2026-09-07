@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
-import { detectAccountKey, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, PDF_READER_VERSION, rebuildPdfText, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
+import { detectAccountKey, detectPeriod, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, PDF_READER_VERSION, rebuildPdfText, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import type { StatementKind, StatementSource } from "../src/types.ts";
 
 const execFile = promisify(execFileCallback);
@@ -130,6 +130,7 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
   }
   const sourceDetection = detectSourceEvidence(text, fileName);
   const accountKey = detectAccountKey(text, sourceDetection.source);
+  const period = detectPeriod(text);
   const kind = kindFor(sourceDetection.source);
   const transactions = kind === "unknown" ? [] : mode === "ocr"
     ? parseImportedTransactions(text, sourceDetection.source, fileName, kind, "ocr", ocrPageConfidences)
@@ -189,6 +190,7 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
       statusAfter: reconciliation.status,
     },
     source: sourceDetection.source,
+    period,
     accountKey,
     sourceStatus: sourceDetection.status,
     sourceConfidence: Number(sourceDetection.confidence.toFixed(4)),

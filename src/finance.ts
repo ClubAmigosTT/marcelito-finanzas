@@ -150,6 +150,7 @@ export type ProjectionMonth = {
   projectedSpend: number;
   projectedPayments: number;
   projectedMsi: number;
+  paymentBasis: string;
   projectedSavings: number;
   projectedDebt: number | undefined;
   projectedLiquidity: number | undefined;
@@ -382,7 +383,7 @@ export function isCardStatement(statement: Statement) {
   return (statement.kind ?? defaultStatementKind(statement.source)) === "card";
 }
 
-function isRealIncomeTransaction(transaction: Transaction, statements: Statement[]) {
+export function isRealIncomeTransaction(transaction: Transaction, statements: Statement[]) {
   if (transaction.flow !== "income") return false;
   const kind = inferTransactionKind(transaction);
   if (kind === "credit" || kind === "refund") return false;
@@ -399,13 +400,15 @@ export function isSpendTransaction(transaction: Transaction) {
 }
 
 function isTravelTransaction(transaction: Transaction) {
-  if (transaction.travelRelated) return true;
+  if (transaction.travelRelated || transaction.foreignCurrency) return true;
   const text = normalize(`${transaction.description} ${transaction.category}`);
-  return /viaje|hotel|hospedaje|aerolinea|vuelo|avion|transporte|uber|taxi|metro|renta de auto|destino|equipaje/.test(text);
+  return normalize(transaction.category) === "viajes"
+    || /viaje|hotel|hospedaje|airbnb|aerolinea|aeropuerto|vuelo|avion|renta de auto|destino|equipaje/.test(text);
 }
 
 function isExtraordinaryTransaction(transaction: Transaction) {
-  if (isTravelTransaction(transaction)) return true;
+  if (isTravelTransaction(transaction)) return false;
+  if (transaction.extraordinary) return true;
   const text = normalize(`${transaction.description} ${transaction.category}`);
   return /evento|boda|fiesta|concierto|festival|mueble|electrodomestico|reparacion|hospital|impuesto|seguro|regalo|celebracion|mudanza|matricula|colegiatura|anualidad|emergencia|atipic/.test(text);
 }
@@ -460,6 +463,7 @@ function buildProjection(
   manualSpend: number,
   latestMsiMonthlyLoad: number | undefined,
   latestPaymentForNoInterest: number | undefined,
+  latestMinimumPlusMsi: number | undefined,
 ): ProjectionSummary {
   const recent = analyticsPeriods.slice(0, 3);
   const recentSpend = recent.map((period) => period.spend).filter((value) => value > 0);
@@ -471,8 +475,9 @@ function buildProjection(
   const incomePeriodCount = analyticsPeriods.length || periodCount;
   const monthlyIncome = average(recentIncome) || (incomePeriodCount ? realIncome / incomePeriodCount : realIncome);
   const fixedSpend = average(recentFixedSpend) || monthlySpend;
-  const monthlyPayments = average(recentPayments) || latestPaymentForNoInterest || 0;
   const monthlyMsi = average(recentMsi) || latestMsiMonthlyLoad || 0;
+  const recurringPayment = average(recentPayments) || monthlyMsi;
+  const firstDetectedPayment = latestPaymentForNoInterest || latestMinimumPlusMsi || recurringPayment;
   const cardShare = consolidatedRealSpend > 0 ? Math.min(1, Math.max(0, cardSpend / consolidatedRealSpend)) : 0;
   const cashSpendShare = consolidatedRealSpend > 0 ? Math.min(1, Math.max(0, (directBankSpend + manualSpend) / consolidatedRealSpend)) : 1 - cardShare;
   const baseDate = parsePeriodDate(currentPeriodKey);
@@ -481,7 +486,10 @@ function buildProjection(
   const months: ProjectionMonth[] = Array.from({ length: 12 }, (_, index) => {
     const monthOffset = index + 1;
     const projectedSpend = monthlySpend;
-    const projectedPayments = monthlyPayments;
+    const paymentCandidate = monthOffset === 1 ? firstDetectedPayment : recurringPayment;
+    const projectedPayments = projectedDebt === undefined
+      ? paymentCandidate
+      : Math.min(Math.max(0, projectedDebt + projectedSpend * cardShare), paymentCandidate);
     const expectedIncome = monthlyIncome;
     const cardCharges = projectedSpend * cardShare;
     const cashSpend = projectedSpend * cashSpendShare;
@@ -500,6 +508,15 @@ function buildProjection(
       projectedSpend,
       projectedPayments,
       projectedMsi: monthlyMsi,
+      paymentBasis: monthOffset === 1 && latestPaymentForNoInterest
+        ? "Pago para no generar intereses detectado"
+        : monthOffset === 1 && latestMinimumPlusMsi
+          ? "Pago mínimo + MSI detectado"
+          : recentPayments.length
+            ? "Promedio de pagos de 3 periodos"
+            : monthlyMsi
+              ? "Carga MSI detectada"
+              : "Sin pago detectado",
       projectedSavings: expectedIncome - projectedSpend,
       projectedDebt,
       projectedLiquidity,
@@ -513,7 +530,7 @@ function buildProjection(
     horizon3: months[2],
     horizon6: months[5],
     horizon12: months[11],
-    assumption: "Estimación basada en el promedio de los últimos 3 periodos disponibles; no anticipa cambios futuros.",
+    assumption: "Ingresos y gasto usan hasta 3 periodos recientes; el primer pago usa el importe detectado en el último estado y los siguientes el promedio de pagos o la carga MSI disponible. No anticipa compras ni ingresos nuevos.",
   };
 }
 
@@ -526,18 +543,21 @@ function buildExecutiveAlerts(
   currentMonthNetFlow: number,
 ): ExecutiveAlert[] {
   const current = analyticsPeriods[0];
-  const previous = analyticsPeriods[1];
   const alerts: ExecutiveAlert[] = [];
   const priorSpend = analyticsPeriods.slice(1, 4).map((period) => period.spend).filter((value) => value > 0);
   const averagePriorSpend = average(priorSpend);
+  const priorDebt = analyticsPeriods.slice(1, 4).map((period) => period.debtTotal).filter(hasNumber);
+  const averagePriorDebt = average(priorDebt);
+  const priorCash = analyticsPeriods.slice(1, 4).map((period) => period.cashAvailable).filter(hasNumber);
+  const averagePriorCash = average(priorCash);
   if (current && averagePriorSpend > 0 && current.spend > averagePriorSpend * 1.25) {
     alerts.push({ id: "spend-above-average", severity: "medium", title: "Gasto por encima de tu ritmo", body: `Este periodo superó en ${Math.round((current.spend / averagePriorSpend - 1) * 100)}% el promedio reciente.`, action: "Revisa las categorías que más crecieron." });
   }
-  if (current?.debtTotal !== undefined && previous?.debtTotal !== undefined && current.debtTotal > previous.debtTotal * 1.1) {
-    alerts.push({ id: "debt-growth", severity: "high", title: "La deuda está creciendo", body: `Subió ${Math.round((current.debtTotal / Math.max(previous.debtTotal, 1) - 1) * 100)}% frente al periodo anterior.`, action: "Prioriza un pago mayor al mínimo." });
+  if (current?.debtTotal !== undefined && averagePriorDebt > 0 && current.debtTotal > averagePriorDebt * 1.1) {
+    alerts.push({ id: "debt-growth", severity: "high", title: "La deuda está sobre tu promedio", body: `Está ${Math.round((current.debtTotal / averagePriorDebt - 1) * 100)}% por encima del promedio de los 3 periodos anteriores.`, action: "Prioriza un pago mayor al mínimo." });
   }
-  if (current?.cashAvailable !== undefined && previous?.cashAvailable !== undefined && current.cashAvailable < previous.cashAvailable * 0.85) {
-    alerts.push({ id: "liquidity-drop", severity: "high", title: "Cayó tu liquidez", body: `El efectivo disponible bajó ${Math.round((1 - current.cashAvailable / Math.max(previous.cashAvailable, 1)) * 100)}% frente al periodo anterior.`, action: "Protege efectivo antes de asumir nuevos gastos." });
+  if (current?.cashAvailable !== undefined && averagePriorCash > 0 && current.cashAvailable < averagePriorCash * 0.85) {
+    alerts.push({ id: "liquidity-drop", severity: "high", title: "La liquidez está bajo tu promedio", body: `El efectivo disponible está ${Math.round((1 - current.cashAvailable / averagePriorCash) * 100)}% debajo del promedio de los 3 periodos anteriores.`, action: "Protege efectivo antes de asumir nuevos gastos." });
   }
   const topCategory = categoryDistribution[0];
   if (topCategory && topCategory.share >= 0.4) {
@@ -897,7 +917,8 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
       : undefined
   )));
   const creditUtilizationRate = creditUsed !== undefined && creditLimit ? creditUsed / creditLimit : undefined;
-  const ordinarySpend = Math.max(0, consolidatedRealSpend - travelSpend);
+  const extraordinarySpendTotal = sum(transactions.filter((transaction) => isSpendTransaction(transaction) && isExtraordinaryTransaction(transaction) && !isTravelTransaction(transaction)).map((transaction) => absolute(transaction.amount)));
+  const ordinarySpend = Math.max(0, consolidatedRealSpend - travelSpend - extraordinarySpendTotal);
   const transactionPeriodKeys = transactions
     .map((transaction) => transactionPeriodKey(transaction, statements))
     .filter((key): key is string => Boolean(key));
@@ -952,8 +973,8 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
       ? Math.max(0, parsedGrossSpend - refundsForPeriod)
       : Math.max(0, statementSpendFallback - refundsForPeriod);
     const income = sum(periodTransactions.filter((transaction) => isRealIncomeTransaction(transaction, statements)).map((transaction) => absolute(transaction.amount)));
-    const extraordinarySpend = Math.min(spend, sum(linkedSpend.filter(isExtraordinaryTransaction).map((transaction) => absolute(transaction.amount))));
     const travelSpendForPeriod = Math.min(spend, sum(linkedSpend.filter(isTravelTransaction).map((transaction) => absolute(transaction.amount))));
+    const extraordinarySpend = Math.min(Math.max(0, spend - travelSpendForPeriod), sum(linkedSpend.filter((transaction) => isExtraordinaryTransaction(transaction) && !isTravelTransaction(transaction)).map((transaction) => absolute(transaction.amount))));
     const bankPeriods = latestBySource(group.filter((period) => period.kind === "bank"));
     const cardPeriodsForKey = latestBySource(group.filter((period) => period.kind === "card"));
     const cash = sumKnown(bankPeriods.map((period) => period.cashBalance));
@@ -962,7 +983,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
       key,
       label: group[0]?.label ?? key,
       spend,
-      ordinarySpend: Math.max(0, spend - extraordinarySpend),
+      ordinarySpend: Math.max(0, spend - extraordinarySpend - travelSpendForPeriod),
       extraordinarySpend,
       travelSpend: travelSpendForPeriod,
       paymentTotal: sum(periodTransactions.filter((transaction) => inferTransactionKind(transaction) === "cardPayment" && transaction.statementId && cardPeriods.some((period) => period.statementId === transaction.statementId)).map((transaction) => absolute(transaction.amount))),
@@ -1195,6 +1216,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     manualSpend,
     lastDefined(cardPeriods, (period) => period.msiMonthlyLoad),
     latestCardPaymentForNoInterest,
+    latestCardMinimumPayment,
   );
   const executiveAlerts = buildExecutiveAlerts(
     analyticsPeriods,
