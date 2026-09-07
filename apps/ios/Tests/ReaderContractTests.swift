@@ -885,6 +885,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testBBVAOCRUsesCalibratedCargoAndAbonoColumns() {
         let fixtures = [
+            OCRObservationFixture(text: "Detalle de Movimientos Realizados", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.04, y: 0.94, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.20, y: 0.94, width: 0.14),
             OCRObservationFixture(text: "CARGOS", x: 0.60, y: 0.94, width: 0.08),
