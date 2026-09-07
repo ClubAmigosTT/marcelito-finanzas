@@ -940,6 +940,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testBBVAOCRCalibratesWhenVisionReturnsTheWholeHeaderInOneBox() {
         let fixtures = [
+            OCRObservationFixture(text: "Detalle de Movimientos Realizados", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(
                 text: "FECHA SALDO OPER LIQ DESCRIPCION REFERENCIA CARGOS ABONOS OPERACION LIQUIDACION",
                 x: 0.04,
