@@ -86,6 +86,8 @@ export type StatementReconciliation = {
   /** Créditos del estado (por ejemplo, “monto a diferir”) descontados del gasto neto. */
   extractedCreditTotal?: number;
   extractedPaymentTotal?: number;
+  /** MSI installments extracted from the issuer's dedicated section. */
+  extractedMsiTotal?: number;
   /** Difference in the card identity: credit limit - available - debt. */
   creditIdentityDifference?: number;
   extractedMovementCount?: number;
@@ -182,6 +184,10 @@ export type ImportResult = {
   pageCount?: number;
   /** Exact reader revision that produced this extraction. */
   readerVersion?: string;
+  /** Issuer-specific deterministic parser used for the import. */
+  parserId?: "santander-checking-v1" | "bbva-movements-v1" | "amex-operations-v1";
+  /** Exact statement section from which movement rows were accepted. */
+  sourceSection?: string;
   /** Proveedor de extracción; `multimodal` solo identifica una importación legacy. */
   extractionProvider?: ExtractionProvider;
   /** Modelo remoto utilizado, si aplica; nunca contiene credenciales. */
@@ -219,6 +225,8 @@ export type Statement = {
   pageCount?: number;
   /** Exact reader revision that produced this statement. */
   readerVersion?: string;
+  parserId?: ImportResult["parserId"];
+  sourceSection?: string;
   /** Proveedor de extracción; `multimodal` solo identifica una importación legacy. */
   extractionProvider?: ExtractionProvider;
   /** Modelo remoto utilizado, si aplica; nunca contiene credenciales. */
@@ -252,6 +260,8 @@ export type ImportCommit = {
   fileSizeBytes?: number;
   pageCount?: number;
   readerVersion?: string;
+  parserId?: ImportResult["parserId"];
+  sourceSection?: string;
   extractionProvider?: ExtractionProvider;
   extractionModel?: string;
   extractionPromptVersion?: string;

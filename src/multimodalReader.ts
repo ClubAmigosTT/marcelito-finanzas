@@ -521,7 +521,15 @@ export function extractionToImportResult(
   const transactions = mapRows({ ...extraction, source }, file.name);
   const kind: StatementKind = extraction.kind;
   const summary = mapSummary(extraction.summary);
-  const reconciliation = reconcileStatementImport(kind, summary, transactions);
+  // Remote/model readers are legacy-only. Production imports are accepted
+  // exclusively by one of the three issuer-specific deterministic parsers.
+  const checked = reconcileStatementImport(kind, summary, transactions);
+  const reconciliation = {
+    ...checked,
+    status: "invalid" as const,
+    tolerance: 0,
+    reason: "Lector multimodal no permitido: vuelve a importar con el parser determinista del emisor.",
+  };
   const dates = [extraction.period_start, extraction.period_end, extraction.cutoff_date].filter(Boolean) as string[];
   const period = dates.length >= 2 ? `${dates[0]} – ${dates[1]}` : dates[0] ?? file.name;
   const averageConfidence = transactions.length

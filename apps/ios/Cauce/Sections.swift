@@ -1291,23 +1291,9 @@ private struct StatementSummaryEditor: View {
                 }
             }
             Section {
-                Button("Guardar cifras del corte") {
-                    store.updateStatementSource(for: statement, to: source, kind: statementKind)
-                    store.updateStatementSummary(for: statement, summary: summary)
-                    dismiss()
-                }
-                .frame(maxWidth: .infinity)
-                if statement.requiresReview {
-                    Button("Confirmar estado revisado") {
-                        _ = store.confirmStatementReviewed(statement)
-                        dismiss()
-                    }
-                    .frame(maxWidth: .infinity)
-                    .disabled(statement.reconciliation?.status != .valid)
-                    Text("Confirma después de revisar las filas OCR y los importes. Solo los estados conciliados pueden entrar a los KPI.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                Text("El emisor, las cifras oficiales y el estado de conciliación son inmutables. Un estado solo entra al libro canónico cuando su parser determinista concilia al centavo; no existe confirmación manual.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
         .navigationTitle("Cifras del corte")

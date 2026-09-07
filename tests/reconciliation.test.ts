@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { adaptiveOcrScale, detectAccountKey, detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
+import { adaptiveOcrScale, detectAccountKey, detectPeriod, detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, inferLocalCategory, parseImportedTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
 import { buildFinanceMetrics, hasSufficientOcrQuality, hasVerifiedSourceEvidence, isStatementEligibleForDashboard } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
@@ -128,7 +128,7 @@ test("una fila bancaria sin dirección inequívoca queda fuera de la aceptación
 });
 
 test("la compuerta OCR se conserva al recalcular la vista de revisión", () => {
-  const base = reconcileStatementImport("bank", { depositTotal: 100, withdrawalTotal: 0 }, [
+  const base = reconcileStatementImport("bank", { previousBalance: 0, cashBalance: 100, depositTotal: 100, withdrawalTotal: 0 }, [
     movement({ id: "ocr-income", date: "01 ago 2026", description: "NOMINA", account: "BBVA", amount: 100, flow: "income" }),
   ]);
   assert.equal(base.status, "valid");
@@ -306,6 +306,57 @@ test("una coincidencia ambigua relevante queda en revisión y vuelve provisional
   assert.equal(result.audit.periods.find((period) => period.key === "2026-08")?.reviewCount, 2);
   assert.equal(result.transactions.every((row) => row.validationStatus === "review"), true);
   assert.equal(buildFinanceMetrics(transactions, statements, result).isProvisional, true);
+});
+
+test("los periodos BBVA y Amex se recortan al rango exacto del estado", () => {
+  assert.equal(
+    detectPeriod("Periodo DEL 15/07/2026 AL 14/08/2026 Fecha de corte 14/08/2026"),
+    "15/07/2026 AL 14/08/2026",
+  );
+  assert.equal(
+    detectPeriod("Período de Facturación Del 28 de Julio al 27 de Agosto de 2026 Días del periodo: 31"),
+    "28 de Julio al 27 de Agosto de 2026",
+  );
+});
+
+test("las reglas locales asignan una categoría auditable sin dejar gasto genérico por revisar", () => {
+  const known = inferLocalCategory("OXXO SUC 1234");
+  const broad = inferLocalCategory("COMERCIO LOCAL NO IDENTIFICADO");
+  assert.equal(known.category, "Alimentos");
+  assert.ok(known.confidence >= 0.9);
+  assert.equal(broad.category, "Otros gastos");
+  assert.equal(broad.confidence, 0.6);
+  assert.match(broad.reason, /giro inequívoco/i);
+});
+
+test("el gasto ordinario, extraordinario y de viaje es excluyente y la proyección usa el pago Amex", () => {
+  const statement: Statement = {
+    ...card("amex-split", "Amex", "28 de Julio al 27 de Agosto de 2026", 600),
+    summary: {
+      debtBalance: 600,
+      statementBalance: 600,
+      creditLimit: 10_000,
+      creditAvailable: 9_400,
+      paymentForNoInterest: 600,
+      minimumPlusMsi: 200,
+      msiMonthlyLoad: 50,
+    },
+  };
+  const rows = [
+    movement({ id: "ordinary", date: "10 ago 2026", description: "OXXO", account: "Amex", category: "Alimentos", amount: -100, flow: "expense", statementId: statement.id }),
+    movement({ id: "extraordinary", date: "11 ago 2026", description: "ANUALIDAD", account: "Amex", category: "Finanzas", extraordinary: true, amount: -200, flow: "expense", statementId: statement.id }),
+    movement({ id: "travel", date: "12 ago 2026", description: "HOTEL", account: "Amex", category: "Viajes", travelRelated: true, amount: -300, flow: "expense", statementId: statement.id }),
+  ];
+
+  const metrics = buildFinanceMetrics(rows, [statement]);
+  assert.equal(metrics.analyticsPeriods[0]?.ordinarySpend, 100);
+  assert.equal(metrics.analyticsPeriods[0]?.extraordinarySpend, 200);
+  assert.equal(metrics.analyticsPeriods[0]?.travelSpend, 300);
+  assert.equal(metrics.analyticsPeriods[0]?.spend, 600);
+  assert.equal(metrics.projection.next90Days[0]?.projectedPayments, 600);
+  assert.equal(metrics.projection.next90Days[0]?.paymentBasis, "Pago para no generar intereses detectado");
+  assert.equal(metrics.projection.next90Days[1]?.projectedPayments, 50);
+  assert.equal(metrics.projection.next90Days[1]?.paymentBasis, "Carga MSI detectada");
 });
 
 test("la calidad separa filas canónicas de PDFs en cuarentena", () => {
@@ -877,6 +928,9 @@ test("el resumen Amex conserva deuda comprometida, pago MSI y saldo pendiente", 
   assert.equal(summary.minimumPlusMsi, 1_052.92);
   assert.equal(summary.msiPending, 1_040.11);
   assert.equal(summary.msiMonthlyLoad, 1_638.24);
+  assert.equal(summary.msiOriginalDeferred, 1_040.11);
+  assert.equal(summary.debtBalance, 3_317.75);
+  assert.ok(Math.abs((summary.revolvingBalance ?? 0) - 2_277.64) < 0.001);
 });
 
 test("el formato real de controles Amex no confunde la fecha con límite o disponible", () => {
@@ -891,6 +945,7 @@ test("el formato real de controles Amex no confunde la fecha con límite o dispo
 
   assert.equal(summary.creditLimit, 20_000);
   assert.equal(summary.creditAvailable, 16_682.25);
+  assert.equal(summary.debtBalance, 3_317.75);
   assert.equal(summary.statementBalance, 3_996.62);
   assert.equal(summary.paymentForNoInterest, 3_996.62);
   assert.equal(summary.minimumPlusMsi, 1_957.97);
@@ -983,7 +1038,10 @@ test("la conciliación de tarjeta usa nuevas transacciones antes que el total co
     "Nuevas transacciones: 100.00",
     "Total Nuevos Cargos: 500.00",
   ].join("\n"), "card");
-  const rows = extractTransactions("01/08/2026 COMPRA 100.00", "Amex", "sample-card-period-3.pdf", "card");
+  const rows = [
+    movement({ id: "purchase", date: "01 ago 2026", description: "COMPRA", account: "Amex", amount: -100, flow: "expense", kind: "purchase" }),
+    movement({ id: "msi", date: "01 ago 2026", description: "MESES SIN INTERESES", account: "Amex", amount: -400, flow: "expense", kind: "msi" }),
+  ];
   assert.equal(reconcileStatementImport("card", summary, rows).status, "valid");
 });
 
@@ -998,13 +1056,12 @@ test("la conciliación de tarjeta bloquea una deuda que no cuadra con límite y 
   const reconciliation = reconcileStatementImport("card", summary, rows);
   assert.equal(reconciliation.status, "invalid");
   assert.equal(reconciliation.creditIdentityDifference, 100);
-  assert.match(reconciliation.reason ?? "", /identidad de crédito/);
+  assert.match(reconciliation.reason ?? "", /deuda utilizada/);
 });
 
 test("la conciliación Amex usa subtotales nacional y extranjero como gasto real", () => {
   const summary = parseStatementSummary([
-    "Nuevas transacciones: 3,317.75",
-    "Total Nuevos Cargos: 4,955.99",
+    "Nuevas transacciones: 23,583.75",
     "Total de las transacciones en $ de CLIENTE 13,990.02",
     "Total de Transacciones en Moneda Extranjera de CLIENTE 9,593.73",
   ].join("\n"), "card");
@@ -1017,8 +1074,7 @@ test("la conciliación Amex usa subtotales nacional y extranjero como gasto real
 
 test("la conciliación Amex descuenta créditos del subtotal doméstico y rechaza guías fechadas", () => {
   const summary = parseStatementSummary([
-    "Nuevas transacciones: 3,317.75",
-    "Total Nuevos Cargos: 4,955.99",
+    "Nuevas transacciones: 33,177.48",
     "Total de las transacciones en $ de CLIENTE 13,990.02",
     "Total de Transacciones en Moneda Extranjera de CLIENTE 9,593.73",
   ].join("\n"), "card");
@@ -1035,8 +1091,7 @@ test("la conciliación Amex descuenta créditos del subtotal doméstico y rechaz
 
 test("la conciliación Amex respeta un subtotal doméstico marcado como CR", () => {
   const summary = parseStatementSummary([
-    "Nuevas transacciones: 2,803.42",
-    "Total Nuevos Cargos: 37,213.42",
+    "Nuevas transacciones: 28,034.19",
     "Total de las transacciones en $ de CLIENTE 27,041.19 CR",
     "Total de Transacciones en Moneda Extranjera de CLIENTE 27,537.69",
   ].join("\n"), "card");
@@ -1465,7 +1520,7 @@ test("una versión anterior del lector queda en cuarentena al abrir el libro", (
   assert.match(prepared[1]?.reconciliation?.reason ?? "", /web-reader-legacy/);
 });
 
-test("un estado listo sin emisor verificado queda en cuarentena aunque concilie", () => {
+test("un estado listo sin emisor verificado conserva sus filas en cuarentena", () => {
   const statement = {
     ...bank("bbva-unverified", "BBVA", "agosto 2026"),
     readerVersion: "web-reader-current",
@@ -1488,7 +1543,7 @@ test("un estado listo sin emisor verificado queda en cuarentena aunque concilie"
     statementId: statement.id,
   })], "web-reader-current");
   assert.equal(ledger.quarantinedMovementCount, 1);
-  assert.equal(ledger.transactions.length, 0);
+  assert.deepEqual(ledger.transactions.map((row) => row.id), ["unverified-row"]);
 });
 
 test("un estado sin conciliación explícita no alimenta KPI aunque tenga emisor verificado", () => {
@@ -1575,7 +1630,7 @@ test("la migración devuelve a revisión un OCR débil aunque conserve la versi�
   assert.match(prepared?.reconciliation?.reason ?? "", /OCR con confianza insuficiente/);
 });
 
-test("una confirmación humana explícita conserva un estado conocido sin evidencia automática", () => {
+test("una confirmación humana no sustituye evidencia automática del emisor", () => {
   const statement = {
     ...bank("bbva-confirmed", "BBVA", "agosto 2026"),
     readerVersion: "web-reader-current",
@@ -1594,8 +1649,8 @@ test("una confirmación humana explícita conserva un estado conocido sin eviden
     flow: "expense",
     statementId: statement.id,
   })], "web-reader-current");
-  assert.equal(ledger.quarantinedMovementCount, 0);
-  assert.equal(ledger.statements[0]?.status, "ready");
+  assert.equal(ledger.quarantinedMovementCount, 1);
+  assert.equal(ledger.statements[0]?.status, "review");
 });
 
 test("la cuarentena de versión también bloquea las cifras del estado antiguo", () => {
@@ -1625,7 +1680,45 @@ test("la cuarentena de versión también bloquea las cifras del estado antiguo",
   assert.equal(metrics.isProvisional, true);
 });
 
-test("la migración elimina filas PDF obsoletas y conserva movimientos manuales", () => {
+test("la revisión compatible .9 se revalida sin borrar filas ni pedir recategorización", () => {
+  const statement: Statement = {
+    ...bank("bbva-compatible", "BBVA", "15/07/2026 AL 14/08/2026"),
+    readerVersion: "web-reader-2026.09.01.9",
+    status: "review",
+    reconciliationStatus: "pending",
+    reconciliation: { status: "pending", tolerance: 0.05, reason: "Versión anterior" },
+    summary: {
+      previousBalance: 1_000,
+      cashBalance: 900,
+      depositTotal: 0,
+      withdrawalTotal: 100,
+      depositCount: 0,
+      withdrawalCount: 1,
+    },
+  };
+  const row = movement({
+    id: "compatible-row",
+    date: "10 ago 2026",
+    description: "OXXO SUC 1234",
+    account: "BBVA",
+    amount: -100,
+    flow: "expense",
+    statementId: statement.id,
+    confidence: 0.62,
+  });
+
+  const prepared = prepareStoredLedger([statement], [row], "web-reader-2026.09.06.10");
+  assert.equal(prepared.quarantinedMovementCount, 0);
+  assert.equal(prepared.statements[0]?.status, "ready");
+  assert.equal(prepared.statements[0]?.reconciliationStatus, "valid");
+  assert.equal(prepared.transactions[0]?.category, "Alimentos");
+  assert.equal(prepared.transactions[0]?.confidence, 0.92);
+  const metrics = buildFinanceMetrics(prepared.transactions, prepared.statements);
+  assert.equal(metrics.currentMonthSpend, 100);
+  assert.equal(metrics.dataQuality.reviewPercent, 0);
+});
+
+test("la migración conserva filas PDF obsoletas y las excluye de KPI por cuarentena", () => {
   const legacyStatement = {
     ...bank("bbva-legacy", "BBVA", "agosto 2026"),
     readerVersion: "web-reader-legacy",
@@ -1653,7 +1746,7 @@ test("la migración elimina filas PDF obsoletas y conserva movimientos manuales"
 
   const prepared = prepareStoredLedger([legacyStatement], [legacyRow, manualRow], "web-reader-current");
   assert.equal(prepared.quarantinedMovementCount, 1);
-  assert.deepEqual(prepared.transactions.map((row) => row.id), ["manual-row"]);
+  assert.deepEqual(prepared.transactions.map((row) => row.id), ["legacy-pdf-row", "manual-row"]);
   assert.deepEqual(prepared.quarantinedStatementIds, [legacyStatement.id]);
   assert.equal(prepared.statements[0]?.status, "review");
   assert.equal(prepared.statements[0]?.reconciliationStatus, "pending");
@@ -1678,7 +1771,7 @@ test("la migración conserva filas del lector actual que esperan revisión OCR",
   });
 
   const prepared = prepareStoredLedger([currentPending], [ocrRow], "web-reader-current");
-  assert.equal(prepared.quarantinedMovementCount, 0);
+  assert.equal(prepared.quarantinedMovementCount, 1);
   assert.deepEqual(prepared.transactions.map((row) => row.id), ["ocr-row"]);
   assert.equal(prepared.statements[0]?.reconciliationStatus, "pending");
   assert.equal(prepared.statements[0]?.reconciliation?.reason, "OCR provisional");
@@ -1717,7 +1810,7 @@ test("la migración pone en cuarentena estados producidos por el lector multimod
   assert.equal(prepared.quarantinedMovementCount, 1);
   assert.equal(prepared.statements[0]?.status, "review");
   assert.equal(prepared.statements[0]?.reconciliationStatus, "pending");
-  assert.deepEqual(prepared.transactions.map((item) => item.id), []);
+  assert.deepEqual(prepared.transactions.map((item) => item.id), ["multimodal-row"]);
 });
 
 test("la auditoría conserva el conteo de filas PDF heredadas en cuarentena", () => {

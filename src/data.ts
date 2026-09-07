@@ -11,5 +11,6 @@ export const categories = [
   "Hogar",
   "Mascotas",
   "Finanzas",
+  "Otros gastos",
   "Sin categoría",
 ];

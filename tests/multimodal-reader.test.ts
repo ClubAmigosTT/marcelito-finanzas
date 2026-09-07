@@ -136,7 +136,7 @@ test("normaliza booleanos de moneda inequívocos y bloquea valores ambiguos", ()
   );
 });
 
-test("convierte centavos, conserva evidencia y reconcilia antes de entregar el resultado", () => {
+test("conserva evidencia multimodal pero la rechaza como fuente contable", () => {
   const result = extractionToImportResult({ ...bankExtraction(), source: "BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE" }, { name: "BBVA agosto.pdf", size: 1200 });
   assert.equal(result.source, "BBVA");
   assert.equal(result.accountKey, "BBVA:0941");
@@ -145,7 +145,8 @@ test("convierte centavos, conserva evidencia y reconcilia antes de entregar el r
   assert.equal(result.transactions[1].amount, -700);
   assert.equal(result.transactions[0].extractionEvidence?.method, "multimodal");
   assert.deepEqual(result.ocrPageConfidences, [0.99]);
-  assert.equal(result.reconciliation?.status, "valid");
+  assert.equal(result.reconciliation?.status, "invalid");
+  assert.match(result.reconciliation?.reason ?? "", /no permitido/i);
 });
 
 test("conserva el emisor institucional local cuando el lector multimodal confunde una contraparte", () => {
@@ -190,7 +191,7 @@ test("rechaza un emisor que en realidad es texto administrativo", () => {
   );
 });
 
-test("la extracción de tarjeta conserva deuda y separa un pago de tarjeta del gasto", () => {
+test("la extracción multimodal conserva el diagnóstico pero nunca puede aceptar una tarjeta", () => {
   const result = extractionToImportResult({
     source: "Amex",
     kind: "card",
@@ -218,10 +219,11 @@ test("la extracción de tarjeta conserva deuda y separa un pago de tarjeta del g
   assert.equal(result.summary?.paymentForNoInterest, 39_966.15);
   assert.equal(result.transactions[0].flow, "expense");
   assert.equal(result.transactions[1].flow, "debt");
-  assert.equal(result.reconciliation?.status, "valid");
+  assert.equal(result.reconciliation?.status, "invalid");
+  assert.match(result.reconciliation?.reason ?? "", /multimodal no permitido/i);
 });
 
-test("deriva deuda de tarjeta desde límite y disponible y conserva la identidad", () => {
+test("deriva deuda de tarjeta desde límite y disponible sin habilitar el lector legado", () => {
   const result = extractionToImportResult({
     source: "Amex",
     kind: "card",
@@ -244,7 +246,7 @@ test("deriva deuda de tarjeta desde límite y disponible y conserva la identidad
 
   assert.equal(result.summary?.debtBalance, 50_367.21);
   assert.equal(result.reconciliation?.creditIdentityDifference, 0);
-  assert.equal(result.reconciliation?.status, "valid");
+  assert.equal(result.reconciliation?.status, "invalid");
 });
 
 test("bloquea una tarjeta cuando el crédito disponible supera el límite", () => {
@@ -267,7 +269,7 @@ test("bloquea una tarjeta cuando el crédito disponible supera el límite", () =
   }, { name: "Amex inconsistente.pdf", size: 900 });
 
   assert.equal(result.reconciliation?.status, "invalid");
-  assert.match(result.reconciliation?.reason ?? "", /disponible supera l[ií]mite/i);
+  assert.match(result.reconciliation?.reason ?? "", /multimodal no permitido/i);
 });
 
 test("no envía el PDF sin opt-in y acepta únicamente respuestas JSON válidas del proxy", async () => {

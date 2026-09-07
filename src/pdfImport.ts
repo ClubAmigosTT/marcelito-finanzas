@@ -1,9 +1,11 @@
 import type { ImportResult, SourceDetection, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types.ts";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
+import { parseDeterministicStatement, reconcileExactly } from "./issuerParsers/index.ts";
+import type { DocumentLayout, DocumentLayoutLine, DocumentLayoutPage } from "./issuerParsers/types.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-2026.09.06.10";
+export const PDF_READER_VERSION = "web-reader-deterministic-2026.09.07.1";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
@@ -28,6 +30,45 @@ export function rebuildPdfText(items: unknown[]) {
     .sort((a, b) => b.y - a.y)
     .map((row) => row.parts.sort((a, b) => a.x - b.x).map((part) => part.text).join(" "))
     .join("\n");
+}
+
+/** Preserves source columns so issuer parsers never infer direction from descriptions. */
+export function rebuildPdfLayout(items: unknown[], page: number, pageWidth: number): DocumentLayoutPage {
+  const rows: Array<{ y: number; words: DocumentLayoutLine["words"] }> = [];
+  (items as PdfTextItem[]).forEach((item) => {
+    if (!item.str?.trim() || !Array.isArray(item.transform)) return;
+    const sourceX = item.transform[4] ?? 0;
+    const y = item.transform[5] ?? 0;
+    let row = rows.find((candidate) => Math.abs(candidate.y - y) < 2.2);
+    if (!row) {
+      row = { y, words: [] };
+      rows.push(row);
+    }
+    row.words.push({ x: Math.max(0, Math.min(1, sourceX / Math.max(pageWidth, 1))), text: item.str.trim(), confidence: 1 });
+  });
+  return {
+    page,
+    lines: rows.sort((a, b) => b.y - a.y).map((row) => ({ page, words: row.words.sort((a, b) => a.x - b.x) })),
+  };
+}
+
+export function rebuildOcrLayout(tsv: string | null | undefined, page: number, pageWidth: number): DocumentLayoutPage {
+  const rows = new Map<string, DocumentLayoutLine["words"]>();
+  for (const raw of (tsv ?? "").split(/\r?\n/).slice(1)) {
+    const fields = raw.split("\t");
+    if (fields.length < 12 || fields[0] !== "5") continue;
+    const text = fields.slice(11).join("\t").trim();
+    if (!text) continue;
+    const key = fields.slice(1, 5).join(":");
+    const words = rows.get(key) ?? [];
+    words.push({
+      x: Math.max(0, Math.min(1, Number(fields[6]) / Math.max(pageWidth, 1))),
+      text,
+      confidence: Math.max(0, Math.min(1, Number(fields[10]) / 100)),
+    });
+    rows.set(key, words);
+  }
+  return { page, lines: [...rows.values()].map((words) => ({ page, words: words.sort((a, b) => a.x - b.x) })) };
 }
 
 function normalizeAmount(value: string) {
@@ -239,10 +280,22 @@ function detectStatementKind(text: string, source: StatementSource): StatementKi
   return "unknown";
 }
 
-function detectPeriod(text: string, fileName: string) {
+export function detectPeriod(text: string, fileName = "") {
   const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+  // Keep the complete issuer range, not just the month inferred from the
+  // filename. BBVA prints "Periodo DEL dd/mm/yyyy AL dd/mm/yyyy" while Amex
+  // uses a written month. A bounded range also prevents the following
+  // "Fecha de corte" field from leaking into the period label.
+  const numericRange = normalized.match(/period(?:o|os)\s*(?:de\s+facturacion)?\s*[:-]?\s*((?:del\s+)?\d{1,2}[./-]\d{1,2}[./-]20\d{2}\s+(?:al|a|-)\s+\d{1,2}[./-]\d{1,2}[./-]20\d{2})/i);
+  if (numericRange?.[1]) return numericRange[1].replace(/^del\s+/i, "").replace(/\s+/g, " ").trim();
+  const writtenRange = normalized.match(/period(?:o|os)\s*(?:de\s+facturacion)?\s*[:-]?\s*((?:del\s+)?\d{1,2}\s+de\s+[a-z]+\s+(?:de\s+)?(?:20\d{2}\s+)?(?:al|a|-)\s+\d{1,2}\s+de\s+[a-z]+\s+(?:de\s+)?20\d{2})/i);
+  if (writtenRange?.[1]) return writtenRange[1].replace(/^del\s+/i, "").replace(/\s+/g, " ").trim();
   const periodMatch = normalized.match(/period(?:o|os)\s*(?:de\s+facturacion)?\s*[:-]?\s*([^\n]{8,80})/i);
-  if (periodMatch?.[1]) return periodMatch[1].replace(/\s+/g, " ").trim();
+  if (periodMatch?.[1]) return periodMatch[1]
+    .replace(/\s+(?:fecha\s+de\s+corte|dias\s+del\s+periodo).*$/i, "")
+    .replace(/^del\s+/i, "")
+    .replace(/\s+/g, " ")
+    .trim();
 
   // Scanned PDFs often have no text layer. Their filename is still useful
   // context, so expose a readable month/year instead of the raw slug.
@@ -555,7 +608,11 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
     if (creditPair) {
       summary.creditLimit = creditPair[0];
       summary.creditAvailable = creditPair[1];
+      summary.debtBalance = Math.max(0, creditPair[0] - creditPair[1]);
     }
+
+    const paymentDue = cardSummaryText.match(/fecha\s+l[ií]mite\s+de\s+pago\s*:?\s*(\d{1,2}\s+de\s+[a-z]+(?:\s+(?:de\s+)?20\d{2})?)/i)?.[1];
+    if (paymentDue) summary.paymentDueDate = paymentDue.replace(/\s+/g, " ").trim();
 
     // Amex's MSI table ends with the remaining principal followed by the
     // aggregate monthly installment load (for example “Total de Plan ...
@@ -563,10 +620,14 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
     const msiTotal = normalized.match(new RegExp(`total\\s+de\\s+plan\\s+de\\s+meses\\s+sin\\s+intereses[^\\d$-]{0,40}(${decimalMoneyToken})[^\\d$-]{0,30}(${decimalMoneyToken})`, "i"));
     if (msiTotal) {
       summary.msiPending = parseToken(msiTotal[1]);
+      summary.msiOriginalDeferred = parseToken(msiTotal[1]);
       summary.msiMonthlyLoad = parseToken(msiTotal[2]);
     } else {
       const monthlyTotal = normalized.match(new RegExp(`total\\s+de\\s+meses\\s+sin\\s+intereses[^\\d$-]{0,40}(${decimalMoneyToken})`, "i"));
       if (monthlyTotal) summary.msiMonthlyLoad = parseToken(monthlyTotal[1]);
+    }
+    if (summary.debtBalance !== undefined) {
+      summary.revolvingBalance = Math.max(0, summary.debtBalance - (summary.msiPending ?? 0));
     }
 
     // Amex also prints the totals for the domestic and foreign sections. Keep
@@ -617,8 +678,10 @@ function sumAbsolute(values: number[]) {
  * are kept out of the ledger; pending imports remain visible but provisional.
  */
 export function reconcileStatementImport(kind: StatementKind, summary: StatementSummary | undefined, transactions: Transaction[]): StatementReconciliation {
-  const tolerance = 0.05;
-  if (!summary) return { status: "pending", tolerance, extractedMovementCount: transactions.length, reason: "El estado no contiene un resumen de totales" };
+  const exact = kind === "bank" || kind === "card" ? reconcileExactly(kind, summary, transactions) : undefined;
+  if (exact) return exact;
+  const tolerance = 0;
+  if (!summary) return { status: "invalid", tolerance, extractedMovementCount: transactions.length, reason: "Faltan los controles oficiales del estado" };
 
   if (kind === "bank") {
     const extractedDepositTotal = sumAbsolute(transactions.filter((transaction) => transaction.amount > 0).map((transaction) => transaction.amount));
@@ -745,7 +808,7 @@ export function reconcileStatementImport(kind: StatementKind, summary: Statement
       reason: invalid ? `Las filas no concilian con cargos/pagos del estado (cargos ${chargeDifference.toFixed(2)}, pagos ${paymentDifference.toFixed(2)}${sectionDifferences.length ? `, secciones ${sectionDifferences.join("; ")}` : ""})` : undefined,
     };
   }
-  return { status: "pending", tolerance, extractedMovementCount: transactions.length, reason: "Tipo de estado no identificado" };
+  return { status: "invalid", tolerance, extractedMovementCount: transactions.length, reason: "Tipo de estado no soportado por un parser determinista" };
 }
 
 /**
@@ -772,25 +835,43 @@ export function gateOcrReconciliation(
   };
 }
 
-function guessCategory(description: string) {
+export type LocalCategoryInference = {
+  category: string;
+  confidence: number;
+  reason: string;
+  travel: boolean;
+  extraordinary: boolean;
+};
+
+/**
+ * Deterministic, local-only enrichment used for both fresh imports and old
+ * canonical rows. The broad `Otros gastos` fallback is intentional: it is an
+ * honest accounting bucket, not an unresolved parser state, so a valid row
+ * does not remain in review merely because the issuer printed a terse memo.
+ */
+export function inferLocalCategory(description: string): LocalCategoryInference {
   const value = normalizeText(description);
-  const rules: Array<[string, RegExp]> = [
-    ["Viajes", /airbnb|booking|expedia|hotel|hospedaje|aeromexico|aerobus|volaris|vivaaerobus|american airlines|united airlines|delta air|iberia|vuelo|flight|travel|renta de auto|car rental|airport|aeropuerto|equipaje|luggage/],
-    ["Transporte", /uber|didi|cabify|taxi|metrobus|metrotap|nyct paygo|njtransit|nyc ferry|subway|mta |train |estacionamiento|estac |parking|parco |gasolina|pemex|shell|\bbp\b|gulf|mobil|caseta|autopista|toll|ecobici|mueve|transporte/],
-    ["Salud", /farmacia|farmacias|hospital|clinica|doctor|consultorio|dent|dental|laboratorio|salud|medic/],
-    ["Comidas", /restaurant|rest |rest\.|taquer|taco|sushi|cafe|coffee|starbucks|burger|pizza|pub|bar |comida|food|flauta|ramen|krispy|pan |pastel|helado|neveria|churro|frutos prohibidos|grill|deli|pantry|wine|beer|chicken|cocina|parrilla|guac time|chipotle|dos toros|dunkin|italian|crepes|sanborns|cerv|mariscos|exquisito|faunna|terraza|los gueros|guero|harp helu|serena horneando|tierra garat|malachy|sophie|lovejoy|smokejazz|smoke and gift|metropolis|mandarin mo|social|goldbergs|marta tap|hana group|tst\*|shreeji|jimmys|primavera|saio la octava|pickle|fogoncito|burger king|aifa|asador/],
-    ["Alimentos", /walmart|superama|soriana|costco|chedraui|la comer|city market|sam'?s|sams |oxxo|7 eleven|seven eleven|extra k|extra |super |mercado\s|grocery|market|mkt |frutos|abarrotes|cvs|pharmacy|wholefds|whole foods|queens mkt|convenience|meadowland|mart corp|7-eleven/],
-    ["Entretenimiento", /cinemex|cinepolis|cine |cinemas|teatro|spotify|netflix|disney|hbo|prime video|apple music|xbox|playstation|nintendo|steam|videojuego|club deportivo|entret |jazz|museum|museo|amnh|guggenheim|aquarium|acuario|zoo|attraction|atraccion|ticket|boletos|show|concierto|club |soccer|summit one|world of coca|circo|stadium|rounders|empire hall|hard rock|salon de perreo|asdeporte/],
-    ["Educación", /universidad|escuela|colegio|curso|udemy|coursera|domestika|libros|libreria/],
-    ["Mascotas", /veterin|petco|pet shop|mascota|mundo animal/],
-    ["Hogar", /ikea|home depot|ferreter|muebles|hogar|limpieza|decoracion|mantenimiento/],
-    ["Servicios", /canva|telcel|at&t|movistar|izzi|totalplay|cfe|luz |agua |internet|seguro|asegur|suscripcion|membresia|adobe|microsoft|google storage|apple\.com\/bill|apple\.com\/mx|paypal|stripe|holafly|wi-fi onboard|wifi onboard/],
-    ["Compras", /amazon|shein|mercadolibre|mercado libre|mercadopago|lumen|steren|bout|tienda|shop|store|ropa|zapateria|departamental|old navy|fanatics|thriftland|miniso/],
-    ["Finanzas", /comision|interes|cajero|retiro|anualidad|financ|keepcash|meses sin intereses|meses en automatico|meses automatico|monto a diferir|diferid/],
+  const rules: Array<[string, RegExp, string]> = [
+    ["Viajes", /airbnb|booking|expedia|hotel|hospedaje|aeromexico|aerobus|volaris|vivaaerobus|american airlines|united airlines|delta air|iberia|vuelo|flight|travel|renta de auto|car rental|airport|aeropuerto|equipaje|luggage/, "Marcador explícito de viaje"],
+    ["Transporte", /uber|didi|cabify|taxi|metrobus|metrotap|nyct paygo|njtransit|nyc ferry|subway|mta |train |estacionamiento|estac |parking|parco |gasolina|pemex|shell|\bbp\b|gulf|mobil|caseta|autopista|toll|ecobici|mueve|transporte/, "Movilidad, combustible o estacionamiento"],
+    ["Salud", /farmacia|farmacias|hospital|clinica|doctor|consultorio|dent(?:al|ista)|laboratorio|salud|medic/, "Proveedor de salud"],
+    ["Comidas", /restaurant|rest |rest\.|taquer|taco|sushi|cafe|coffee|starbucks|burger|pizza|pub|bar |comida|food|flauta|ramen|krispy|pan |pastel|helado|neveria|churro|frutos prohibidos|grill|deli|pantry|wine|beer|chicken|cocina|parrilla|guac time|chipotle|dos toros|dunkin|italian|crepes|sanborns|cerv|mariscos|exquisito|faunna|terraza|los gueros|guero|harp helu|serena horneando|tierra garat|malachy|sophie|lovejoy|smokejazz|smoke and gift|metropolis|mandarin mo|social|goldbergs|marta tap|hana group|tst\*|shreeji|jimmys|primavera|saio la octava|pickle|fogoncito|burger king|aifa|asador|uber eats|rappi.*(?:food|rest)|didi food/, "Restaurante, cafetería o entrega de comida"],
+    ["Alimentos", /walmart|superama|soriana|costco|chedraui|la comer|city market|sam'?s|sams |oxxo|7 eleven|seven eleven|extra k|extra |super |mercado\s|grocery|market|mkt |frutos|abarrotes|cvs|pharmacy|wholefds|whole foods|queens mkt|convenience|meadowland|mart corp|7-eleven/, "Supermercado o tienda de conveniencia"],
+    ["Entretenimiento", /cinemex|cinepolis|cine |cinemas|teatro|spotify|netflix|disney|hbo|prime video|apple music|xbox|playstation|nintendo|steam|videojuego|club deportivo|entret |jazz|museum|museo|amnh|guggenheim|aquarium|acuario|zoo|attraction|atraccion|ticket|boletos|show|concierto|club |soccer|summit one|world of coca|circo|stadium|rounders|empire hall|hard rock|salon de perreo|asdeporte/, "Entretenimiento, evento o suscripción audiovisual"],
+    ["Educación", /universidad|escuela|colegio|curso|udemy|coursera|domestika|libros|libreria|instituto tecnologic/, "Educación o material formativo"],
+    ["Mascotas", /veterin|petco|pet shop|mascota|mundo animal/, "Comercio o servicio para mascotas"],
+    ["Hogar", /ikea|home depot|ferreter|muebles|hogar|limpieza|decoracion|mantenimiento/, "Hogar, mobiliario o mantenimiento"],
+    ["Servicios", /canva|telcel|at&t|movistar|telef movis|izzi|totalplay|cfe|luz |agua |internet|seguro|asegur|suscripcion|membresia|adobe|microsoft|google storage|googplay|youtube|apple\.com\/bill|apple\.com\/mx|paypal|stripe|holafly|wi-fi onboard|wifi onboard|facebk/, "Servicio, telecomunicación o suscripción"],
+    ["Compras", /amazon|shein|mercadolibre|mercado libre|mercadopago|billpocket|conectapp|lumen|steren|bout|tienda|shop|store|ropa|zapateria|departamental|old navy|fanatics|thriftland|miniso/, "Comercio o compra minorista"],
+    ["Finanzas", /comision|iva rep tarj|interes|cajero|retiro|anualidad|financ|keepcash|meses sin intereses|meses en automatico|meses automatico|monto a diferir|diferid/, "Costo financiero, comisión o disposición de efectivo"],
   ];
   const match = rules.find(([, marker]) => marker.test(value));
-  if (match) return match[0];
-  return "Sin categoría";
+  if (match) {
+    const travel = match[0] === "Viajes";
+    const extraordinary = travel || /hospital|emergencia|mueble|reparacion|impuesto|anualidad|concierto|festival/.test(value);
+    return { category: match[0], confidence: 0.9, reason: match[2], travel, extraordinary };
+  }
+  return { category: "Otros gastos", confidence: 0.6, reason: "Egreso válido sin un giro inequívoco en el texto del banco", travel: false, extraordinary: false };
 }
 
 function inferImportedKind(description: string, amount: number, isCredit: boolean, statementKind: StatementKind, explicitOwnTransfer = false): TransactionKind {
@@ -1163,8 +1244,11 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     const flow: Transaction["flow"] = isRefund || isIncome || isDeferredCredit || cardCredit ? "income" : isCardPayment ? "debt" : explicitOwnTransfer ? "transfer" : "expense";
     const value = Math.round(amountValue * 100) / 100 * (flow === "income" ? 1 : -1);
     const importedKind = inferImportedKind(description, value, isCredit, kind, explicitOwnTransfer);
-    const category = importedKind === "cardPayment" || importedKind === "bankTransfer" ? "Transferencia" : guessCategory(description);
-    const travelRelated = /viaje|hotel|hospedaje|aerolinea|vuelo|avion|transporte|uber|taxi|metro|renta de auto|destino|equipaje|airbnb|aeropuerto/i.test(normalizedDescription);
+    const localClassification = inferLocalCategory(description);
+    const category = importedKind === "cardPayment" || importedKind === "bankTransfer" ? "Transferencia" : localClassification.category;
+    const travelRelated = localClassification.travel
+      || foreignCurrency
+      || /viaje|hotel|hospedaje|aerolinea|vuelo|avion|renta de auto|destino|equipaje|airbnb|aeropuerto/i.test(normalizedDescription);
     results.push({
       id: `import-${importKey}-${index}-${value}`,
       date: formatDate(date),
@@ -1176,11 +1260,15 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       kind: importedKind,
       travelRelated,
       foreignCurrency: kind === "card" ? foreignCurrency : undefined,
-      confidence: category === "Sin categoría" ? 0.62 : 0.92,
+      classificationProvider: "rules",
+      classificationConfidence: importedKind === "cardPayment" || importedKind === "bankTransfer" ? 1 : localClassification.confidence,
+      classificationReason: importedKind === "cardPayment" || importedKind === "bankTransfer" ? "Movimiento contable identificado por conciliación" : localClassification.reason,
+      extraordinary: localClassification.extraordinary || travelRelated,
+      confidence: 0.92,
       extractionEvidence: {
         method: "pdf-text",
         page: rowPage,
-        confidence: category === "Sin categoría" ? 0.78 : 0.95,
+        confidence: 0.95,
         sourceText: line.slice(0, 240),
       },
     });
@@ -1236,13 +1324,14 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
     },
   });
   const pages: string[] = [];
+  const layoutPages: DocumentLayoutPage[] = [];
   const pageConfidences: number[] = [];
   const recognitionTimeoutMs = 45_000;
   const recognizeWithTimeout = async (image: HTMLCanvasElement) => {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
-        worker.recognize(image),
+        worker.recognize(image, {}, { text: true, tsv: true }),
         new Promise<never>((_, reject) => {
           timeoutId = setTimeout(
             () => reject(new Error("El OCR tardó demasiado en una página; intenta importar un PDF más ligero.")),
@@ -1275,6 +1364,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       await page.render({ canvas: null, canvasContext: context, viewport }).promise;
       const baseResult = await recognizeWithTimeout(canvas);
       let bestText = baseResult.data.text;
+      let bestTsv = baseResult.data.tsv;
       let confidence = Number(baseResult.data.confidence);
 
       // Low-confidence scans often have a gray background or faint table
@@ -1304,6 +1394,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
             if (Number.isFinite(enhancedConfidence) && enhancedConfidence > confidence) {
               confidence = enhancedConfidence;
               bestText = enhancedResult.data.text;
+              bestTsv = enhancedResult.data.tsv;
             }
           }
         } catch {
@@ -1319,6 +1410,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       // Keep explicit page sentinels so row reconstruction cannot cross page
       // boundaries or blend a movement with the following page's summary.
       pages.push(`__PDF_PAGE_${pageNumber}__\n${bestText}`);
+      layoutPages.push(rebuildOcrLayout(bestTsv, pageNumber, canvas.width));
       onProgress(88 + Math.round((pageNumber / document.numPages) * 10), `Reconociendo página ${pageNumber} de ${document.numPages}`);
       canvas.width = 0;
       canvas.height = 0;
@@ -1330,6 +1422,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
 
   return {
     text: pages.join("\n"),
+    layout: { pages: layoutPages } satisfies DocumentLayout,
     pageConfidences,
     confidence: pageConfidences.length
       ? pageConfidences.reduce((sum, value) => sum + value, 0) / pageConfidences.length
@@ -1381,6 +1474,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
       throw new Error("El PDF contiene más de 80 páginas. Importa un estado mensual a la vez para mantener segura la memoria.");
     }
     const pageTexts: string[] = [];
+    const textLayoutPages: DocumentLayoutPage[] = [];
 
   for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
     const page = await document.getPage(pageNumber);
@@ -1390,6 +1484,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
     // selectable text layer. The sentinel is consumed by extractTransactions
     // and never reaches a merchant description.
     pageTexts.push(`__PDF_PAGE_${pageNumber}__\n${rebuildPdfText(content.items)}`);
+    textLayoutPages.push(rebuildPdfLayout(content.items, pageNumber, page.getViewport({ scale: 1 }).width));
     onProgress(12 + Math.round((pageNumber / document.numPages) * 58), `Leyendo pagina ${pageNumber} de ${document.numPages}`);
     page.cleanup();
   }
@@ -1398,26 +1493,24 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   const mode = shouldUseOCR(extractedText) ? "ocr" : "text";
   const ocrResult = mode === "ocr" ? await recognizePdfText(document, onProgress) : undefined;
   const text = ocrResult?.text ?? extractedText;
+  const layout = ocrResult?.layout ?? { pages: textLayoutPages };
   const sourceDetection = detectSourceEvidence(text, file.name);
   const source = sourceDetection.source;
   const accountKey = detectAccountKey(text, source);
   const kind = detectStatementKind(text, source);
   onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
-  const parsed = parseImportedTransactions(text, source, file.name, kind, mode, ocrResult?.pageConfidences);
-  const summary = parseStatementSummary(text, kind);
-  const baseReconciliation = reconcileStatementImport(kind, summary, parsed);
-  // A matching total is necessary but not sufficient for automatic OCR
-  // acceptance: a scan can lose one row and still happen to reconcile after
-  // a coincidental amount. Keep the statement provisional when the visual
-  // signal is weak, and require a human confirmation before it can enter the
-  // canonical ledger. Text-layer imports are not affected by this gate.
-  const reconciliation = gateOcrReconciliation(
-    baseReconciliation,
-    mode,
-    ocrResult?.confidence,
-    ocrResult?.pageConfidences,
-  );
+  const deterministic = source === "Santander" || source === "BBVA" || source === "Amex"
+    ? parseDeterministicStatement({ source, fileName: file.name, mode, text, layout })
+    : undefined;
+  const parsed = deterministic?.transactions ?? [];
+  const summary = deterministic?.summary;
+  const reconciliation = deterministic?.reconciliation ?? {
+    status: "invalid" as const,
+    tolerance: 0,
+    extractedMovementCount: 0,
+    reason: "No existe un parser determinista para el emisor identificado",
+  };
   onProgress(100, "Listo para revisar");
 
     const result: ImportResult = {
@@ -1431,6 +1524,8 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
       fileSizeBytes: file.size,
       pageCount: document.numPages,
       readerVersion: PDF_READER_VERSION,
+      parserId: deterministic?.parserId,
+      sourceSection: deterministic?.sourceSection,
       mode,
       transactions: parsed,
       summary,

@@ -31,8 +31,8 @@ import {
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
 import { categories } from "./data";
 import { createAuditRun } from "./audit";
-import { buildFinanceMetrics, defaultStatementKind, hasSufficientOcrQuality, isStatementEligibleForDashboard, isSpendTransaction, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
-import { gateOcrReconciliation, inspectPdf, parseImportedTransactions, PDF_READER_VERSION, reconcileStatementImport, parseStatementSummary } from "./pdfImport";
+import { buildFinanceMetrics, defaultStatementKind, hasSufficientOcrQuality, isRealIncomeTransaction, isStatementEligibleForDashboard, isSpendTransaction, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
+import { inspectPdf, PDF_READER_VERSION } from "./pdfImport";
 import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
 import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey } from "./reconciliation";
 import { prepareStoredLedger } from "./statementMigration";
@@ -40,7 +40,7 @@ import { clearWebErrorDiagnostics, readWebErrorDiagnostics, type WebErrorDiagnos
 import { clearImportedPdfs, openImportedPdf, saveImportedPdf } from "./documentStore";
 import { requestTransactionClassification, requestTransactionClassifierPreflight, applyTransactionClassifications, TransactionClassifierError } from "./aiClassifier";
 import type { TransactionClassifierPreflightResult } from "./aiClassifier";
-import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction } from "./types";
+import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementReconciliation, StatementSource, Transaction } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
 const moneyPrecise = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 2 });
@@ -181,6 +181,18 @@ function comparisonMoney(current: number | undefined, previous: number | undefin
   if (current === undefined || previous === undefined) return "Sin comparativo";
   const delta = current - previous;
   return `${delta >= 0 ? "+" : "−"}${money.format(Math.abs(delta))} vs. mes anterior`;
+}
+
+function priorThreeAverage(periods: AnalyticsPeriod[], selector: (period: AnalyticsPeriod) => number | undefined) {
+  const values = periods.slice(1, 4).map(selector).filter((value): value is number => value !== undefined && Number.isFinite(value));
+  return values.length ? values.reduce((total, value) => total + value, 0) / values.length : undefined;
+}
+
+function comparisonAverageMoney(current: number | undefined, average: number | undefined) {
+  if (current === undefined || average === undefined) return "Sin promedio de 3 meses";
+  const delta = current - average;
+  const percent = average === 0 ? "" : ` (${delta >= 0 ? "+" : "−"}${Math.round(Math.abs(delta / average) * 100)}%)`;
+  return `${delta >= 0 ? "+" : "−"}${money.format(Math.abs(delta))}${percent} vs. prom. 3m`;
 }
 
 function signedMoney(value: number | undefined | null) {
@@ -403,6 +415,8 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       fileSizeBytes: commit.fileSizeBytes,
       pageCount: commit.pageCount,
       readerVersion: commit.readerVersion ?? PDF_READER_VERSION,
+      parserId: commit.parserId,
+      sourceSection: commit.sourceSection,
       extractionProvider: commit.extractionProvider,
       extractionModel: commit.extractionModel,
       extractionPromptVersion: commit.extractionPromptVersion,
@@ -424,8 +438,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       : [statement, ...statements];
     const withoutPrevious = previous ? transactions.filter((item) => item.statementId !== statementId) : transactions;
     const importedPipeline = runTransactionPipeline([...importedTransactions, ...withoutPrevious], nextStatements);
-    const needsReview = importedTransactions.some((item) => item.category === "Sin categoría" || (item.confidence ?? 1) < 0.75)
-      || commit.source === "Desconocido"
+    const needsReview = commit.source === "Desconocido"
       || commit.kind === "unknown"
       || commit.sourceDetection?.status !== "verified"
       // A multimodal reader keeps mode="text" for compatibility with the
@@ -434,9 +447,6 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       // eligibility boundary so a weak remote read is never displayed as
       // ready before the next render/migration pass.
       || !hasSufficientOcrQuality(statement)
-      // Browser OCR currently returns flattened text without coordinates;
-      // keep scanned imports provisional until the user confirms their rows.
-      || commit.mode === "ocr"
       || importedPipeline.audit.criticalIssues.length > 0;
     statement.status = importedTransactions.length && !needsReview ? "ready" : "review";
     statement.transactionCount = importedPipeline.transactions.filter((item) => item.statementId === statementId).length;
@@ -459,13 +469,11 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       && item.reconciliationStatus === "valid"
       && item.source !== "Desconocido"
       && item.kind !== "unknown"
+      && item.sourceDetection?.status === "verified"
       && hasSufficientOcrQuality(item)
       ? {
         ...item,
         status: "ready",
-        issuerConfirmedByUser: item.sourceDetection?.status === "verified"
-          ? item.issuerConfirmedByUser
-          : true,
       }
       : item));
   }
@@ -531,7 +539,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
             {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => setImportOpen(true)} onRunReaderPreflight={transactionClassifierEndpoint ? runReaderPreflight : undefined} readerPreflight={readerPreflight} readerPreflightBusy={readerPreflightBusy} readerPreflightError={readerPreflightError} />}
             {section === "Gastos" && <Expenses transactions={ledgerTransactions} statements={statements} metrics={metrics} onImport={() => setImportOpen(true)} />}
             {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onOpenStatement={(statement) => openImportedPdf(statement.sourceFingerprint)} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
-            {section === "Patrimonio" && <NetWorth metrics={metrics} />}
+            {section === "Patrimonio" && <NetWorth metrics={metrics} transactions={ledgerTransactions} statements={statements} />}
           </motion.div>
         </AnimatePresence>
       </main>
@@ -554,6 +562,12 @@ function Home({ transactions, statements, metrics, goals, setGoals, auditRun, on
   const trendLabel = comparisonPercent(trend);
   const trendTone = trend === null ? "" : trend >= 0 ? "positive" : "negative";
   const latestPeriodLabel = latestStatementFor(statements)?.period ?? periodLabel(metrics.analyticsPeriods[0]);
+  const previous = metrics.analyticsPeriods[1];
+  const averagePatrimony = priorThreeAverage(metrics.analyticsPeriods, (period) => period.liquidPatrimony);
+  const averageCash = priorThreeAverage(metrics.analyticsPeriods, (period) => period.cashAvailable);
+  const averageDebt = priorThreeAverage(metrics.analyticsPeriods, (period) => period.debtTotal);
+  const averageSpend = priorThreeAverage(metrics.analyticsPeriods, (period) => period.spend);
+  const averageFlow = priorThreeAverage(metrics.analyticsPeriods, (period) => period.netFlow);
 
   return (
     <>
@@ -564,20 +578,21 @@ function Home({ transactions, statements, metrics, goals, setGoals, auditRun, on
         <span className="month-button data-period">{latestPeriodLabel}</span>
       </section>
       <button type="button" className="summary-hero summary-hero-action" aria-label="Ver detalle del patrimonio líquido" onClick={() => setSelectedMetric("patrimony")}>
-        <div><span>Patrimonio líquido</span><strong>{dashboardMoney(metrics.isProvisional, metrics.liquidPatrimony)}</strong><p className={`summary-trend ${trendTone}`}>{metrics.isProvisional ? "Conciliación requerida" : trendLabel}</p></div>
+        <div><span>Patrimonio líquido</span><strong>{dashboardMoney(metrics.isProvisional, metrics.liquidPatrimony)}</strong><div className="summary-benchmarks"><p className={`summary-trend ${trendTone}`}>{metrics.isProvisional ? "Conciliación requerida" : trendLabel}</p>{!metrics.isProvisional && <p>{comparisonAverageMoney(metrics.liquidPatrimony, averagePatrimony)}</p>}</div></div>
       </button>
       <section className="summary-kpis" aria-label="Indicadores principales">
-        <Metric label="Efectivo disponible" value={dashboardMoney(metrics.isProvisional, metrics.cashAvailable)} delta={metrics.isProvisional ? "Conciliación requerida" : comparisonMoney(metrics.cashAvailable, metrics.analyticsPeriods[1]?.cashAvailable)} tone="income" icon={Wallet} onSelect={() => setSelectedMetric("cash")} />
-        <Metric label="Deuda total" value={dashboardMoney(metrics.isProvisional, metrics.debtTotal)} delta={metrics.isProvisional ? "Conciliación requerida" : comparisonMoney(metrics.debtTotal, metrics.analyticsPeriods[1]?.debtTotal)} tone="debt" icon={CreditCard} onSelect={() => setSelectedMetric("debt")} />
-        <Metric label="Gasto del mes" value={dashboardMoney(metrics.isProvisional, metrics.currentMonthSpend)} delta={metrics.isProvisional ? "Conciliación requerida" : comparisonPercent(metrics.analyticsPeriods[0]?.variationPercent)} tone="expense" icon={Receipt} onSelect={() => setSelectedMetric("expense")} />
-        <Metric label="Flujo neto" value={dashboardMoney(metrics.isProvisional, metrics.currentMonthNetFlow)} delta={metrics.isProvisional ? "Conciliación requerida" : comparisonMoney(metrics.currentMonthNetFlow, metrics.analyticsPeriods[1]?.netFlow)} tone={metrics.currentMonthNetFlow >= 0 ? "income" : "debt"} icon={ChartLineUp} onSelect={() => setSelectedMetric("flow")} />
+        <Metric label="Efectivo disponible" value={dashboardMoney(metrics.isProvisional, metrics.cashAvailable)} delta={metrics.isProvisional ? "Conciliación requerida" : comparisonMoney(metrics.cashAvailable, previous?.cashAvailable)} benchmark={metrics.isProvisional ? undefined : comparisonAverageMoney(metrics.cashAvailable, averageCash)} tone="income" icon={Wallet} onSelect={() => setSelectedMetric("cash")} />
+        <Metric label="Deuda total" value={dashboardMoney(metrics.isProvisional, metrics.debtTotal)} delta={metrics.isProvisional ? "Conciliación requerida" : comparisonMoney(metrics.debtTotal, previous?.debtTotal)} benchmark={metrics.isProvisional ? undefined : comparisonAverageMoney(metrics.debtTotal, averageDebt)} tone="debt" icon={CreditCard} onSelect={() => setSelectedMetric("debt")} />
+        <Metric label="Gasto del mes" value={dashboardMoney(metrics.isProvisional, metrics.currentMonthSpend)} delta={metrics.isProvisional ? "Conciliación requerida" : comparisonMoney(metrics.currentMonthSpend, previous?.spend)} benchmark={metrics.isProvisional ? undefined : comparisonAverageMoney(metrics.currentMonthSpend, averageSpend)} tone="expense" icon={Receipt} onSelect={() => setSelectedMetric("expense")} />
+        <Metric label="Flujo neto" value={dashboardMoney(metrics.isProvisional, metrics.currentMonthNetFlow)} delta={metrics.isProvisional ? "Conciliación requerida" : comparisonMoney(metrics.currentMonthNetFlow, previous?.netFlow)} benchmark={metrics.isProvisional ? undefined : comparisonAverageMoney(metrics.currentMonthNetFlow, averageFlow)} tone={metrics.currentMonthNetFlow >= 0 ? "income" : "debt"} icon={ChartLineUp} onSelect={() => setSelectedMetric("flow")} />
       </section>
-      {selectedMetric && <MetricDetailPanel metric={selectedMetric} metrics={metrics} onClose={() => setSelectedMetric(null)} />}
+      {selectedMetric && <MetricDetailPanel metric={selectedMetric} metrics={metrics} transactions={transactions} statements={statements} onClose={() => setSelectedMetric(null)} />}
       {metrics.isProvisional ? <DashboardBlockedNotice metrics={metrics} /> : <>
         <ExecutiveSummary metrics={metrics} />
-        <SpendTrendChart periods={metrics.analyticsPeriods} />
+        <HistoricalEvolution periods={metrics.analyticsPeriods} />
         <CashFlowTrendChart points={metrics.cashFlowHistory} />
         <SpendingSplit period={metrics.analyticsPeriods[0]} />
+        <MonthDrivers metrics={metrics} />
         <DebtBreakdown metrics={metrics} />
         <ProjectionPanel projection={metrics.projection} />
         <ScenarioSimulator metrics={metrics} />
@@ -611,7 +626,7 @@ function ProjectionPanel({ projection }: { projection: ReturnType<typeof buildFi
     { label: "6 meses", period: projection.horizon6, tone: "medium" },
     { label: "12 meses", period: projection.horizon12, tone: "long" },
   ];
-  return <section className="projection-panel" aria-labelledby="projection-title"><div className="section-heading"><div><h2 id="projection-title">Próximos 90 días</h2><p>Qué podría pasar si mantienes tu comportamiento reciente.</p></div><span className="estimate-badge">Estimación</span></div><div className="projection-table" role="table" aria-label="Proyección de los próximos 90 días"><div className="projection-row projection-head" role="row"><span>Periodo</span><span>Ingresos</span><span>Gasto fijo</span><span>Pagos / MSI</span><span>Liquidez</span><span>Patrimonio</span></div>{projection.next90Days.map((period) => <div className="projection-row" role="row" key={period.key}><strong>{period.label}</strong><span>{displayMoney(period.expectedIncome)}</span><span>{displayMoney(period.fixedSpend)}</span><span>{displayMoney(period.projectedPayments)}<small>{period.projectedMsi ? `MSI ${displayMoney(period.projectedMsi)}` : ""}</small></span><span>{displayMoney(period.projectedLiquidity)}</span><span>{displayMoney(period.projectedPatrimony)}</span></div>)}</div><div className="projection-horizons"><div className="section-heading"><div><h3>Proyección de largo plazo</h3><p>Gasto, ahorro, deuda y patrimonio estimados.</p></div></div><div className="projection-horizon-grid">{horizons.map(({ label, period, tone }) => <article className={`projection-horizon horizon-${tone}`} key={label}><span>{label}</span><strong>{displayMoney(period.projectedPatrimony)}</strong><small>Patrimonio estimado</small><div><span>Gasto acumulado</span><b>{displayMoney(period.projectedSpend * period.monthOffset)}</b></div><div><span>Ahorro acumulado</span><b>{displayMoney(period.projectedSavings * period.monthOffset)}</b></div><div><span>Deuda</span><b>{displayMoney(period.projectedDebt)}</b></div></article>)}</div></div><p className="estimate-note">{projection.assumption}</p></section>;
+  return <section className="projection-panel" aria-labelledby="projection-title"><div className="section-heading"><div><h2 id="projection-title">Próximos 90 días</h2><p>Qué podría pasar si mantienes tu comportamiento reciente.</p></div><span className="estimate-badge">Estimación</span></div><div className="projection-table" role="table" aria-label="Proyección de los próximos 90 días"><div className="projection-row projection-head" role="row"><span>Periodo</span><span>Ingresos</span><span>Gasto fijo</span><span>Pago detectado</span><span>Liquidez</span><span>Patrimonio</span></div>{projection.next90Days.map((period) => <div className="projection-row" role="row" key={period.key}><strong>{period.label}</strong><span>{displayMoney(period.expectedIncome)}</span><span>{displayMoney(period.fixedSpend)}</span><span>{displayMoney(period.projectedPayments)}<small>{period.paymentBasis}{period.projectedMsi ? ` · incluye MSI estimados por ${displayMoney(period.projectedMsi)}` : ""}</small></span><span>{displayMoney(period.projectedLiquidity)}</span><span>{displayMoney(period.projectedPatrimony)}</span></div>)}</div><div className="projection-horizons"><div className="section-heading"><div><h3>Proyección de largo plazo</h3><p>Gasto, ahorro, deuda y patrimonio estimados.</p></div></div><div className="projection-horizon-grid">{horizons.map(({ label, period, tone }) => <article className={`projection-horizon horizon-${tone}`} key={label}><span>{label}</span><strong>{displayMoney(period.projectedPatrimony)}</strong><small>Patrimonio estimado</small><div><span>Gasto acumulado</span><b>{displayMoney(period.projectedSpend * period.monthOffset)}</b></div><div><span>Ahorro acumulado</span><b>{displayMoney(period.projectedSavings * period.monthOffset)}</b></div><div><span>Deuda</span><b>{displayMoney(period.projectedDebt)}</b></div></article>)}</div></div><p className="estimate-note">{projection.assumption}</p></section>;
 }
 
 type ScenarioResult = {
@@ -654,7 +669,9 @@ function ScenarioSimulator({ metrics }: { metrics: ReturnType<typeof buildFinanc
     const liquidationLabel = balance > 0.5 ? ">10 años" : liquidationMonths === 0 ? "Este mes" : `En ${liquidationMonths} meses`;
     const cashAvailable = metrics.cashAvailable === undefined ? undefined : metrics.cashAvailable - payment;
     const utilizationRate = metrics.creditLimit ? Math.max(0, (metrics.creditUsed ?? debt) - payment) / metrics.creditLimit : undefined;
-    return { payment, remainingDebt, interestEstimated, cashAvailable, utilizationRate, liquidationMonths, liquidationLabel, liquidPatrimony: metrics.liquidPatrimony, patrimonyGain: baselineInterest - interestEstimated };
+    const patrimonyGain = baselineInterest - interestEstimated;
+    const liquidPatrimony = metrics.liquidPatrimony === undefined ? undefined : metrics.liquidPatrimony + patrimonyGain;
+    return { payment, remainingDebt, interestEstimated, cashAvailable, utilizationRate, liquidationMonths, liquidationLabel, liquidPatrimony, patrimonyGain };
   }
 
   const baseline = simulate(minimum, 0);
@@ -667,7 +684,7 @@ function ScenarioSimulator({ metrics }: { metrics: ReturnType<typeof buildFinanc
     const leftWins = metric === "interestEstimated" ? left < right : left > right;
     return leftWins ? 1 : -1;
   };
-  return <section className="scenario-panel" aria-labelledby="scenario-title"><div className="section-heading"><div><h2 id="scenario-title">Simulador de escenarios</h2><p>Compara cuánto pagar y el impacto probable en tu deuda y liquidez.</p></div><span className="estimate-badge">Estimación</span></div>{debt ? <><div className="scenario-controls"><ScenarioControl label="Escenario A" value={scenarioA} minimum={minimum} noInterest={noInterest} onChange={setScenarioA} /><ScenarioControl label="Escenario B" value={scenarioB} minimum={minimum} noInterest={noInterest} onChange={setScenarioB} /></div><div className="scenario-grid"><ScenarioCard label="Escenario A" result={resultA} cashWinner={winner("cashAvailable") === 1} interestWinner={winner("interestEstimated") === 1} patrimonyWinner={winner("patrimonyGain") === 1} /><ScenarioCard label="Escenario B" result={resultB} cashWinner={winner("cashAvailable") === -1} interestWinner={winner("interestEstimated") === -1} patrimonyWinner={winner("patrimonyGain") === -1} /></div><p className="estimate-note">El interés se estima con la tasa observada en tu último corte; si no existe, se usa una referencia del 2% mensual. El pago reduce efectivo y deuda por el mismo importe, por eso el patrimonio inmediato no cambia.</p></> : <EmptyState title="Sin deuda para simular" body="Completa la deuda al corte en Cuentas para comparar opciones de pago." />}</section>;
+  return <section className="scenario-panel" aria-labelledby="scenario-title"><div className="section-heading"><div><h2 id="scenario-title">Simulador de escenarios</h2><p>Compara cuánto pagar y el impacto probable en tu deuda, liquidez y costo financiero.</p></div><span className="estimate-badge">Estimación</span></div>{debt ? <><div className="scenario-controls"><ScenarioControl label="Escenario A" value={scenarioA} minimum={minimum} noInterest={noInterest} onChange={setScenarioA} /><ScenarioControl label="Escenario B" value={scenarioB} minimum={minimum} noInterest={noInterest} onChange={setScenarioB} /></div><div className="scenario-grid"><ScenarioCard label="Escenario A" result={resultA} cashWinner={winner("cashAvailable") === 1} interestWinner={winner("interestEstimated") === 1} patrimonyWinner={winner("patrimonyGain") === 1} /><ScenarioCard label="Escenario B" result={resultB} cashWinner={winner("cashAvailable") === -1} interestWinner={winner("interestEstimated") === -1} patrimonyWinner={winner("patrimonyGain") === -1} /></div><p className="estimate-note">El interés se estima con la tasa observada en tu último corte; si no existe, se usa una referencia del 2% mensual. Pagar mueve efectivo a deuda sin alterar el patrimonio inmediato; el impacto futuro mostrado es el interés evitado frente al pago mínimo.</p></> : <EmptyState title="Sin deuda para simular" body="Completa la deuda al corte en Cuentas para comparar opciones de pago." />}</section>;
 }
 
 function ScenarioControl({ label, value, minimum, noInterest, onChange }: { label: string; value: number; minimum: number; noInterest: number; onChange: (value: number) => void }) {
@@ -675,7 +692,7 @@ function ScenarioControl({ label, value, minimum, noInterest, onChange }: { labe
 }
 
 function ScenarioCard({ label, result, cashWinner, interestWinner, patrimonyWinner }: { label: string; result: ScenarioResult; cashWinner: boolean; interestWinner: boolean; patrimonyWinner: boolean }) {
-  return <article className="scenario-card"><div className="scenario-card-head"><div><span>{label}</span><strong>{displayMoney(result.payment)}</strong></div><small>Pago elegido</small></div><div className="scenario-outcomes"><div><span>Deuda restante</span><strong>{displayMoney(result.remainingDebt)}</strong></div><div className={cashWinner ? "scenario-winner" : ""}><span>Efectivo disponible</span><strong>{displayMoney(result.cashAvailable)}</strong>{cashWinner && <small>Más liquidez</small>}</div><div className={interestWinner ? "scenario-winner" : ""}><span>Intereses estimados</span><strong>{displayMoney(result.interestEstimated)}</strong>{interestWinner && <small>Menos intereses</small>}</div><div><span>Liquidación probable</span><strong>{result.liquidationLabel}</strong></div><div><span>Uso de crédito</span><strong>{result.utilizationRate === undefined ? "Pendiente" : `${Math.round(result.utilizationRate * 100)}%`}</strong></div><div className={patrimonyWinner ? "scenario-winner" : ""}><span>Patrimonio líquido</span><strong>{displayMoney(result.liquidPatrimony)}</strong><small>{patrimonyWinner ? "Mejor impacto futuro" : `${signedDeltaMoney(result.patrimonyGain)} vs pago mínimo`}</small></div></div></article>;
+  return <article className="scenario-card"><div className="scenario-card-head"><div><span>{label}</span><strong>{displayMoney(result.payment)}</strong></div><small>Pago elegido</small></div><div className="scenario-outcomes"><div><span>Deuda restante</span><strong>{displayMoney(result.remainingDebt)}</strong></div><div className={cashWinner ? "scenario-winner" : ""}><span>Efectivo disponible</span><strong>{displayMoney(result.cashAvailable)}</strong>{cashWinner && <small>Más liquidez</small>}</div><div className={interestWinner ? "scenario-winner" : ""}><span>Intereses estimados</span><strong>{displayMoney(result.interestEstimated)}</strong>{interestWinner && <small>Menos intereses</small>}</div><div><span>Liquidación probable</span><strong>{result.liquidationLabel}</strong></div><div><span>Uso de crédito</span><strong>{result.utilizationRate === undefined ? "Pendiente" : `${Math.round(result.utilizationRate * 100)}%`}</strong></div><div className={patrimonyWinner ? "scenario-winner" : ""}><span>Patrimonio tras intereses</span><strong>{displayMoney(result.liquidPatrimony)}</strong><small>{patrimonyWinner ? "Mejor impacto futuro" : `${signedDeltaMoney(result.patrimonyGain)} vs pago mínimo`}</small></div></div></article>;
 }
 
 function ExecutiveAlerts({ alerts }: { alerts: ExecutiveAlert[] }) {
@@ -735,6 +752,50 @@ function ExecutiveSummary({ metrics }: { metrics: ReturnType<typeof buildFinance
     <div className="section-heading"><div><h2 id="executive-summary-title">Qué pasó este mes</h2><p>Una lectura automática de gasto, cambios y saldos relevantes.</p></div><span className="summary-period-chip">{periodLabel(current)}</span></div>
     <p className="executive-conclusion">Este mes gastaste <strong>{displayMoney(spend)}</strong>{change === null ? ", sin comparativo disponible" : `, ${comparisonPercent(change)}`}. {causeText} {payment ? `Registraste ${displayMoney(payment)} en pagos relevantes` : "No se detectaron pagos relevantes"} y cerraste con <strong>{displayMoney(debt)}</strong> de deuda.</p>
   </section>;
+}
+
+const historicalMetricOptions: Array<{ key: Exclude<DashboardMetricKey, "flow">; label: string; color: string }> = [
+  { key: "patrimony", label: "Patrimonio", color: "var(--navy)" },
+  { key: "cash", label: "Efectivo", color: "var(--income)" },
+  { key: "debt", label: "Deuda", color: "var(--debt)" },
+  { key: "expense", label: "Gasto", color: "var(--expense)" },
+];
+
+function HistoricalEvolution({ periods }: { periods: AnalyticsPeriod[] }) {
+  const [selected, setSelected] = useState<Exclude<DashboardMetricKey, "flow">>("patrimony");
+  if (!periods.length) return null;
+  const selectedOption = historicalMetricOptions.find((option) => option.key === selected) ?? historicalMetricOptions[0];
+  const points = periods.slice(0, 6).reverse().map((period) => ({
+    key: period.key,
+    label: period.label,
+    value: selected === "patrimony" ? period.liquidPatrimony : selected === "cash" ? period.cashAvailable : selected === "debt" ? period.debtTotal : period.spend,
+  })).filter((point): point is MetricSeriesPoint => point.value !== undefined);
+  return <section className="executive-card historical-evolution" aria-labelledby="historical-evolution-title">
+    <div className="section-heading"><div><h2 id="historical-evolution-title">Evolución histórica</h2><p>Patrimonio, deuda, efectivo y gasto con la misma definición en cada periodo.</p></div><span className="summary-period-chip">Últimos {Math.min(6, periods.length)} periodos</span></div>
+    <div className="historical-tabs" role="tablist" aria-label="Indicador histórico">{historicalMetricOptions.map((option) => {
+      const latest = option.key === "patrimony" ? periods[0]?.liquidPatrimony : option.key === "cash" ? periods[0]?.cashAvailable : option.key === "debt" ? periods[0]?.debtTotal : periods[0]?.spend;
+      return <button type="button" role="tab" aria-selected={selected === option.key} className={selected === option.key ? "active" : ""} key={option.key} onClick={() => setSelected(option.key)}><span>{option.label}</span><strong>{displayMoney(latest)}</strong></button>;
+    })}</div>
+    {points.length ? <MiniMetricChart points={points} color={selectedOption.color} /> : <p className="metric-detail-empty">No hay suficientes saldos para este indicador.</p>}
+  </section>;
+}
+
+function MonthDrivers({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+  const categories = metrics.categoryDistribution.slice(0, 5);
+  const merchants = metrics.topMerchants.slice(0, 5);
+  const movements = metrics.topMovements.slice(0, 5);
+  return <section className="executive-card month-drivers" aria-labelledby="month-drivers-title">
+    <div className="section-heading"><div><h2 id="month-drivers-title">Lo que más explica el mes</h2><p>Los cinco rubros, comercios y movimientos con mayor impacto en el gasto.</p></div><span className="summary-period-chip">{periodLabel(metrics.analyticsPeriods[0])}</span></div>
+    <div className="driver-columns">
+      <DriverList title="Categorías" rows={categories.map((item) => ({ id: item.name, label: item.name, detail: `${Math.round(item.share * 100)}% del gasto`, value: item.total }))} />
+      <DriverList title="Comercios" rows={merchants.map((item) => ({ id: item.name, label: item.name, detail: `${item.count} movimiento${item.count === 1 ? "" : "s"}`, value: item.total }))} />
+      <DriverList title="Movimientos" rows={movements.map((item) => ({ id: item.id, label: item.description, detail: `${item.date} · ${item.category}`, value: Math.abs(item.amount) }))} />
+    </div>
+  </section>;
+}
+
+function DriverList({ title, rows }: { title: string; rows: Array<{ id: string; label: string; detail: string; value: number }> }) {
+  return <div className="driver-list"><h3>Top 5 {title.toLowerCase()}</h3>{rows.length ? <ol>{rows.map((row, index) => <li key={row.id}><span className="driver-rank">{index + 1}</span><span><strong>{row.label}</strong><small>{row.detail}</small></span><b>{displayMoney(row.value)}</b></li>)}</ol> : <p className="metric-detail-empty">Sin datos para este periodo.</p>}</div>;
 }
 
 function SpendTrendChart({ periods }: { periods: AnalyticsPeriod[] }) {
@@ -844,12 +905,15 @@ function MiniCashFlowTrend({ points }: { points: CashFlowPoint[] }) {
 function SpendingSplit({ period }: { period?: AnalyticsPeriod }) {
   const ordinary = period?.ordinarySpend ?? 0;
   const extraordinary = period?.extraordinarySpend ?? 0;
-  const total = ordinary + extraordinary;
+  const travel = period?.travelSpend ?? 0;
+  const total = ordinary + extraordinary + travel;
   const ordinaryWidth = total ? ordinary / total * 100 : 0;
+  const extraordinaryWidth = total ? extraordinary / total * 100 : 0;
+  const travelWidth = total ? travel / total * 100 : 0;
   return <section className="executive-card spending-split" aria-labelledby="spending-split-title">
-    <div className="section-heading"><div><h2 id="spending-split-title">Gasto ordinario y extraordinario</h2><p>Separamos costo de vida recurrente de viajes, compras atípicas y eventos.</p></div><span className="summary-period-chip">{periodLabel(period)}</span></div>
-    <div className="split-values"><div><span>Gasto ordinario</span><strong>{displayMoney(ordinary)}</strong><small>{total ? `${Math.round(ordinary / total * 100)}% del periodo` : "Sin datos identificados"}</small></div><div><span>Gasto extraordinario</span><strong>{displayMoney(extraordinary)}</strong><small>{total ? `${Math.round(extraordinary / total * 100)}% del periodo` : "Sin datos identificados"}</small></div></div>
-    <div className="split-bar" aria-label={`Gasto ordinario ${Math.round(ordinaryWidth)} por ciento y extraordinario ${Math.round(100 - ordinaryWidth)} por ciento`}><span style={{ width: `${ordinaryWidth}%` }} /><span style={{ width: `${100 - ordinaryWidth}%` }} /></div>
+    <div className="section-heading"><div><h2 id="spending-split-title">Gasto ordinario, extraordinario y viajes</h2><p>Tres clases excluyentes: cada movimiento participa una sola vez en el total.</p></div><span className="summary-period-chip">{periodLabel(period)}</span></div>
+    <div className="split-values"><div><span>Gasto ordinario</span><strong>{displayMoney(ordinary)}</strong><small>{total ? `${Math.round(ordinaryWidth)}% del periodo` : "Sin datos identificados"}</small></div><div><span>Gasto extraordinario</span><strong>{displayMoney(extraordinary)}</strong><small>{total ? `${Math.round(extraordinaryWidth)}% del periodo` : "Sin datos identificados"}</small></div><div><span>Viajes</span><strong>{displayMoney(travel)}</strong><small>{total ? `${Math.round(travelWidth)}% del periodo` : "Sin datos identificados"}</small></div></div>
+    <div className="split-bar" aria-label={`Gasto ordinario ${Math.round(ordinaryWidth)} por ciento, extraordinario ${Math.round(extraordinaryWidth)} por ciento y viajes ${Math.round(travelWidth)} por ciento`}><span style={{ width: `${ordinaryWidth}%` }} /><span style={{ width: `${extraordinaryWidth}%` }} /><span style={{ width: `${travelWidth}%` }} /></div>
   </section>;
 }
 
@@ -900,61 +964,32 @@ function AuditDiagnostics({ metrics, statements, auditRun, onRunReaderPreflight,
 }
 
 function CalculationSummary({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
-  return <section className="calculation-section" aria-label="Cálculos financieros"><div className="section-heading"><div><h2>Lo que explica tu dinero</h2><p>Calculado por periodo y conciliado con pagos, MSI, transferencias y devoluciones cuando están disponibles.</p></div><span className="calculation-periods">{metrics.periodCount} {metrics.periodCount === 1 ? "periodo" : "periodos"}</span></div><div className="calculation-grid"><div className="calculation-ledger"><div className="calculation-ledger-head"><span>Tarjeta</span><small>Acumulado de estados Amex</small></div><CalculationRow label="Gasto total" value={displayMoney(metrics.totalNewTransactions)} detail="Compras nuevas" /><CalculationRow label="Gasto promedio mensual" value={displayMoney(metrics.averageMonthlySpend)} detail="Nuevos cargos / periodos" /><CalculationRow label="Abonos reales" value={displayMoney(metrics.totalRealPayments)} detail="Pagos, sin créditos contables" /><CalculationRow label="Saldo acumulado" value={displayMoney(metrics.accumulatedBalance)} detail="Cargos − pagos − créditos" tone={metrics.accumulatedBalance > 0 ? "warning" : "positive"} /><CalculationRow label="Porcentaje pagado" value={displayPercent(metrics.paidPercent)} detail="Abonos / nuevos cargos" /><CalculationRow label="Pendiente" value={displayPercent(metrics.pendingPercent)} detail="Saldo / nuevos cargos" /></div><div className="calculation-ledger"><div className="calculation-ledger-head"><span>Consolidado</span><small>Tarjetas + bancos propios</small></div><CalculationRow label="Gasto real consolidado" value={displayMoney(metrics.consolidatedRealSpend)} detail="Excluye pagos y traspasos" /><CalculationRow label="Gasto de viaje" value={displayMoney(metrics.travelSpend)} detail={metrics.travelPercent === null ? "Pendiente de identificar" : `${displayPercent(metrics.travelPercent)} del gasto`} /><CalculationRow label="Gasto ordinario" value={displayMoney(metrics.ordinarySpend)} detail="Consolidado − viajes" /><CalculationRow label="Flujo neto mensual" value={displayMoney(metrics.netFlow)} detail="Ingresos reales − gastos reales" tone={metrics.netFlow >= 0 ? "positive" : "warning"} /><CalculationRow label="Tasa de ahorro" value={displayPercent(metrics.savingsRate)} detail="Flujo neto / ingresos" /><CalculationRow label="Promedio ordinario" value={displayMoney(metrics.ordinaryAverageMonthly)} detail="Ordinario / periodos" /></div><div className="calculation-ledger"><div className="calculation-ledger-head"><span>Crédito y MSI</span><small>Último corte con datos</small></div><CalculationRow label="Utilización de crédito" value={displayPercent(metrics.creditUtilizationRate)} detail={metrics.creditUsed !== undefined ? `${displayMoney(metrics.creditUsed)} utilizado` : "Límite y disponible pendientes"} /><CalculationRow label="Carga mensual MSI" value={displayMoney(metrics.latestMsiMonthlyLoad)} detail={metrics.latestMsiInstallmentsCount !== undefined ? `${metrics.latestMsiInstallmentsCount} mensualidades activas` : "Captura el total del corte"} /><CalculationRow label="MSI diferido original" value={displayMoney(metrics.latestMsiOriginalDeferred)} detail="Principal aún diferido" /><CalculationRow label="Nuevos cargos del corte" value={displayMoney(metrics.cardPeriods[0]?.newCharges)} detail="Compras + MSI + intereses + comisiones" /><CalculationRow label="Pago para no generar intereses" value={displayMoney(metrics.latestPaymentForNoInterest)} detail="Estimado con saldo anterior y pagos" /><CalculationRow label="Saldo de deuda" value={displayMoney(metrics.debtTotal)} detail="Requiere saldo al corte" /></div></div><p className="calculation-footnote">Pendiente significa que el documento aún no trae ese dato o debes capturarlo en <strong>Cuentas</strong>. Marcelito no sustituye una cifra faltante con una estimación silenciosa.</p></section>;
+  return <section className="calculation-section" aria-label="Cálculos financieros"><div className="section-heading"><div><h2>Lo que explica tu dinero</h2><p>Calculado por periodo y conciliado con pagos, MSI, transferencias y devoluciones cuando están disponibles.</p></div><span className="calculation-periods">{metrics.periodCount} {metrics.periodCount === 1 ? "periodo" : "periodos"}</span></div><div className="calculation-grid"><div className="calculation-ledger"><div className="calculation-ledger-head"><span>Tarjeta</span><small>Acumulado de estados Amex</small></div><CalculationRow label="Gasto total" value={displayMoney(metrics.totalNewTransactions)} detail="Compras nuevas" /><CalculationRow label="Gasto promedio mensual" value={displayMoney(metrics.averageMonthlySpend)} detail="Nuevos cargos / periodos" /><CalculationRow label="Abonos reales" value={displayMoney(metrics.totalRealPayments)} detail="Pagos, sin créditos contables" /><CalculationRow label="Saldo acumulado" value={displayMoney(metrics.accumulatedBalance)} detail="Cargos − pagos − créditos" tone={metrics.accumulatedBalance > 0 ? "warning" : "positive"} /><CalculationRow label="Porcentaje pagado" value={displayPercent(metrics.paidPercent)} detail="Abonos / nuevos cargos" /><CalculationRow label="Pendiente" value={displayPercent(metrics.pendingPercent)} detail="Saldo / nuevos cargos" /></div><div className="calculation-ledger"><div className="calculation-ledger-head"><span>Consolidado</span><small>Tarjetas + bancos propios</small></div><CalculationRow label="Gasto real consolidado" value={displayMoney(metrics.consolidatedRealSpend)} detail="Excluye pagos y traspasos" /><CalculationRow label="Gasto de viaje" value={displayMoney(metrics.travelSpend)} detail={metrics.travelPercent === null ? "Pendiente de identificar" : `${displayPercent(metrics.travelPercent)} del gasto`} /><CalculationRow label="Gasto ordinario" value={displayMoney(metrics.ordinarySpend)} detail="Consolidado − extraordinario − viajes" /><CalculationRow label="Flujo neto mensual" value={displayMoney(metrics.netFlow)} detail="Ingresos reales − gastos reales" tone={metrics.netFlow >= 0 ? "positive" : "warning"} /><CalculationRow label="Tasa de ahorro" value={displayPercent(metrics.savingsRate)} detail="Flujo neto / ingresos" /><CalculationRow label="Promedio ordinario" value={displayMoney(metrics.ordinaryAverageMonthly)} detail="Ordinario / periodos" /></div><div className="calculation-ledger"><div className="calculation-ledger-head"><span>Crédito y MSI</span><small>Último corte con datos</small></div><CalculationRow label="Utilización de crédito" value={displayPercent(metrics.creditUtilizationRate)} detail={metrics.creditUsed !== undefined ? `${displayMoney(metrics.creditUsed)} utilizado` : "Límite y disponible pendientes"} /><CalculationRow label="Carga mensual MSI" value={displayMoney(metrics.latestMsiMonthlyLoad)} detail={metrics.latestMsiInstallmentsCount !== undefined ? `${metrics.latestMsiInstallmentsCount} mensualidades activas` : "Captura el total del corte"} /><CalculationRow label="MSI diferido original" value={displayMoney(metrics.latestMsiOriginalDeferred)} detail="Principal aún diferido" /><CalculationRow label="Nuevos cargos del corte" value={displayMoney(metrics.cardPeriods[0]?.newCharges)} detail="Compras + MSI + intereses + comisiones" /><CalculationRow label="Pago para no generar intereses" value={displayMoney(metrics.latestPaymentForNoInterest)} detail="Estimado con saldo anterior y pagos" /><CalculationRow label="Saldo de deuda" value={displayMoney(metrics.debtTotal)} detail="Requiere saldo al corte" /></div></div><p className="calculation-footnote">Pendiente significa que el documento aún no trae ese dato o debes capturarlo en <strong>Cuentas</strong>. Marcelito no sustituye una cifra faltante con una estimación silenciosa.</p></section>;
 }
 
 function CalculationRow({ label, value, detail, tone }: { label: string; value: string; detail: string; tone?: "positive" | "warning" }) {
   return <div className={`calculation-row${tone ? ` ${tone}` : ""}`}><div><span>{label}</span><small>{detail}</small></div><strong>{value}</strong></div>;
 }
 
-function StatementSummaryForm({ source, kind, summary, onChange }: { source: StatementSource; kind: Statement["kind"]; summary: StatementSummary; onChange: (key: keyof StatementSummary, value: string) => void }) {
-  const fields: Array<{ key: keyof StatementSummary; label: string; hint: string }> = [
-    { key: "previousBalance", label: "Saldo anterior", hint: "Corte previo" },
-    { key: "newTransactions", label: "Nuevas transacciones", hint: "Compras nuevas" },
-    { key: "payments", label: "Pagos realizados", hint: "Abonos reales" },
-    { key: "credits", label: "Créditos / abonos contables", hint: "No son pagos" },
-    { key: "newCharges", label: "Nuevos cargos del corte", hint: "Total del resumen" },
-    { key: "interest", label: "Intereses", hint: "Interés del periodo" },
-    { key: "fees", label: "Comisiones", hint: "Cargos y anualidad" },
-    { key: "statementBalance", label: source === "Amex" ? "Saldo nuevo" : "Saldo al corte", hint: "Saldo del estado" },
-    { key: "minimumPayment", label: "Pago mínimo", hint: "Pago requerido" },
-    { key: "minimumPlusMsi", label: "Pago mínimo + MSI", hint: "Pago próximo del estado" },
-    { key: "paymentForNoInterest", label: "Pago para no generar intereses", hint: "Importe del estado" },
-    ...(kind === "card" || source === "Amex" ? [
-      { key: "creditLimit" as keyof StatementSummary, label: "Límite de crédito", hint: "Línea autorizada" },
-      { key: "creditAvailable" as keyof StatementSummary, label: "Crédito disponible", hint: "Disponible al corte" },
-      { key: "debtBalance" as keyof StatementSummary, label: "Deuda al corte", hint: "Saldo usado" },
-      { key: "revolvingBalance" as keyof StatementSummary, label: "Saldo revolvente", hint: "Deuda fuera de MSI" },
-      { key: "msiPending" as keyof StatementSummary, label: "MSI pendientes", hint: "Principal diferido" },
-      { key: "msiOriginalDeferred" as keyof StatementSummary, label: "MSI original diferido", hint: "Principal pendiente" },
-      { key: "msiInstallments" as keyof StatementSummary, label: "Mensualidades MSI activas", hint: "Cantidad" },
-      { key: "msiMonthlyLoad" as keyof StatementSummary, label: "Carga mensual MSI", hint: "Total del corte" },
-    ] : [
-      { key: "cashBalance" as keyof StatementSummary, label: "Efectivo disponible", hint: "Saldo bancario" },
-      { key: "depositTotal" as keyof StatementSummary, label: "Depósitos / abonos", hint: "Total declarado" },
-      { key: "withdrawalTotal" as keyof StatementSummary, label: "Retiros / cargos", hint: "Total declarado" },
-    ]),
-  ];
-  return <details className="statement-summary-form"><summary>Completar datos del corte <span>Opcional, pero necesario para crédito y patrimonio</span></summary><p>Los importes detectados del PDF aparecen aquí para que puedas corregirlos. Si un campo no está en el estado, déjalo vacío.</p><div className="summary-field-grid">{fields.map((field) => <label key={String(field.key)}><span>{field.label}</span><small>{field.hint}</small><input type="number" step="0.01" value={typeof summary[field.key] === "number" ? Number(summary[field.key]) : ""} onChange={(event) => onChange(field.key, event.target.value)} placeholder="—" /></label>)}</div></details>;
-}
-
 function RealDataEmpty({ onImport }: { onImport: () => void }) {
   return <section className="real-data-empty"><div className="real-data-icon"><FilePdf size={32} /></div><h1>Empieza con tus estados reales</h1><p>Marcelito no carga cifras de muestra. Importa un PDF mensual y revisa banco, periodo, movimientos y categorías antes de guardarlo.</p><button className="primary-button" onClick={onImport}><UploadSimple size={18} />Importar primer estado</button><small>El archivo se procesa localmente y no se sube a ningún servidor.</small></section>;
 }
 
-function Metric({ label, value, delta, tone, icon: Icon, onSelect }: { label: string; value: string; delta: string; tone: string; icon: typeof Wallet; onSelect?: () => void }) {
-  return <button type="button" className={"metric metric-button metric-" + tone} onClick={onSelect} aria-label={"Ver detalle de " + label}><div className="metric-icon"><Icon size={20} /></div><div><span>{label}</span><strong>{value}</strong><small>{delta}</small></div></button>;
+function Metric({ label, value, delta, benchmark, tone, icon: Icon, onSelect }: { label: string; value: string; delta: string; benchmark?: string; tone: string; icon: typeof Wallet; onSelect?: () => void }) {
+  return <button type="button" className={"metric metric-button metric-" + tone} onClick={onSelect} aria-label={"Ver detalle de " + label}><div className="metric-icon"><Icon size={20} /></div><div><span>{label}</span><strong>{value}</strong><small>{delta}</small>{benchmark && <small className="metric-benchmark">{benchmark}</small>}</div></button>;
 }
 
 function metricSeries(metric: DashboardMetricKey, metrics: ReturnType<typeof buildFinanceMetrics>): MetricSeriesPoint[] {
-  if (metric === "expense") return metrics.cashFlowHistory.slice(-12).map((point) => ({ key: point.key, label: point.date, value: point.expense }));
-  if (metric === "flow") return metrics.cashFlowHistory.slice(-12).map((point) => ({ key: point.key, label: point.date, value: point.balance }));
   const periods = metrics.analyticsPeriods.slice().reverse();
   const valueFor = metric === "patrimony"
     ? (period: AnalyticsPeriod) => period.liquidPatrimony
     : metric === "cash"
       ? (period: AnalyticsPeriod) => period.cashAvailable
-      : (period: AnalyticsPeriod) => period.debtTotal;
+      : metric === "debt"
+        ? (period: AnalyticsPeriod) => period.debtTotal
+        : metric === "expense"
+          ? (period: AnalyticsPeriod) => period.spend
+          : (period: AnalyticsPeriod) => period.netFlow;
   return periods
     .map((period) => ({ key: period.key, label: period.label, value: valueFor(period) }))
     .filter((point): point is MetricSeriesPoint => point.value !== undefined);
@@ -976,15 +1011,55 @@ function metricExplanation(metric: DashboardMetricKey) {
   return "Ingresos reales menos gasto real.";
 }
 
-function MetricDetailPanel({ metric, metrics, onClose }: { metric: DashboardMetricKey; metrics: ReturnType<typeof buildFinanceMetrics>; onClose: () => void }) {
+function metricLabel(metric: DashboardMetricKey) {
+  return metric === "patrimony" ? "Patrimonio líquido" : metric === "cash" ? "Efectivo disponible" : metric === "debt" ? "Deuda total" : metric === "expense" ? "Gasto del mes" : "Flujo neto";
+}
+
+function latestAccountPeriods(metrics: ReturnType<typeof buildFinanceMetrics>) {
+  const latest = new Map<string, (typeof metrics.periods)[number]>();
+  metrics.periods.forEach((period) => {
+    const key = period.accountKey ?? `${period.source}|${period.kind}`;
+    if (!latest.has(key)) latest.set(key, period);
+  });
+  return [...latest.values()];
+}
+
+function MetricDetailPanel({ metric, metrics, transactions, statements, onClose }: { metric: DashboardMetricKey; metrics: ReturnType<typeof buildFinanceMetrics>; transactions: Transaction[]; statements: Statement[]; onClose: () => void }) {
   const points = metricSeries(metric, metrics);
   const current = metricCurrentValue(metric, metrics);
   const comparison = points.length > 1 ? comparisonMoney(points.at(-1)?.value, points.at(-2)?.value) : "Aún no hay comparativo";
+  const average = priorThreeAverage(metrics.analyticsPeriods, metric === "patrimony" ? (period) => period.liquidPatrimony : metric === "cash" ? (period) => period.cashAvailable : metric === "debt" ? (period) => period.debtTotal : metric === "expense" ? (period) => period.spend : (period) => period.netFlow);
   const color = metric === "expense" ? "var(--expense)" : metric === "debt" ? "var(--debt)" : metric === "patrimony" ? "var(--navy)" : "var(--income)";
+  const currentPeriodKey = metrics.analyticsPeriods[0]?.key;
+  const currentMovements = transactions.filter((transaction) => !currentPeriodKey || transactionPeriodKey(transaction, statements) === currentPeriodKey);
+  const movements = metric === "expense"
+    ? currentMovements.filter(isSpendTransaction)
+    : metric === "flow"
+      ? currentMovements.filter((transaction) => isSpendTransaction(transaction) || isRealIncomeTransaction(transaction, statements))
+      : [];
+  const accountPeriods = latestAccountPeriods(metrics).filter((period) => metric === "patrimony" || (metric === "cash" && period.kind === "bank") || (metric === "debt" && period.kind === "card"));
+  const movementStatementIds = new Set(movements.map((transaction) => transaction.statementId).filter(Boolean));
+  const sourcePeriods = metric === "expense" || metric === "flow"
+    ? metrics.periods.filter((period) => movementStatementIds.has(period.statementId))
+    : accountPeriods;
+  const components = metric === "patrimony"
+    ? [{ label: "Efectivo consolidado", value: metrics.cashAvailable ?? 0 }, { label: "Menos deuda", value: -(metrics.debtTotal ?? 0) }]
+    : metric === "cash"
+      ? accountPeriods.map((period) => ({ label: `${period.source}${period.accountKey ? ` · ••••${period.accountKey.split(":").at(-1)}` : ""}`, value: period.cashBalance ?? 0 }))
+      : metric === "debt"
+        ? accountPeriods.map((period) => ({ label: `${period.source}${period.accountKey ? ` · ••••${period.accountKey.split(":").at(-1)}` : ""}`, value: period.debtBalance ?? 0 }))
+        : metric === "expense"
+          ? [{ label: "Gasto ordinario", value: metrics.analyticsPeriods[0]?.ordinarySpend ?? 0 }, { label: "Gasto extraordinario", value: metrics.analyticsPeriods[0]?.extraordinarySpend ?? 0 }, { label: "Viajes", value: metrics.analyticsPeriods[0]?.travelSpend ?? 0 }]
+          : [{ label: "Ingresos reales", value: metrics.analyticsPeriods[0]?.income ?? 0 }, { label: "Menos gasto real", value: -(metrics.analyticsPeriods[0]?.spend ?? 0) }];
   return <section className="metric-detail-panel" aria-live="polite" aria-labelledby="metric-detail-title">
-    <div className="metric-detail-head"><div><span>Detalle del indicador</span><h2 id="metric-detail-title">{metric === "patrimony" ? "Patrimonio líquido" : metric === "cash" ? "Efectivo disponible" : metric === "debt" ? "Deuda total" : metric === "expense" ? "Gasto del mes" : "Flujo neto"}</h2></div><button type="button" className="row-action" aria-label="Cerrar detalle" onClick={onClose}><X size={17} /></button></div>
-    <div className="metric-detail-summary"><strong>{dashboardMoney(metrics.isProvisional, current)}</strong><span>{metrics.isProvisional ? "Conciliación requerida" : comparison}</span><p>{metricExplanation(metric)}</p></div>
+    <div className="metric-detail-head"><div><span>Composición auditable</span><h2 id="metric-detail-title">{metricLabel(metric)}</h2></div><button type="button" className="icon-button" aria-label="Cerrar detalle" onClick={onClose}><X size={17} /></button></div>
+    <div className="metric-detail-summary"><strong>{dashboardMoney(metrics.isProvisional, current)}</strong><span>{metrics.isProvisional ? "Conciliación requerida" : comparison}</span><span>{metrics.isProvisional ? "" : comparisonAverageMoney(current, average)}</span><p>{metricExplanation(metric)}</p></div>
     {metrics.isProvisional ? <p className="metric-detail-empty">La tendencia se habilitará cuando los estados concilien.</p> : points.length ? <MiniMetricChart points={points} color={color} /> : <p className="metric-detail-empty">Aún no hay suficientes datos para dibujar una tendencia.</p>}
+    {!metrics.isProvisional && <div className="metric-audit-grid">
+      <div className="metric-audit-block"><h3>Cálculo exacto</h3><div className="metric-formula-list">{components.map((component) => <div key={component.label}><span>{component.label}</span><strong className={component.value < 0 ? "negative" : ""}>{signedDeltaMoney(component.value)}</strong></div>)}</div></div>
+      <div className="metric-audit-block"><h3>Estados y cuentas fuente</h3>{sourcePeriods.length ? <div className="metric-source-list">{sourcePeriods.map((period) => { const statement = statements.find((item) => item.id === period.statementId); const value = metric === "cash" ? period.cashBalance : metric === "debt" ? period.debtBalance : undefined; return <div key={period.statementId}><span><strong>{period.source} · {period.label}</strong><small>{statement?.fileName ?? "Estado importado"} · conciliación {statement?.reconciliationStatus ?? "pendiente"}</small></span>{value !== undefined && <b>{displayMoney(value)}</b>}</div>; })}</div> : <p className="metric-detail-empty">Movimiento manual o cifra sin un estado asociado.</p>}</div>
+    </div>}
+    {!metrics.isProvisional && movements.length > 0 && <div className="metric-movement-audit"><div className="metric-movement-head"><h3>Movimientos que generan la cifra</h3><span>{movements.length} filas canónicas · sin pagos de tarjeta ni transferencias internas</span></div><div className="metric-movement-list">{movements.slice().sort((left, right) => Math.abs(right.amount) - Math.abs(left.amount)).map((transaction) => { const contribution = isSpendTransaction(transaction) ? (metric === "expense" ? Math.abs(transaction.amount) : -Math.abs(transaction.amount)) : Math.abs(transaction.amount); const statement = statements.find((item) => item.id === transaction.statementId); return <div key={transaction.id}><span><strong>{compactMerchantName(transaction.description)}</strong><small>{transaction.date} · {transaction.category} · {statementLabel(statement)}{transaction.classificationReason ? ` · ${transaction.classificationReason}` : ""}</small></span><b className={contribution < 0 ? "negative" : ""}>{signedDeltaMoney(contribution)}</b></div>; })}</div></div>}
   </section>;
 }
 
@@ -1027,10 +1102,11 @@ function Expenses({ transactions, statements, metrics, onImport }: { transaction
   return <section>
     <PageHeading title="Gastos" body="Entiende cuánto gastaste, cómo cambió y qué lo explica." action="Importar estado" onAction={onImport} />
     <section className="expense-summary-kpis" aria-label="Resumen de gastos">
-      <Metric label="Gasto del mes" value={displayMoney(metrics.currentMonthSpend)} delta={comparisonPercent(current?.variationPercent)} tone="expense" icon={Receipt} />
+      <Metric label="Gasto del mes" value={displayMoney(metrics.currentMonthSpend)} delta={comparisonPercent(current?.variationPercent)} benchmark={comparisonAverageMoney(metrics.currentMonthSpend, priorThreeAverage(metrics.analyticsPeriods, (period) => period.spend))} tone="expense" icon={Receipt} />
       <Metric label="Promedio móvil 3 meses" value={displayMoney(current?.movingAverage3)} delta={comparisonMoney(current?.movingAverage3, previous?.movingAverage3)} tone="income" icon={ChartLineUp} />
       <Metric label="Gasto extraordinario" value={displayMoney(current?.extraordinarySpend)} delta={current?.spend ? `${Math.round((current.extraordinarySpend / current.spend) * 100)}% del gasto · ${comparisonMoney(current.extraordinarySpend, previous?.extraordinarySpend)}` : "Sin datos identificados"} tone="debt" icon={Warning} />
     </section>
+    <SpendTrendChart periods={metrics.analyticsPeriods} />
     <SpendingSplit period={current} />
     <div className="expense-analysis-grid">
       <CategoryDistribution categories={metrics.categoryDistribution} period={current} analyticsPeriods={metrics.analyticsPeriods} transactions={transactions} statements={statements} />
@@ -1200,7 +1276,6 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
         </article>;
       })}</div> : <EmptyState title="Aún no hay cuentas" body="Importa un estado de cuenta para construir tus saldos reales." />}
     </section>
-    {statements.some((statement) => statement.status === "review" && statement.reconciliationStatus === "valid" && statement.source !== "Desconocido" && statement.kind !== "unknown" && statement.sourceDetection?.status !== "verified") && <div className="provisional-banner" role="status"><Warning size={18} /><span>Hay estados conciliados que requieren confirmar el banco mostrado antes de entrar a los KPI.</span>{statements.filter((statement) => statement.status === "review" && statement.reconciliationStatus === "valid" && statement.source !== "Desconocido" && statement.kind !== "unknown" && statement.sourceDetection?.status !== "verified").map((statement) => <button key={statement.id} className="text-button" onClick={() => onMarkReviewed(statement.id)}>Confirmar {statement.source}</button>)}</div>}
     <details className="documents-panel">
       <summary><div><h2>Documentos importados</h2><span>{statements.length ? `${statements.length} archivos guardados localmente.` : "Aquí aparecerán tus PDFs revisados."}</span></div><strong>{statements.length}</strong></summary>
       <div className="documents-content">
@@ -1209,21 +1284,25 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
     </details>
   </section>;
 }
-function NetWorthBase({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
+function NetWorthBase({ metrics, onSelect }: { metrics: ReturnType<typeof buildFinanceMetrics>; onSelect?: (metric: Extract<DashboardMetricKey, "cash" | "debt" | "patrimony">) => void }) {
   const trend = metrics.liquidPatrimonyChangePercent;
   const trendLabel = comparisonPercent(trend);
+  const averageCash = priorThreeAverage(metrics.analyticsPeriods, (period) => period.cashAvailable);
+  const averageDebt = priorThreeAverage(metrics.analyticsPeriods, (period) => period.debtTotal);
+  const averagePatrimony = priorThreeAverage(metrics.analyticsPeriods, (period) => period.liquidPatrimony);
   if (metrics.isProvisional) return <section><PageHeading title="Patrimonio" body="Los saldos se muestran cuando cada estado concilia." /><DashboardBlockedNotice metrics={metrics} /><DataQualityIndicator metrics={metrics} /></section>;
   return <section>
     <PageHeading title="Patrimonio" body="Cuánto tienes, cómo cambió y qué parte está en efectivo o deuda." />
     <div className="patrimony-analytics-grid">
       <section className="detail-card patrimony-chart-card" aria-labelledby="patrimony-history-title"><div className="section-heading"><div><h2 id="patrimony-history-title">Evolución histórica</h2><p>Patrimonio líquido por periodo · efectivo menos deuda.</p></div></div><PatrimonyChart periods={metrics.analyticsPeriods} /></section>
-      <section className="patrimony-balances" aria-label="Saldos de patrimonio"><BalanceMetric label="Efectivo" value={displayMoney(metrics.cashAvailable)} comparison={comparisonMoney(metrics.cashAvailable, metrics.analyticsPeriods[1]?.cashAvailable)} tone="cash" /><BalanceMetric label="Deuda" value={displayMoney(metrics.debtTotal)} comparison={comparisonMoney(metrics.debtTotal, metrics.analyticsPeriods[1]?.debtTotal)} tone="debt" /><BalanceMetric label="Patrimonio neto" value={displayMoney(metrics.liquidPatrimony)} comparison={trendLabel} tone="net" /></section>
+      <section className="patrimony-balances" aria-label="Saldos de patrimonio"><BalanceMetric label="Efectivo" value={displayMoney(metrics.cashAvailable)} comparison={comparisonMoney(metrics.cashAvailable, metrics.analyticsPeriods[1]?.cashAvailable)} benchmark={comparisonAverageMoney(metrics.cashAvailable, averageCash)} tone="cash" onSelect={() => onSelect?.("cash")} /><BalanceMetric label="Deuda" value={displayMoney(metrics.debtTotal)} comparison={comparisonMoney(metrics.debtTotal, metrics.analyticsPeriods[1]?.debtTotal)} benchmark={comparisonAverageMoney(metrics.debtTotal, averageDebt)} tone="debt" onSelect={() => onSelect?.("debt")} /><BalanceMetric label="Patrimonio neto" value={displayMoney(metrics.liquidPatrimony)} comparison={trendLabel} benchmark={comparisonAverageMoney(metrics.liquidPatrimony, averagePatrimony)} tone="net" onSelect={() => onSelect?.("patrimony")} /></section>
     </div>
   </section>;
 }
 
-function NetWorth({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
-  return <><NetWorthBase metrics={metrics} /><details className="technical-details"><summary>Ver detalle de conciliación</summary><CalculationSummary metrics={metrics} /></details></>;
+function NetWorth({ metrics, transactions, statements }: { metrics: ReturnType<typeof buildFinanceMetrics>; transactions: Transaction[]; statements: Statement[] }) {
+  const [selectedMetric, setSelectedMetric] = useState<Extract<DashboardMetricKey, "cash" | "debt" | "patrimony"> | null>(null);
+  return <><NetWorthBase metrics={metrics} onSelect={setSelectedMetric} />{selectedMetric && <MetricDetailPanel metric={selectedMetric} metrics={metrics} transactions={transactions} statements={statements} onClose={() => setSelectedMetric(null)} />}<details className="technical-details"><summary>Ver detalle de conciliación</summary><CalculationSummary metrics={metrics} /></details></>;
 }
 
 function PatrimonyChart({ periods }: { periods: AnalyticsPeriod[] }) {
@@ -1243,8 +1322,11 @@ function PatrimonyChart({ periods }: { periods: AnalyticsPeriod[] }) {
   return <div className="patrimony-chart-wrap"><svg className="patrimony-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="Evolución histórica del patrimonio líquido"><line x1={padding.left} x2={width - padding.right} y1={zeroY} y2={zeroY} className="trend-baseline" /><polyline points={points.map(({ x, y }) => `${x},${y}`).join(" ")} className="patrimony-line" />{points.map(({ period, x, y }) => <circle key={period.key} cx={x} cy={y} r="5" className="patrimony-point"><title>{`${period.label}: ${displayMoney(period.liquidPatrimony)}`}</title></circle>)}</svg><div className="trend-values patrimony-values">{chartPeriods.map((period) => <div key={period.key}><span>{period.label}</span><strong>{displayMoney(period.liquidPatrimony)}</strong><small>{comparisonPercent(period.patrimonyVariationPercent)}</small></div>)}</div></div>;
 }
 
-function BalanceMetric({ label, value, comparison, tone }: { label: string; value: string; comparison: string; tone: "cash" | "debt" | "net" }) {
-  return <article className={`balance-metric balance-${tone}`}><span>{label}</span><strong>{value}</strong><small>{comparison}</small></article>;
+function BalanceMetric({ label, value, comparison, benchmark, tone, onSelect }: { label: string; value: string; comparison: string; benchmark?: string; tone: "cash" | "debt" | "net"; onSelect?: () => void }) {
+  const content = <><span>{label}</span><strong>{value}</strong><small>{comparison}</small>{benchmark && <small className="balance-benchmark">{benchmark}</small>}</>;
+  return onSelect
+    ? <button type="button" className={`balance-metric balance-metric-button balance-${tone}`} aria-label={`Ver composición de ${label}`} onClick={onSelect}>{content}</button>
+    : <article className={`balance-metric balance-${tone}`}>{content}</article>;
 }
 
 function PageHeading({ title, body, action, onAction }: { title: string; body: string; action?: string; onAction?: () => void }) {
@@ -1262,9 +1344,6 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
   const [progressLabel, setProgressLabel] = useState("");
   const [result, setResult] = useState<ImportResult | null>(null);
   const [items, setItems] = useState<Transaction[]>([]);
-  const [summary, setSummary] = useState<StatementSummary>({});
-  const [reviewSource, setReviewSource] = useState<StatementSource>("Desconocido");
-  const [reviewKind, setReviewKind] = useState<StatementKind>("unknown");
   const [error, setError] = useState("");
   const [classificationBusy, setClassificationBusy] = useState(false);
   const [classificationMessage, setClassificationMessage] = useState("");
@@ -1292,7 +1371,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
         return learned ? { ...item, category: learned, confidence: 1 } : item;
       });
       initialCategories.current = Object.fromEntries(withLearnedCategories.map((item) => [item.id, item.category]));
-      setResult({ ...inspected, transactions: withLearnedCategories }); setItems(withLearnedCategories); setSummary(inspected.summary ?? {}); setReviewSource(inspected.source); setReviewKind(inspected.kind); setStage("review");
+      setResult({ ...inspected, transactions: withLearnedCategories }); setItems(withLearnedCategories); setStage("review");
     } catch (cause) {
       const safeMessage = cause instanceof Error && cause.message.startsWith("El PDF")
         ? cause.message
@@ -1344,83 +1423,41 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
     }
   }
 
-  function updateItem(id: string, key: "description" | "category", value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, [key]: value } : item)); }
-  function updateAmount(id: string, value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, amount: Math.abs(Number(value) || 0) * (item.amount > 0 ? 1 : -1) } : item)); }
-  function addManualItem() { setItems((current) => [...current, { id: `manual-${Date.now()}`, date: "Sin fecha", description: "Movimiento por revisar", account: result?.source ?? "Desconocido", category: "Sin categoría", amount: -1, flow: "expense", confidence: 1 }]); }
+  function updateCategory(id: string, value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, category: value } : item)); }
 
-  function reparseWithSelection() {
-    if (!result?.extractedText) return;
-    const source = reviewSource.trim() || "Desconocido";
-    if (reviewKind === result.kind && source === result.source) return;
-    const parsed = parseImportedTransactions(
-      result.extractedText,
-      source,
-      result.fileName,
-      reviewKind,
-      result.mode,
-      result.ocrPageConfidences,
-    );
-    const withLearnedCategories = parsed.map((item) => {
-      const learned = categoryFromRules(item.description, categoryRules);
-      return learned ? { ...item, category: learned, confidence: 1 } : item;
-    });
-    const reparsedSummary = parseStatementSummary(result.extractedText, reviewKind);
-    const sourceDetection = result.sourceDetection && source !== result.sourceDetection.source
-      ? {
-        ...result.sourceDetection,
-        source,
-        confidence: 0,
-        status: "review" as const,
-        evidence: [...result.sourceDetection.evidence, "origen corregido por el usuario"],
-      }
-      : result.sourceDetection;
-    initialCategories.current = Object.fromEntries(withLearnedCategories.map((item) => [item.id, item.category]));
-    setItems(withLearnedCategories);
-    setSummary(reparsedSummary);
-    setResult((current) => current ? {
-      ...current,
-      source,
-      kind: reviewKind,
-      transactions: withLearnedCategories,
-      summary: reparsedSummary,
-      sourceDetection,
-    } : current);
-  }
-
-  function resetAndClose() { setStage("pick"); setProgress(0); setProgressLabel(""); setResult(null); setItems([]); setSummary({}); setReviewSource("Desconocido"); setReviewKind("unknown"); setError(""); setClassificationBusy(false); setClassificationMessage(""); initialCategories.current = {}; readerAuthorization.current = ""; readerConsent.current = false; onClose(); }
-
-  function updateSummary(key: keyof StatementSummary, value: string) {
-    setSummary((current) => {
-      const next = { ...current };
-      if (!value.trim()) delete next[key];
-      else next[key] = Number(value.replace(/,/g, "")) as never;
-      return next;
-    });
-  }
+  function resetAndClose() { setStage("pick"); setProgress(0); setProgressLabel(""); setResult(null); setItems([]); setError(""); setClassificationBusy(false); setClassificationMessage(""); initialCategories.current = {}; readerAuthorization.current = ""; readerConsent.current = false; onClose(); }
 
   const validItems = items.filter((item) => item.description.trim().length >= 3 && Number.isFinite(item.amount) && item.amount !== 0);
-  const currentReconciliation = result
-    ? gateOcrReconciliation(
-      reconcileStatementImport(reviewKind, summary, validItems),
-      result.mode,
-      result.ocrConfidence,
-      result.ocrPageConfidences,
-    )
-    : undefined;
+  // Reconciliation is immutable parser output. Category enrichment cannot
+  // rewrite amounts, issuer, statement controls, or acceptance state.
+  const currentReconciliation = result?.reconciliation;
   const reconciliationBlocked = Boolean(currentReconciliation && currentReconciliation.status !== "valid");
   const learnedCategories = Object.fromEntries(validItems.flatMap((item) => {
     const previous = initialCategories.current[item.id];
     const key = merchantKey(item.description);
     return key && previous && previous !== item.category && item.category !== "Sin categoría" ? [[key, item.category]] : [];
   }));
-  const selectionChanged = Boolean(result && (reviewKind !== result.kind || reviewSource.trim() !== result.source));
   return <dialog ref={dialog} className="import-dialog" onCancel={(event) => { event.preventDefault(); resetAndClose(); }}><div className="dialog-head"><div><span className="dialog-icon"><FilePdf size={21} /></span><div><h2>Importar estado de cuenta</h2><p>El archivo se procesa localmente y conserva su origen.</p></div></div><button className="icon-button" aria-label="Cerrar" onClick={resetAndClose}><X size={20} /></button></div>
-    {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se detectarán banco, periodo y movimientos. Los estados escaneados se leen con OCR local y quedan pendientes de confirmación.</span>{transactionClassifierEndpoint && <small>Zen no lee PDFs: solo podrá enriquecer categorías después de una conciliación local válida.</small>}<span className="file-button">Elegir archivo</span></label>}
+    {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se aceptan Santander, BBVA y American Express únicamente cuando sus filas concilian al centavo contra el total oficial.</span>{transactionClassifierEndpoint && <small>Zen no lee PDFs: solo podrá enriquecer categorías después de una conciliación local válida.</small>}<span className="file-button">Elegir archivo</span></label>}
     {stage === "processing" && <div className="processing-state" role="status" aria-live="polite" aria-busy="true"><div className="loading-orbit" aria-hidden="true"><CircleNotch size={34} className="spinner" /><span className="loading-pulse"><i /><i /><i /></span></div><h3>{progressLabel || "Cargando estado de cuenta…"}</h3><p>Estamos leyendo y conciliando tu estado. No cierres esta ventana.</p><div className="progress-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div><small>{progress}% completado</small></div>}
     {stage === "error" && <div className="error-state"><Warning size={34} /><h3>No pudimos completar la importación</h3><p>{error}</p><button className="secondary-button" onClick={() => setStage("pick")}>Intentar de nuevo</button></div>}
-    {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Origen detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.extractionProvider === "multimodal" ? "Lector multimodal legado" : result.mode === "text" ? "Lectura directa" : "OCR en el dispositivo"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div>{result.mode === "ocr" && <div><span>Confianza OCR</span><strong>{Math.round((result.ocrConfidence ?? 0) * 100)}%</strong></div>}</div><div className={`reconciliation-callout ${currentReconciliation?.status ?? "pending"}`} role="status"><div><strong>{currentReconciliation?.status === "valid" ? "Importación conciliada" : currentReconciliation?.status === "invalid" ? "Importación bloqueada" : "Conciliación pendiente"}</strong><p>{currentReconciliation?.status === "valid" ? "Las filas extraídas coinciden con los totales declarados por el estado." : currentReconciliation?.reason ?? "Completa o revisa los totales declarados antes de guardar."}</p></div><small>{currentReconciliation ? `Tolerancia ±${currentReconciliation.tolerance.toFixed(2)}${reconciliationCountLabel(currentReconciliation)}` : ""}</small></div><div className="review-source-editor"><label><span>Nombre que se guardará</span><input value={reviewSource} onChange={(event) => setReviewSource(event.target.value as StatementSource)} placeholder="Ej. Santander, Nómina o Banco personal" /></label><label><span>Tipo de archivo</span><select value={reviewKind} onChange={(event) => setReviewKind(event.target.value as StatementKind)}><option value="card">Tarjeta de crédito</option><option value="bank">Cuenta bancaria</option><option value="unknown">No identificado</option></select></label>{selectionChanged && <button type="button" className="text-button" onClick={reparseWithSelection}>Releer filas con esta configuración</button>}<p>Corrige el origen aquí si el PDF usa una marca o formato que todavía no conocemos. Las categorías que ajustes se recordarán para el siguiente mes.</p>{transactionClassifierEndpoint && currentReconciliation?.status === "valid" && validItems.length > 0 && <div className="classifier-callout"><div><strong>Clasificación opcional con Zen</strong><small>Envía solo filas ya conciliadas; no envía el PDF y no puede cambiar importes ni transferencias.</small></div><button type="button" className="secondary-button" onClick={classifyExpensesWithZen} disabled={classificationBusy || !readerPreflightReady}>{classificationBusy ? "Clasificando…" : "Clasificar gastos"}</button>{classificationMessage && <span role="status">{classificationMessage}</span>}</div>}</div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>Marcelito convirtió sus páginas a imagen y ejecutó OCR en tu navegador. Confirma los importes y agrega cualquier movimiento que no se haya reconocido.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
-      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "No se puede guardar hasta conciliar el estado" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: reviewSource.trim() || "Desconocido", accountKey: result.accountKey, kind: reviewKind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, extractionProvider: result.extractionProvider, extractionModel: result.extractionModel, extractionPromptVersion: result.extractionPromptVersion, mode: result.mode, transactions: validItems.map((item) => ({ ...item, account: reviewSource.trim() || item.account })) , summary, reconciliation: currentReconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Corregir conciliación para guardar" : validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado conciliado"}</button></div></div>}
-    {stage === "review" && result && <StatementSummaryForm source={reviewSource} kind={reviewKind} summary={summary} onChange={updateSummary} />}
+    {stage === "review" && result && <div className="review-state">
+      <div className="review-summary">
+        <div><span>Origen detectado</span><strong>{result.source}</strong></div>
+        <div><span>Periodo</span><strong>{result.period}</strong></div>
+        <div><span>Parser</span><strong>{result.parserId ?? "No compatible"}</strong></div>
+        <div><span>Sección</span><strong>{result.sourceSection ?? "No encontrada"}</strong></div>
+        <div><span>Movimientos</span><strong>{result.transactions.length}</strong></div>
+      </div>
+      <div className={`reconciliation-callout ${currentReconciliation?.status ?? "pending"}`} role="status">
+        <div><strong>{currentReconciliation?.status === "valid" ? "Importación conciliada al centavo" : "Importación rechazada"}</strong><p>{currentReconciliation?.status === "valid" ? "Las filas deterministas coinciden exactamente con los totales oficiales. Emisor, importes y controles no se pueden editar." : currentReconciliation?.reason ?? "El archivo no entrará al libro canónico."}</p></div>
+        <small>{currentReconciliation ? `Tolerancia ${currentReconciliation.tolerance.toFixed(2)}${reconciliationCountLabel(currentReconciliation)}` : ""}</small>
+      </div>
+      {transactionClassifierEndpoint && currentReconciliation?.status === "valid" && validItems.length > 0 && <div className="classifier-callout"><div><strong>Clasificación opcional con Zen</strong><small>Solo enriquece filas ya conciliadas; no puede cambiar importes, emisor ni aceptación.</small></div><button type="button" className="secondary-button" onClick={classifyExpensesWithZen} disabled={classificationBusy || !readerPreflightReady}>{classificationBusy ? "Clasificando…" : "Clasificar gastos"}</button>{classificationMessage && <span role="status">{classificationMessage}</span>}</div>}
+      {result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Lectura OCR con plantilla fija</strong><p>Solo se aceptaron filas dentro de la sección contractual del emisor. No se permiten correcciones manuales de importes; si el archivo no concilia, debe reimportarse.</p></div></div>}
+      {items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><strong>{item.description}</strong><small>{item.date} · página {item.extractionEvidence?.page ?? "—"}</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)} disabled={reconciliationBlocked}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><span className={item.amount > 0 ? "review-amount positive" : "review-amount"}>{moneyPrecise.format(item.amount)}</span></div>)}</div> : <EmptyState title="Importación rechazada" body="No se extrajeron movimientos contractuales. Este archivo no puede guardarse ni afectar los KPI." />}
+      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "El parser rechazó el estado; no admite desbloqueo manual" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: result.source, accountKey: result.accountKey, kind: result.kind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, parserId: result.parserId, sourceSection: result.sourceSection, extractionProvider: result.extractionProvider, extractionModel: result.extractionModel, extractionPromptVersion: result.extractionPromptVersion, mode: result.mode, transactions: validItems, summary: result.summary, reconciliation: result.reconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Estado rechazado" : `Guardar estado y ${validItems.length} movimientos`}</button></div>
+    </div>}
   </dialog>;
 }
 

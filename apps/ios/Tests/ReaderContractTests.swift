@@ -866,6 +866,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRUsesMovementColumnInsteadOfRunningBalance() {
         let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "16-JUL-2026", x: 0.05, y: 0.80, width: 0.10),
             OCRObservationFixture(text: "PAGO TRANSFERENCIA SPEI", x: 0.18, y: 0.80, width: 0.40),
             OCRObservationFixture(text: "30.00", x: 0.76, y: 0.80, width: 0.08),
@@ -884,6 +885,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testBBVAOCRUsesCalibratedCargoAndAbonoColumns() {
         let fixtures = [
+            OCRObservationFixture(text: "Detalle de Movimientos Realizados", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.04, y: 0.94, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.20, y: 0.94, width: 0.14),
             OCRObservationFixture(text: "CARGOS", x: 0.60, y: 0.94, width: 0.08),
@@ -939,6 +941,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testBBVAOCRCalibratesWhenVisionReturnsTheWholeHeaderInOneBox() {
         let fixtures = [
+            OCRObservationFixture(text: "Detalle de Movimientos Realizados", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(
                 text: "FECHA SALDO OPER LIQ DESCRIPCION REFERENCIA CARGOS ABONOS OPERACION LIQUIDACION",
                 x: 0.04,
@@ -960,6 +963,7 @@ final class ReaderContractTests: XCTestCase {
         // look like they start in the description column and the balance can
         // become a false expense.
         let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
@@ -985,6 +989,7 @@ final class ReaderContractTests: XCTestCase {
         // the parser must still keep the penultimate token as the movement and
         // the final token as the running balance.
         let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
@@ -1108,6 +1113,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRCalibratesShiftedColumnsFromHeader() {
         let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "FOLIO", x: 0.14, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
@@ -1131,6 +1137,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRRequiresACompleteColumnHeaderForAutomaticAcceptance() {
         let calibrated = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
@@ -1140,6 +1147,7 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(FinanceStore.santanderOCRColumnsCalibratedForTesting(calibrated, fileName: "sample-bank-period-3.pdf"))
 
         let missingAnchor = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
@@ -1150,6 +1158,12 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRCalibratesWhenVisionReturnsTheWholeHeaderInOneBox() {
         let fixtures = [
+            OCRObservationFixture(
+                text: "Detalle de movimientos cuenta de cheques",
+                x: 0.02,
+                y: 0.98,
+                width: 0.52
+            ),
             OCRObservationFixture(
                 text: "FECHA FOLIO DESCRIPCION DEPOSITO RETIRO SALDO",
                 x: 0.04,
@@ -1166,6 +1180,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRAcceptsEquivalentAbonosAndCargosColumnLabels() {
         let labels = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "ABONOS", x: 0.50, y: 0.90, width: 0.08),
@@ -1181,6 +1196,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRInheritsCalibrationAcrossContinuationPagesAndUsesBalanceDelta() {
         let fixtures = [
+            OCRObservationFixture(page: 0, text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(page: 0, text: "FECHA", x: 0.05, y: 0.94, width: 0.06),
             OCRObservationFixture(page: 0, text: "DESCRIPCION", x: 0.22, y: 0.94, width: 0.12),
             OCRObservationFixture(page: 0, text: "DEPOSITO", x: 0.50, y: 0.94, width: 0.08),
@@ -1237,6 +1253,7 @@ final class ReaderContractTests: XCTestCase {
         ))
 
         let splitLabelTokens = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSI TO", x: 0.50, y: 0.90, width: 0.08),
@@ -1249,6 +1266,7 @@ final class ReaderContractTests: XCTestCase {
         ))
 
         let glyphSubstitutions = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPC10N", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOS1T0", x: 0.50, y: 0.90, width: 0.08),
@@ -1263,6 +1281,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRIgnoresMultilineFolioTraceAndRunningBalance() {
         let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
             OCRObservationFixture(text: "RETIRO", x: 0.64, y: 0.90, width: 0.08),
             OCRObservationFixture(text: "SALDO", x: 0.79, y: 0.90, width: 0.08),
@@ -1281,6 +1300,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRReconstructsSeveralRowsWithDepositsAndContinuationText() {
         let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "DEPOSITO", x: 0.58, y: 0.94, width: 0.08),
             OCRObservationFixture(text: "RETIRO", x: 0.71, y: 0.94, width: 0.08),
             OCRObservationFixture(text: "SALDO", x: 0.84, y: 0.94, width: 0.08),
@@ -1315,6 +1335,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRSkipsDatedPeriodAndBalanceHeaders() {
         let rows = FinanceStore.santanderOCRRowsForTesting([
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "ESTADO DE CUENTA NOMINA", x: 0.04, y: 0.96, width: 0.40),
             OCRObservationFixture(text: "PERIODO 16-JUL-2026 AL 15-AGO-2026", x: 0.04, y: 0.94, width: 0.55),
             OCRObservationFixture(text: "SALDO FINAL DEL PERIODO ANTERIOR: $5562.79", x: 0.04, y: 0.90, width: 0.55),
@@ -1360,13 +1381,13 @@ final class ReaderContractTests: XCTestCase {
 
         XCTAssertTrue(store.dashboardIsBlocked)
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
-        XCTAssertTrue(store.confirmStatementReviewed(statement))
-        XCTAssertTrue(store.statements[0].issuerConfirmedByUser == true)
-        XCTAssertFalse(store.dashboardIsBlocked)
-        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
+        XCTAssertFalse(store.confirmStatementReviewed(statement))
+        XCTAssertNil(store.statements[0].issuerConfirmedByUser)
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 0)
     }
 
-    func testManualDashboardUnlockIsExplicitAndProvisional() {
+    func testManualDashboardUnlockIsRejectedAndNeverProvisional() {
         let store = FinanceStore()
         defer { store.clearLocalData() }
         let statement = StatementRecord(
@@ -1397,10 +1418,10 @@ final class ReaderContractTests: XCTestCase {
 
         XCTAssertTrue(store.dashboardIsBlocked)
         XCTAssertFalse(store.dashboardIsProvisional)
-        XCTAssertTrue(store.setManualDashboardUnlock(true))
-        XCTAssertFalse(store.dashboardIsBlocked)
-        XCTAssertTrue(store.dashboardIsProvisional)
-        XCTAssertEqual(store.periodMetrics.count, 1)
+        XCTAssertFalse(store.setManualDashboardUnlock(true))
+        XCTAssertTrue(store.dashboardIsBlocked)
+        XCTAssertFalse(store.dashboardIsProvisional)
+        XCTAssertEqual(store.periodMetrics.count, 0)
         XCTAssertTrue(store.setManualDashboardUnlock(false))
         XCTAssertTrue(store.dashboardIsBlocked)
         XCTAssertFalse(store.dashboardIsProvisional)
@@ -1447,8 +1468,8 @@ final class ReaderContractTests: XCTestCase {
         store.statements = [statement]
         store.movements = [movement]
 
-        XCTAssertTrue(store.setManualDashboardUnlock(true))
-        XCTAssertFalse(store.operationalMetricsBlocked)
+        XCTAssertFalse(store.setManualDashboardUnlock(true))
+        XCTAssertTrue(store.operationalMetricsBlocked)
         XCTAssertEqual(store.consolidatedRealSpend, 0)
         XCTAssertEqual(store.monthlyExpense, 0)
         XCTAssertEqual(store.realIncome, 0)
@@ -1914,7 +1935,7 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
     }
 
-    func testWeakOCRCannotFeedNativeDashboardEvenWhenReviewFlagIsStale() {
+    func testWeakLegacyOCRCannotFeedNativeDashboardEvenWhenReviewFlagIsStale() {
         let store = FinanceStore()
         defer { store.clearLocalData() }
         let statement = StatementRecord(
@@ -1942,7 +1963,11 @@ final class ReaderContractTests: XCTestCase {
             ocrConfidence: 0.86,
             ocrPageConfidences: [0.86, 0.91],
             ocrColumnsCalibrated: true,
-            readerVersion: FinanceStore.readerVersion
+            // The current reader records deterministic, issuer-specific rows;
+            // an OCR confidence score is not a gate for those validated rows.
+            // This fixture represents a legacy OCR envelope, which must stay
+            // quarantined even if a stale persisted review flag says otherwise.
+            readerVersion: "ios-reader-legacy"
         )
         store.statements = [statement]
         store.movements = []

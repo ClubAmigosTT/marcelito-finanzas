@@ -661,7 +661,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-2026.09.06.36"
+    static let readerVersion = "ios-reader-deterministic-2026.09.07.1"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -1230,7 +1230,7 @@ final class FinanceStore {
     /// chose to inspect the provisional projections. Keep this separate from
     /// `dashboardIsBlocked` so every screen can label the numbers instead of
     /// silently treating an override as a successful reconciliation.
-    var dashboardIsProvisional: Bool { manualDashboardUnlockEnabled && ledgerQuality.isBlocking }
+    var dashboardIsProvisional: Bool { false }
 
     /// A manual unlock is an explicit request to inspect provisional analytics.
     /// It does not promote rejected rows: every aggregate still reads only
@@ -1238,10 +1238,10 @@ final class FinanceStore {
     /// result provisional and keeps the quality warning visible. A rebuild in
     /// progress remains a hard stop because the canonical ledger is incomplete.
     var operationalMetricsBlocked: Bool {
-        canonicalRebuildPending || (ledgerQuality.isBlocking && !manualDashboardUnlockEnabled)
+        canonicalRebuildPending || ledgerQuality.isBlocking
     }
 
-    var dashboardIsBlocked: Bool { ledgerQuality.isBlocking && !manualDashboardUnlockEnabled }
+    var dashboardIsBlocked: Bool { ledgerQuality.isBlocking }
 
     /// Enables a deliberately provisional dashboard for forensic review. This
     /// never certifies a statement, changes reconciliation, or suppresses the
@@ -1249,35 +1249,18 @@ final class FinanceStore {
     @discardableResult
     func setManualDashboardUnlock(_ enabled: Bool) -> Bool {
         let defaults = UserDefaults.standard
-        guard enabled else {
-            manualDashboardUnlockEnabled = false
-            defaults.removeObject(forKey: manualDashboardUnlockKey)
-            DiagnosticsRecorder.record(
-                stage: "dashboard.manual_unlock.disabled",
-                message: "Desbloqueo manual desactivado; el dashboard vuelve a exigir conciliación."
-            )
-            persist()
-            runAutomaticAudit(trigger: "manual-lock")
-            return true
-        }
-
-        guard !statements.isEmpty else {
+        manualDashboardUnlockEnabled = false
+        defaults.removeObject(forKey: manualDashboardUnlockKey)
+        if enabled {
             DiagnosticsRecorder.record(
                 level: "error",
                 stage: "dashboard.manual_unlock.rejected",
-                message: "No se puede desbloquear el dashboard sin estados importados."
+                message: "El desbloqueo manual fue eliminado; los KPI exigen conciliación exacta del emisor."
             )
             return false
         }
-        manualDashboardUnlockEnabled = true
-        defaults.set(true, forKey: manualDashboardUnlockKey)
-        DiagnosticsRecorder.record(
-            level: "error",
-            stage: "dashboard.manual_unlock.enabled",
-            message: "Desbloqueo manual activo: los KPI son provisionales y no sustituyen la conciliación del emisor."
-        )
         persist()
-        runAutomaticAudit(trigger: "manual-unlock")
+        runAutomaticAudit(trigger: "manual-lock")
         return true
     }
 
@@ -1386,7 +1369,9 @@ final class FinanceStore {
     }
 
     var consistencyChecks: [LedgerConsistencyCheck] {
-        let tolerance = Decimal(string: "0.05", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(0.05)
+        // Accounting acceptance is exact. Decimal keeps this comparison in
+        // base 10, so a one-cent difference can never enter the ledger.
+        let tolerance = Decimal.zero
         func check(_ id: String, _ label: String, expected: Decimal?, actual: Decimal?) -> LedgerConsistencyCheck {
             guard let expected, let actual else {
                 return LedgerConsistencyCheck(id: id, label: label, expected: expected, actual: actual, difference: nil, tolerance: tolerance, passed: true)
@@ -1733,6 +1718,9 @@ final class FinanceStore {
     /// Re-check persisted values here so an old/corrupt `requiresReview=false`
     /// flag cannot promote a weak visual read into a KPI.
     private func hasSufficientOCRQuality(_ statement: StatementRecord) -> Bool {
+        if isCurrentReader(statement), statement.reconciliation?.status == .valid {
+            return true
+        }
         let hasOCRSignal = statement.ocrConfidence != nil || statement.ocrPageConfidences != nil
         guard hasOCRSignal else { return true }
         guard let average = statement.ocrConfidence,
@@ -1767,7 +1755,7 @@ final class FinanceStore {
             && statement.source.trimmingCharacters(in: .whitespacesAndNewlines)
                 .caseInsensitiveCompare("Desconocido") != .orderedSame
             && statement.kind != .unknown
-            && (hasVerifiedSourceEvidence(statement) || statement.issuerConfirmedByUser == true)
+            && hasVerifiedSourceEvidence(statement)
             // A Santander scan must have its visual transaction columns
             // calibrated. Keep this as an independent gate instead of
             // trusting only `requiresReview`, so stale/corrupt persisted data
@@ -1781,12 +1769,7 @@ final class FinanceStore {
     /// generations and unknown issuers stay quarantined even after the user
     /// acknowledges the provisional warning.
     private func isDashboardStatement(_ statement: StatementRecord) -> Bool {
-        if isEligibleStatement(statement) { return true }
-        guard manualDashboardUnlockEnabled,
-              isCurrentReader(statement),
-              statementKind(statement) != .unknown else { return false }
-        let source = statement.source.trimmingCharacters(in: .whitespacesAndNewlines)
-        return !source.isEmpty && source.caseInsensitiveCompare("Desconocido") != .orderedSame
+        isEligibleStatement(statement)
     }
 
     /// Only reconciled and confirmed statement rows may feed a financial
@@ -2407,7 +2390,8 @@ final class FinanceStore {
     init() {
         let defaults = UserDefaults.standard
         isReconciliationOnly = false
-        manualDashboardUnlockEnabled = defaults.bool(forKey: manualDashboardUnlockKey)
+        manualDashboardUnlockEnabled = false
+        defaults.removeObject(forKey: manualDashboardUnlockKey)
         var loadedAtomicEnvelope = false
         if let data = defaults.data(forKey: ledgerEnvelopeKey),
            let envelope = try? JSONDecoder().decode(LedgerEnvelope.self, from: data),
@@ -2543,86 +2527,35 @@ final class FinanceStore {
     }
 
     func updateStatementSummary(for statement: StatementRecord, summary: StatementSummaryRecord) {
-        guard let index = statements.firstIndex(where: { $0.id == statement.id }) else { return }
-        statements[index].summary = summary
-        let linked = movements.filter { $0.statementId == statement.id }
-        statements[index].reconciliation = reconcileStatement(
-            kind: statementKind(statements[index]),
-            summary: summary,
-            movements: linked
+        _ = summary
+        DiagnosticsRecorder.record(
+            level: "error",
+            stage: "statement.summary.manual_edit.rejected",
+            message: "No se modificó \(statement.fileName): los controles oficiales solo pueden provenir del parser del emisor."
         )
-        statements[index].requiresReview = statements[index].reconciliation?.status != .valid
-            || (statements[index].sourceDetection?.status != .verified && statements[index].issuerConfirmedByUser != true)
-        persist(markingChange: true)
     }
 
-    /// Explicitly releases a reconciled statement from the review quarantine.
-    /// This is a human acknowledgement for OCR/low-confidence rows. It never
-    /// overrides an issuer-total mismatch; for a known issuer it records a
-    /// manual confirmation when automatic evidence is unavailable.
+    /// Manual review cannot release a statement from quarantine. Eligibility
+    /// is an immutable result of the issuer parser and its cent-level
+    /// reconciliation; retaining this method only keeps old call sites safe.
     @discardableResult
     func confirmStatementReviewed(_ statement: StatementRecord) -> Bool {
-        guard let index = statements.firstIndex(where: { $0.id == statement.id }) else { return false }
-        guard statements[index].reconciliation?.status == .valid else {
-            DiagnosticsRecorder.record(
-                level: "error",
-                stage: "statement.review.blocked",
-                message: "No se puede confirmar \(statements[index].fileName): la conciliación aún no es válida."
-            )
-            return false
-        }
-        let sourceIsVerified = statements[index].sourceDetection?.status == .verified
-        let normalizedSource = statements[index].source
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        let sourceIsKnown = !normalizedSource.isEmpty
-            && normalizedSource != "importado"
-            && normalizedSource != "desconocido"
-        guard sourceIsVerified || sourceIsKnown else {
-            DiagnosticsRecorder.record(
-                level: "error",
-                stage: "statement.review.blocked",
-                message: "No se puede confirmar \(statements[index].fileName): primero selecciona un emisor conocido."
-            )
-            return false
-        }
-        if !sourceIsVerified {
-            statements[index].issuerConfirmedByUser = true
-            DiagnosticsRecorder.record(
-                stage: "statement.issuer.manual_confirmation",
-                message: "Emisor confirmado manualmente: \(statements[index].source) · \(statements[index].fileName)."
-            )
-        }
-        statements[index].requiresReview = false
-        persist(markingChange: true)
-        _ = runAutomaticAudit(trigger: "review")
-        return true
+        DiagnosticsRecorder.record(
+            level: "error",
+            stage: "statement.review.manual_confirmation_rejected",
+            message: "No se puede confirmar \(statement.fileName): la elegibilidad solo proviene del parser determinista y la conciliación exacta."
+        )
+        return false
     }
 
     func updateStatementSource(for statement: StatementRecord, to source: String, kind: StatementKind? = nil) {
-        let cleaned = source.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleaned.isEmpty,
-              let index = statements.firstIndex(where: { $0.id == statement.id }) else { return }
-        let previousSource = statements[index].source
-        statements[index].source = cleaned
-        if let kind {
-            statements[index].kind = kind
-        }
-        if previousSource != cleaned || kind != nil {
-            statements[index].reconciliation = StatementReconciliationRecord(
-                status: .pending,
-                tolerance: Decimal(string: "0.05", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(0.05),
-                reason: "El origen o tipo del estado cambió; vuelve a conciliar sus filas."
-            )
-            statements[index].requiresReview = true
-            statements[index].issuerConfirmedByUser = false
-        }
-        for movementIndex in movements.indices where movements[movementIndex].statementId == statement.id {
-            if movements[movementIndex].account == previousSource || movements[movementIndex].account == "Importado" {
-                movements[movementIndex].account = cleaned
-            }
-        }
-        persist(markingChange: true)
+        _ = source
+        _ = kind
+        DiagnosticsRecorder.record(
+            level: "error",
+            stage: "statement.source.manual_edit.rejected",
+            message: "No se modificó \(statement.fileName): emisor y tipo son resultados inmutables del parser."
+        )
     }
 
     func addMovement(
@@ -3191,7 +3124,7 @@ final class FinanceStore {
         summary: StatementSummaryRecord?,
         movements fresh: [Movement]
     ) -> StatementReconciliationRecord {
-        let tolerance = Decimal(string: "0.05", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(0.05)
+        let tolerance = Decimal.zero
         let validRows = fresh.filter(isValidStoredMovement)
         let deposits = validRows.filter { $0.amount > 0 }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let withdrawals = validRows.filter { $0.amount < 0 }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
@@ -3407,9 +3340,10 @@ final class FinanceStore {
     ) -> Bool {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return false }
         let detectedSourceEvidence = sourceDetection(from: text, fileName: fileName)
-        let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let source = cleanedSourceOverride.flatMap { $0.isEmpty ? nil : $0 } ?? detectedSourceEvidence.source
-        let kind = kindOverride ?? statementKind(from: text, source: source)
+        _ = sourceOverride
+        _ = kindOverride
+        let source = detectedSourceEvidence.source
+        let kind = statementKind(from: text, source: source)
         let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let layoutNormalized = normalized
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
@@ -3423,7 +3357,16 @@ final class FinanceStore {
             && (normalized.contains("fecha y detalle de las operaciones")
                 || layoutNormalized.contains("fecha y detalle de las operaciones"))
         let structuredText = isAmexLayout ? Self.rebuildAmexSelectableLines(text) : text
-        let candidates = parse(text: structuredText, fileName: fileName, sourceHint: source)
+        let candidates: [Movement]
+        if source == "BBVA", kind == .bank {
+            candidates = parseBBVASelectableText(text: structuredText, fileName: fileName, sourceHint: source)
+        } else if isAmexLayout {
+            candidates = parse(text: structuredText, fileName: fileName, sourceHint: source)
+        } else {
+            // Santander is validated through its fixed Vision columns. No
+            // generic selectable-text scan is allowed to suppress OCR.
+            candidates = []
+        }
         guard !candidates.isEmpty else { return false }
         // This probe runs from the detached PDF/OCR task. Constructing the
         // normal store here would read and rewrite UserDefaults (and could
@@ -3545,21 +3488,16 @@ final class FinanceStore {
         }
 
         let detectedSourceEvidence = Self.sourceDetection(from: text, fileName: fileName)
-        let sourceDetection = cleanedSourceOverride.flatMap { override -> SourceDetectionEvidence? in
-            guard !override.isEmpty else { return nil }
-            return SourceDetectionEvidence(
-                source: override,
-                confidence: 0,
-                status: .review,
-                evidence: ["origen corregido por el usuario"],
-                ignoredBodyMentions: detectedSourceEvidence.ignoredBodyMentions
-            )
-        } ?? detectedSourceEvidence
+        // Issuer and statement kind are document facts. User overrides are
+        // intentionally ignored so they cannot unlock a rejected import.
+        _ = cleanedSourceOverride
+        _ = kindOverride
+        let sourceDetection = detectedSourceEvidence
         let source = sourceDetection.source
         let accountKey = detectedSourceEvidence.source == source
             ? Self.maskedAccountKey(from: text, source: source)
             : nil
-        let kind = kindOverride ?? Self.statementKind(from: text, source: source)
+        let kind = Self.statementKind(from: text, source: source)
         var movementColumnsCalibrated = true
         var rowDiagnostics: [OCRRowDiagnostic] = []
         let parsedCandidates: [Movement]
@@ -3567,52 +3505,31 @@ final class FinanceStore {
             let santanderResult = Self.parseSantanderOCRResult(ocrObservations, fileName: fileName)
             movementColumnsCalibrated = santanderResult.columnsCalibrated
             rowDiagnostics = santanderResult.diagnostics
-            if santanderResult.movements.isEmpty {
-                let fallback = Self.parse(text: text, fileName: fileName, sourceHint: source)
-                rowDiagnostics.append(contentsOf: Self.rowDiagnostics(for: fallback, fallbackReason: "fila reconstruida desde el texto OCR tras agotar la calibración Santander"))
-                parsedCandidates = fallback
-            } else {
-                parsedCandidates = santanderResult.movements
-            }
+            parsedCandidates = santanderResult.movements
         } else if usedOCR, source == "Amex" {
             let amexResult = Self.parseAmexOCRResult(Self.ocrLines(from: ocrObservations), fileName: fileName)
             rowDiagnostics = amexResult.diagnostics
-            if amexResult.movements.isEmpty {
-                let fallback = Self.parse(text: text, fileName: fileName, sourceHint: source)
-                rowDiagnostics.append(contentsOf: Self.rowDiagnostics(for: fallback, fallbackReason: "fila reconstruida desde el texto OCR tras agotar Vision Amex"))
-                parsedCandidates = fallback
-            } else {
-                parsedCandidates = amexResult.movements
-            }
+            parsedCandidates = amexResult.movements
         } else if usedOCR, source == "BBVA" {
             let bbvaResult = Self.parseBBVAOCRResult(ocrObservations, fileName: fileName)
             movementColumnsCalibrated = bbvaResult.columnsCalibrated
             rowDiagnostics = bbvaResult.diagnostics
-            if bbvaResult.movements.isEmpty {
-                let fallback = Self.parse(text: text, fileName: fileName, sourceHint: source)
-                rowDiagnostics.append(contentsOf: Self.rowDiagnostics(for: fallback, fallbackReason: "fila reconstruida desde el texto OCR tras agotar la calibración BBVA"))
-                parsedCandidates = fallback
-            } else {
-                parsedCandidates = bbvaResult.movements
-            }
+            parsedCandidates = bbvaResult.movements
         } else if usedOCR {
-            let genericCandidates = Self.parseGenericOCR(
-                ocrObservations,
-                fileName: fileName,
-                source: source,
-                kind: kind
-            )
-            rowDiagnostics = Self.rowDiagnostics(for: genericCandidates, fallbackReason: "importe seleccionado por el parser OCR genérico")
-            if genericCandidates.isEmpty {
-                let fallback = Self.parse(text: text, fileName: fileName, sourceHint: source)
-                rowDiagnostics.append(contentsOf: Self.rowDiagnostics(for: fallback, fallbackReason: "fila reconstruida desde el texto OCR tras agotar el parser genérico"))
-                parsedCandidates = fallback
-            } else {
-                parsedCandidates = genericCandidates
-            }
+            parsedCandidates = []
+        } else if source == "BBVA" {
+            parsedCandidates = Self.parseBBVASelectableText(text: text, fileName: fileName, sourceHint: source)
+            rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "fila BBVA dentro de Detalle de Movimientos Realizados")
+        } else if source.localizedCaseInsensitiveContains("Amex") {
+            // The selectable Amex parser is section-aware and ignores all
+            // dates outside Fecha y Detalle de las operaciones.
+            parsedCandidates = Self.parse(text: Self.rebuildAmexSelectableLines(text), fileName: fileName, sourceHint: source)
+            rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "fila Amex dentro de Fecha y Detalle de las operaciones")
         } else {
-            parsedCandidates = Self.parse(text: text, fileName: fileName, sourceHint: source)
-            rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "fila reconstruida desde la capa de texto PDFKit")
+            // Santander uses its fixed visual columns; unsupported issuers
+            // have no generic text parser. Both remain rejected when Vision
+            // is unavailable instead of guessing rows from global numbers.
+            parsedCandidates = []
         }
         let candidates = parsedCandidates.map { candidate -> Movement in
             var corrected = candidate
@@ -3716,7 +3633,6 @@ final class FinanceStore {
             )
         }
         let ocrFallbackNeedsReview = extraction.ocrFallbackNeedsReview
-        let ocrRejectedRowsNeedReview = extraction.rowDiagnostics.contains { !$0.accepted }
         let ocrColumnCalibrationNeedsReview = extraction.ocrColumnCalibrationNeedsReview
         let weakestOCRPage = ocrPageConfidences?.min()
         let ocrConfidenceNeedsReview = extraction.ocrConfidenceNeedsReview
@@ -3739,57 +3655,15 @@ final class FinanceStore {
                 message: "\(url.lastPathComponent): OCR provisional (media \(Int(((ocrConfidence ?? 0) * 100).rounded()))%, página más débil \(Int(((weakestOCRPage ?? 0) * 100).rounded()))%)."
             )
         }
-        let ocrQualityNeedsReview = ocrFallbackNeedsReview
-            || ocrColumnCalibrationNeedsReview
-            || ocrConfidenceNeedsReview
-        // Keep the reconciliation status itself provisional when visual
-        // evidence is weak. `requiresReview` is a UI flag and can be stale in
-        // persisted data; the status is the durable accounting boundary used
-        // by rebuilds and downstream callers.
-        let gatedReconciliation: StatementReconciliationRecord = {
-            guard ocrQualityNeedsReview, reconciliation.status == .valid else { return reconciliation }
-            let reason: String
-            if ocrColumnCalibrationNeedsReview {
-                reason = "OCR provisional: columnas de movimientos sin calibrar; revisa la tabla visual antes de aceptar."
-            } else if ocrRejectedRowsNeedReview {
-                reason = "OCR provisional: una o más filas fueron rechazadas por falta de fecha, importe, dirección o descripción demostrable."
-            } else if ocrFallbackNeedsReview {
-                reason = "OCR provisional: alguna fila no conserva evidencia visual suficiente; revisa el estado antes de aceptar."
-            } else {
-                reason = "OCR provisional: confianza media \(Int(((ocrConfidence ?? 0) * 100).rounded()))% y página más débil \(Int(((weakestOCRPage ?? 0) * 100).rounded()))%; revisa las filas antes de aceptar."
-            }
-            return StatementReconciliationRecord(
-                status: .pending,
-                tolerance: reconciliation.tolerance,
-                extractedDepositTotal: reconciliation.extractedDepositTotal,
-                extractedWithdrawalTotal: reconciliation.extractedWithdrawalTotal,
-                extractedChargeTotal: reconciliation.extractedChargeTotal,
-                extractedDomesticChargeTotal: reconciliation.extractedDomesticChargeTotal,
-                extractedForeignChargeTotal: reconciliation.extractedForeignChargeTotal,
-                extractedCreditTotal: reconciliation.extractedCreditTotal,
-                extractedPaymentTotal: reconciliation.extractedPaymentTotal,
-                extractedMovementCount: reconciliation.extractedMovementCount,
-                expectedMovementCount: reconciliation.expectedMovementCount,
-                reason: reason
-            )
-        }()
+        // Confidence remains diagnostic. Acceptance is determined solely by
+        // the issuer-specific section parser and exact declared controls.
+        let ocrQualityNeedsReview = false
+        let gatedReconciliation = reconciliation
         let needsReview = fresh.isEmpty
             || summary == nil
             || detectedKind == .unknown
             || gatedReconciliation.status != .valid
             || sourceDetection.status != .verified
-
-        // Re-importing the exact same bytes must not silently erase a prior
-        // human issuer confirmation. The confirmation is scoped to the
-        // immutable document fingerprint, source and statement kind; any
-        // change to those inputs intentionally starts a fresh review.
-        let preservedIssuerConfirmation: Bool? = {
-            guard let existingStatement,
-                  existingStatement.sourceFingerprint == sourceFingerprint,
-                  existingStatement.source == source,
-                  statementKind(existingStatement) == detectedKind else { return nil }
-            return existingStatement.issuerConfirmedByUser
-        }()
 
         // The operational ledger contains only rows backed by a verified
         // issuer control. Rejected or OCR-provisional rows are represented by
@@ -3834,7 +3708,7 @@ final class FinanceStore {
             summary: summary,
             reconciliation: gatedReconciliation,
             sourceDetection: sourceDetection,
-            issuerConfirmedByUser: preservedIssuerConfirmation,
+            issuerConfirmedByUser: nil,
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences,
             ocrColumnsCalibrated: ocrColumnsCalibrated,
@@ -4089,38 +3963,7 @@ final class FinanceStore {
             summary: extraction.summary,
             movements: fresh
         )
-        let weakestOCRPage = extraction.ocrPageConfidences?.min()
-        let ocrRejectedRowsNeedReview = extraction.rowDiagnostics.contains { !$0.accepted }
-        let ocrQualityNeedsReview = extraction.ocrFallbackNeedsReview
-            || extraction.ocrColumnCalibrationNeedsReview
-            || extraction.ocrConfidenceNeedsReview
-        let gatedReconciliation: StatementReconciliationRecord = {
-            guard ocrQualityNeedsReview, reconciliation.status == .valid else { return reconciliation }
-            let reason: String
-            if extraction.ocrColumnCalibrationNeedsReview {
-                reason = "OCR provisional: columnas de movimientos sin calibrar; revisa la tabla visual antes de aceptar."
-            } else if ocrRejectedRowsNeedReview {
-                reason = "OCR provisional: una o más filas fueron rechazadas por falta de fecha, importe, dirección o descripción demostrable."
-            } else if extraction.ocrFallbackNeedsReview {
-                reason = "OCR provisional: alguna fila no conserva evidencia visual suficiente; revisa el estado antes de aceptar."
-            } else {
-                reason = "OCR provisional: confianza media \(Int(((extraction.ocrConfidence ?? 0) * 100).rounded()))% y página más débil \(Int(((weakestOCRPage ?? 0) * 100).rounded()))%; revisa las filas antes de aceptar."
-            }
-            return StatementReconciliationRecord(
-                status: .pending,
-                tolerance: reconciliation.tolerance,
-                extractedDepositTotal: reconciliation.extractedDepositTotal,
-                extractedWithdrawalTotal: reconciliation.extractedWithdrawalTotal,
-                extractedChargeTotal: reconciliation.extractedChargeTotal,
-                extractedDomesticChargeTotal: reconciliation.extractedDomesticChargeTotal,
-                extractedForeignChargeTotal: reconciliation.extractedForeignChargeTotal,
-                extractedCreditTotal: reconciliation.extractedCreditTotal,
-                extractedPaymentTotal: reconciliation.extractedPaymentTotal,
-                extractedMovementCount: reconciliation.extractedMovementCount,
-                expectedMovementCount: reconciliation.expectedMovementCount,
-                reason: reason
-            )
-        }()
+        let gatedReconciliation = reconciliation
         let requiresReview = fresh.isEmpty
             || extraction.summary == nil
             || extraction.kind == .unknown
@@ -4710,9 +4553,7 @@ final class FinanceStore {
         )
         let hintedBBVA = sourceHint?.localizedCaseInsensitiveCompare("BBVA") == .orderedSame
         guard hintedBBVA || foldedDocument.contains("bbva mexico") else { return [] }
-        let hasMovementTable = foldedDocument.contains("detalle de movimientos")
-            || foldedDocument.contains("fecha descripcion")
-            || foldedDocument.contains("fecha saldo oper")
+        let hasMovementTable = foldedDocument.contains("detalle de movimientos realizados")
         guard hasMovementTable else { return [] }
         guard let dateRegex = try? NSRegularExpression(
             pattern: #"(?<!\d)(\d{1,2})[\/.\-](\d{1,2})[\/.\-](\d{2,4})(?!\d)"#
@@ -4747,6 +4588,7 @@ final class FinanceStore {
         var pendingPage: Int?
         var pendingHasAmount = false
         var currentPage: Int?
+        var inMovementSection = false
 
         func flush() {
             guard !pending.isEmpty else { return }
@@ -4790,6 +4632,18 @@ final class FinanceStore {
                 currentPage = page
                 continue
             }
+
+            if normalized.contains("detalle de movimientos realizados") {
+                flush()
+                inMovementSection = true
+                continue
+            }
+            if normalized.contains("total de movimientos") {
+                flush()
+                inMovementSection = false
+                continue
+            }
+            guard inMovementSection else { continue }
 
             let boundary = normalized.contains("total importe cargos")
                 || normalized.contains("total importe abonos")
@@ -5897,7 +5751,23 @@ final class FinanceStore {
             return Calendar.current.component(.year, from: .now)
         }()
 
-        let observationsByPage = Dictionary(grouping: observations, by: \.page)
+        var inMovementSection = false
+        var scopedObservations: [OCRObservation] = []
+        for observation in observations.sorted(by: {
+            $0.page == $1.page ? $0.centerY > $1.centerY : $0.page < $1.page
+        }) {
+            let normalized = observation.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            if normalized.contains("detalle de movimientos realizados") {
+                inMovementSection = true
+                continue
+            }
+            if normalized.contains("total de movimientos") {
+                inMovementSection = false
+                continue
+            }
+            if inMovementSection { scopedObservations.append(observation) }
+        }
+        let observationsByPage = Dictionary(grouping: scopedObservations, by: \.page)
         var parsed: [Movement] = []
         var diagnostics: [OCRRowDiagnostic] = []
         var lastCalibratedColumns: BBVAOCRColumns?
@@ -6288,7 +6158,23 @@ final class FinanceStore {
             return Calendar.current.component(.year, from: .now)
         }()
 
-        let observationsByPage = Dictionary(grouping: observations, by: \.page)
+        var inMovementSection = false
+        var scopedObservations: [OCRObservation] = []
+        for observation in observations.sorted(by: {
+            $0.page == $1.page ? $0.centerY > $1.centerY : $0.page < $1.page
+        }) {
+            let normalized = observation.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            if normalized.contains("detalle de movimientos cuenta de cheques") {
+                inMovementSection = true
+                continue
+            }
+            if inMovementSection && normalized.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("total") {
+                inMovementSection = false
+                continue
+            }
+            if inMovementSection { scopedObservations.append(observation) }
+        }
+        let observationsByPage = Dictionary(grouping: scopedObservations, by: \.page)
         var parsed: [Movement] = []
         var diagnostics: [OCRRowDiagnostic] = []
         var previousRunningBalance: Decimal?
@@ -6955,8 +6841,7 @@ final class FinanceStore {
             let normalizedPageText = pageLines
                 .map { $0.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current) }
                 .joined(separator: " ")
-            let hasMovementMarker = normalizedPageText.contains("fecha y detalle")
-                || normalizedPageText.contains("importe en mn")
+            let hasMovementMarker = normalizedPageText.contains("fecha y detalle de las operaciones")
             let hasMSISummaryMarker = normalizedPageText.contains("resumen de meses sin intereses")
                 || normalizedPageText.contains("consolidado de compras en meses sin intereses")
             if (page == 0 && !hasMovementMarker) || (hasMSISummaryMarker && !hasMovementMarker) {
@@ -6969,13 +6854,13 @@ final class FinanceStore {
             // date to become a row anchor. On continuation pages where the
             // table title was not recognized, start open and rely on the
             // normal administrative-row filters below.
-            var inMovementTable = !hasMovementMarker
+            var inMovementTable = amexSection != 0
             for line in pageLines {
                 let normalized = line.text.folding(
                     options: [.diacriticInsensitive, .caseInsensitive],
                     locale: .current
                 )
-                if normalized.contains("fecha y detalle") || normalized.contains("importe en mn") {
+                if normalized.contains("fecha y detalle de las operaciones") {
                     // Any pending content here is page/header material, not a
                     // transaction. Dropping it is safer than letting a cover
                     // amount leak into the first row of the page.

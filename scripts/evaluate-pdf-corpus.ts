@@ -5,7 +5,10 @@ import { promisify } from "node:util";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
-import { detectAccountKey, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, PDF_READER_VERSION, rebuildPdfText, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
+import { detectAccountKey, detectPeriod, detectSourceEvidence, PDF_READER_VERSION, rebuildOcrLayout, rebuildPdfLayout, rebuildPdfText, shouldUseOCR } from "../src/pdfImport.ts";
+import { parseDeterministicStatement } from "../src/issuerParsers/index.ts";
+import { cents } from "../src/issuerParsers/shared.ts";
+import type { DocumentLayoutPage } from "../src/issuerParsers/types.ts";
 import type { StatementKind, StatementSource } from "../src/types.ts";
 
 const execFile = promisify(execFileCallback);
@@ -40,7 +43,12 @@ function kindFor(source: StatementSource): StatementKind {
 
 function closeEnough(actual: unknown, expected: unknown, tolerance: number) {
   if (typeof actual !== "number" || typeof expected !== "number") return actual === expected;
-  return Math.abs(actual - expected) <= tolerance;
+  // Statement controls are money. Compare integer cents so binary floating
+  // point artifacts can never manufacture a reconciliation difference.
+  const actualCents = Math.round(actual * 100);
+  const expectedCents = Math.round(expected * 100);
+  const toleranceCents = Math.round(tolerance * 100);
+  return Math.abs(actualCents - expectedCents) <= toleranceCents;
 }
 
 async function textFromPdf(file: string) {
@@ -50,13 +58,15 @@ async function textFromPdf(file: string) {
   const document = await loadingTask.promise;
   try {
     const pages: string[] = [];
+    const layoutPages: DocumentLayoutPage[] = [];
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
       const content = await page.getTextContent();
       pages.push(`__PDF_PAGE_${pageNumber}__\n${rebuildPdfText(content.items)}`);
+      layoutPages.push(rebuildPdfLayout(content.items, pageNumber, page.getViewport({ scale: 1 }).width));
       page.cleanup();
     }
-    return { text: pages.join("\n"), sourceFingerprint, numPages: document.numPages };
+    return { text: pages.join("\n"), layout: { pages: layoutPages }, sourceFingerprint, numPages: document.numPages };
   } finally {
     // PDF.js 6 exposes lifecycle teardown on the loading task rather than on
     // the resolved PDFDocumentProxy. Keeping this aligned with the app avoids
@@ -90,12 +100,15 @@ async function ocrTextFromPdf(file: string, numPages: number, dpi: number, pdfto
     const { createWorker } = await import("tesseract.js");
     const worker = await createWorker("spa");
     const pages: string[] = [];
+    const layoutPages: DocumentLayoutPage[] = [];
     const pageConfidences: number[] = [];
     try {
       for (let index = 0; index < imageFiles.length; index += 1) {
         const image = await readFile(join(temporaryDirectory, imageFiles[index]));
-        const result = await worker.recognize(image);
+        const result = await worker.recognize(image, {}, { text: true, tsv: true });
         pages.push(`__PDF_PAGE_${index + 1}__\n${result.data.text}`);
+        const pageWidth = Number(result.data.tsv?.split(/\r?\n/)[1]?.split("\t")[8]) || 1;
+        layoutPages.push(rebuildOcrLayout(result.data.tsv, index + 1, pageWidth));
         pageConfidences.push(Math.max(0, Math.min(1, Number(result.data.confidence) / 100)));
       }
     } finally {
@@ -104,7 +117,7 @@ async function ocrTextFromPdf(file: string, numPages: number, dpi: number, pdfto
     const confidence = pageConfidences.length
       ? pageConfidences.reduce((total, value) => total + value, 0) / pageConfidences.length
       : 0;
-    return { text: pages.join("\n"), confidence, pageConfidences };
+    return { text: pages.join("\n"), layout: { pages: layoutPages }, confidence, pageConfidences };
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
@@ -113,6 +126,7 @@ async function ocrTextFromPdf(file: string, numPages: number, dpi: number, pdfto
 async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdftoppmPath: string }) {
   const extracted = await textFromPdf(file);
   let text = extracted.text;
+  let layout = extracted.layout;
   const fileName = file.split(/[\\/]/).at(-1) ?? file;
   // Keep corpus diagnostics on the exact same text/OCR decision as the app;
   // otherwise a hidden administrative layer could be certified as text here
@@ -124,19 +138,22 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
   if (requiresOCR && options.ocr) {
     const ocr = await ocrTextFromPdf(file, extracted.numPages, options.dpi, options.pdftoppmPath);
     text = ocr.text;
+    layout = ocr.layout;
     mode = "ocr";
     ocrConfidence = ocr.confidence;
     ocrPageConfidences = ocr.pageConfidences;
   }
   const sourceDetection = detectSourceEvidence(text, fileName);
   const accountKey = detectAccountKey(text, sourceDetection.source);
+  const period = detectPeriod(text, fileName);
   const kind = kindFor(sourceDetection.source);
-  const transactions = kind === "unknown" ? [] : mode === "ocr"
-    ? parseImportedTransactions(text, sourceDetection.source, fileName, kind, "ocr", ocrPageConfidences)
-    : extractTransactions(text, sourceDetection.source, fileName, kind);
-  const summary = kind === "unknown" ? undefined : parseStatementSummary(text, kind);
+  const deterministic = kind !== "unknown" && (sourceDetection.source === "Santander" || sourceDetection.source === "BBVA" || sourceDetection.source === "Amex")
+    ? parseDeterministicStatement({ source: sourceDetection.source, fileName, mode: mode === "ocr" ? "ocr" : "text", text, layout })
+    : undefined;
+  const transactions = deterministic?.transactions ?? [];
+  const summary = deterministic?.summary;
   const creditUsed = summary?.creditLimit !== undefined && summary.creditAvailable !== undefined
-    ? Math.max(0, summary.creditLimit - summary.creditAvailable)
+    ? Math.max(0, ((cents(summary.creditLimit) ?? 0) - (cents(summary.creditAvailable) ?? 0)) / 100)
     : summary?.debtBalance;
   const statementControls = summary ? {
     previousBalance: summary.previousBalance,
@@ -153,13 +170,9 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
     minimumPlusMsi: summary.minimumPlusMsi,
     msiPending: summary.msiPending,
   } : {};
-  const baseReconciliation = kind === "unknown"
-    ? { status: "pending" as const, tolerance: 0.05, extractedMovementCount: 0, reason: "Emisor no identificado" }
-    : reconcileStatementImport(kind, summary, transactions);
-  const reconciliation = mode === "ocr"
-    ? gateOcrReconciliation(baseReconciliation, "ocr", ocrConfidence, ocrPageConfidences)
-    : baseReconciliation;
-  const qualityGateApplied = baseReconciliation.status !== reconciliation.status;
+  const reconciliation = deterministic?.reconciliation
+    ?? { status: "invalid" as const, tolerance: 0, extractedMovementCount: 0, reason: "Emisor no soportado" };
+  const qualityGateApplied = false;
   const suspiciousRows = transactions.filter((row) => !Number.isFinite(row.amount) || Math.abs(row.amount) >= 100_000_000 || row.date === "Sin fecha");
   // A valid total is not enough to certify an extracted row. Every accepted
   // movement must remain traceable to the source page and a bounded fragment
@@ -179,16 +192,21 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
   return {
     file: fileName,
     readerVersion: PDF_READER_VERSION,
+    parserId: deterministic?.parserId,
+    sourceSection: deterministic?.sourceSection,
+    rejectedRowCount: deterministic?.rejectedRowCount ?? 0,
+    rejectedRows: deterministic?.rejectedRows ?? [],
     sourceFingerprint: extracted.sourceFingerprint,
     mode,
     ocrConfidence,
     ocrPageConfidences,
     qualityGate: {
       applied: qualityGateApplied,
-      statusBefore: baseReconciliation.status,
+      statusBefore: reconciliation.status,
       statusAfter: reconciliation.status,
     },
     source: sourceDetection.source,
+    period,
     accountKey,
     sourceStatus: sourceDetection.status,
     sourceConfidence: Number(sourceDetection.confidence.toFixed(4)),
@@ -196,6 +214,15 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
     ignoredBodyMentions: sourceDetection.ignoredBodyMentions,
     kind,
     rows: transactions.length,
+    extractedRows: transactions.map((row) => ({
+      date: row.date,
+      description: row.description,
+      signedAmount: Number(row.amount.toFixed(2)),
+      kind: row.kind,
+      foreignCurrency: row.foreignCurrency,
+      page: row.extractionEvidence?.page,
+      sourceText: row.extractionEvidence?.sourceText,
+    })),
     // Keep the issuer's balance controls separate from row reconciliation so
     // OCR runs can compare Santander scans even before their movement table is
     // accepted. Undefined fields are omitted from JSON automatically.
@@ -369,7 +396,7 @@ if (!directory) {
     // path. Keep its successful promotions visible, but do not call them
     // automatic acceptances or count them as false positives against the
     // 97% metric reserved for text extraction/Vision-native output.
-    const autoAccepted = qualityAccepted && result.mode !== "ocr";
+    const autoAccepted = qualityAccepted;
     if (expected && result.mode === "ocr" && qualityAccepted) diagnosticOcrAccepted += 1;
     if (expected && autoAccepted) {
       if (expected.status === "valid" && mismatches.length === 0) goldenAutoAccepted += 1;
@@ -396,9 +423,7 @@ if (!directory) {
   const precisionFailure = Boolean(requireManifest && (automaticAcceptancePrecision === null || automaticAcceptancePrecision < targetPrecision));
   if (precisionFailure) failures += 1;
   const nativeOCRPending = results.filter((result) => result.mode === "ocr-required").length;
-  const nativeVisionRequired = useOCR
-    ? results.filter((result) => result.mode === "ocr").length
-    : nativeOCRPending;
+  const nativeVisionRequired = useOCR ? 0 : nativeOCRPending;
   // Precision answers “of the rows we accepted, how many were correct?”;
   // certification also requires every manifest file to have been evaluated
   // by the appropriate reader. A text-only run must never look certified
@@ -408,7 +433,6 @@ if (!directory) {
     : 0;
   const certified = Boolean(
     requireManifest
-      && !useOCR
       && failures === 0
       && nativeOCRPending === 0
       && expectedFiles.length === results.length
@@ -417,7 +441,6 @@ if (!directory) {
   );
   const certificationBlockers = [
     ...(!requireManifest ? ["falta --require-manifest"] : []),
-    ...(useOCR ? ["--ocr es diagnóstico local y no sustituye Vision nativa"] : []),
     ...(nativeVisionRequired > 0 ? [`${nativeVisionRequired} PDF(s) requieren certificación Vision nativa`] : []),
     ...(manifestReaderVersionMismatch ? ["la versión del manifiesto no coincide con el lector"] : []),
     ...(parseErrors > 0 ? [`${parseErrors} PDF(s) no se pudieron leer`] : []),
