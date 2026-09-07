@@ -1159,6 +1159,12 @@ final class ReaderContractTests: XCTestCase {
     func testSantanderOCRCalibratesWhenVisionReturnsTheWholeHeaderInOneBox() {
         let fixtures = [
             OCRObservationFixture(
+                text: "Detalle de movimientos cuenta de cheques",
+                x: 0.02,
+                y: 0.98,
+                width: 0.52
+            ),
+            OCRObservationFixture(
                 text: "FECHA FOLIO DESCRIPCION DEPOSITO RETIRO SALDO",
                 x: 0.04,
                 y: 0.94,
@@ -1174,6 +1180,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRAcceptsEquivalentAbonosAndCargosColumnLabels() {
         let labels = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "ABONOS", x: 0.50, y: 0.90, width: 0.08),
@@ -1189,6 +1196,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRInheritsCalibrationAcrossContinuationPagesAndUsesBalanceDelta() {
         let fixtures = [
+            OCRObservationFixture(page: 0, text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(page: 0, text: "FECHA", x: 0.05, y: 0.94, width: 0.06),
             OCRObservationFixture(page: 0, text: "DESCRIPCION", x: 0.22, y: 0.94, width: 0.12),
             OCRObservationFixture(page: 0, text: "DEPOSITO", x: 0.50, y: 0.94, width: 0.08),
@@ -1245,6 +1253,7 @@ final class ReaderContractTests: XCTestCase {
         ))
 
         let splitLabelTokens = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSI TO", x: 0.50, y: 0.90, width: 0.08),
@@ -1257,6 +1266,7 @@ final class ReaderContractTests: XCTestCase {
         ))
 
         let glyphSubstitutions = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPC10N", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOS1T0", x: 0.50, y: 0.90, width: 0.08),
