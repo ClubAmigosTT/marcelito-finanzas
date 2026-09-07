@@ -661,7 +661,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.07.1"
+    static let readerVersion = "ios-reader-deterministic-2026.09.07.2"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -724,7 +724,14 @@ final class FinanceStore {
             ? maskedAccountKey(from: text, source: source)
             : nil
         let kind = statementKind(from: text, source: source)
-        let movements = parse(text: text, fileName: fileName, sourceHint: source)
+        let movements: [Movement]
+        if source.localizedCaseInsensitiveContains("Amex") {
+            // American Express PDFs are text-native. Keep this path separate
+            // from the generic reader so a failed control never triggers OCR.
+            movements = parseAmexText(text, fileName: fileName)
+        } else {
+            movements = parse(text: text, fileName: fileName, sourceHint: source)
+        }
         // Keep the contract helper on the same repaired text path as a real
         // PDF import. Amex's selectable layer can flatten section totals onto
         // one line; production separates those sections before reading the
@@ -793,7 +800,9 @@ final class FinanceStore {
         let source = cleanedOverride?.isEmpty == false ? cleanedOverride! : evidence.source
         let kind = kindOverride ?? statementKind(from: text, source: source)
         let repaired = rebuildAmexSelectableLines(text)
-        let rows = parse(text: repaired, fileName: fileName, sourceHint: source)
+        let rows = source.localizedCaseInsensitiveContains("Amex")
+            ? parseAmexText(repaired, fileName: fileName)
+            : parse(text: repaired, fileName: fileName, sourceHint: source)
         let statementSummary = summary(from: repaired, source: source)
         let reconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
             kind: kind,
@@ -844,6 +853,30 @@ final class FinanceStore {
             )
         }
         return parseSantanderOCR(observations, fileName: fileName)
+    }
+
+    /// Runs Santander's fixed table geometry reader against Vision-like
+    /// observations. This is the production contract for Santander; the
+    /// legacy OCR seam above remains available only for backwards-compatible
+    /// fixture diagnostics.
+    static func santanderTableRowsForTesting(
+        _ fixtures: [OCRObservationFixture],
+        fileName: String
+    ) -> [Movement] {
+        let observations = fixtures.map { fixture in
+            OCRObservation(
+                page: fixture.page,
+                text: fixture.text,
+                boundingBox: CGRect(
+                    x: fixture.x,
+                    y: fixture.y,
+                    width: fixture.width,
+                    height: fixture.height
+                ),
+                confidence: fixture.confidence
+            )
+        }
+        return parseSantanderTable(observations, fileName: fileName).movements
     }
 
     /// Reports whether the OCR fixture contains a geometrically valid
@@ -938,6 +971,12 @@ final class FinanceStore {
             )
         }
         return parseAmexOCR(ocrLines(from: observations), fileName: fileName)
+    }
+
+    /// Runs the native PDF text parser used by production imports. No Vision
+    /// observations are accepted by this seam by design.
+    static func amexTextRowsForTesting(_ text: String, fileName: String) -> [Movement] {
+        parseAmexText(text, fileName: fileName)
     }
 
     /// Decides whether a PDF's selectable text is structurally usable. Kept
@@ -3361,7 +3400,7 @@ final class FinanceStore {
         if source == "BBVA", kind == .bank {
             candidates = parseBBVASelectableText(text: structuredText, fileName: fileName, sourceHint: source)
         } else if isAmexLayout {
-            candidates = parse(text: structuredText, fileName: fileName, sourceHint: source)
+            candidates = parseAmexText(structuredText, fileName: fileName)
         } else {
             // Santander is validated through its fixed Vision columns. No
             // generic selectable-text scan is allowed to suppress OCR.
@@ -3439,6 +3478,13 @@ final class FinanceStore {
             }
         }
 
+        // American Express PDFs contain a digital text layer. Once the issuer
+        // is identified from that layer, Vision is permanently disabled for
+        // this import; a failed text control must reject the statement rather
+        // than silently switch to OCR.
+        let selectableSource = Self.sourceDetection(from: extractedText, fileName: fileName).source
+        let selectableAmex = selectableSource.localizedCaseInsensitiveCompare("Amex") == .orderedSame
+
         // A short administrative layer is not a trustworthy movement table;
         // a structured layer that failed reconciliation is not trustworthy
         // either. In both cases run Vision as a recovery pass. This closes a
@@ -3447,7 +3493,11 @@ final class FinanceStore {
         // the wrong rows. A valid, reconciled layer remains the fast path and
         // avoids a lossy OCR round-trip (especially for Amex's split columns).
         let shouldAttemptOCR = allowOCR && !textLayerReconciles
-        let ocrObservations = shouldAttemptOCR ? Self.ocrObservations(from: document) : []
+        // Keep the legacy quality-gate variable intact for bank recovery,
+        // but never invoke Vision for a selectable American Express PDF.
+        let ocrObservations = shouldAttemptOCR && !selectableAmex
+            ? Self.ocrObservations(from: document)
+            : []
         let ocrText = Self.ocrText(from: ocrObservations)
         let usedOCR = shouldAttemptOCR && !ocrObservations.isEmpty
         // If Vision cannot produce a single observation, keep the original
@@ -3502,14 +3552,10 @@ final class FinanceStore {
         var rowDiagnostics: [OCRRowDiagnostic] = []
         let parsedCandidates: [Movement]
         if usedOCR, source == "Santander" {
-            let santanderResult = Self.parseSantanderOCRResult(ocrObservations, fileName: fileName)
+            let santanderResult = Self.parseSantanderTable(ocrObservations, fileName: fileName)
             movementColumnsCalibrated = santanderResult.columnsCalibrated
             rowDiagnostics = santanderResult.diagnostics
             parsedCandidates = santanderResult.movements
-        } else if usedOCR, source == "Amex" {
-            let amexResult = Self.parseAmexOCRResult(Self.ocrLines(from: ocrObservations), fileName: fileName)
-            rowDiagnostics = amexResult.diagnostics
-            parsedCandidates = amexResult.movements
         } else if usedOCR, source == "BBVA" {
             let bbvaResult = Self.parseBBVAOCRResult(ocrObservations, fileName: fileName)
             movementColumnsCalibrated = bbvaResult.columnsCalibrated
@@ -3523,7 +3569,7 @@ final class FinanceStore {
         } else if source.localizedCaseInsensitiveContains("Amex") {
             // The selectable Amex parser is section-aware and ignores all
             // dates outside Fecha y Detalle de las operaciones.
-            parsedCandidates = Self.parse(text: Self.rebuildAmexSelectableLines(text), fileName: fileName, sourceHint: source)
+            parsedCandidates = Self.parseAmexText(text, fileName: fileName)
             rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "fila Amex dentro de Fecha y Detalle de las operaciones")
         } else {
             // Santander uses its fixed visual columns; unsupported issuers
@@ -4792,6 +4838,19 @@ final class FinanceStore {
                 )
             )
         }
+    }
+
+    /// Deterministic native-text reader for American Express. Amex's PDF
+    /// text layer carries the domestic, foreign-currency, payment/credit and
+    /// MSI sections as real text; scope and row reconstruction are therefore
+    /// performed by the section-aware reader below, never by Vision/OCR or a
+    /// global numeric scan. The caller runs the resulting rows through the
+    /// same cent-level issuer reconciliation gate before canonical persistence.
+    private static func parseAmexText(_ text: String, fileName: String) -> [Movement] {
+        let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        guard normalized.contains("fecha y detalle de las operaciones") else { return [] }
+        let structured = rebuildAmexSelectableLines(text)
+        return parse(text: structured, fileName: fileName, sourceHint: "Amex")
     }
 
     private static func parse(text: String, fileName: String, sourceHint: String? = nil) -> [Movement] {
@@ -6124,6 +6183,171 @@ final class FinanceStore {
         )
     }
 
+    /// Santander's statement is a scanned table. The production reader first
+    /// scopes observations to the exact checking-account table and then uses
+    /// fixed column fractions relative to that table's detected header. It
+    /// never calibrates movement columns from transaction values or repairs a
+    /// row with a running-balance delta.
+    private static func parseSantanderTable(
+        _ observations: [OCRObservation],
+        fileName: String
+    ) -> SantanderOCRParseResult {
+        guard let dateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-.]\s*(\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*(\d{2,4}))?(?![A-Za-z])"#
+        ), let amountRegex = try? NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
+        ) else {
+            return SantanderOCRParseResult(movements: [], columnsCalibrated: false, diagnostics: [])
+        }
+
+        let defaultYear: Int = {
+            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+               let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
+                return year
+            }
+            return Calendar.current.component(.year, from: .now)
+        }()
+        let ordered = observations.sorted {
+            $0.page == $1.page ? $0.centerY > $1.centerY : $0.page < $1.page
+        }
+        var scoped: [OCRObservation] = []
+        var inTable = false
+        for observation in ordered {
+            let normalized = observation.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            if !inTable && normalized.contains("detalle de movimientos cuenta de cheques") {
+                inTable = true
+                continue
+            }
+            if inTable && (
+                normalized.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("total")
+                    || normalized.contains("total de movimientos")
+                    || normalized.contains("saldo final del periodo")
+            ) {
+                inTable = false
+                continue
+            }
+            if inTable { scoped.append(observation) }
+        }
+        guard !scoped.isEmpty else {
+            return SantanderOCRParseResult(movements: [], columnsCalibrated: false, diagnostics: [])
+        }
+
+        // Locate the complete six-column header on one page/visual line. The
+        // header only defines the table rectangle; the amount columns below
+        // are fixed fractions of that rectangle and are not recalibrated per
+        // page or from row contents.
+        let requiredLabels = ["fecha", "folio", "descripcion", "deposito", "retiro", "saldo"]
+        func compact(_ value: String) -> String {
+            value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+        }
+        func headerFrame(for pageObservations: [OCRObservation]) -> (left: CGFloat, right: CGFloat)? {
+            let lines = pageObservations.reduce(into: [[OCRObservation]]()) { groups, observation in
+                if let index = groups.firstIndex(where: { abs(($0.first?.centerY ?? observation.centerY) - observation.centerY) <= 0.035 }) {
+                    groups[index].append(observation)
+                } else {
+                    groups.append([observation])
+                }
+            }
+            for line in lines {
+                let lineText = compact(line.map(\.text).joined(separator: " "))
+                let hasAll = requiredLabels.allSatisfy { lineText.contains($0) }
+                guard hasAll else { continue }
+                let left = line.map(\.boundingBox.minX).min() ?? 0
+                let right = line.map { $0.boundingBox.maxX }.max() ?? 1
+                guard right > left else { continue }
+                return (max(0, left), min(1, right))
+            }
+            return nil
+        }
+
+        let byPage = Dictionary(grouping: scoped, by: \.page)
+        let frames: [(page: Int, left: CGFloat, right: CGFloat)] = byPage.keys.sorted().compactMap { page in
+            guard let frame = headerFrame(for: byPage[page] ?? []) else { return nil }
+            return (page, frame.left, frame.right)
+        }
+        guard let frame = frames.first else {
+            return SantanderOCRParseResult(movements: [], columnsCalibrated: false, diagnostics: [])
+        }
+        let span = max(frame.right - frame.left, 0.50)
+        // Fixed Santander layout: FECHA/FOLIO/DESCRIPCIÓN occupy the first
+        // 50%, followed by DEPÓSITO, RETIRO and SALDO. These constants are
+        // relative to the table rectangle and remain identical on all pages.
+        let columns = SantanderOCRColumns(
+            movementMinX: min(0.94, frame.left + span * 0.50),
+            balanceMinX: min(0.98, frame.left + span * 0.84),
+            depositMaxX: min(0.96, frame.left + span * 0.68),
+            calibratedFromHeader: true,
+            calibrationReason: "geometría fija relativa a la tabla Santander"
+        )
+        let dateMaxX = min(0.48, frame.left + span * 0.16)
+        let titleBounds = (
+            min: max(0, frame.left + span * 0.18),
+            max: min(1, frame.left + span * 0.50)
+        )
+        var parsed: [Movement] = []
+        var diagnostics: [OCRRowDiagnostic] = []
+        for page in byPage.keys.sorted() {
+            let pageObservations = (byPage[page] ?? []).sorted {
+                if abs($0.centerY - $1.centerY) > 0.008 { return $0.centerY > $1.centerY }
+                return $0.centerX < $1.centerX
+            }
+            var rows: [[OCRObservation]] = []
+            var pending: [OCRObservation] = []
+            for observation in pageObservations {
+                let normalized = observation.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                let hasDate = firstMatch(in: observation.text, regex: dateRegex) != nil
+                let isDateCell = hasDate
+                    && observation.centerX <= dateMaxX
+                    && !normalized.contains("periodo")
+                    && !normalized.contains("corte")
+                    && !normalized.contains("pagina")
+                if isDateCell {
+                    if !pending.isEmpty { rows.append(pending) }
+                    pending = [observation]
+                } else if !pending.isEmpty {
+                    pending.append(observation)
+                }
+            }
+            if !pending.isEmpty { rows.append(pending) }
+
+            for row in rows {
+                // No previous balance is supplied: movement direction and
+                // amount come only from the fixed DEPÓSITO/RETIRO cells.
+                if let result = parseSantanderRow(
+                    row,
+                    dateRegex: dateRegex,
+                    amountRegex: amountRegex,
+                    defaultYear: defaultYear,
+                    previousRunningBalance: nil,
+                    columns: columns,
+                    dateMaxX: dateMaxX,
+                    titleBounds: titleBounds,
+                    requireFixedMovementColumn: true
+                ), result.runningBalance != nil {
+                    parsed.append(result.movement)
+                    diagnostics.append(OCRRowDiagnostic(
+                        page: row.first.map { $0.page + 1 },
+                        rawText: row.map(\.text).joined(separator: " "),
+                        selectedColumn: result.movement.extractionEvidence?.selectedColumn,
+                        selectedAmount: result.movement.extractionEvidence?.selectedAmount,
+                        direction: result.movement.amount >= 0 ? "in" : "out",
+                        reason: result.movement.extractionEvidence?.selectionReason ?? "fila Santander dentro de la tabla de cheques",
+                        accepted: true
+                    ))
+                } else {
+                    diagnostics.append(OCRRowDiagnostic(
+                        page: row.first.map { $0.page + 1 },
+                        rawText: row.map(\.text).joined(separator: " "),
+                        reason: "fila Santander rechazada: fecha, descripción y columna fija no demostrables",
+                        accepted: false
+                    ))
+                }
+            }
+        }
+        return SantanderOCRParseResult(movements: parsed, columnsCalibrated: true, diagnostics: diagnostics)
+    }
+
     /// Santander's statement is a scanned table. A plain text OCR stream loses
     /// the distinction between the transaction amount and the running balance,
     /// so use Vision bounding boxes to read the deposit/withdrawal columns.
@@ -6438,10 +6662,19 @@ final class FinanceStore {
         amountRegex: NSRegularExpression,
         defaultYear: Int,
         previousRunningBalance: Decimal?,
-        columns: SantanderOCRColumns
+        columns: SantanderOCRColumns,
+        dateMaxX: CGFloat? = nil,
+        titleBounds: (min: CGFloat, max: CGFloat)? = nil,
+        requireFixedMovementColumn: Bool = false
     ) -> SantanderRowResult? {
         guard let dateObservation = row.first(where: {
-            $0.boundingBox.minX < 0.24 && firstMatch(in: $0.text, regex: dateRegex) != nil
+            let inDateColumn: Bool
+            if let dateMaxX {
+                inDateColumn = $0.centerX <= dateMaxX
+            } else {
+                inDateColumn = $0.boundingBox.minX < 0.24
+            }
+            return inDateColumn && firstMatch(in: $0.text, regex: dateRegex) != nil
         }), let dateMatch = firstMatch(in: dateObservation.text, regex: dateRegex),
         let date = parseDate(dateMatch.text, defaultYear: defaultYear) else {
             return nil
@@ -6534,17 +6767,25 @@ final class FinanceStore {
         let wholeRowMovement = useWholeRowPair ? orderedAmountCandidates.dropLast().last : nil
         let wholeRowBalance = useWholeRowPair ? orderedAmountCandidates.last : nil
         let columnCandidates = amountCandidates.filter { $0.x >= columns.movementMinX && $0.x < columns.balanceMinX }
-        let selected = wholeRowMovement
-            ?? columnCandidates.sorted { $0.order < $1.order }.first
-            ?? { () -> OCRAmountCandidate? in
-                let fallbackCandidates = amountCandidates
-                    .filter { $0.x < 0.90 && ($0.text.contains(".") || $0.text.contains(",")) }
-                    .sorted { $0.order < $1.order }
-                if fallbackCandidates.count > 1 {
-                    return fallbackCandidates[fallbackCandidates.count - 2]
-                }
-                return fallbackCandidates.first
-            }()
+        let selected: OCRAmountCandidate? = {
+            if requireFixedMovementColumn {
+                // The table parser is fail-closed: an amount outside the
+                // fixed DEPÓSITO/RETIRO rectangle is a saldo/reference, never
+                // a movement fallback.
+                return columnCandidates.sorted { $0.order < $1.order }.first
+            }
+            return wholeRowMovement
+                ?? columnCandidates.sorted { $0.order < $1.order }.first
+                ?? { () -> OCRAmountCandidate? in
+                    let fallbackCandidates = amountCandidates
+                        .filter { $0.x < 0.90 && ($0.text.contains(".") || $0.text.contains(",")) }
+                        .sorted { $0.order < $1.order }
+                    if fallbackCandidates.count > 1 {
+                        return fallbackCandidates[fallbackCandidates.count - 2]
+                    }
+                    return fallbackCandidates.first
+                }()
+        }()
         guard let selected else { return nil }
         let runningBalance = wholeRowBalance?.value
             ?? amountCandidates
@@ -6601,7 +6842,10 @@ final class FinanceStore {
         }
 
         let titleParts = row
-            .filter { $0.centerX >= 0.18 && $0.centerX < 0.62 }
+            .filter {
+                let bounds = titleBounds ?? (min: CGFloat(0.18), max: CGFloat(0.62))
+                return $0.centerX >= bounds.min && $0.centerX < bounds.max
+            }
             .filter { observation in
                 let normalized = observation.text
                     .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
