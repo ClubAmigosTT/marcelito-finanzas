@@ -1135,6 +1135,7 @@ final class ReaderContractTests: XCTestCase {
 
     func testSantanderOCRRequiresACompleteColumnHeaderForAutomaticAcceptance() {
         let calibrated = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
@@ -1144,6 +1145,7 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(FinanceStore.santanderOCRColumnsCalibratedForTesting(calibrated, fileName: "sample-bank-period-3.pdf"))
 
         let missingAnchor = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.02, y: 0.98, width: 0.52),
             OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.90, width: 0.06),
             OCRObservationFixture(text: "DESCRIPCION", x: 0.23, y: 0.90, width: 0.12),
             OCRObservationFixture(text: "DEPOSITO", x: 0.50, y: 0.90, width: 0.08),
