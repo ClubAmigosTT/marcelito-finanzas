@@ -170,6 +170,23 @@ test("Amex conserva PDFKit cuando su capa de texto ya concilia", async () => {
   assert.match(source, /let shouldAttemptOCR = allowOCR && !textLayerReconciles/);
 });
 
+test("Amex queda aislado en el parser nativo y no cae a Vision", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /private static func parseAmexText\(_ text: String, fileName: String\)/);
+  assert.match(source, /let selectableAmex = selectableSource\.localizedCaseInsensitiveCompare\("Amex"\)/);
+  assert.match(source, /let ocrObservations = shouldAttemptOCR && !selectableAmex\s*\?/);
+  assert.match(source, /parsedCandidates = Self\.parseAmexText\(text, fileName: fileName\)/);
+});
+
+test("Santander usa rectángulo y columnas fijas de la tabla", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /private static func parseSantanderTable\(/);
+  assert.match(source, /let requiredLabels = \["fecha", "folio", "descripcion", "deposito", "retiro", "saldo"\]/);
+  assert.match(source, /calibrationReason: "geometría fija relativa a la tabla Santander"/);
+  assert.match(source, /requireFixedMovementColumn: true/);
+  assert.match(source, /let santanderResult = Self\.parseSantanderTable\(ocrObservations/);
+});
+
 test("BBVA exige calibración y dirección explícita por columna", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /private static func parseBBVAOCRRow\([\s\S]*?guard columns\.calibratedFromHeader else \{ return nil \}/);
