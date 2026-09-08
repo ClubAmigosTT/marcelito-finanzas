@@ -258,11 +258,11 @@ test("el clasificador iOS interpola categorías y movimientos reales en el promp
 
 test("el clasificador iOS divide lotes y filtra respuestas fuera de alcance", async () => {
   const source = await readFile(aiClassificationPath, "utf8");
-  assert.match(source, /static let maxBatchSize = 32/);
+  assert.match(source, /static let maxBatchSize = 12/);
   assert.match(source, /classifyBatch\(/);
   assert.match(source, /requested\.contains\(movementID\)/);
   assert.match(source, /seen\.insert\(movementID\)\.inserted/);
-  assert.match(source, /maxTokens: 2000/);
+  assert.doesNotMatch(source, /maxTokens|temperature/);
 });
 
 test("iOS usa Zen solo para enriquecer gastos después de la lectura local", async () => {

@@ -90,6 +90,45 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(store.movements.first?.classificationTags.contains("viaje") == true)
     }
 
+    func testReviewChoiceDoesNotPermanentlyBlockRecognizableMerchant() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let movement = Movement(
+            date: .now,
+            title: "OXXO EDS LA 70 COMBUSTIBLES",
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -154.36,
+            flow: .expense,
+            kind: .purchase
+        )
+        store.movements = [movement]
+
+        XCTAssertTrue(store.updateCategory(for: movement, to: "Otros / Por revisar"))
+        XCTAssertEqual(store.applyDeterministicCategoryRules(), 1)
+        XCTAssertEqual(store.movements.first?.category, "Tiendita")
+    }
+
+    func testAutomaticRulesRepairPrematureBroadCategory() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let movement = Movement(
+            date: .now,
+            title: "UBER TRIP MEDELLIN HTTPS HELP UBER COM",
+            account: "Amex",
+            category: "Comisiones y finanzas",
+            amount: -240,
+            flow: .expense,
+            kind: .purchase
+        )
+        store.movements = [movement]
+
+        XCTAssertEqual(store.applyDeterministicCategoryRules(), 1)
+        XCTAssertEqual(store.movements.first?.category, "Transporte")
+        XCTAssertTrue(store.movements.first?.classificationTags.contains("viaje") == true)
+        XCTAssertEqual(store.pendingExpenseCategoryCount, 0)
+    }
+
     func testCanonicalRebuildIsInvalidatedWhenReaderVersionChanges() {
         XCTAssertTrue(FinanceStore.needsCanonicalRebuild(
             completed: true,

@@ -105,6 +105,14 @@ struct MovementsView: View {
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(movement.title)
                                         .lineLimit(1)
+                                    Text(movement.category)
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(
+                                            ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains(movement.category)
+                                                ? Color.marcelitoAmber
+                                                : Color.marcelitoSuccess
+                                        )
+                                        .lineLimit(1)
                                     Text("\(movement.account) · \(statementLabel(for: movement))")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
@@ -139,9 +147,10 @@ struct MovementsView: View {
                     Menu {
                         Button {
                             let updated = store.applyDeterministicCategoryRules()
-                            aiMessage = updated == 0
-                                ? "Las reglas locales ya estaban aplicadas. Los movimientos restantes necesitan IA o una categoría manual."
-                                : "Se asignaron categorías locales a \(updated) movimientos."
+                            let eligible = store.classifiableExpenseCount
+                            let pending = store.pendingExpenseCategoryCount
+                            let classified = max(0, eligible - pending)
+                            aiMessage = "Reglas locales terminadas: \(classified) de \(eligible) gastos clasificados; \(pending) por revisar. Se actualizaron \(updated) movimientos en esta ejecución."
                         } label: {
                             Label("Aplicar reglas automáticas", systemImage: "bolt.fill")
                         }
@@ -331,6 +340,7 @@ private struct MovementDetailView: View {
     @State private var selectedCategory: String
     @State private var selectedKind: MovementKind
     @State private var isTravel: Bool
+    @State private var categorySaveMessage: String?
     private let categories = movementCategoryOptions
 
     private var currentMovement: Movement {
@@ -342,6 +352,7 @@ private struct MovementDetailView: View {
         _selectedCategory = State(initialValue: movementCategoryOptions.contains(movement.category) ? movement.category : "Otros / Por revisar")
         _selectedKind = State(initialValue: movement.kind ?? .purchase)
         _isTravel = State(initialValue: movement.travelRelated)
+        _categorySaveMessage = State(initialValue: nil)
     }
 
     var body: some View {
@@ -386,7 +397,9 @@ private struct MovementDetailView: View {
                 get: { selectedCategory },
                 set: {
                     selectedCategory = $0
-                    store.updateCategory(for: movement, to: $0)
+                    categorySaveMessage = store.updateCategory(for: movement, to: $0)
+                        ? "Guardado como \($0)"
+                        : "No se pudo guardar; el movimiento ya no está disponible."
                 }
             )) {
                 ForEach(categories, id: \.self) { option in
@@ -396,6 +409,11 @@ private struct MovementDetailView: View {
             Text("La categoría se guarda al seleccionarla y se recordará para movimientos futuros del mismo comercio.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if let categorySaveMessage {
+                Label(categorySaveMessage, systemImage: "checkmark.circle.fill")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.marcelitoSuccess)
+            }
             if !currentMovement.classificationTags.isEmpty {
                 LabeledContent("Etiquetas", value: currentMovement.classificationTags.joined(separator: " · "))
             }
