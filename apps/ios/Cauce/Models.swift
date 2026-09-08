@@ -2347,7 +2347,11 @@ final class FinanceStore {
             || inText.contains("deposito")
             || inText.contains("entrada")
         if outgoingSignal && incomingSignal {
-            score += 12
+            // With exact opposite amounts across two distinct imported bank
+            // accounts, explicit SENT/RECEIVED semantics must reach the
+            // acceptance threshold even when neither bank names the other in
+            // the shortened PDF row title. Keep ±3-day pairs below the gate.
+            score += 18
             reasons.append("dirección explícita")
         }
 
