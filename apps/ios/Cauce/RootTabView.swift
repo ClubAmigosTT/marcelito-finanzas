@@ -7,6 +7,7 @@ struct RootTabView: View {
     private enum Tab: Hashable {
         case summary
         case expenses
+        case calendar
         case accounts
         case patrimony
     }
@@ -25,6 +26,11 @@ struct RootTabView: View {
             }
                 .tabItem { Label("Gastos", systemImage: "chart.pie.fill") }
                 .tag(Tab.expenses)
+            DeferredTab {
+                SpendingCalendarView()
+            }
+                .tabItem { Label("Calendario", systemImage: "calendar") }
+                .tag(Tab.calendar)
             DeferredTab {
                 AccountsView()
             }
