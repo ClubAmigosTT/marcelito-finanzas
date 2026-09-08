@@ -1125,7 +1125,8 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertNil(snapshot.summary?.withdrawalCount)
     }
 
-    func testSantanderFourStatementControlsReconcileAtCentPrecision() {
+    // Synthetic two-row arithmetic controls, NOT native OCR golden coverage.
+    func testSantanderSyntheticTwoRowArithmeticControlsReconcileAtCentPrecision() {
         func rows(opening: Decimal, deposit: Decimal, withdrawal: Decimal, closing: Decimal) -> [Movement] {
             func money(_ value: Decimal) -> String {
                 String(format: "%.2f", locale: Locale(identifier: "en_US_POSIX"), NSDecimalNumber(decimal: value).doubleValue)

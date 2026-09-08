@@ -86,7 +86,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         ocrColumnsCalibrated = summary.ocrColumnsCalibrated
         reconciliationValid = summary.reconciliation?.status == .valid
         duplicate = false
-        errorCode = summary.rowDiagnostics.first(where: { !$0.accepted })?.reason
+        errorCode = Self.redactedRowError(summary.rowDiagnostics.first(where: { !$0.accepted })?.reason)
         reconciliationReason = summary.reconciliation?.reason
         multimodalFallbackAttempted = summary.multimodalFallbackAttempted
         multimodalFallbackError = summary.multimodalFallbackError
@@ -116,6 +116,39 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         multimodalFallbackAttempted = false
         multimodalFallbackError = nil
         self.sourceFileName = sourceFileName
+    }
+
+    static func redactedRowError(_ reason: String?) -> String? {
+        guard let reason else { return nil }
+        let code = String(reason.prefix { $0 != ";" && $0 != ":" })
+        // Only stable machine codes may leave the private diagnostic report.
+        return code.range(of: #"^santander\.[a-z-]+$"#, options: .regularExpression) != nil
+            ? code : "row-extraction-rejected"
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(file, forKey: .file)
+        try c.encode(sourceFingerprint, forKey: .sourceFingerprint)
+        try c.encode(source, forKey: .source)
+        try c.encode(accountKey, forKey: .accountKey)
+        try c.encode(kind, forKey: .kind)
+        try c.encode(mode, forKey: .mode)
+        try c.encode(sourceStatus, forKey: .sourceStatus)
+        try c.encode(sourceConfidence, forKey: .sourceConfidence)
+        try c.encode(status, forKey: .status)
+        try c.encode(requiresReview, forKey: .requiresReview)
+        try c.encode(rows, forKey: .rows)
+        try c.encode(extractedRows, forKey: .extractedRows)
+        try c.encodeIfPresent(ocrConfidence, forKey: .ocrConfidence)
+        try c.encodeIfPresent(weakestOCRPage, forKey: .weakestOCRPage)
+        try c.encodeIfPresent(ocrColumnsCalibrated, forKey: .ocrColumnsCalibrated)
+        try c.encode(reconciliationValid, forKey: .reconciliationValid)
+        try c.encode(duplicate, forKey: .duplicate)
+        try c.encodeIfPresent(errorCode, forKey: .errorCode)
+        try c.encode(multimodalFallbackAttempted, forKey: .multimodalFallbackAttempted)
+        // Detailed reconciliation and transport errors remain in memory/UI
+        // and in the explicit private report, never the public JSON.
     }
 
     init(index: Int, sourceFileName: String, duplicateOf summary: ImportSummary) {
@@ -277,6 +310,11 @@ struct NativeCorpusDiagnosticReport: Codable {
                     payload["selectedAmount"] = NSDecimalNumber(decimal: selectedAmount).stringValue
                 }
                 if let direction = row.direction { payload["direction"] = direction }
+                if let ordinal = row.rowOrdinal { payload["rowOrdinal"] = ordinal }
+                if let cells = row.cellTexts { payload["cellTexts"] = cells }
+                if let bounds = row.rowBounds {
+                    payload["rowBounds"] = ["x": bounds.x, "y": bounds.y, "width": bounds.width, "height": bounds.height]
+                }
                 return payload
             }
             var payload: [String: Any] = [

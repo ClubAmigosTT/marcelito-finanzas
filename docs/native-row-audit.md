@@ -1,5 +1,32 @@
 # Auditoría independiente del lector iOS
 
+## Corrección Santander — lector 2026.09.07.5
+
+La extracción mantiene filas físicas ancladas a FECHA dentro de la tabla de
+cheques. Los importes requieren cajas contenidas en las columnas fijas; las
+continuaciones se conservan en la descripción sin crear movimientos.
+
+La validación compara cada importe con los dos saldos **impresos** adyacentes,
+no con el último movimiento aceptado. Una celda inválida no provoca una cascada
+de rechazos usando un saldo antiguo. Si falta un saldo se rompe ese enlace y
+se retoma la comprobación cuando vuelven a existir dos controles legibles.
+Una fila sin validar sigue bloqueando el estado completo, incluso cuando los
+errores se compensan en la suma. La misma compuerta protege importar y certificar.
+
+Las celdas ambiguas o cuya ecuación falla se releen una vez mediante recortes
+fijos de DEPÓSITO, RETIRO y SALDO usando PDFKit/Vision. La confianza media de
+página no impide este reintento. No se inventa un importe a partir de la
+diferencia de saldos. El informe privado conserva texto original, textos de
+las tres celdas (en ese orden), ordinal, página, banda normalizada y resultado
+del reintento. Los errores públicos excluyen saldos y descripciones.
+
+`SantanderIndependentRowsTests` cubre geometría, errores localizados,
+compuertas y una recuperación con Vision sobre un PDF generado. Estas pruebas
+son sintéticas. Tampoco los controles aritméticos de dos filas por periodo
+acreditan la lectura de los cuatro estados originales. Antes de distribuir
+como corregido, ejecutar la auditoría privada descrita abajo, comparando todas
+las filas y los totales al centavo. No subir los PDFs a la CI pública.
+
 Una compilación correcta y un informe del lector web no certifican PDFKit/Vision.
 La prueba `NativeRowAuditTests` usa los PDFs privados con el extractor de producción
 y compara cada ocurrencia contra una referencia transcrita de las páginas originales.
