@@ -21,6 +21,35 @@ final class SantanderIndependentRowsTests: XCTestCase {
          OCRObservationFixture(text: "FECHA FOLIO DESCRIPCION DEPOSITO RETIRO SALDO", x: 0.05, y: 0.90, width: 0.89)]
     }
 
+    func testAugustDiagnosticSeparatorsAndCropNoiseRecoverBalanceChain() throws {
+        let first = try XCTUnwrap(FinanceStore.santanderCellConsensus([
+            "54 977 93", "54 97793", "54 97793"
+        ]))
+        let second = try XCTUnwrap(FinanceStore.santanderCellConsensus([
+            "54,177.93", "54,177.93 --...al.-", "54,177.93 - a1.-"
+        ]))
+        XCTAssertEqual(first, "54977.93")
+        XCTAssertEqual(second, "54,177.93")
+        let fixtures = header + row(1, amount: "500.00", balance: first)
+            + row(2, amount: "800.00", balance: second)
+            + row(3, amount: "100.00", balance: "54,077.93")
+            + [OCRObservationFixture(text: "TOTAL", x: 0.20, y: 0.10, width: 0.10)]
+        let result = FinanceStore.santanderTableSnapshotForTesting(fixtures,
+            fileName: "statement.pdf", openingBalance: Decimal(string: "55477.93")!)
+        XCTAssertEqual(result.diagnostics.map(\.accepted), [true, true, true])
+        XCTAssertEqual(result.movements.map(\.amount), [-500, -800, -100])
+    }
+
+    func testCellNormalizationDoesNotInventDecimalsOrDiscardNumericConflicts() {
+        for invalid in ["5497793", "54 9779", "54 97 93", "54,97.93", "500.001",
+                        "RFC 500.00", "500.00 800.00", "500.00 - 800.00",
+                        "500.00 - a1.-", "500.00 - $", "-500.00"] {
+            XCTAssertNil(FinanceStore.santanderNormalizedCellReading(invalid), invalid)
+        }
+        XCTAssertNil(FinanceStore.santanderCellConsensus(["54 977 93", "54 97793", "4,977.93"]))
+        XCTAssertNil(FinanceStore.santanderCellConsensus(["54 977 93", nil, "noise"]))
+    }
+
     private func row(_ n: Int, amount: String?, balance: String?, page: Int = 0) -> [OCRObservationFixture] {
         let y = 0.82 - Double(n - 1) * 0.10
         var result = [
