@@ -348,7 +348,7 @@ private struct AddMovementView: View {
     }
 }
 
-private struct MovementDetailView: View {
+struct MovementDetailView: View {
     @Environment(FinanceStore.self) private var store
     let movement: Movement
     @State private var selectedCategory: String
@@ -503,7 +503,7 @@ struct ExpensesView: View {
                 Text("\(groups.count) categorías explican")
                 Text(total, format: .currency(code: "MXN").precision(.fractionLength(0)))
                     .font(.headline)
-                Text("Incluye todo el historial conciliado. Puedes corregir el origen o la categoría desde Cuentas > Movimientos.")
+                Text("Incluye todo el historial conciliado. Puedes corregir el origen o la categoría desde Cuentas > Ajustes.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -659,7 +659,7 @@ private struct ExpenseCategoryDetailView: View {
     }
 
     private var highestMovements: [Movement] {
-        Array(movements.sorted { abs($0.amount) > abs($1.amount) }.prefix(5))
+        Array(movements.sorted { abs($0.amount) > abs($1.amount) }.prefix(10))
     }
 
     private func merchantKey(_ value: String) -> String {
@@ -727,7 +727,7 @@ private struct ExpenseCategoryDetailView: View {
 
                     if !highestMovements.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("Gastos más altos")
+                            Text("Top 10 de montos")
                                 .font(.subheadline.weight(.semibold))
                             ForEach(highestMovements) { movement in
                                 NavigationLink {
@@ -895,25 +895,34 @@ private struct AccountCardArtwork: View {
     let isSelected: Bool
 
     var body: some View {
-        Group {
-            if let artworkName = account.artworkName {
-                Image(artworkName)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                ZStack {
-                    LinearGradient(
-                        colors: [Color.marcelitoNavy, Color.marcelitoNavyMid],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    )
-                    Image(systemName: account.kind == .card ? "creditcard.fill" : "building.columns.fill")
-                        .font(.system(size: 52, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.9))
+        GeometryReader { proxy in
+            Group {
+                if let artworkName = account.artworkName {
+                    Image(artworkName)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        // The supplied artwork includes a narrow white photo
+                        // margin. Zooming inside the card-shaped viewport keeps
+                        // only the physical card visible without modifying the
+                        // original asset.
+                        .scaleEffect(1.08)
+                } else {
+                    ZStack {
+                        LinearGradient(
+                            colors: [Color.marcelitoNavy, Color.marcelitoNavyMid],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                        Image(systemName: account.kind == .card ? "creditcard.fill" : "building.columns.fill")
+                            .font(.system(size: 52, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.9))
+                    }
                 }
             }
         }
-        .aspectRatio(1.5, contentMode: .fit)
+        .aspectRatio(1.66, contentMode: .fit)
+        .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(alignment: .topTrailing) {
             if account.isPlaceholder {
@@ -926,12 +935,7 @@ private struct AccountCardArtwork: View {
                     .padding(12)
             }
         }
-        .overlay {
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(isSelected ? Color.marcelitoNavyMid : Color.marcelitoLine.opacity(0.45), lineWidth: isSelected ? 3 : 1)
-        }
-        .shadow(color: Color.black.opacity(isSelected ? 0.18 : 0.09), radius: isSelected ? 14 : 8, y: 6)
-        .padding(.horizontal, 5)
+        .shadow(color: Color.black.opacity(isSelected ? 0.14 : 0.07), radius: isSelected ? 12 : 6, y: 5)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(account.displayName + (account.maskedAccount.map { ", \($0)" } ?? ""))
         .accessibilityValue(account.isPlaceholder ? "Sin estados subidos" : "Cuenta seleccionable")
@@ -997,6 +1001,7 @@ private struct AccountSummaryRow: View {
 struct AccountsView: View {
     @Environment(FinanceStore.self) private var store
     @State private var selectedAccountID = ""
+    @State private var isMovementManagementPresented = false
 
     private var displayedAccounts: [AccountDisplayItem] {
         var seen = Set<String>()
@@ -1159,27 +1164,30 @@ struct AccountsView: View {
                         }
                     }
 
-                    NavigationLink {
-                        MovementsView()
-                    } label: {
-                        Label("Ver todos los movimientos", systemImage: "list.bullet.rectangle")
-                            .font(.headline)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(16)
-                            .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    }
-                    .buttonStyle(.plain)
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 28)
             }
             .scrollIndicators(.hidden)
             .navigationTitle("Cuentas")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        isMovementManagementPresented = true
+                    } label: {
+                        Label("Ajustes", systemImage: "slider.horizontal.3")
+                    }
+                    .accessibilityHint("Abre la asignación y edición de gastos y movimientos")
+                }
+            }
             .foregroundStyle(Color.marcelitoNavy)
             .background(MarcelitoAmbientBackground())
             .onAppear(perform: ensureValidSelection)
             .onChange(of: displayedAccounts.map(\.id)) { _, _ in
                 ensureValidSelection()
+            }
+            .sheet(isPresented: $isMovementManagementPresented) {
+                MovementsView()
             }
         }
     }
