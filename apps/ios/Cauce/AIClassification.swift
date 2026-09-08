@@ -170,7 +170,7 @@ enum ExpenseAIClassifier {
 
     private struct ClassificationSchema: Encodable {
         struct RootProperties: Encodable {
-            let classifications: ClassificationArray
+            let classifications = ClassificationArray()
         }
 
         struct ClassificationArray: Encodable {
