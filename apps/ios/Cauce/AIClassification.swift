@@ -15,6 +15,7 @@ struct AIClassification: Identifiable {
 }
 
 enum ExpenseAIProvider: String, CaseIterable, Identifiable {
+    case gemini
     case openCodeZen
     case nvidia
 
@@ -22,6 +23,7 @@ enum ExpenseAIProvider: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
+        case .gemini: return "Gemini"
         case .openCodeZen: return "OpenCode Zen"
         case .nvidia: return "NVIDIA"
         }
@@ -29,6 +31,8 @@ enum ExpenseAIProvider: String, CaseIterable, Identifiable {
 
     var endpoint: URL {
         switch self {
+        case .gemini:
+            return URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")!
         case .openCodeZen:
             return URL(string: "https://opencode.ai/zen/v1/chat/completions")!
         case .nvidia:
@@ -43,6 +47,7 @@ enum ExpenseAIClassifier {
         let name: String
     }
 
+    static let geminiDefaultModel = "gemini-3.1-flash-lite"
     static let zenDefaultModel = "mimo-v2.5-free"
     static let nvidiaDefaultModel = "deepseek-ai/deepseek-v4-flash-0731"
     /// Keep each response comfortably below the output limit. A long list of
@@ -59,13 +64,25 @@ enum ExpenseAIClassifier {
     static let nvidiaModels: [ModelOption] = [
         ModelOption(id: nvidiaDefaultModel, name: "DeepSeek V4 Flash 0731")
     ]
+    static let geminiModels: [ModelOption] = [
+        ModelOption(id: geminiDefaultModel, name: "Gemini 3.1 Flash-Lite"),
+        ModelOption(id: "gemini-3.8-flash", name: "Gemini 3.8 Flash")
+    ]
 
     static func models(for provider: ExpenseAIProvider) -> [ModelOption] {
-        provider == .openCodeZen ? zenModels : nvidiaModels
+        switch provider {
+        case .gemini: return geminiModels
+        case .openCodeZen: return zenModels
+        case .nvidia: return nvidiaModels
+        }
     }
 
     static func defaultModel(for provider: ExpenseAIProvider) -> String {
-        provider == .openCodeZen ? zenDefaultModel : nvidiaDefaultModel
+        switch provider {
+        case .gemini: return geminiDefaultModel
+        case .openCodeZen: return zenDefaultModel
+        case .nvidia: return nvidiaDefaultModel
+        }
     }
     static let allowedCategories = [
         "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento",
@@ -102,13 +119,19 @@ enum ExpenseAIClassifier {
         let maxTokens: Int?
         let stream: Bool?
         let chatTemplateKwargs: ChatTemplateKwargs?
+        let responseFormat: ResponseFormat?
 
         enum CodingKeys: String, CodingKey {
             case model, messages, temperature, stream
             case topP = "top_p"
             case maxTokens = "max_tokens"
             case chatTemplateKwargs = "chat_template_kwargs"
+            case responseFormat = "response_format"
         }
+    }
+
+    private struct ResponseFormat: Encodable {
+        let type: String
     }
 
     private struct ChatTemplateKwargs: Encodable {
@@ -230,9 +253,10 @@ enum ExpenseAIClassifier {
         let categories = allowedCategories.joined(separator: ", ")
         let tags = allowedTags.joined(separator: ", ")
         let system = """
-        Eres el clasificador de gastos de una app financiera. Clasifica cada movimiento usando solo estas categorías: \(categories). Usa únicamente estas etiquetas secundarias, sin duplicarlas: \(tags). Club Amigos / Proyectos tiene prioridad si el concepto identifica un proyecto. No clasifiques ingresos, reembolsos, pagos de tarjeta, transferencias ni MSI: esos movimientos no deben enviarse a esta función. No recibes ni debes solicitar PDFs, cuentas, números de tarjeta, saldos o metadatos del estado. Identifica si pertenece a un viaje. Conserva exactamente cada id. Responde únicamente un arreglo JSON, sin markdown, con objetos de la forma {\"id\":\"UUID\",\"category\":\"Categoría\",\"tags\":[\"personal\",\"variable\",\"ordinario\"],\"travelRelated\":true|false,\"confidence\":0.0,\"reason\":\"evidencia breve\",\"requires_review\":false}.
+        Eres el clasificador de gastos de una app financiera. Clasifica cada movimiento usando solo estas categorías: \(categories). Usa únicamente estas etiquetas secundarias, sin duplicarlas: \(tags). Club Amigos / Proyectos tiene prioridad si el concepto identifica un proyecto. No clasifiques ingresos, reembolsos, pagos de tarjeta, transferencias ni MSI: esos movimientos no deben enviarse a esta función. No recibes ni debes solicitar PDFs, cuentas, números de tarjeta, saldos o metadatos del estado. Identifica si pertenece a un viaje. Conserva exactamente cada id. Responde únicamente un objeto JSON sin markdown, con la propiedad \"classifications\" que contenga un objeto por movimiento de la forma {\"id\":\"UUID\",\"category\":\"Categoría\",\"tags\":[\"personal\",\"variable\",\"ordinario\"],\"travelRelated\":true|false,\"confidence\":0.0,"reason":"evidencia breve","requires_review":false}.
         """
         let user = "Clasifica estos movimientos pendientes:\n\(inputJSON)"
+        let usesDeterministicOptions = provider == .nvidia || provider == .gemini
         let requestBody = Request(
             model: model,
             messages: [
@@ -242,20 +266,21 @@ enum ExpenseAIClassifier {
             // Zen rejects several OpenAI-compatible tuning fields, so its
             // established request remains minimal. NVIDIA receives an
             // explicit deterministic JSON-oriented configuration.
-            temperature: provider == .nvidia ? 0 : nil,
-            topP: provider == .nvidia ? 1 : nil,
-            maxTokens: provider == .nvidia ? 4096 : nil,
-            stream: provider == .nvidia ? false : nil,
-            chatTemplateKwargs: provider == .nvidia ? ChatTemplateKwargs(thinking: false) : nil
+            temperature: usesDeterministicOptions ? 0 : nil,
+            topP: usesDeterministicOptions ? 1 : nil,
+            maxTokens: usesDeterministicOptions ? 2048 : nil,
+            stream: usesDeterministicOptions ? false : nil,
+            chatTemplateKwargs: provider == .nvidia ? ChatTemplateKwargs(thinking: false) : nil,
+            responseFormat: provider == .gemini ? ResponseFormat(type: "json_object") : nil
         )
         var request = URLRequest(url: provider.endpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = 90
+        request.timeoutInterval = 60
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(requestBody)
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await perform(request: request, provider: provider)
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ClassificationError.provider("No pudimos conectar con \(provider.displayName).")
         }
@@ -309,6 +334,31 @@ enum ExpenseAIClassifier {
         return parsed
     }
 
+    private static func perform(request: URLRequest, provider: ExpenseAIProvider) async throws -> (Data, URLResponse) {
+        let retryableStatusCodes = Set([408, 425, 429, 500, 502, 503, 504, 529])
+        let retryableURLErrors: Set<URLError.Code> = [.timedOut, .cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet]
+        let delays: [UInt64] = [1_000_000_000, 3_000_000_000]
+
+        for attempt in 0...delays.count {
+            do {
+                let result = try await URLSession.shared.data(for: request)
+                if let response = result.1 as? HTTPURLResponse,
+                   retryableStatusCodes.contains(response.statusCode),
+                   attempt < delays.count {
+                    try await Task.sleep(nanoseconds: delays[attempt])
+                    continue
+                }
+                return result
+            } catch let error as URLError {
+                guard retryableURLErrors.contains(error.code), attempt < delays.count else {
+                    throw ClassificationError.provider("\(provider.displayName) no respondió: \(error.localizedDescription)")
+                }
+                try await Task.sleep(nanoseconds: delays[attempt])
+            }
+        }
+        throw ClassificationError.provider("\(provider.displayName) no respondió después de varios intentos.")
+    }
+
     private static func extractJSON(from content: String) -> String? {
         let cleaned = content
             .replacingOccurrences(of: "```json", with: "")
@@ -351,7 +401,7 @@ enum ExpenseAISettingsStore {
 
     static var selectedProvider: ExpenseAIProvider {
         guard let raw = UserDefaults.standard.string(forKey: selectedProviderKey),
-              let provider = ExpenseAIProvider(rawValue: raw) else { return .openCodeZen }
+              let provider = ExpenseAIProvider(rawValue: raw) else { return .gemini }
         return provider
     }
 
@@ -476,7 +526,7 @@ struct AISettingsView: View {
                     }
                 }
                 Section("Privacidad") {
-                    Text("La clasificación es opcional. OpenCode Zen y NVIDIA son servicios externos: evita enviar descripciones que contengan información sensible que no quieras compartir.")
+                    Text("La clasificación es opcional. Gemini, OpenCode Zen y NVIDIA son servicios externos: evita enviar descripciones que contengan información sensible que no quieras compartir.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("La IA nunca aprueba cifras por sí sola: cada resultado debe conciliar contra los totales impresos antes de alimentar los KPI.")
