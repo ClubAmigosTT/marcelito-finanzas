@@ -884,7 +884,8 @@ final class FinanceStore {
     static func santanderTableSnapshotForTesting(
         _ fixtures: [OCRObservationFixture],
         fileName: String,
-        openingBalance: Decimal? = nil
+        openingBalance: Decimal? = nil,
+        recoveryPDF: PDFDocument? = nil
     ) -> (movements: [Movement], diagnostics: [OCRRowDiagnostic]) {
         let observations = fixtures.map { fixture in
             OCRObservation(
@@ -902,7 +903,8 @@ final class FinanceStore {
         let result = parseSantanderTable(
             observations,
             fileName: fileName,
-            openingBalance: openingBalance
+            openingBalance: openingBalance,
+            document: recoveryPDF
         )
         return (result.movements, result.diagnostics)
     }
@@ -6571,6 +6573,7 @@ final class FinanceStore {
             var balance: Decimal?
             var problem: String?
             var retried = false
+            var retryOutcome = "not-needed"
         }
         let cellEdges = [columns.movementMinX, columns.depositMaxX, columns.balanceMinX, CGFloat(0.955)]
         var physicalRows: [PhysicalRow] = []
@@ -6643,6 +6646,7 @@ final class FinanceStore {
             guard !physical.retried, let document, let pageIndex = physical.observations.first?.page,
                   let page = document.page(at: pageIndex) else { return }
             physical.retried = true
+            physical.retryOutcome = "render-unavailable"
             if renderedPage != pageIndex {
                 let bounds = page.bounds(for: .mediaBox)
                 let scale = min(3200 / max(bounds.width, bounds.height), sqrt(5_000_000 / max(bounds.width * bounds.height, 1)))
@@ -6655,18 +6659,20 @@ final class FinanceStore {
                 let region = CGRect(x: cellEdges[cell], y: physical.band.minY,
                     width: cellEdges[cell + 1] - cellEdges[cell], height: physical.band.height)
                 let pixels = santanderCropPixelRect(region, width: image.width, height: image.height)
-                guard let crop = image.cropping(to: pixels) else { return }
+                physical.retryOutcome = "crop-unavailable-cell-\(cell)"
+                guard !pixels.isEmpty, let crop = image.cropping(to: pixels) else { return }
                 let request = VNRecognizeTextRequest()
                 request.recognitionLevel = .accurate
                 request.usesLanguageCorrection = false
                 do { try VNImageRequestHandler(cgImage: crop, options: [:]).perform([request]) }
-                catch { return }
+                catch { physical.retryOutcome = "vision-error-cell-\(cell)"; return }
                 let candidates = (request.results ?? []).compactMap { $0.topCandidates(1).first }
                 let text = candidates.map(\.string).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
                 if text.isEmpty { recovered.append([]); continue }
                 // The entire crop must contain exactly one monetary value;
                 // arbitrary text, multiple values and malformed decimals reject.
                 let matches = allMatches(in: text, regex: amountRegex)
+                physical.retryOutcome = "ambiguous-crop-cell-\(cell)"
                 guard matches.count == 1,
                       matches[0].text.trimmingCharacters(in: .whitespacesAndNewlines) == text,
                       parseAmount(text) != nil else { return }
@@ -6674,6 +6680,7 @@ final class FinanceStore {
                     confidence: candidates.map { Double($0.confidence) }.min() ?? 0)])
             }
             physical.cells = recovered
+            physical.retryOutcome = "completed"
             decode(&physical)
         }
 
@@ -6726,7 +6733,7 @@ final class FinanceStore {
                 else if !equationMatches(physical) { problem = "santander.running-balance-mismatch" }
             }
             let accepted = problem == nil
-            let reason = "\(problem ?? "santander.row-verified"); fila \(index + 1); saldo anterior \(previousPrintedBalance.map { NSDecimalNumber(decimal: $0).stringValue } ?? "ilegible"); saldo impreso \(physical.balance.map { NSDecimalNumber(decimal: $0).stringValue } ?? "ilegible"); relectura de celdas \(physical.retried ? "sí" : "no")"
+            let reason = "\(problem ?? "santander.row-verified"); fila \(index + 1); saldo anterior \(previousPrintedBalance.map { NSDecimalNumber(decimal: $0).stringValue } ?? "ilegible"); saldo impreso \(physical.balance.map { NSDecimalNumber(decimal: $0).stringValue } ?? "ilegible"); relectura de celdas \(physical.retried ? "sí" : "no"); resultado \(physical.retryOutcome)"
             if accepted, var movement = physical.movement {
                 movement.extractionEvidence?.selectionReason = reason
                 parsed.append(movement)

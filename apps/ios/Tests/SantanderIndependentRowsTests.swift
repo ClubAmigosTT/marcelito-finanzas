@@ -1,4 +1,6 @@
 import XCTest
+import PDFKit
+import UIKit
 @testable import Marcelito
 
 /// Synthetic geometry regressions, not certification of the private PDF corpus.
@@ -19,8 +21,9 @@ final class SantanderIndependentRowsTests: XCTestCase {
         return result
     }
 
-    private func read(_ rows: [OCRObservationFixture]) -> (movements: [Movement], diagnostics: [OCRRowDiagnostic]) {
-        FinanceStore.santanderTableSnapshotForTesting(header + rows, fileName: "julio-2026.pdf", openingBalance: 1000)
+    private func read(_ rows: [OCRObservationFixture], pdf: PDFDocument? = nil) -> (movements: [Movement], diagnostics: [OCRRowDiagnostic]) {
+        let footer = OCRObservationFixture(page: rows.map(\.page).max() ?? 0, text: "TOTAL", x: 0.20, y: 0.10, width: 0.10)
+        return FinanceStore.santanderTableSnapshotForTesting(header + rows + [footer], fileName: "julio-2026.pdf", openingBalance: 1000, recoveryPDF: pdf)
     }
 
     func testMissingMovementDoesNotCascadeToFollowingRowsEvenAcrossPages() {
@@ -120,5 +123,23 @@ final class SantanderIndependentRowsTests: XCTestCase {
         XCTAssertEqual(NativeCorpusFileReport.redactedRowError("santander.running-balance-mismatch; saldo anterior 87801.76; COMERCIO"), "santander.running-balance-mismatch")
         XCTAssertEqual(NativeCorpusFileReport.redactedRowError("importe 87801.76"), "row-extraction-rejected")
         XCTAssertNil(NativeCorpusFileReport.redactedRowError(nil))
+    }
+
+    func testNativeVisionCropRecoversMissingMovementOnHighConfidencePage() throws {
+        // A generated, nonfinancial page exercises the real PDFKit -> CGImage
+        // -> Vision retry, rather than mocking its result or certifying totals.
+        let bounds = CGRect(x: 0, y: 0, width: 612, height: 792)
+        let data = UIGraphicsPDFRenderer(bounds: bounds).pdfData { context in
+            context.beginPage()
+            let attributes: [NSAttributedString.Key: Any] = [.font: UIFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)]
+            ("30.00" as NSString).draw(at: CGPoint(x: 0.74 * 612, y: 0.16 * 792), withAttributes: attributes)
+            ("970.00" as NSString).draw(at: CGPoint(x: 0.86 * 612, y: 0.16 * 792), withAttributes: attributes)
+        }
+        let pdf = try XCTUnwrap(PDFDocument(data: data))
+        let result = read(row(1, amount: nil, balance: "970.00"), pdf: pdf)
+        XCTAssertEqual(result.movements.map(\.amount), [-30])
+        XCTAssertEqual(result.diagnostics.map(\.accepted), [true])
+        XCTAssertTrue(result.diagnostics[0].reason.contains("relectura de celdas sí"))
+        XCTAssertEqual(result.diagnostics[0].cellTexts, ["", "30.00", "970.00"])
     }
 }
