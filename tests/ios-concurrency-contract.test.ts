@@ -172,10 +172,10 @@ test("Amex conserva PDFKit cuando su capa de texto ya concilia", async () => {
 
 test("Amex queda aislado en el parser nativo y no cae a Vision", async () => {
   const source = await readFile(modelsPath, "utf8");
-  assert.match(source, /private static func parseAmexText\(_ text: String, fileName: String\)/);
+  assert.match(source, /private static func parseAmexText\(_ text: String, fileName: String, diagnosticSink:/);
   assert.match(source, /let selectableAmex = selectableSource\.localizedCaseInsensitiveCompare\("Amex"\)/);
   assert.match(source, /let ocrObservations = shouldAttemptOCR && !selectableAmex\s*\?/);
-  assert.match(source, /parsedCandidates = Self\.parseAmexText\(text, fileName: fileName\)/);
+  assert.match(source, /parsedCandidates = Self\.parseAmexText\(text, fileName: fileName, diagnosticSink:/);
 });
 
 test("Santander usa rectángulo y columnas fijas de la tabla", async () => {

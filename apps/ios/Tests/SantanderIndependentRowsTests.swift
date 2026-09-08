@@ -40,6 +40,43 @@ final class SantanderIndependentRowsTests: XCTestCase {
         }
     }
 
+    func testDanglingRFCOnFirstDescriptionLineDoesNotRejectARealWithdrawal() {
+        for amount in ["40.00", "63.00"] {
+            let balance = amount == "40.00" ? "960.00" : "937.00"
+            let fixtures = row(1, amount: amount, balance: balance).filter { !$0.text.hasPrefix("PAGO COMERCIO") }
+                + [OCRObservationFixture(text: "PAGO TRANSF RAPIDA SPEI TRANSFERENCIA A COMERCIO RFC", x: 0.20, y: 0.82, width: 0.38)]
+            let result = read(fixtures)
+            XCTAssertEqual(result.diagnostics.map(\.accepted), [true])
+            XCTAssertEqual(result.movements.first?.title, "PAGO TRANSF RAPIDA SPEI TRANSFERENCIA A COMERCIO")
+        }
+    }
+
+    func testDanglingRFCDoesNotDisableAdministrativeRejectionOrBalanceGate() {
+        let metadata = row(1, amount: "40.00", balance: "960.00").filter { !$0.text.hasPrefix("PAGO COMERCIO") }
+        let result = read(metadata + [OCRObservationFixture(text: "SALDO DISPONIBLE RFC", x: 0.20, y: 0.82, width: 0.30)])
+        XCTAssertTrue(result.movements.isEmpty)
+        let mismatch = read(row(1, amount: "40.00", balance: "950.00")
+            + [OCRObservationFixture(text: "RFC", x: 0.20, y: 0.80, width: 0.05)])
+        XCTAssertTrue(mismatch.movements.isEmpty)
+    }
+
+    func testBalanceRetryCannotBeAbortedByUnrelatedWithdrawalCrop() throws {
+        XCTAssertEqual(FinanceStore.santanderRetryCells(problem: "santander.balance-cell-missing-or-ambiguous"), [2])
+        XCTAssertEqual(FinanceStore.santanderRetryCells(problem: nil), [0, 1, 2])
+        let data = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792)).pdfData { context in
+            context.beginPage()
+            let attributes: [NSAttributedString.Key: Any] = [.font: UIFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular)]
+            ("NOISE 30.00" as NSString).draw(at: CGPoint(x: 0.73 * 612, y: 0.16 * 792), withAttributes: attributes)
+            ("970.00" as NSString).draw(at: CGPoint(x: 0.86 * 612, y: 0.16 * 792), withAttributes: attributes)
+        }
+        let result = read(row(1, amount: "30.00", balance: nil)
+            + row(2, amount: "40.00", balance: "930.00"), pdf: try XCTUnwrap(PDFDocument(data: data)))
+        XCTAssertEqual(result.movements.map(\.amount), [-30, -40])
+        XCTAssertEqual(result.diagnostics.map(\.accepted), [true, true])
+        XCTAssertEqual(result.diagnostics[0].cellRetryTexts?[1], "not-read")
+        XCTAssertEqual(result.diagnostics[0].cellTexts, ["", "30.00", "970.00"])
+    }
+
     func testMissingPrintedBalanceClearsLinkAndLaterRowsResume() {
         let result = read(row(1, amount: "30.00", balance: "970.00")
             + row(2, amount: "30.00", balance: nil)

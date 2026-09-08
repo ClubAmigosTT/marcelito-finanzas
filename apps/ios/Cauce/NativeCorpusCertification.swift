@@ -188,6 +188,11 @@ struct NativeAuditRow: Codable {
     let page: Int?
     let signedAmount: String
     let title: String
+    let kind: String?
+    let flow: String?
+    let foreignCurrency: Bool?
+    let section: String?
+    let selectionReason: String?
 
     init(_ movement: Movement) {
         let formatter = DateFormatter()
@@ -199,6 +204,11 @@ struct NativeAuditRow: Codable {
         page = movement.extractionEvidence?.page
         signedAmount = NSDecimalNumber(decimal: movement.amount).stringValue
         title = movement.title
+        kind = movement.kind?.rawValue
+        flow = movement.flow.rawValue
+        foreignCurrency = movement.foreignCurrency
+        section = movement.extractionEvidence?.selectedColumn
+        selectionReason = movement.extractionEvidence?.selectionReason
     }
 }
 
@@ -216,11 +226,13 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
     let accountKey: String?
     let period: String?
     let candidateRows: [NativeAuditRow]?
+    let declaredControls: StatementSummaryRecord?
+    let reconciliation: StatementReconciliationRecord?
 
     private enum CodingKeys: String, CodingKey {
         case file, sourceFileName, source, mode, status, reconciliationReason,
              multimodalFallbackAttempted, multimodalFallbackError, rows,
-             sourceFingerprint, accountKey, period, candidateRows
+             sourceFingerprint, accountKey, period, candidateRows, declaredControls, reconciliation
     }
 
     init(
@@ -236,7 +248,9 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
         sourceFingerprint: String? = nil,
         accountKey: String? = nil,
         period: String? = nil,
-        candidateRows: [NativeAuditRow]? = nil
+        candidateRows: [NativeAuditRow]? = nil,
+        declaredControls: StatementSummaryRecord? = nil,
+        reconciliation: StatementReconciliationRecord? = nil
     ) {
         self.file = file
         self.sourceFileName = sourceFileName
@@ -251,6 +265,8 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
         self.accountKey = accountKey
         self.period = period
         self.candidateRows = candidateRows
+        self.declaredControls = declaredControls
+        self.reconciliation = reconciliation
     }
 
     var id: String { file }
@@ -270,6 +286,8 @@ struct NativeCorpusDiagnosticFile: Codable, Identifiable {
         try container.encodeIfPresent(accountKey, forKey: .accountKey)
         try container.encodeIfPresent(period, forKey: .period)
         try container.encodeIfPresent(candidateRows, forKey: .candidateRows)
+        try container.encodeIfPresent(declaredControls, forKey: .declaredControls)
+        try container.encodeIfPresent(reconciliation, forKey: .reconciliation)
     }
 }
 
@@ -312,6 +330,7 @@ struct NativeCorpusDiagnosticReport: Codable {
                 if let direction = row.direction { payload["direction"] = direction }
                 if let ordinal = row.rowOrdinal { payload["rowOrdinal"] = ordinal }
                 if let cells = row.cellTexts { payload["cellTexts"] = cells }
+                if let cells = row.cellRetryTexts { payload["cellRetryTexts"] = cells }
                 if let bounds = row.rowBounds {
                     payload["rowBounds"] = ["x": bounds.x, "y": bounds.y, "width": bounds.width, "height": bounds.height]
                 }
@@ -335,16 +354,33 @@ struct NativeCorpusDiagnosticReport: Codable {
                 payload["candidateRows"] = candidates.map { row -> [String: Any] in
                     var fields: [String: Any] = ["date": row.date, "signedAmount": row.signedAmount, "title": row.title]
                     if let page = row.page { fields["page"] = page }
+                    if let kind = row.kind { fields["kind"] = kind }
+                    if let flow = row.flow { fields["flow"] = flow }
+                    if let foreign = row.foreignCurrency { fields["foreignCurrency"] = foreign }
+                    if let section = row.section { fields["section"] = section }
+                    if let reason = row.selectionReason { fields["selectionReason"] = reason }
                     return fields
                 }
             }
             return payload
         }
+        // Keep declared and extracted controls in this PRIVATE file only.
+        // They allow comparison of domestic/foreign/MSI/payment buckets
+        // without guessing the semantics of the signed candidate amounts.
+        var enrichedPayload = filePayload
+        for index in files.indices {
+            if let controls = files[index].declaredControls {
+                enrichedPayload[index]["declaredControls"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(controls))
+            }
+            if let reconciliation = files[index].reconciliation {
+                enrichedPayload[index]["reconciliation"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(reconciliation))
+            }
+        }
         let object: [String: Any] = [
             "schemaVersion": schemaVersion,
             "generatedAt": dateFormatter.string(from: generatedAt),
             "readerVersion": readerVersion,
-            "files": filePayload
+            "files": enrichedPayload
         ]
         let data = try JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys])
         let url = FileManager.default.temporaryDirectory
@@ -489,7 +525,9 @@ extension FinanceStore {
                         sourceFingerprint: summary.sourceFingerprint,
                         accountKey: summary.accountKey,
                         period: summary.period,
-                        candidateRows: summary.auditRows
+                        candidateRows: summary.auditRows,
+                        declaredControls: summary.summary,
+                        reconciliation: summary.reconciliation
                     )
                 )
             } catch is CancellationError {
