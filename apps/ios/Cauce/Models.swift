@@ -698,7 +698,7 @@ final class FinanceStore {
     /// survive a PDF re-import, whose row UUID is intentionally new.
     private let manualCategoryOverridesKey = "marcelito.categoryOverrides.v1"
     private let categoryTaxonomyVersionKey = "marcelito.categoryTaxonomyVersion.v1"
-    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.3"
+    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.4"
     private static let pendingCategoryNames: Set<String> = [
         "Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos",
         "Alimentos", "Comidas", "Servicios", "Compras", "Finanzas",
@@ -2314,20 +2314,29 @@ final class FinanceStore {
         let storedVersion = defaults.string(forKey: categoryTaxonomyVersionKey)
         guard force || storedVersion != Self.categoryTaxonomyVersion else { return 0 }
         let learnedRules = defaults.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
-        let manualOverrides = defaults.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
+        // "Otros / Por revisar" is a queue, not a permanent user rule.  Build
+        // 1.0.44 could retain that value as a manual override, which prevented
+        // recognizable merchants such as OXXO and Uber from ever leaving the
+        // review bucket.  Drop those stale sentinels before applying v2.4.
+        var manualOverrides = defaults.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
+        manualOverrides = manualOverrides.filter { !Self.pendingCategoryNames.contains($0.value) }
+        defaults.set(manualOverrides, forKey: manualCategoryOverridesKey)
         var changed = 0
         var nextMovements = movements
         for index in nextMovements.indices {
             let movement = nextMovements[index]
-            guard movement.flow == .expense,
-                  Self.pendingCategoryNames.contains(movement.category) else { continue }
+            guard movement.flow == .expense else { continue }
             if let kind = movement.kind,
                [.cardPayment, .bankTransfer, .income, .credit, .refund, .msi].contains(kind) {
                 continue
             }
             let key = Self.categoryRuleKey(movement.title)
             let normalizedTitle = Self.categoryText(movement.title)
-            let inferred = manualOverrides[key] ?? learnedRules[key] ?? Self.category(for: normalizedTitle, flow: .expense)
+            let manualCategory = manualOverrides[key]
+            // Explicit user choices always win. Everything else is refreshed,
+            // including legacy rows that were prematurely labelled with a
+            // broad category such as "Comisiones y finanzas".
+            let inferred = manualCategory ?? learnedRules[key] ?? Self.category(for: normalizedTitle, flow: .expense)
             guard !inferred.isEmpty else { continue }
             var updated = movement
             updated.category = inferred
@@ -2343,6 +2352,21 @@ final class FinanceStore {
         movements = nextMovements
         defaults.set(Self.categoryTaxonomyVersion, forKey: categoryTaxonomyVersionKey)
         return changed
+    }
+
+    var classifiableExpenseCount: Int {
+        canonicalMovements.filter(isClassifiableExpenseForCategory).count
+    }
+
+    var pendingExpenseCategoryCount: Int {
+        canonicalMovements.filter {
+            isClassifiableExpenseForCategory($0) && Self.pendingCategoryNames.contains($0.category)
+        }.count
+    }
+
+    private func isClassifiableExpenseForCategory(_ movement: Movement) -> Bool {
+        guard movement.flow == .expense else { return false }
+        return ![.cardPayment, .bankTransfer, .income, .credit, .refund, .msi].contains(movementKind(movement))
     }
 
     private func isValidStoredMovement(_ movement: Movement) -> Bool {
@@ -2655,10 +2679,14 @@ final class FinanceStore {
         if !key.isEmpty {
             var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
             var overrides = UserDefaults.standard.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
-            // Persist every explicit choice, including "Otros / Por revisar".
-            // Otherwise the next taxonomy refresh would reinterpret a user's
-            // deliberate review decision as an unclassified legacy row.
-            overrides[key] = category
+            // The review bucket must remain temporary. Persist final manual
+            // choices, but never turn "Otros / Por revisar" into a rule that
+            // blocks future deterministic or AI improvements.
+            if Self.pendingCategoryNames.contains(category) {
+                overrides.removeValue(forKey: key)
+            } else {
+                overrides[key] = category
+            }
             UserDefaults.standard.set(overrides, forKey: manualCategoryOverridesKey)
             if ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains(category) {
                 rules.removeValue(forKey: key)
@@ -9424,7 +9452,10 @@ final class FinanceStore {
             // Project identity is always evaluated first and is handled below.
             ("Comisiones y finanzas", ["comision", "interés", "iva com", "cajero", "anualidad", "cargo bancario", "seguro financiero", "financiera", "finanzas"]),
             ("Software y suscripciones", ["canva", "cursor", "google one", "google storage", "youtube premium", "apple music", "adobe", "microsoft 365", "microsoft office", "suscripcion", "suscripción", "saas", "software", "icloud", "dropbox", "apple.com/bill"]),
-            ("Viajes", ["airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico", "aerobus", "volaris", "vivaaerobus", "american airlines", "united airlines", "delta air", "iberia", "vuelo", "flight", "holafly", "esim", "roaming", "airport", "aeropuerto", "renta de auto", "car rental", "nueva york", "new york", "medellin", "atlanta"]),
+            // A destination alone is only a secondary travel tag. Otherwise
+            // UBER MEDELLIN or a restaurant in New York would lose its useful
+            // natural category and be flattened into Viajes.
+            ("Viajes", ["airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico", "aerobus", "volaris", "vivaaerobus", "american airlines", "united airlines", "delta air", "iberia", "vuelo", "flight", "holafly", "esim", "roaming", "airport", "aeropuerto", "renta de auto", "car rental"]),
             ("Entretenimiento", ["cinemex", "cinemas wtc", "cinepolis", "cine", "teatro", "museo", "museum", "moma", "guggenheim", "summit one", "concierto", "festival", "boleto", "ticket", "show", "smoke jazz", "jazz", "nekoma", "club nocturno", "experiencia", "ocio"]),
             ("Deporte", ["club deportivo", "club deportivo kanoa", "asdeporte", "pickleball", "padel", "pádel", "cancha", "renta de cancha", "gimnasio", "gym", "deporte", "competencia"]),
             ("Salud", ["farmacia", "farmacias", "hospital", "clinica", "clínica", "doctor", "consultorio", "dentista", "dental", "odont", "laboratorio", "salud", "medic", "tratamiento"]),

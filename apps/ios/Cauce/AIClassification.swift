@@ -25,7 +25,7 @@ enum ZenExpenseClassifier {
     /// Keep each response comfortably below the output limit. A long list of
     /// pending movements must be split instead of silently truncating the
     /// JSON returned by the provider.
-    static let maxBatchSize = 32
+    static let maxBatchSize = 12
     static let freeModels: [FreeModel] = [
         FreeModel(id: "mimo-v2.5-free", name: "MiMo V2.5 Free"),
         FreeModel(id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin Free"),
@@ -62,15 +62,7 @@ enum ZenExpenseClassifier {
 
     private struct Request: Encodable {
         let model: String
-        let temperature: Double
-        let maxTokens: Int
         let messages: [Message]
-
-        enum CodingKeys: String, CodingKey {
-            case model, temperature
-            case maxTokens = "max_tokens"
-            case messages
-        }
     }
 
     private struct Message: Encodable {
@@ -88,6 +80,12 @@ enum ZenExpenseClassifier {
 
     private struct ResponseMessage: Decodable {
         let content: String?
+    }
+
+    private struct ProviderErrorEnvelope: Decodable {
+        struct ProviderError: Decodable { let message: String? }
+        let error: ProviderError?
+        let message: String?
     }
 
     private struct ClassificationPayload: Decodable {
@@ -184,8 +182,6 @@ enum ZenExpenseClassifier {
         let user = "Clasifica estos movimientos pendientes:\n\(inputJSON)"
         let requestBody = Request(
             model: model,
-            temperature: 0,
-            maxTokens: 2000,
             messages: [
                 Message(role: "system", content: system),
                 Message(role: "user", content: user)
@@ -193,6 +189,7 @@ enum ZenExpenseClassifier {
         )
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
+        request.timeoutInterval = 90
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(requestBody)
@@ -202,7 +199,11 @@ enum ZenExpenseClassifier {
             throw ClassificationError.provider("No pudimos conectar con OpenCode Zen.")
         }
         guard (200..<300).contains(httpResponse.statusCode) else {
-            throw ClassificationError.provider("OpenCode Zen devolvió un error (\(httpResponse.statusCode)). Revisa tu clave y vuelve a intentar.")
+            let providerMessage = (try? JSONDecoder().decode(ProviderErrorEnvelope.self, from: data))
+                .flatMap { $0.error?.message ?? $0.message }
+                .map { String($0.prefix(220)) }
+            let detail = providerMessage.map { ": \($0)" } ?? "."
+            throw ClassificationError.provider("OpenCode Zen devolvió un error (\(httpResponse.statusCode))\(detail)")
         }
         let decoded = try JSONDecoder().decode(Response.self, from: data)
         guard let content = decoded.choices.first?.message.content,
