@@ -184,9 +184,14 @@ struct OCRRowDiagnostic: Codable, Identifiable {
     let direction: String?
     let reason: String
     let accepted: Bool
+    /// Private Santander evidence, absent in older reports and other readers.
+    let rowOrdinal: Int?
+    let rowBounds: MovementExtractionBounds?
+    let cellTexts: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case id, page, rawText, selectedColumn, selectedAmount, direction, reason, accepted
+        case rowOrdinal, rowBounds, cellTexts
     }
 
     init(
@@ -197,7 +202,10 @@ struct OCRRowDiagnostic: Codable, Identifiable {
         selectedAmount: Decimal? = nil,
         direction: String? = nil,
         reason: String,
-        accepted: Bool
+        accepted: Bool,
+        rowOrdinal: Int? = nil,
+        rowBounds: MovementExtractionBounds? = nil,
+        cellTexts: [String]? = nil
     ) {
         self.id = id
         self.page = page
@@ -207,6 +215,9 @@ struct OCRRowDiagnostic: Codable, Identifiable {
         self.direction = direction
         self.reason = reason
         self.accepted = accepted
+        self.rowOrdinal = rowOrdinal
+        self.rowBounds = rowBounds
+        self.cellTexts = cellTexts
     }
 
     func encode(to encoder: Encoder) throws {
@@ -219,6 +230,9 @@ struct OCRRowDiagnostic: Codable, Identifiable {
         try container.encodeIfPresent(direction, forKey: .direction)
         try container.encode(reason, forKey: .reason)
         try container.encode(accepted, forKey: .accepted)
+        try container.encodeIfPresent(rowOrdinal, forKey: .rowOrdinal)
+        try container.encodeIfPresent(rowBounds, forKey: .rowBounds)
+        try container.encodeIfPresent(cellTexts, forKey: .cellTexts)
     }
 }
 
@@ -661,7 +675,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.07.4"
+    static let readerVersion = "ios-reader-deterministic-2026.09.07.5"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -864,6 +878,14 @@ final class FinanceStore {
         fileName: String,
         openingBalance: Decimal? = nil
     ) -> [Movement] {
+        santanderTableSnapshotForTesting(fixtures, fileName: fileName, openingBalance: openingBalance).movements
+    }
+
+    static func santanderTableSnapshotForTesting(
+        _ fixtures: [OCRObservationFixture],
+        fileName: String,
+        openingBalance: Decimal? = nil
+    ) -> (movements: [Movement], diagnostics: [OCRRowDiagnostic]) {
         let observations = fixtures.map { fixture in
             OCRObservation(
                 page: fixture.page,
@@ -877,11 +899,12 @@ final class FinanceStore {
                 confidence: fixture.confidence
             )
         }
-        return parseSantanderTable(
+        let result = parseSantanderTable(
             observations,
             fileName: fileName,
             openingBalance: openingBalance
-        ).movements
+        )
+        return (result.movements, result.diagnostics)
     }
 
     /// Reports whether the OCR fixture contains a geometrically valid
@@ -3572,7 +3595,8 @@ final class FinanceStore {
             let santanderResult = Self.parseSantanderTable(
                 ocrObservations,
                 fileName: fileName,
-                openingBalance: summary?.previousBalance
+                openingBalance: summary?.previousBalance,
+                document: document
             )
             movementColumnsCalibrated = santanderResult.columnsCalibrated
             rowDiagnostics = santanderResult.diagnostics
@@ -3713,7 +3737,7 @@ final class FinanceStore {
         // Confidence remains diagnostic. Acceptance is determined solely by
         // the issuer-specific section parser and exact declared controls.
         let ocrQualityNeedsReview = false
-        let gatedReconciliation = reconciliation
+        let gatedReconciliation = Self.santanderRowGate(reconciliation, source: source, diagnostics: extraction.rowDiagnostics)
         let needsReview = fresh.isEmpty
             || summary == nil
             || detectedKind == .unknown
@@ -4018,7 +4042,7 @@ final class FinanceStore {
             summary: extraction.summary,
             movements: fresh
         )
-        let gatedReconciliation = reconciliation
+        let gatedReconciliation = Self.santanderRowGate(reconciliation, source: extraction.source, diagnostics: extraction.rowDiagnostics)
         let requiresReview = fresh.isEmpty
             || extraction.summary == nil
             || extraction.kind == .unknown
@@ -6257,10 +6281,41 @@ final class FinanceStore {
     /// the fixed Carta table coordinates measured from the supplied statements.
     /// Movement columns are never inferred from transaction values; the printed
     /// running balance is used only as a fail-closed accounting control.
+    /// Shared by import and certification: compensating row errors must not
+    /// turn a matching statement sum into canonical acceptance.
+    static func santanderRowGate(
+        _ reconciliation: StatementReconciliationRecord,
+        source: String,
+        diagnostics: [OCRRowDiagnostic]
+    ) -> StatementReconciliationRecord {
+        guard source == "Santander" else { return reconciliation }
+        let rejected = diagnostics.filter { !$0.accepted }
+        guard diagnostics.isEmpty || !rejected.isEmpty else { return reconciliation }
+        var result = reconciliation
+        result.status = .invalid
+        let detail = rejected.first?.reason ?? "santander.no-row-evidence"
+        result.reason = [reconciliation.reason, "Santander: \(rejected.count) filas pendientes; \(detail)"]
+            .compactMap { $0 }.joined(separator: "; ")
+        return result
+    }
+
+    /// Vision uses bottom-left normalized coordinates; CGImage crops use
+    /// top-left pixels. Round inward so a crop cannot cross a money column.
+    static func santanderCropPixelRect(_ region: CGRect, width: Int, height: Int) -> CGRect {
+        let clipped = region.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard !clipped.isNull, width > 0, height > 0 else { return .zero }
+        let left = ceil(clipped.minX * CGFloat(width))
+        let right = floor(clipped.maxX * CGFloat(width))
+        let top = ceil((1 - clipped.maxY) * CGFloat(height))
+        let bottom = floor((1 - clipped.minY) * CGFloat(height))
+        return CGRect(x: left, y: top, width: max(0, right - left), height: max(0, bottom - top))
+    }
+
     private static func parseSantanderTable(
         _ observations: [OCRObservation],
         fileName: String,
-        openingBalance: Decimal? = nil
+        openingBalance: Decimal? = nil,
+        document: PDFDocument? = nil
     ) -> SantanderOCRParseResult {
         guard let dateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-.]\s*(\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*(\d{2,4}))?(?![A-Za-z])"#
@@ -6508,15 +6563,123 @@ final class FinanceStore {
         )
         var parsed: [Movement] = []
         var diagnostics: [OCRRowDiagnostic] = []
-        var previousRunningBalance = openingBalance
-        for page in byPage.keys.sorted() {
-            let pageObservations = (byPage[page] ?? []).sorted {
-                if abs($0.centerY - $1.centerY) > 0.008 { return $0.centerY > $1.centerY }
-                return $0.centerX < $1.centerX
+        struct PhysicalRow {
+            let observations: [OCRObservation]
+            let band: CGRect
+            var cells: [[OCRObservation]]
+            var movement: Movement?
+            var balance: Decimal?
+            var problem: String?
+            var retried = false
+        }
+        let cellEdges = [columns.movementMinX, columns.depositMaxX, columns.balanceMinX, CGFloat(0.955)]
+        var physicalRows: [PhysicalRow] = []
+
+        // Phase one retains physical rows, including a readable printed balance
+        // when another cell is invalid. No preceding accepted row is consulted.
+        func extractCells(_ row: [OCRObservation]) -> [[OCRObservation]] {
+            var cells = Array(repeating: [OCRObservation](), count: 3)
+            for observation in row {
+                let tokens: [OCRTextBox]
+                if !observation.amountBoxes.isEmpty {
+                    tokens = observation.amountBoxes
+                } else {
+                    // A broad observation is not a cell. Missing substring
+                    // geometry is recovered from a crop, never character offsets.
+                    guard (0..<3).contains(where: {
+                        observation.boundingBox.minX >= cellEdges[$0]
+                            && observation.boundingBox.maxX <= cellEdges[$0 + 1]
+                    }) else { continue }
+                    tokens = allMatches(in: observation.text, regex: amountRegex).map {
+                        OCRTextBox(text: $0.text, boundingBox: observation.boundingBox)
+                    }
+                }
+                for token in tokens {
+                    guard let cell = (0..<3).first(where: {
+                        token.boundingBox.minX >= cellEdges[$0]
+                            && token.boundingBox.maxX <= cellEdges[$0 + 1]
+                    }) else { continue }
+                    cells[cell].append(OCRObservation(page: observation.page, text: token.text,
+                        boundingBox: token.boundingBox, confidence: observation.confidence))
+                }
             }
-            var rows: [[OCRObservation]] = []
-            var pending: [OCRObservation] = []
-            for observation in pageObservations {
+            return cells
+        }
+
+        func decode(_ physical: inout PhysicalRow) {
+            let values = physical.cells.map { $0.compactMap { parseAmount($0.text) } }
+            physical.balance = values[2].count == 1 ? values[2][0] : nil
+            physical.movement = nil
+            physical.problem = nil
+            let count = values[0].count + values[1].count
+            if count != 1 {
+                physical.problem = count == 0 ? "santander.movement-cell-missing" : "santander.movement-cell-ambiguous"
+            } else if physical.balance == nil {
+                physical.problem = "santander.balance-cell-missing-or-ambiguous"
+            }
+            guard physical.problem == nil else { return }
+            // Keep date/description evidence but supply amounts exclusively from
+            // the three physical cells. References in descriptions stay excluded.
+            let metadata = physical.observations.map { observation in
+                OCRObservation(page: observation.page,
+                    text: amountRegex.stringByReplacingMatches(in: observation.text,
+                        range: NSRange(observation.text.startIndex..<observation.text.endIndex, in: observation.text),
+                        withTemplate: " "),
+                    boundingBox: observation.boundingBox, confidence: observation.confidence,
+                    dateBoxes: observation.dateBoxes)
+            }
+            physical.movement = parseSantanderRow(metadata + physical.cells.flatMap { $0 },
+                dateRegex: dateRegex, amountRegex: amountRegex, defaultYear: defaultYear,
+                previousRunningBalance: nil, columns: columns, dateMaxX: dateMaxX,
+                titleBounds: titleBounds, requireFixedMovementColumn: true)?.movement
+            if physical.movement == nil { physical.problem = "santander.date-description-or-amount-invalid" }
+        }
+
+        // Keep only one rendered page in memory. These bounded numeric crops
+        // are triggered by cell/equation failures, even on a high-confidence page.
+        var renderedPage: Int?
+        var renderedImage: CGImage?
+        func retryCells(_ physical: inout PhysicalRow) {
+            guard !physical.retried, let document, let pageIndex = physical.observations.first?.page,
+                  let page = document.page(at: pageIndex) else { return }
+            physical.retried = true
+            if renderedPage != pageIndex {
+                let bounds = page.bounds(for: .mediaBox)
+                let scale = min(3200 / max(bounds.width, bounds.height), sqrt(5_000_000 / max(bounds.width * bounds.height, 1)))
+                renderedImage = page.thumbnail(of: CGSize(width: bounds.width * scale, height: bounds.height * scale), for: .mediaBox).cgImage
+                renderedPage = pageIndex
+            }
+            guard let image = renderedImage else { return }
+            var recovered: [[OCRObservation]] = []
+            for cell in 0..<3 {
+                let region = CGRect(x: cellEdges[cell], y: physical.band.minY,
+                    width: cellEdges[cell + 1] - cellEdges[cell], height: physical.band.height)
+                let pixels = santanderCropPixelRect(region, width: image.width, height: image.height)
+                guard let crop = image.cropping(to: pixels) else { return }
+                let request = VNRecognizeTextRequest()
+                request.recognitionLevel = .accurate
+                request.usesLanguageCorrection = false
+                do { try VNImageRequestHandler(cgImage: crop, options: [:]).perform([request]) }
+                catch { return }
+                let candidates = (request.results ?? []).compactMap { $0.topCandidates(1).first }
+                let text = candidates.map(\.string).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
+                if text.isEmpty { recovered.append([]); continue }
+                // The entire crop must contain exactly one monetary value;
+                // arbitrary text, multiple values and malformed decimals reject.
+                let matches = allMatches(in: text, regex: amountRegex)
+                guard matches.count == 1,
+                      matches[0].text.trimmingCharacters(in: .whitespacesAndNewlines) == text,
+                      parseAmount(text) != nil else { return }
+                recovered.append([OCRObservation(page: pageIndex, text: text, boundingBox: region,
+                    confidence: candidates.map { Double($0.confidence) }.min() ?? 0)])
+            }
+            physical.cells = recovered
+            decode(&physical)
+        }
+
+        for page in byPage.keys.sorted() {
+            let pageObservations = byPage[page] ?? []
+            let anchors = pageObservations.compactMap { observation -> CGRect? in
                 let normalized = observation.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
                 let boundedDate = observation.dateBoxes.first(where: { box in
                     box.centerX <= dateMaxX && firstMatch(in: box.text, regex: dateRegex) != nil
@@ -6527,50 +6690,56 @@ final class FinanceStore {
                     && !normalized.contains("periodo")
                     && !normalized.contains("corte")
                     && !normalized.contains("pagina")
-                if isDateCell {
-                    if !pending.isEmpty { rows.append(pending) }
-                    pending = [observation]
-                } else if !pending.isEmpty {
-                    pending.append(observation)
-                }
+                return isDateCell ? (boundedDate?.boundingBox ?? observation.boundingBox) : nil
+            }.sorted { $0.midY > $1.midY }
+            for (index, anchor) in anchors.enumerated() {
+                let upper = min(anchor.maxY + 0.004, 1)
+                let lower = index + 1 < anchors.count ? anchors[index + 1].maxY + 0.004 : 0
+                let row = pageObservations.filter { $0.centerY <= upper && $0.centerY > lower }
+                    .sorted { $0.centerY == $1.centerY ? $0.centerX < $1.centerX : $0.centerY > $1.centerY }
+                // Numeric cells occupy the date baseline; continuation lines
+                // belong to the description and cannot create money candidates.
+                let numericBottom = max(lower, anchor.minY - 0.006)
+                let band = CGRect(x: tableLeft, y: numericBottom, width: tableSpan, height: upper - numericBottom)
+                let numericRow = row.filter { $0.centerY >= band.minY }
+                var physical = PhysicalRow(observations: row, band: band, cells: extractCells(numericRow))
+                decode(&physical)
+                if physical.problem != nil { retryCells(&physical) }
+                physicalRows.append(physical)
             }
-            if !pending.isEmpty { rows.append(pending) }
+        }
 
-            for row in rows {
-                // Direction and amount come only from the fixed printed cell;
-                // the issuer's running balance must independently confirm it.
-                if let result = parseSantanderRow(
-                    row,
-                    dateRegex: dateRegex,
-                    amountRegex: amountRegex,
-                    defaultYear: defaultYear,
-                    previousRunningBalance: previousRunningBalance,
-                    columns: columns,
-                    dateMaxX: dateMaxX,
-                    titleBounds: titleBounds,
-                    requireFixedMovementColumn: true,
-                    requireBalanceEquation: true
-                ), result.runningBalance != nil {
-                    parsed.append(result.movement)
-                    previousRunningBalance = result.runningBalance
-                    diagnostics.append(OCRRowDiagnostic(
-                        page: row.first.map { $0.page + 1 },
-                        rawText: row.map(\.text).joined(separator: " "),
-                        selectedColumn: result.movement.extractionEvidence?.selectedColumn,
-                        selectedAmount: result.movement.extractionEvidence?.selectedAmount,
-                        direction: result.movement.amount >= 0 ? "in" : "out",
-                        reason: result.movement.extractionEvidence?.selectionReason ?? "fila Santander dentro de la tabla de cheques",
-                        accepted: true
-                    ))
-                } else {
-                    diagnostics.append(OCRRowDiagnostic(
-                        page: row.first.map { $0.page + 1 },
-                        rawText: row.map(\.text).joined(separator: " "),
-                        reason: "fila Santander rechazada: fecha, columna fija, saldo corrido y ecuación exacta no demostrables",
-                        accepted: false
-                    ))
-                }
+        // Phase two compares adjacent PRINTED balances. A missing or ambiguous
+        // balance clears the link; a later readable balance starts a new local
+        // segment. Pending rows still invalidate the entire statement at commit.
+        var previousPrintedBalance = openingBalance
+        for index in physicalRows.indices {
+            var physical = physicalRows[index]
+            func equationMatches(_ row: PhysicalRow) -> Bool {
+                guard let previousPrintedBalance, let balance = row.balance, let movement = row.movement else { return false }
+                return previousPrintedBalance + movement.amount == balance
             }
+            if physical.problem == nil, !equationMatches(physical) { retryCells(&physical) }
+            var problem = physical.problem
+            if problem == nil {
+                if previousPrintedBalance == nil { problem = "santander.previous-printed-balance-unavailable" }
+                else if !equationMatches(physical) { problem = "santander.running-balance-mismatch" }
+            }
+            let accepted = problem == nil
+            let reason = "\(problem ?? "santander.row-verified"); fila \(index + 1); saldo anterior \(previousPrintedBalance.map { NSDecimalNumber(decimal: $0).stringValue } ?? "ilegible"); saldo impreso \(physical.balance.map { NSDecimalNumber(decimal: $0).stringValue } ?? "ilegible"); relectura de celdas \(physical.retried ? "sí" : "no")"
+            if accepted, var movement = physical.movement {
+                movement.extractionEvidence?.selectionReason = reason
+                parsed.append(movement)
+            }
+            diagnostics.append(OCRRowDiagnostic(page: physical.observations.first.map { $0.page + 1 },
+                rawText: physical.observations.map(\.text).joined(separator: " "),
+                selectedColumn: physical.movement?.extractionEvidence?.selectedColumn,
+                selectedAmount: physical.movement?.extractionEvidence?.selectedAmount,
+                direction: physical.movement.map { $0.amount >= 0 ? "in" : "out" },
+                reason: reason, accepted: accepted, rowOrdinal: index + 1,
+                rowBounds: MovementExtractionBounds(rect: physical.band),
+                cellTexts: physical.cells.map { $0.map(\.text).joined(separator: " | ") }))
+            previousPrintedBalance = physical.balance
         }
         if diagnostics.isEmpty {
             diagnostics.append(OCRRowDiagnostic(
@@ -6940,7 +7109,9 @@ final class FinanceStore {
         for (observationOrder, observation) in row.enumerated() {
             if !observation.amountBoxes.isEmpty {
                 for (matchOrder, box) in observation.amountBoxes.enumerated() {
-                    guard let value = parseAmount(box.text), abs(value) > 0, abs(value) < 10_000_000 else {
+                    guard let value = parseAmount(box.text),
+                          (abs(value) > 0 || (requireFixedMovementColumn && box.centerX >= columns.balanceMinX)),
+                          abs(value) < 10_000_000 else {
                         continue
                     }
                     amountCandidates.append(
@@ -6957,7 +7128,9 @@ final class FinanceStore {
                 continue
             }
             for (matchOrder, match) in allMatches(in: observation.text, regex: amountRegex).enumerated() {
-                guard let value = parseAmount(match.text), abs(value) > 0, abs(value) < 10_000_000 else {
+                guard let value = parseAmount(match.text),
+                      (abs(value) > 0 || (requireFixedMovementColumn && observation.centerX >= columns.balanceMinX)),
+                      abs(value) < 10_000_000 else {
                     continue
                 }
                 if requireFixedMovementColumn {
@@ -7087,7 +7260,7 @@ final class FinanceStore {
             .filter { $0.x >= columns.balanceMinX && $0.x < 0.99 }
             .sorted { $0.order < $1.order }
         let runningBalance: Decimal? = {
-            if requireBalanceEquation {
+            if requireBalanceEquation || requireFixedMovementColumn {
                 guard balanceCandidates.count == 1 else { return nil }
                 return balanceCandidates[0].value
             }

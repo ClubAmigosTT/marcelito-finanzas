@@ -191,7 +191,10 @@ test("Santander usa rectángulo y columnas fijas de la tabla", async () => {
   assert.match(source, /depositMaxX: tableX\(0\.742\)/);
   assert.match(source, /balanceMinX: tableX\(0\.874\)/);
   assert.match(source, /requireFixedMovementColumn: true/);
-  assert.match(source, /requireBalanceEquation: true/);
+  assert.match(source, /return previousPrintedBalance \+ movement.amount == balance/);
+  assert.match(source, /previousPrintedBalance = physical.balance/);
+  assert.equal((source.match(/let gatedReconciliation = Self.santanderRowGate\(/g) ?? []).length, 2);
+  assert.match(source, /santanderCropPixelRect\(region, width: image.width, height: image.height\)/);
   assert.match(source, /let santanderResult = Self\.parseSantanderTable\(\s*ocrObservations/);
 });
 
