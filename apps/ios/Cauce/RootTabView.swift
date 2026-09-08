@@ -1038,8 +1038,53 @@ struct MetricDetailSheet: View {
             }
         case .flow:
             store.cashFlowHistory.suffix(12).map { point in
-                MetricTrendPoint(id: point.id.description, label: dateLabel(point.date), value: point.balance)
+                MetricTrendPoint(id: point.id.description, label: dateLabel(point.date), value: point.net)
             }
+        }
+    }
+
+    private var supportingMovements: [Movement] {
+        let allRealMovements = store.realExpenseMovements + store.realIncomeMovements
+        let cardStatementIDs = Set(store.statements.compactMap { statement -> UUID? in
+            let kind = statement.kind ?? (statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank)
+            return kind == .card ? statement.id : nil
+        })
+        let bankStatementIDs = Set(store.statements.compactMap { statement -> UUID? in
+            let kind = statement.kind ?? (statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank)
+            return kind == .bank ? statement.id : nil
+        })
+
+        let candidates: [Movement]
+        switch metric {
+        case .expense:
+            candidates = store.currentPeriodExpenseMovements
+        case .flow:
+            candidates = store.currentPeriodExpenseMovements + store.currentPeriodIncomeMovements
+        case .debt:
+            candidates = store.realExpenseMovements.filter { movement in
+                movement.statementId.map(cardStatementIDs.contains) == true
+            }
+        case .cash:
+            candidates = allRealMovements.filter { movement in
+                guard let statementID = movement.statementId else { return true }
+                return bankStatementIDs.contains(statementID)
+            }
+        case .patrimony:
+            candidates = allRealMovements
+        }
+
+        return Array(candidates
+            .sorted { abs($0.amount) > abs($1.amount) }
+            .prefix(10))
+    }
+
+    private var supportingMovementsDescription: String {
+        switch metric {
+        case .expense: "Egresos reales más altos del periodo actual."
+        case .flow: "Ingresos y egresos con mayor impacto en el flujo del periodo."
+        case .debt: "Cargos de tarjeta más altos registrados en los estados conciliados."
+        case .cash: "Movimientos bancarios con mayor importe absoluto."
+        case .patrimony: "Movimientos reales con mayor impacto en efectivo y deuda."
         }
     }
 
@@ -1151,6 +1196,57 @@ struct MetricDetailSheet: View {
                             }
                             .frame(height: 170)
                         }
+                    }
+
+                    if !supportingMovements.isEmpty {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Top 10 de montos")
+                                .font(.headline)
+                                .foregroundStyle(Color.marcelitoNavy)
+                            Text(supportingMovementsDescription)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            ForEach(Array(supportingMovements.enumerated()), id: \.element.id) { index, movement in
+                                NavigationLink {
+                                    MovementDetailView(movement: movement)
+                                } label: {
+                                    HStack(spacing: 11) {
+                                        Text("\(index + 1)")
+                                            .font(.caption.weight(.bold))
+                                            .foregroundStyle(.secondary)
+                                            .frame(width: 20)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(movement.title)
+                                                .font(.subheadline.weight(.semibold))
+                                                .lineLimit(2)
+                                            Text("\(movement.category) · \(movement.date.formatted(.dateTime.day().month(.abbreviated).year()))")
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(1)
+                                        }
+                                        Spacer(minLength: 8)
+                                        Text(movement.amount, format: .currency(code: "MXN").precision(.fractionLength(2)))
+                                            .font(.subheadline.monospacedDigit())
+                                            .foregroundStyle(movement.amount < 0 ? Color.marcelitoAmber : Color.marcelitoSuccess)
+                                            .lineLimit(1)
+                                            .minimumScaleFactor(0.75)
+                                        Image(systemName: "chevron.right")
+                                            .font(.caption.weight(.bold))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    .padding(.vertical, 7)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityHint("Abre el detalle para editar la clasificación")
+
+                                if movement.id != supportingMovements.last?.id {
+                                    Divider().padding(.leading, 31)
+                                }
+                            }
+                        }
+                        .padding(14)
+                        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
 
                     Text("Los valores se actualizan al importar o corregir movimientos y estados de cuenta.")

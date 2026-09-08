@@ -348,7 +348,7 @@ private struct AddMovementView: View {
     }
 }
 
-private struct MovementDetailView: View {
+struct MovementDetailView: View {
     @Environment(FinanceStore.self) private var store
     let movement: Movement
     @State private var selectedCategory: String
@@ -659,7 +659,7 @@ private struct ExpenseCategoryDetailView: View {
     }
 
     private var highestMovements: [Movement] {
-        Array(movements.sorted { abs($0.amount) > abs($1.amount) }.prefix(5))
+        Array(movements.sorted { abs($0.amount) > abs($1.amount) }.prefix(10))
     }
 
     private func merchantKey(_ value: String) -> String {
@@ -727,7 +727,7 @@ private struct ExpenseCategoryDetailView: View {
 
                     if !highestMovements.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
-                            Text("Gastos más altos")
+                            Text("Top 10 de montos")
                                 .font(.subheadline.weight(.semibold))
                             ForEach(highestMovements) { movement in
                                 NavigationLink {

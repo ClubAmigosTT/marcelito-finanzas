@@ -71,3 +71,20 @@ test("Resumen grafica únicamente el flujo neto y conserva su desglose", async (
   assert.match(chart, /CashFlowDetailValue\(title: "Ingresos"/);
   assert.match(chart, /CashFlowDetailValue\(title: "Gastos"/);
 });
+
+test("las métricas y categorías exponen Top 10 editable por movimiento", async () => {
+  const [sections, root] = await Promise.all([
+    readFile(sectionsPath, "utf8"),
+    readFile(rootTabPath, "utf8"),
+  ]);
+  const metricStart = root.indexOf("struct MetricDetailSheet");
+  const metricEnd = root.indexOf("private struct CashFlowChart", metricStart);
+  const metricDetail = root.slice(metricStart, metricEnd);
+
+  assert.ok(metricStart >= 0 && metricEnd > metricStart);
+  assert.match(metricDetail, /Text\("Top 10 de montos"\)/);
+  assert.match(metricDetail, /prefix\(10\)/);
+  assert.match(metricDetail, /MovementDetailView\(movement: movement\)/);
+  assert.match(metricDetail, /currentPeriodExpenseMovements \+ store\.currentPeriodIncomeMovements/);
+  assert.match(sections, /Array\(movements\.sorted[\s\S]*\.prefix\(10\)\)/);
+});

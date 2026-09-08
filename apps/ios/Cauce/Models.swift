@@ -1703,6 +1703,7 @@ final class FinanceStore {
     var totalTransfers: Decimal { eligibleMovements.filter { $0.flow == .transfer }.reduce(0) { $0 + absolute($1.amount) } }
     var totalExpenses: Decimal { consolidatedRealSpend }
     var realExpenseMovements: [Movement] { eligibleMovements.filter(isSpend) }
+    var realIncomeMovements: [Movement] { eligibleMovements.filter(isRealIncome) }
 
     /// Expenses shown in the dashboard are scoped to the newest available
     /// statement period. Keeping the complete ledger above is useful for
@@ -1712,6 +1713,12 @@ final class FinanceStore {
             guard let currentPeriodKey else { return true }
             return movementPeriodKey(movement) == currentPeriodKey
         }.filter(isSpend)
+    }
+    var currentPeriodIncomeMovements: [Movement] {
+        eligibleMovements.filter { movement in
+            guard let currentPeriodKey else { return true }
+            return movementPeriodKey(movement) == currentPeriodKey
+        }.filter(isRealIncome)
     }
     var realIncome: Decimal {
         eligibleMovements.filter(isRealIncome).reduce(0) { $0 + absolute($1.amount) }
