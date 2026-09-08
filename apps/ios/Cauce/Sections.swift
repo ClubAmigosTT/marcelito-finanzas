@@ -407,6 +407,28 @@ struct MovementDetailView: View {
                     )
                 }
             }
+            if let confidence = currentMovement.reconciliationConfidence,
+               let reason = currentMovement.reconciliationReason {
+                Section("Conciliación entre cuentas") {
+                    LabeledContent("Confianza", value: "\(confidence)%")
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    if let matchedID = currentMovement.matchedMovementId,
+                       let counterpart = store.movements.first(where: { $0.id == matchedID }) {
+                        NavigationLink {
+                            AnyView(MovementDetailView(movement: counterpart))
+                        } label: {
+                            LabeledContent(
+                                "Contraparte",
+                                value: "\(counterpart.account) · \(counterpart.amount.formatted(.currency(code: "MXN")))"
+                            )
+                        }
+                    } else {
+                        LabeledContent("Contraparte", value: "Estado no importado")
+                    }
+                }
+            }
             Picker("Categoría", selection: Binding(
                 get: { selectedCategory },
                 set: {

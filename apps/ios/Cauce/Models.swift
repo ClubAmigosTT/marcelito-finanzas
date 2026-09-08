@@ -256,6 +256,11 @@ struct Movement: Identifiable, Codable {
     /// Kept as strings for backward-compatible Codable migrations.
     var classificationTags: [String]
     var extractionEvidence: MovementExtractionEvidence?
+    /// Audit trail for transfers matched across two of the user's accounts.
+    /// Optional fields keep existing on-device ledgers backward compatible.
+    var matchedMovementId: UUID?
+    var reconciliationConfidence: Int?
+    var reconciliationReason: String?
 
     init(
         id: UUID = UUID(),
@@ -270,7 +275,10 @@ struct Movement: Identifiable, Codable {
         travelRelated: Bool = false,
         foreignCurrency: Bool = false,
         classificationTags: [String] = [],
-        extractionEvidence: MovementExtractionEvidence? = nil
+        extractionEvidence: MovementExtractionEvidence? = nil,
+        matchedMovementId: UUID? = nil,
+        reconciliationConfidence: Int? = nil,
+        reconciliationReason: String? = nil
     ) {
         self.id = id
         self.date = date
@@ -285,10 +293,14 @@ struct Movement: Identifiable, Codable {
         self.foreignCurrency = foreignCurrency
         self.classificationTags = classificationTags
         self.extractionEvidence = extractionEvidence
+        self.matchedMovementId = matchedMovementId
+        self.reconciliationConfidence = reconciliationConfidence
+        self.reconciliationReason = reconciliationReason
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, date, title, account, category, amount, flow, statementId, kind, travelRelated, foreignCurrency, classificationTags, extractionEvidence
+        case matchedMovementId, reconciliationConfidence, reconciliationReason
     }
 
     init(from decoder: Decoder) throws {
@@ -306,6 +318,9 @@ struct Movement: Identifiable, Codable {
         foreignCurrency = try container.decodeIfPresent(Bool.self, forKey: .foreignCurrency) ?? false
         classificationTags = try container.decodeIfPresent([String].self, forKey: .classificationTags) ?? []
         extractionEvidence = try container.decodeIfPresent(MovementExtractionEvidence.self, forKey: .extractionEvidence)
+        matchedMovementId = try container.decodeIfPresent(UUID.self, forKey: .matchedMovementId)
+        reconciliationConfidence = try container.decodeIfPresent(Int.self, forKey: .reconciliationConfidence)
+        reconciliationReason = try container.decodeIfPresent(String.self, forKey: .reconciliationReason)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -323,6 +338,9 @@ struct Movement: Identifiable, Codable {
         try container.encode(foreignCurrency, forKey: .foreignCurrency)
         try container.encode(classificationTags, forKey: .classificationTags)
         try container.encodeIfPresent(extractionEvidence, forKey: .extractionEvidence)
+        try container.encodeIfPresent(matchedMovementId, forKey: .matchedMovementId)
+        try container.encodeIfPresent(reconciliationConfidence, forKey: .reconciliationConfidence)
+        try container.encodeIfPresent(reconciliationReason, forKey: .reconciliationReason)
     }
 }
 
@@ -716,6 +734,14 @@ final class FinanceStore {
     private let rebuildStateKey = "marcelito.ledger.rebuildState.v1"
     private let auditRunKey = "marcelito.ledger.lastAudit.v1"
     private let manualDashboardUnlockKey = "marcelito.dashboard.manualUnlock.v1"
+    private let transferOwnerAliasesKey = "marcelito.transfer.ownerAliases.v1"
+    private let transferMatcherVersionKey = "marcelito.transfer.matcherVersion.v1"
+    private static let transferMatcherVersion = "scored-owner-pairing-v1"
+    private static let defaultTransferOwnerAliases = [
+        "Marcelo Díaz",
+        "Marcelo A. Díaz",
+        "Díaz Marcelo"
+    ]
     private let ledgerSchemaVersion = 1
     private let statementFilesDirectoryName = "ImportedStatements"
     /// Parser-only scratch stores are used to build a candidate ledger without
@@ -748,6 +774,33 @@ final class FinanceStore {
     @ObservationIgnored private var eligibleMovementsCache: DerivedProjectionCache<[Movement]>?
     @ObservationIgnored private var periodMetricsCache: DerivedProjectionCache<[StatementMetric]>?
     @ObservationIgnored private var ledgerQualityCache: DerivedProjectionCache<LedgerQuality>?
+
+    var transferOwnerAliases: [String] {
+        let stored = UserDefaults.standard.stringArray(forKey: transferOwnerAliasesKey) ?? []
+        return stored.isEmpty ? Self.defaultTransferOwnerAliases : stored
+    }
+
+    @discardableResult
+    func updateTransferOwnerAliases(_ aliases: [String]) -> Int {
+        let cleaned = aliases
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+            .reduce(into: [String]()) { result, alias in
+                guard !result.contains(where: { $0.caseInsensitiveCompare(alias) == .orderedSame }) else { return }
+                result.append(alias)
+            }
+        UserDefaults.standard.set(cleaned.isEmpty ? Self.defaultTransferOwnerAliases : cleaned, forKey: transferOwnerAliasesKey)
+        let before = movements.filter { $0.kind == .bankTransfer }.count
+        normalizeStoredLedger()
+        UserDefaults.standard.set(Self.transferMatcherVersion, forKey: transferMatcherVersionKey)
+        persist(markingChange: true)
+        let added = max(0, movements.filter { $0.kind == .bankTransfer }.count - before)
+        DiagnosticsRecorder.record(
+            stage: "transfers.identity",
+            message: "Perfil de titular actualizado; \(added) lado(s) nuevos de transferencias propias identificados."
+        )
+        return added
+    }
 
     /// Runs the same text-layer reader path used during import, without
     /// touching UserDefaults or the canonical ledger. The test target uses
@@ -2175,36 +2228,83 @@ final class FinanceStore {
         return ["transfer", "traspaso", "spei", "entre cuentas", "cuenta propia", "clabe"].contains { value.contains($0) }
     }
 
-    /// Same amount/date and different bank accounts narrow a transfer
-    /// candidate, but do not prove it is an own-account movement.  Require an
-    /// explicit own-account phrase or the known counterpart bank name before
-    /// excluding the rows from income and spend aggregates.
-    private func hasOwnAccountTransferEvidence(_ outflow: Movement, _ inflow: Movement) -> Bool {
-        let combined = normalizedConcept("\(outflow.title) \(inflow.title)")
-        if ["entre cuentas", "cuenta propia", "mismo titular", "traspaso interno", "autotransferencia"].contains(where: { combined.contains($0) }) {
-            return true
+    private func containsWholePhrase(_ phrase: String, in text: String) -> Bool {
+        guard !phrase.isEmpty else { return false }
+        return " \(text) ".contains(" \(phrase) ")
+    }
+
+    private func ownerAliasMentioned(in text: String) -> Bool {
+        let normalized = normalizedConcept(text)
+        return transferOwnerAliases
+            .map(normalizedConcept)
+            .filter { $0.split(separator: " ").count >= 2 }
+            .contains { containsWholePhrase($0, in: normalized) }
+    }
+
+    private func transferReferenceTokens(_ text: String) -> Set<String> {
+        let folded = text
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+        let pattern = #"(?:ref(?:erencia)?|folio|rastreo|clave|operacion)\s*[:#./_-]*\s*([a-z0-9-]{5,})"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return [] }
+        let range = NSRange(folded.startIndex..<folded.endIndex, in: folded)
+        return Set(expression.matches(in: folded, range: range).compactMap { match in
+            guard match.numberOfRanges > 1,
+                  let tokenRange = Range(match.range(at: 1), in: folded) else { return nil }
+            return String(folded[tokenRange])
+        })
+    }
+
+    private func statementForMovement(_ movement: Movement) -> StatementRecord? {
+        movement.statementId.flatMap { id in statements.first(where: { $0.id == id }) }
+    }
+
+    private func distinctImportedBankAccounts(_ outflow: Movement, _ inflow: Movement) -> Bool {
+        guard let outStatement = statementForMovement(outflow),
+              let inStatement = statementForMovement(inflow),
+              statementKind(outStatement) == .bank,
+              statementKind(inStatement) == .bank else { return false }
+        if let outKey = outStatement.accountKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let inKey = inStatement.accountKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !outKey.isEmpty, !inKey.isEmpty {
+            return outKey.caseInsensitiveCompare(inKey) != .orderedSame
         }
-        // A bank name in an otherwise generic payment description is not
-        // enough; one side must also contain transfer semantics (SPEI,
-        // transferencia, traspaso, CLABE, etc.).
-        guard hasTransferHint(outflow) || hasTransferHint(inflow) else { return false }
+        if normalizedConcept(outStatement.source) != normalizedConcept(inStatement.source) { return true }
+        return normalizedConcept(outflow.account) != normalizedConcept(inflow.account)
+    }
+
+    private func transferPairEvidence(_ outflow: Movement, _ inflow: Movement) -> (score: Int, reason: String) {
+        let combined = normalizedConcept("\(outflow.title) \(inflow.title)")
+        var score = 50 // importe exacto, direcciones opuestas y cuentas distintas
+        var reasons = ["importe exacto", "egreso ↔ ingreso"]
+
+        let seconds = abs(outflow.date.timeIntervalSince(inflow.date))
+        let dayDistance = Int((seconds / (24 * 60 * 60)).rounded(.down))
+        switch dayDistance {
+        case 0: score += 10; reasons.append("mismo día")
+        case 1: score += 8; reasons.append("1 día")
+        case 2: score += 5; reasons.append("2 días")
+        default: score += 2; reasons.append("3 días")
+        }
+
+        if ["entre cuentas", "cuenta propia", "mismo titular", "traspaso interno", "autotransferencia"].contains(where: { combined.contains($0) }) {
+            score += 25
+            reasons.append("texto de cuenta propia")
+        }
+        if ownerAliasMentioned(in: "\(outflow.title) \(inflow.title)") {
+            score += 20
+            reasons.append("titular propio")
+        }
+        if hasTransferHint(outflow) && hasTransferHint(inflow) {
+            score += 12
+            reasons.append("transferencia en ambos lados")
+        } else if hasTransferHint(outflow) || hasTransferHint(inflow) {
+            score += 6
+            reasons.append("señal de transferencia")
+        }
+
         let outAccount = normalizedConcept(outflow.account)
         let inAccount = normalizedConcept(inflow.account)
-        guard !outAccount.isEmpty, !inAccount.isEmpty, outAccount != inAccount else { return false }
-        let distinctImportedAccounts: Bool = {
-            guard let outStatementID = outflow.statementId,
-                  let inStatementID = inflow.statementId,
-                  let outStatement = statements.first(where: { $0.id == outStatementID }),
-                  let inStatement = statements.first(where: { $0.id == inStatementID }),
-                  statementKind(outStatement) == .bank,
-                  statementKind(inStatement) == .bank else { return false }
-            if let outKey = outStatement.accountKey?.trimmingCharacters(in: .whitespacesAndNewlines),
-               let inKey = inStatement.accountKey?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !outKey.isEmpty, !inKey.isEmpty {
-                return outKey.caseInsensitiveCompare(inKey) != .orderedSame
-            }
-            return normalizedConcept(outStatement.source) != normalizedConcept(inStatement.source)
-        }()
         let knownBankLabels = Set(statements
             .filter { statementKind($0) == .bank }
             .map { normalizedConcept($0.source) }
@@ -2213,7 +2313,22 @@ final class FinanceStore {
         let inText = normalizedConcept(inflow.title)
         let namedCounterpart = (knownBankLabels.contains(outAccount) && inAccount.count >= 3 && outText.contains(inAccount))
             || (knownBankLabels.contains(inAccount) && outAccount.count >= 3 && inText.contains(outAccount))
-        if namedCounterpart { return true }
+        if namedCounterpart {
+            score += 15
+            reasons.append("banco contrario")
+        }
+
+        if distinctImportedBankAccounts(outflow, inflow) {
+            score += 5
+            reasons.append("cuentas propias distintas")
+        }
+
+        let sharedReferences = transferReferenceTokens(outflow.title)
+            .intersection(transferReferenceTokens(inflow.title))
+        if !sharedReferences.isEmpty {
+            score += 25
+            reasons.append("referencia coincidente")
+        }
 
         // BBVA/Santander often omit the counterpart bank from the first line
         // of the row (it appears in a continuation line that PDFKit does not
@@ -2226,13 +2341,93 @@ final class FinanceStore {
             || outText.contains("transferencia")
             || outText.contains("traspaso")
             || outText.contains("spei")
-            || outText.contains("pago")
         let incomingSignal = inText.contains("recibido")
             || inText.contains("recibida")
             || inText.contains("abono")
             || inText.contains("deposito")
             || inText.contains("entrada")
-        return distinctImportedAccounts && outgoingSignal && incomingSignal
+        if outgoingSignal && incomingSignal {
+            // With exact opposite amounts across two distinct imported bank
+            // accounts, explicit SENT/RECEIVED semantics must reach the
+            // acceptance threshold even when neither bank names the other in
+            // the shortened PDF row title. Keep ±3-day pairs below the gate.
+            score += 18
+            reasons.append("dirección explícita")
+        }
+
+        // Preserve the raw evidence score for global pairing. The displayed
+        // confidence is capped when it is stored on each movement.
+        return (score, reasons.joined(separator: " · "))
+    }
+
+    private struct ScoredTransferCandidate {
+        let outflowIndex: Int
+        let inflowIndex: Int
+        let amountKey: String
+        let score: Int
+        let reason: String
+        let dateDistance: TimeInterval
+    }
+
+    /// Chooses a one-to-one set with the highest total confidence for each
+    /// exact amount. Repeated round amounts can otherwise make a greedy first
+    /// match hide the correct counterpart. Candidate groups above 12 rows use
+    /// a deterministic greedy fallback to keep imports bounded.
+    private func globallyBestTransferCandidates(_ candidates: [ScoredTransferCandidate]) -> [ScoredTransferCandidate] {
+        let grouped = Dictionary(grouping: candidates, by: \.amountKey)
+        return grouped.keys.sorted().flatMap { amountKey -> [ScoredTransferCandidate] in
+            let group = grouped[amountKey, default: []]
+            let outflows = Array(Set(group.map(\.outflowIndex))).sorted()
+            let inflows = Array(Set(group.map(\.inflowIndex))).sorted()
+            guard outflows.count <= 12, inflows.count <= 12 else {
+                var usedOutflows = Set<Int>()
+                var usedInflows = Set<Int>()
+                return group.sorted {
+                    if $0.score != $1.score { return $0.score > $1.score }
+                    if $0.dateDistance != $1.dateDistance { return $0.dateDistance < $1.dateDistance }
+                    if $0.outflowIndex != $1.outflowIndex { return $0.outflowIndex < $1.outflowIndex }
+                    return $0.inflowIndex < $1.inflowIndex
+                }.filter { candidate in
+                    guard usedOutflows.insert(candidate.outflowIndex).inserted else { return false }
+                    guard usedInflows.insert(candidate.inflowIndex).inserted else {
+                        usedOutflows.remove(candidate.outflowIndex)
+                        return false
+                    }
+                    return true
+                }
+            }
+
+            let incomingPosition = Dictionary(uniqueKeysWithValues: inflows.enumerated().map { ($0.element, $0.offset) })
+            let edgesByOutflow = Dictionary(grouping: group, by: \.outflowIndex)
+            var memo: [String: (score: Int, dateDistance: TimeInterval, matches: [ScoredTransferCandidate])] = [:]
+
+            func solve(_ position: Int, _ usedMask: Int) -> (score: Int, dateDistance: TimeInterval, matches: [ScoredTransferCandidate]) {
+                guard position < outflows.count else { return (0, 0, []) }
+                let key = "\(position)|\(usedMask)"
+                if let cached = memo[key] { return cached }
+                var best = solve(position + 1, usedMask)
+                for edge in edgesByOutflow[outflows[position], default: []] {
+                    guard let bitPosition = incomingPosition[edge.inflowIndex] else { continue }
+                    let bit = 1 << bitPosition
+                    guard usedMask & bit == 0 else { continue }
+                    let tail = solve(position + 1, usedMask | bit)
+                    let candidate = (
+                        score: edge.score + tail.score,
+                        dateDistance: edge.dateDistance + tail.dateDistance,
+                        matches: [edge] + tail.matches
+                    )
+                    if candidate.score > best.score
+                        || (candidate.score == best.score && candidate.matches.count > best.matches.count)
+                        || (candidate.score == best.score && candidate.matches.count == best.matches.count && candidate.dateDistance < best.dateDistance) {
+                        best = candidate
+                    }
+                }
+                memo[key] = best
+                return best
+            }
+
+            return solve(0, 0).matches
+        }
     }
 
     private func hasCardPaymentHint(_ movement: Movement) -> Bool {
@@ -2416,10 +2611,10 @@ final class FinanceStore {
 
     private func reconcileStoredMovements() {
         var consumed = Set<UUID>()
-        let twoDays: TimeInterval = 2 * 24 * 60 * 60
+        let threeDays: TimeInterval = 3 * 24 * 60 * 60
         // A bank direct debit can be posted a few days before the card issuer
         // reflects the payment (the real Santander/Amex corpus has a
-        // three-day posting gap). Keep the strict ±2-day rule for own-bank
+        // three-day posting gap). Keep a strict ±3-day rule for own-bank
         // transfers, but allow a bounded five-day window when both sides have
         // an explicit card-payment signal and the amount is exact to cents.
         let cardPaymentWindow: TimeInterval = 5 * 24 * 60 * 60
@@ -2443,25 +2638,106 @@ final class FinanceStore {
             }) {
                 movements[index].flow = .transfer
                 movements[index].kind = .cardPayment
+                movements[index].category = "Transferencia"
+                movements[index].matchedMovementId = movements[cardIndex].id
+                movements[index].reconciliationConfidence = 100
+                movements[index].reconciliationReason = "Pago de tarjeta · importe exacto · fechas compatibles"
                 movements[cardIndex].flow = .debt
                 movements[cardIndex].kind = .cardPayment
+                movements[cardIndex].category = "Transferencia"
+                movements[cardIndex].matchedMovementId = bank.id
+                movements[cardIndex].reconciliationConfidence = 100
+                movements[cardIndex].reconciliationReason = "Pago de tarjeta · importe exacto · fechas compatibles"
                 consumed.insert(bank.id)
                 consumed.insert(movements[cardIndex].id)
                 continue
             }
+        }
 
-            if let ownIndex = movements.indices.first(where: { candidateIndex in
-                let incoming = movements[candidateIndex]
-                guard !consumed.contains(incoming.id), candidateIndex != index, isBankMovement(incoming), isInflow(incoming), incoming.account != bank.account, amountsMatch(bank.amount, incoming.amount), abs(bank.date.timeIntervalSince(incoming.date)) <= twoDays else { return false }
-                return hasOwnAccountTransferEvidence(bank, incoming)
-            }) {
-                movements[index].flow = .transfer
-                movements[index].kind = .bankTransfer
-                movements[ownIndex].flow = .transfer
-                movements[ownIndex].kind = .bankTransfer
-                consumed.insert(bank.id)
-                consumed.insert(movements[ownIndex].id)
+        var scoredCandidates: [ScoredTransferCandidate] = []
+        var ambiguousRows = Set<UUID>()
+        for outflowIndex in movements.indices {
+            let outflow = movements[outflowIndex]
+            guard !consumed.contains(outflow.id), isBankMovement(outflow), isOutflow(outflow) else { continue }
+            for inflowIndex in movements.indices {
+                let inflow = movements[inflowIndex]
+                guard inflowIndex != outflowIndex,
+                      !consumed.contains(inflow.id),
+                      isBankMovement(inflow),
+                      isInflow(inflow),
+                      distinctImportedBankAccounts(outflow, inflow),
+                      amountsMatch(outflow.amount, inflow.amount) else { continue }
+                let dateDistance = abs(outflow.date.timeIntervalSince(inflow.date))
+                guard dateDistance <= threeDays else { continue }
+                let evidence = transferPairEvidence(outflow, inflow)
+                if evidence.score >= 90 {
+                    let cents = NSDecimalNumber(decimal: absolute(outflow.amount) * 100).int64Value
+                    scoredCandidates.append(ScoredTransferCandidate(
+                        outflowIndex: outflowIndex,
+                        inflowIndex: inflowIndex,
+                        amountKey: String(cents),
+                        score: evidence.score,
+                        reason: evidence.reason,
+                        dateDistance: dateDistance
+                    ))
+                } else {
+                    ambiguousRows.insert(outflow.id)
+                    ambiguousRows.insert(inflow.id)
+                }
             }
+        }
+
+        let selectedTransfers = globallyBestTransferCandidates(scoredCandidates)
+            .sorted { left, right in
+                if left.score != right.score { return left.score > right.score }
+                return left.dateDistance < right.dateDistance
+            }
+        for candidate in selectedTransfers {
+            let outflow = movements[candidate.outflowIndex]
+            let inflow = movements[candidate.inflowIndex]
+            guard !consumed.contains(outflow.id), !consumed.contains(inflow.id) else { continue }
+            movements[candidate.outflowIndex].flow = .transfer
+            movements[candidate.outflowIndex].kind = .bankTransfer
+            movements[candidate.outflowIndex].category = "Transferencia"
+            movements[candidate.outflowIndex].matchedMovementId = inflow.id
+            movements[candidate.outflowIndex].reconciliationConfidence = min(candidate.score, 100)
+            movements[candidate.outflowIndex].reconciliationReason = candidate.reason
+            movements[candidate.inflowIndex].flow = .transfer
+            movements[candidate.inflowIndex].kind = .bankTransfer
+            movements[candidate.inflowIndex].category = "Transferencia"
+            movements[candidate.inflowIndex].matchedMovementId = outflow.id
+            movements[candidate.inflowIndex].reconciliationConfidence = min(candidate.score, 100)
+            movements[candidate.inflowIndex].reconciliationReason = candidate.reason
+            consumed.insert(outflow.id)
+            consumed.insert(inflow.id)
+            ambiguousRows.remove(outflow.id)
+            ambiguousRows.remove(inflow.id)
+        }
+
+        // Statements can be missing or not overlap. A transfer descriptor
+        // that explicitly names the configured owner is still safe to exclude
+        // on one side, while the owner's name without transfer semantics is
+        // deliberately left as ordinary income/spend.
+        for index in movements.indices {
+            let movement = movements[index]
+            guard !consumed.contains(movement.id),
+                  isBankMovement(movement),
+                  hasTransferHint(movement),
+                  ownerAliasMentioned(in: movement.title) else { continue }
+            movements[index].flow = .transfer
+            movements[index].kind = .bankTransfer
+            movements[index].category = "Transferencia"
+            movements[index].reconciliationConfidence = 90
+            movements[index].reconciliationReason = "Titular propio · señal explícita de transferencia · contraparte no importada"
+            ambiguousRows.remove(movement.id)
+        }
+
+        if !ambiguousRows.isEmpty {
+            DiagnosticsRecorder.record(
+                level: "info",
+                stage: "transfers.review",
+                message: "\(ambiguousRows.count) movimiento(s) tienen importe/fecha compatibles, pero no alcanzan evidencia suficiente para ocultarlos como transferencia propia."
+            )
         }
     }
 
@@ -2644,6 +2920,21 @@ final class FinanceStore {
                     message: "Se actualizaron \(changed) movimiento(s) con la taxonomía \(Self.categoryTaxonomyVersion)."
                 )
             }
+        }
+        let storedTransferMatcherVersion = defaults.string(forKey: transferMatcherVersionKey)
+        let canRematchCurrentLedger = statements.allSatisfy(isCurrentReader)
+        if !isReconciliationOnly,
+           storedTransferMatcherVersion != Self.transferMatcherVersion,
+           canRematchCurrentLedger {
+            let before = movements.filter { $0.kind == .bankTransfer }.count
+            normalizeStoredLedger()
+            defaults.set(Self.transferMatcherVersion, forKey: transferMatcherVersionKey)
+            persist(markingChange: true)
+            let added = max(0, movements.filter { $0.kind == .bankTransfer }.count - before)
+            DiagnosticsRecorder.record(
+                stage: "transfers.migration",
+                message: "Matcher de transferencias actualizado; \(added) lado(s) nuevos identificados."
+            )
         }
         // The active envelope is already normalized at every successful
         // commit. Re-running the complete dedupe/matching pass synchronously
@@ -2874,6 +3165,8 @@ final class FinanceStore {
         defaults.removeObject(forKey: statementKey)
         defaults.removeObject(forKey: importKey)
         defaults.removeObject(forKey: categoryRulesKey)
+        defaults.removeObject(forKey: transferOwnerAliasesKey)
+        defaults.removeObject(forKey: transferMatcherVersionKey)
         defaults.removeObject(forKey: manualCategoryOverridesKey)
         defaults.removeObject(forKey: categoryTaxonomyVersionKey)
         defaults.removeObject(forKey: numericRepairKey)

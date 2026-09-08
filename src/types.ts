@@ -131,6 +131,10 @@ export type Transaction = {
   /** Links both sides of a transfer or a bank-to-card payment. */
   reconciliationId?: string;
   reconciledAs?: ReconciliationType;
+  /** Confidence and human-readable evidence for an automatic account match. */
+  reconciliationConfidence?: number;
+  reconciliationReason?: string;
+  matchedTransactionId?: string;
 };
 
 export type StatementKind = "card" | "bank" | "unknown";
