@@ -447,7 +447,7 @@ function categoryFor(kind: TransactionKind) {
   if (kind === "income") return "Ingresos";
   if (kind === "cardPayment") return "Pago de tarjeta";
   if (kind === "bankTransfer") return "Transferencia interna";
-  return "Sin categoría";
+  return "Otros / Por revisar";
 }
 
 function mapRows(extraction: MultimodalStatementExtraction, fileName: string): Transaction[] {

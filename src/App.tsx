@@ -29,11 +29,10 @@ import {
   X,
 } from "@phosphor-icons/react";
 import { AnimatePresence, motion, useReducedMotion } from "motion/react";
-import { categories } from "./data";
 import { createAuditRun } from "./audit";
-import { buildFinanceMetrics, defaultStatementKind, hasSufficientOcrQuality, isRealIncomeTransaction, isStatementEligibleForDashboard, isSpendTransaction, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
+import { buildFinanceMetrics, defaultStatementKind, hasSufficientOcrQuality, isCategorizedSpendTransaction, isRealIncomeTransaction, isStatementEligibleForDashboard, isSpendTransaction, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
 import { inspectPdf, PDF_READER_VERSION } from "./pdfImport";
-import { categoryFromRules, merchantKey, type CategoryRules } from "./categoryRules";
+import { categoryFromRules, deterministicExpenseClassification, expenseCategories, merchantKey, type CategoryRules } from "./categoryRules";
 import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey } from "./reconciliation";
 import { prepareStoredLedger } from "./statementMigration";
 import { clearWebErrorDiagnostics, readWebErrorDiagnostics, type WebErrorDiagnostic } from "./WebErrorBoundary";
@@ -538,7 +537,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
             {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => setImportOpen(true)} onRunReaderPreflight={transactionClassifierEndpoint ? runReaderPreflight : undefined} readerPreflight={readerPreflight} readerPreflightBusy={readerPreflightBusy} readerPreflightError={readerPreflightError} />}
             {section === "Gastos" && <Expenses transactions={ledgerTransactions} statements={statements} metrics={metrics} onImport={() => setImportOpen(true)} />}
-            {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onOpenStatement={(statement) => openImportedPdf(statement.sourceFingerprint)} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
+            {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onOpenStatement={(statement) => openImportedPdf(statement.sourceFingerprint)} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"].includes(category)) { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
             {section === "Patrimonio" && <NetWorth metrics={metrics} transactions={ledgerTransactions} statements={statements} />}
           </motion.div>
         </AnimatePresence>
@@ -1090,8 +1089,23 @@ function Movements({ transactions, statements, setTransactions, onLearnCategory,
     const statement = statements.find((source) => source.id === item.statementId);
     return `${item.description} ${item.category} ${item.account} ${statementLabel(statement)} ${statement?.fileName ?? ""}`.toLowerCase().includes(query.toLowerCase());
   });
-  function updateCategory(id: string, category: string) { setTransactions((items) => items.map((item) => item.id === id ? { ...item, category } : item)); const movement = transactions.find((item) => item.id === id); if (movement) onLearnCategory(movement.description, category); }
-  return <section className={embedded ? "movements-detail" : undefined}>{!embedded && <PageHeading title="Movimientos" body="Busca, corrige y conecta cada movimiento con su estado de cuenta." action="Importar estado" onAction={onImport} />}<div className="filter-row"><div className="search-box"><ListMagnifyingGlass size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar comercio, banco, periodo o categoría" /></div><span className="result-count">{filtered.length} de {transactions.length}</span></div>{filtered.length ? <div className="movement-list">{filtered.map((item) => { const statement = statements.find((source) => source.id === item.statementId); return <div className="movement-row" key={item.id}><span className={`movement-glyph glyph-${item.flow}`}>{item.flow === "transfer" ? <ArrowsLeftRight size={18} /> : item.flow === "income" ? <ArrowDown size={18} /> : <Receipt size={18} />}</span><div className="movement-name"><strong>{item.description}</strong><span>{item.date} · {item.account} · {statementLabel(statement)}</span></div><select aria-label={`Categoría de ${item.description}`} value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><strong className={item.amount > 0 ? "amount positive" : "amount"}>{moneyPrecise.format(item.amount)}</strong><button className="row-action" aria-label={`Editar ${item.description}`}><PencilSimple size={17} /></button></div>; })}</div> : <EmptyState title="No hay movimientos reales" body="Importa un estado de cuenta o agrega un movimiento manual para empezar." />}</section>;
+  function updateCategory(id: string, category: string) {
+    setTransactions((items) => items.map((item) => {
+      if (item.id !== id) return item;
+      const deterministic = deterministicExpenseClassification(item.description, item.flow, item.kind);
+      return {
+        ...item,
+        category,
+        classificationProvider: "rules" as const,
+        classificationConfidence: 1,
+        classificationReason: "Corrección manual del usuario.",
+        classificationTags: deterministic?.tags ?? item.classificationTags,
+      };
+    }));
+    const movement = transactions.find((item) => item.id === id);
+    if (movement) onLearnCategory(movement.description, category);
+  }
+  return <section className={embedded ? "movements-detail" : undefined}>{!embedded && <PageHeading title="Movimientos" body="Busca, corrige y conecta cada movimiento con su estado de cuenta." action="Importar estado" onAction={onImport} />}<div className="filter-row"><div className="search-box"><ListMagnifyingGlass size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar comercio, banco, periodo o categoría" /></div><span className="result-count">{filtered.length} de {transactions.length}</span></div>{filtered.length ? <div className="movement-list">{filtered.map((item) => { const statement = statements.find((source) => source.id === item.statementId); return <div className="movement-row" key={item.id}><span className={`movement-glyph glyph-${item.flow}`}>{item.flow === "transfer" ? <ArrowsLeftRight size={18} /> : item.flow === "income" ? <ArrowDown size={18} /> : <Receipt size={18} />}</span><div className="movement-name"><strong>{item.description}</strong><span>{item.date} · {item.account} · {statementLabel(statement)}</span></div><select aria-label={`Categoría de ${item.description}`} value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)}>{["Ingresos", "Transferencia", ...expenseCategories].map((category) => <option key={category}>{category}</option>)}</select><strong className={item.amount > 0 ? "amount positive" : "amount"}>{moneyPrecise.format(item.amount)}</strong><button className="row-action" aria-label={`Editar ${item.description}`}><PencilSimple size={17} /></button></div>; })}</div> : <EmptyState title="No hay movimientos reales" body="Importa un estado de cuenta o agrega un movimiento manual para empezar." />}</section>;
 }
 
 function Expenses({ transactions, statements, metrics, onImport }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; onImport: () => void }) {
@@ -1127,7 +1141,7 @@ function CategoryDistribution({ categories, period, analyticsPeriods, transactio
     if (!selectedCategory) return [];
     const selectedKey = normalizeConcept(selectedCategory);
     return transactions.filter((transaction) => {
-      if (!isSpendTransaction(transaction)) return false;
+      if (!isCategorizedSpendTransaction(transaction)) return false;
       if (period?.key && transactionPeriodKey(transaction, statements) !== period.key) return false;
       return normalizeConcept(transaction.category) === selectedKey;
     });
@@ -1155,7 +1169,7 @@ function CategoryDistribution({ categories, period, analyticsPeriods, transactio
       key: item.key,
       label: item.label,
       total: transactions
-        .filter((transaction) => isSpendTransaction(transaction)
+        .filter((transaction) => isCategorizedSpendTransaction(transaction)
           && normalizeConcept(transaction.category) === selectedKey
           && transactionPeriodKey(transaction, statements) === item.key)
         .reduce((total, transaction) => total + Math.abs(transaction.amount), 0),
@@ -1368,7 +1382,30 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
       void saveImportedPdf(inspected.sourceFingerprint, file);
       const withLearnedCategories = inspected.transactions.map((item) => {
         const learned = categoryFromRules(item.description, categoryRules);
-        return learned ? { ...item, category: learned, confidence: 1 } : item;
+        if (learned) {
+          return {
+            ...item,
+            category: learned,
+            classificationProvider: "rules" as const,
+            classificationConfidence: 1,
+            classificationReason: "Regla local aprendida por corrección del usuario.",
+            confidence: 1,
+          };
+        }
+        const deterministic = deterministicExpenseClassification(item.description, item.flow, item.kind);
+        if (!deterministic) return item;
+        return {
+          ...item,
+          category: deterministic.category,
+          merchantNormalized: deterministic.merchant,
+          classificationProvider: "rules" as const,
+          classificationTags: deterministic.tags,
+          classificationConfidence: deterministic.confidence,
+          classificationReason: deterministic.reason,
+          travelRelated: Boolean(item.travelRelated || deterministic.tags.includes("viaje")),
+          extraordinary: Boolean(item.extraordinary || deterministic.tags.includes("extraordinario")),
+          confidence: Math.max(item.confidence ?? 0, deterministic.confidence),
+        };
       });
       initialCategories.current = Object.fromEntries(withLearnedCategories.map((item) => [item.id, item.category]));
       setResult({ ...inspected, transactions: withLearnedCategories }); setItems(withLearnedCategories); setStage("review");
@@ -1435,7 +1472,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
   const learnedCategories = Object.fromEntries(validItems.flatMap((item) => {
     const previous = initialCategories.current[item.id];
     const key = merchantKey(item.description);
-    return key && previous && previous !== item.category && item.category !== "Sin categoría" ? [[key, item.category]] : [];
+    return key && previous && previous !== item.category && !["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"].includes(item.category) ? [[key, item.category]] : [];
   }));
   return <dialog ref={dialog} className="import-dialog" onCancel={(event) => { event.preventDefault(); resetAndClose(); }}><div className="dialog-head"><div><span className="dialog-icon"><FilePdf size={21} /></span><div><h2>Importar estado de cuenta</h2><p>El archivo se procesa localmente y conserva su origen.</p></div></div><button className="icon-button" aria-label="Cerrar" onClick={resetAndClose}><X size={20} /></button></div>
     {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se aceptan Santander, BBVA y American Express únicamente cuando sus filas concilian al centavo contra el total oficial.</span>{transactionClassifierEndpoint && <small>Zen no lee PDFs: solo podrá enriquecer categorías después de una conciliación local válida.</small>}<span className="file-button">Elegir archivo</span></label>}
@@ -1455,7 +1492,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
       </div>
       {transactionClassifierEndpoint && currentReconciliation?.status === "valid" && validItems.length > 0 && <div className="classifier-callout"><div><strong>Clasificación opcional con Zen</strong><small>Solo enriquece filas ya conciliadas; no puede cambiar importes, emisor ni aceptación.</small></div><button type="button" className="secondary-button" onClick={classifyExpensesWithZen} disabled={classificationBusy || !readerPreflightReady}>{classificationBusy ? "Clasificando…" : "Clasificar gastos"}</button>{classificationMessage && <span role="status">{classificationMessage}</span>}</div>}
       {result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Lectura OCR con plantilla fija</strong><p>Solo se aceptaron filas dentro de la sección contractual del emisor. No se permiten correcciones manuales de importes; si el archivo no concilia, debe reimportarse.</p></div></div>}
-      {items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><strong>{item.description}</strong><small>{item.date} · página {item.extractionEvidence?.page ?? "—"}</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)} disabled={reconciliationBlocked}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><span className={item.amount > 0 ? "review-amount positive" : "review-amount"}>{moneyPrecise.format(item.amount)}</span></div>)}</div> : <EmptyState title="Importación rechazada" body="No se extrajeron movimientos contractuales. Este archivo no puede guardarse ni afectar los KPI." />}
+      {items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><strong>{item.description}</strong><small>{item.date} · página {item.extractionEvidence?.page ?? "—"}</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)} disabled={reconciliationBlocked}>{["Ingresos", "Transferencia", ...expenseCategories].map((category) => <option key={category}>{category}</option>)}</select><span className={item.amount > 0 ? "review-amount positive" : "review-amount"}>{moneyPrecise.format(item.amount)}</span></div>)}</div> : <EmptyState title="Importación rechazada" body="No se extrajeron movimientos contractuales. Este archivo no puede guardarse ni afectar los KPI." />}
       <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "El parser rechazó el estado; no admite desbloqueo manual" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: result.source, accountKey: result.accountKey, kind: result.kind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, parserId: result.parserId, sourceSection: result.sourceSection, extractionProvider: result.extractionProvider, extractionModel: result.extractionModel, extractionPromptVersion: result.extractionPromptVersion, mode: result.mode, transactions: validItems, summary: result.summary, reconciliation: result.reconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Estado rechazado" : `Guardar estado y ${validItems.length} movimientos`}</button></div>
     </div>}
   </dialog>;

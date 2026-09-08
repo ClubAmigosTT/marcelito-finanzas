@@ -350,7 +350,7 @@ function validateTransaction(transaction: Transaction, statements: Statement[]) 
   const reason = !withinDeclaredDirectionTotal
     ? "importe individual supera el total declarado del estado"
     : !validAmount ? "importe inválido o fuera de rango" : !validDescription ? "descripción administrativa o vacía" : !validDate ? "fecha inválida" : !validDirection ? "dirección no clara" : undefined;
-  const status: TransactionValidationStatus = invalid ? "invalid" : transaction.category === "Sin categoría" || (transaction.confidence ?? 1) < 0.75 ? "review" : "valid";
+  const status: TransactionValidationStatus = invalid ? "invalid" : ["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"].includes(transaction.category) || (transaction.confidence ?? 1) < 0.75 ? "review" : "valid";
   return { status, reason };
 }
 
@@ -713,7 +713,7 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
     }
   });
 
-  const reviewTransactions = classified.filter((transaction) => transaction.validationStatus === "review" || transaction.category === "Sin categoría" || (transaction.confidence ?? 1) < 0.75);
+  const reviewTransactions = classified.filter((transaction) => transaction.validationStatus === "review" || ["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"].includes(transaction.category) || (transaction.confidence ?? 1) < 0.75);
   const relevantReviewThreshold = 1000;
   // Only rows that are demonstrably imported from a statement participate in
   // provenance coverage. Legacy/manual entries without a statement id are

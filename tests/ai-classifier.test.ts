@@ -26,6 +26,8 @@ const expense = (overrides: Partial<Transaction> = {}): Transaction => ({
 test("Zen recibe únicamente gastos y nunca filas contables especiales", () => {
   const rows = buildClassificationInputs([
     expense({ id: "purchase" }),
+    expense({ id: "manual", category: "Tiendita" }),
+    expense({ id: "msi", description: "MSI OXXO", category: "Otros / Por revisar", kind: "msi" }),
     expense({ id: "payment", description: "PAGO AMEX", kind: "cardPayment", flow: "debt", amount: -1000 }),
     expense({ id: "transfer", description: "SPEI A CUENTA PROPIA", kind: "bankTransfer", flow: "transfer", amount: -500 }),
     expense({ id: "refund", description: "DEVOLUCION", kind: "refund", flow: "income", amount: 50 }),
@@ -55,10 +57,10 @@ test("la respuesta de Zen solo puede enriquecer, no mutar identidad contable", a
       return new Response(JSON.stringify({
         model: "mimo-v2.5-free",
         provider: "zen",
-        version: "transaction-classifier-2026.09.03.1",
+        version: "transaction-classifier-2026.09.08.1",
         classifications: [
-          { index: 0, merchant: "Supermercado local", category: "Alimentos", recurring: false, extraordinary: false, travel: false, confidence: 0.96, reason: "Concepto de supermercado", requires_review: false },
-          { index: 1, merchant: "Hotel centro", category: "Viajes", recurring: false, extraordinary: true, travel: true, confidence: 0.94, reason: "Alojamiento", requires_review: false },
+          { index: 0, merchant: "Supermercado local", category: "Despensa / supermercado", tags: ["personal", "variable", "ordinario"], recurring: false, extraordinary: false, travel: false, confidence: 0.96, reason: "Concepto de supermercado", requires_review: false },
+          { index: 1, merchant: "Hotel centro", category: "Viajes", tags: ["personal", "viaje", "variable", "extraordinario"], recurring: false, extraordinary: true, travel: true, confidence: 0.94, reason: "Alojamiento", requires_review: false },
         ],
       }), { status: 200 });
     },
@@ -73,7 +75,7 @@ test("la respuesta de Zen solo puede enriquecer, no mutar identidad contable", a
   assert.equal(enriched[0].amount, source[0].amount);
   assert.equal(enriched[0].flow, source[0].flow);
   assert.equal(enriched[0].kind, source[0].kind);
-  assert.equal(enriched[0].category, "Alimentos");
+  assert.equal(enriched[0].category, "Despensa / supermercado");
   assert.equal(enriched[1].travelRelated, true);
   assert.equal(enriched[1].classificationProvider, "zen");
 });
@@ -86,7 +88,7 @@ test("el cliente rechaza una respuesta que suplanta al proveedor o la versión",
       fetchImpl: async () => new Response(JSON.stringify({
         provider: "otro-proveedor",
         version: "transaction-classifier-legacy",
-        classifications: [{ index: 0, merchant: "Comercio", category: "Alimentos", recurring: false, extraordinary: false, travel: false, confidence: 0.9, reason: "Concepto", requires_review: false }],
+        classifications: [{ index: 0, merchant: "Comercio", category: "Despensa / supermercado", tags: ["personal", "variable", "ordinario"], recurring: false, extraordinary: false, travel: false, confidence: 0.9, reason: "Concepto", requires_review: false }],
       }), { status: 200 }),
     }),
     (error: unknown) => error instanceof TransactionClassifierError && error.code === "invalid_payload",
@@ -103,7 +105,8 @@ test("el contrato rechaza una clasificación incompleta o con campos contables",
     () => validateTransactionClassification({ classifications: [{
       index: 0,
       merchant: "Comercio",
-      category: "Alimentos",
+      category: "Despensa / supermercado",
+      tags: ["personal", "variable", "ordinario"],
       recurring: false,
       extraordinary: false,
       travel: false,
@@ -123,10 +126,10 @@ test("el preflight del clasificador no usa el endpoint de lectura de PDFs", asyn
     enabled: true,
     fetchImpl: async (url) => {
       calledUrl = String(url);
-      return new Response(JSON.stringify({ status: "ready", model: "mimo-v2.5-free", contract: "transaction-classification.v1" }), { status: 200 });
+        return new Response(JSON.stringify({ status: "ready", model: "mimo-v2.5-free", contract: "transaction-classification.v2" }), { status: 200 });
     },
   });
-  assert.equal(result.contract, "transaction-classification.v1");
+  assert.equal(result.contract, "transaction-classification.v2");
   assert.match(calledUrl, /\/api\/transaction-classifier\/preflight$/);
 });
 

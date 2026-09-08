@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://marcelito-finanzas.local/schemas/transaction-classification.v1.json",
-  "title": "Marcelito transaction classification v1",
+  "$id": "https://marcelito-finanzas.local/schemas/transaction-classification.v2.json",
+  "title": "Marcelito transaction classification v2",
   "description": "Optional enrichment for already validated ledger rows. It cannot change accounting fields.",
   "type": "object",
   "additionalProperties": false,
@@ -23,6 +23,15 @@
         "index": { "type": "integer", "minimum": 0, "maximum": 499 },
         "merchant": { "type": "string", "minLength": 2, "maxLength": 120 },
         "category": { "type": "string", "minLength": 2, "maxLength": 40 },
+        "tags": {
+          "type": "array",
+          "maxItems": 7,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["viaje", "ordinario", "extraordinario", "fijo", "variable", "personal", "proyecto"]
+          }
+        },
         "recurring": { "type": "boolean" },
         "extraordinary": { "type": "boolean" },
         "travel": { "type": "boolean" },
@@ -34,6 +43,7 @@
         "index",
         "merchant",
         "category",
+        "tags",
         "recurring",
         "extraordinary",
         "travel",

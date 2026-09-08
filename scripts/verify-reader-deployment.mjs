@@ -55,7 +55,7 @@ export async function verifyReaderDeployment({ endpoint, token, fetchImpl = fetc
   const baseReaderPath = readerPath.replace(/\/preflight$/i, "");
   const preflightUrl = `${parsedEndpoint.origin}${baseReaderPath}/preflight`;
   const isClassifier = /\/api\/transaction-classifier$/i.test(baseReaderPath);
-  const expectedContract = isClassifier ? "transaction-classification.v1" : "statement-extraction.v1";
+  const expectedContract = isClassifier ? "transaction-classification.v2" : "statement-extraction.v1";
   const health = await fetchJson(healthUrl, { method: "GET", headers: { accept: "application/json" } }, fetchImpl, timeoutMs);
   if (!health.response.ok || health.body?.status !== "ok" || health.body?.configured !== true) {
     throw new Error("El servicio no está configurado (health no confirmó configured=true).");

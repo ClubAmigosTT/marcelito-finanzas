@@ -15,8 +15,8 @@ const DEFAULT_RATE_LIMIT_PER_MINUTE = 10;
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 2;
 const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
-const TRANSACTION_CLASSIFIER_VERSION = "transaction-classifier-2026.09.03.1";
-const TRANSACTION_CLASSIFIER_PROMPT_VERSION = "expense-classification-v1";
+const TRANSACTION_CLASSIFIER_VERSION = "transaction-classifier-2026.09.08.1";
+const TRANSACTION_CLASSIFIER_PROMPT_VERSION = "expense-taxonomy-v2";
 const MIN_MULTIMODAL_AVERAGE_CONFIDENCE = 0.88;
 const MIN_MULTIMODAL_PAGE_CONFIDENCE = 0.78;
 const ZEN_HOSTS = new Set(["opencode.ai", "www.opencode.ai"]);
@@ -90,11 +90,17 @@ const CLASSIFIER_PROMPT = `Eres un clasificador de gastos personales. Recibirás
 
 Reglas obligatorias:
 - Clasifica únicamente el comercio/concepto y señales analíticas. No cambies ni repitas importes, fechas, dirección, flujo o tipo contable.
-- Usa una sola categoría útil de esta lista: Viajes, Transporte, Salud, Comidas, Alimentos, Entretenimiento, Educación, Mascotas, Hogar, Servicios, Compras, Finanzas o Sin categoría.
+- Usa una sola categoría principal de esta lista exacta: Restaurantes y bares, Tiendita, Despensa / supermercado, Entretenimiento, Viajes, Transporte, Deporte, Compras personales, Software y suscripciones, Salud, Club Amigos / Proyectos, Comisiones y finanzas u Otros / Por revisar.
+- Club Amigos / Proyectos tiene prioridad cuando el concepto o contraparte identifica claramente un proyecto, aunque el comercio normalmente corresponda a otra categoría.
+- Restaurantes y bares es comida o bebida preparada para consumo inmediato, restaurante, cafetería, bar o delivery. Tiendita es conveniencia/minisúper y compras pequeñas de paso; una compra grande de supermercado es Despensa / supermercado.
+- Viajes es vuelo, hospedaje, Airbnb, roaming/eSIM u otro servicio directamente asociado al viaje. Transporte es movilidad local, transporte público, Uber, taxi o estacionamiento. Un restaurante, Uber o entrada durante un viaje conserva su categoría natural y solo recibe la etiqueta viaje.
+- Entretenimiento es ocio, eventos, cine, clubes, museos y experiencias; Deporte es práctica, club o instalación deportiva; Software y suscripciones es SaaS, herramienta digital o membresía tecnológica; Comisiones y finanzas es únicamente costo financiero/bancario.
 - merchant debe ser un nombre corto y estable del comercio, sin referencias, RFC, autorizaciones, números de cuenta ni folios.
+- tags es un arreglo sin duplicados usando únicamente: viaje, ordinario, extraordinario, fijo, variable, personal, proyecto. Usa viaje también para una actividad o traslado que ocurrió dentro de un viaje.
 - recurring=true solo si el concepto parece repetirse con periodicidad (suscripción, renta, servicio, cuota o comercio recurrente). extraordinary=true para viajes, eventos o compras claramente atípicas; no marques ambos salvo que sea imprescindible.
 - travel=true solo cuando el movimiento esté relacionado con un viaje, alojamiento, transporte de viaje o actividad turística.
-- Si no hay evidencia suficiente, usa Sin categoría y requires_review=true. No inventes una explicación; reason debe ser breve y basada en el texto recibido.
+- No clasifiques pagos de tarjeta, transferencias entre cuentas propias, ingresos, reembolsos, créditos ni MSI; si aparecieran, usa Otros / Por revisar y requires_review=true. Esos movimientos no deben entrar en categorías de gasto.
+- Si no hay evidencia suficiente, usa Otros / Por revisar y requires_review=true. No inventes una explicación; reason debe ser breve y basada en el texto recibido.
 - Devuelve exactamente una propiedad por índice y no añadas propiedades adicionales.`;
 
 const PREFLIGHT_EXPECTED = {
@@ -670,14 +676,17 @@ async function callProvider({ pdf, fileName, env, fetchImpl, schema, prompt = RE
 }
 
 const classifierInputFields = ["index", "date", "description", "amount_cents", "category", "flow", "kind", "travel"];
-const classifierOutputFields = ["index", "merchant", "category", "recurring", "extraordinary", "travel", "confidence", "reason", "requires_review"];
+const classifierOutputFields = ["index", "merchant", "category", "tags", "recurring", "extraordinary", "travel", "confidence", "reason", "requires_review"];
 const classifierFlows = new Set(["expense", "income", "transfer", "debt"]);
 const classifierKinds = new Set(["purchase", "cardPayment", "bankTransfer", "income", "credit", "refund", "msi", "interest", "fee", "other"]);
-const classifierExpenseKinds = new Set(["purchase", "msi", "interest", "fee", "other"]);
+const classifierExpenseKinds = new Set(["purchase", "interest", "fee", "other"]);
 const classifierCategories = new Set([
-  "Viajes", "Transporte", "Salud", "Comidas", "Alimentos", "Entretenimiento", "Educación",
-  "Mascotas", "Hogar", "Servicios", "Compras", "Finanzas", "Sin categoría",
+  "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento", "Viajes",
+  "Transporte", "Deporte", "Compras personales", "Software y suscripciones", "Salud",
+  "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar",
 ]);
+const classifierTags = new Set(["viaje", "ordinario", "extraordinario", "fijo", "variable", "personal", "proyecto"]);
+const classifierReviewCategories = new Set(["Sin categoría", "Por revisar", "Otros gastos", "Otros / Por revisar"]);
 
 function validClassifierText(value, min, max) {
   return typeof value === "string" && value.trim().length >= min && value.trim().length <= max;
@@ -699,6 +708,7 @@ function validateClassifierRows(value) {
     // payments, debt credits and transfers between accounts.
     if (row.flow !== "expense" || !classifierExpenseKinds.has(row.kind) || !classifierFlows.has(row.flow) || !classifierKinds.has(row.kind) || typeof row.travel !== "boolean") throw new Error("request_out_of_scope");
     if (!validClassifierText(row.category, 2, 40)) throw new Error("request_invalid");
+    if (!classifierReviewCategories.has(row.category)) throw new Error("request_out_of_scope");
     return row;
   });
 }
@@ -713,10 +723,10 @@ function validateClassifierModel(value, rows) {
     seen.add(item.index);
     if (!validClassifierText(item.merchant, 2, 120) || administrativeRowPattern.test(item.merchant)) throw new Error("classifier_invalid_shape");
     const category = normalizeClassifierCategory(item.category);
-    if (!category || !["boolean"].includes(typeof item.recurring) || !["boolean"].includes(typeof item.extraordinary) || !["boolean"].includes(typeof item.travel)) throw new Error("classifier_invalid_shape");
+    if (!category || !Array.isArray(item.tags) || item.tags.length > 7 || new Set(item.tags).size !== item.tags.length || item.tags.some((tag) => typeof tag !== "string" || !classifierTags.has(tag)) || !["boolean"].includes(typeof item.recurring) || !["boolean"].includes(typeof item.extraordinary) || !["boolean"].includes(typeof item.travel)) throw new Error("classifier_invalid_shape");
     if (typeof item.confidence !== "number" || !Number.isFinite(item.confidence) || item.confidence < 0 || item.confidence > 1) throw new Error("classifier_invalid_shape");
     if (!validClassifierText(item.reason, 2, 240) || typeof item.requires_review !== "boolean") throw new Error("classifier_invalid_shape");
-    return { ...item, category };
+    return { ...item, category, tags: [...item.tags] };
   });
   if (seen.size !== rows.length) throw new Error("classifier_invalid_shape");
   return normalized.sort((left, right) => left.index - right.index);
@@ -903,7 +913,7 @@ export function createStatementReaderServer({
           json(res, 200, {
             status: "ready",
             model: result.model,
-            contract: "transaction-classification.v1",
+            contract: "transaction-classification.v2",
           }, headers);
           return;
         }
