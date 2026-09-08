@@ -1621,6 +1621,25 @@ final class FinanceStore {
             }
     }
 
+    /// All uploaded statements for one account, newest cutoff first. The
+    /// original filename remains persisted for audit/reimport, but account UI
+    /// can identify each document by its financial period instead of its
+    /// arbitrary upload name.
+    func statements(for source: String, kind: StatementKind, accountKey: String?) -> [StatementRecord] {
+        statements
+            .filter { statement in
+                statement.source == source
+                    && statementKind(statement) == kind
+                    && statement.accountKey == accountKey
+            }
+            .sorted { left, right in
+                let leftDate = statementEndDate(for: left.id)
+                let rightDate = statementEndDate(for: right.id)
+                if leftDate != rightDate { return leftDate > rightDate }
+                return left.importedAt > right.importedAt
+            }
+    }
+
     var totalNewTransactions: Decimal {
         eligibleMovements.filter { isCardMovement($0) && movementKind($0) == .purchase }.reduce(0) { $0 + absolute($1.amount) }
     }

@@ -823,12 +823,119 @@ private struct ExpenseCategoryDetailView: View {
     }
 }
 
+private enum AccountBrand: String, CaseIterable {
+    case amex
+    case bbva
+    case santander
+    case rappi
+
+    var displayName: String {
+        switch self {
+        case .amex: "Amex"
+        case .bbva: "BBVA"
+        case .santander: "Santander"
+        case .rappi: "Rappi"
+        }
+    }
+
+    var artworkName: String {
+        switch self {
+        case .amex: "CardAmex"
+        case .bbva: "CardBBVA"
+        case .santander: "CardSantander"
+        case .rappi: "CardRappi"
+        }
+    }
+
+    var fallbackKind: StatementKind {
+        switch self {
+        case .amex, .rappi: .card
+        case .bbva, .santander: .bank
+        }
+    }
+
+    static func identify(_ source: String) -> AccountBrand? {
+        let normalized = source.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+        if normalized.contains("amex") || normalized.contains("american express") { return .amex }
+        if normalized.contains("bbva") { return .bbva }
+        if normalized.contains("santander") { return .santander }
+        if normalized.contains("rappi") { return .rappi }
+        return nil
+    }
+}
+
 private struct AccountDisplayItem: Identifiable {
     let source: String
     let kind: StatementKind
     let accountKey: String?
+    let isPlaceholder: Bool
 
-    var id: String { "\(source)|\(kind.rawValue)|\(accountKey ?? "default")" }
+    init(source: String, kind: StatementKind, accountKey: String?, isPlaceholder: Bool = false) {
+        self.source = source
+        self.kind = kind
+        self.accountKey = accountKey
+        self.isPlaceholder = isPlaceholder
+    }
+
+    var brand: AccountBrand? { AccountBrand.identify(source) }
+    var displayName: String { brand?.displayName ?? source }
+    var artworkName: String? { brand?.artworkName }
+    var id: String {
+        "\(isPlaceholder ? "placeholder" : "account")|\(source)|\(kind.rawValue)|\(accountKey ?? "default")"
+    }
+
+    var maskedAccount: String? {
+        accountKey.flatMap { $0.split(separator: ":").last }.map { "•••• \(String($0))" }
+    }
+}
+
+private struct AccountCardArtwork: View {
+    let account: AccountDisplayItem
+    let isSelected: Bool
+
+    var body: some View {
+        Group {
+            if let artworkName = account.artworkName {
+                Image(artworkName)
+                    .resizable()
+                    .scaledToFill()
+            } else {
+                ZStack {
+                    LinearGradient(
+                        colors: [Color.marcelitoNavy, Color.marcelitoNavyMid],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                    Image(systemName: account.kind == .card ? "creditcard.fill" : "building.columns.fill")
+                        .font(.system(size: 52, weight: .semibold))
+                        .foregroundStyle(.white.opacity(0.9))
+                }
+            }
+        }
+        .aspectRatio(1.5, contentMode: .fit)
+        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        .overlay(alignment: .topTrailing) {
+            if account.isPlaceholder {
+                Text("Sin estados")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.white)
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 5)
+                    .background(.black.opacity(0.68), in: Capsule())
+                    .padding(12)
+            }
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(isSelected ? Color.marcelitoNavyMid : Color.marcelitoLine.opacity(0.45), lineWidth: isSelected ? 3 : 1)
+        }
+        .shadow(color: Color.black.opacity(isSelected ? 0.18 : 0.09), radius: isSelected ? 14 : 8, y: 6)
+        .padding(.horizontal, 5)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(account.displayName + (account.maskedAccount.map { ", \($0)" } ?? ""))
+        .accessibilityValue(account.isPlaceholder ? "Sin estados subidos" : "Cuenta seleccionable")
+    }
 }
 
 private struct AccountSummaryRow: View {
@@ -889,89 +996,191 @@ private struct AccountSummaryRow: View {
 
 struct AccountsView: View {
     @Environment(FinanceStore.self) private var store
+    @State private var selectedAccountID = ""
 
     private var displayedAccounts: [AccountDisplayItem] {
-        let preferred = ["Santander", "BBVA", "Amex"]
         var seen = Set<String>()
-        var result: [AccountDisplayItem] = []
+        var imported: [AccountDisplayItem] = []
         for statement in store.statements {
             let kind = statement.kind ?? (statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank)
             let item = AccountDisplayItem(source: statement.source, kind: kind, accountKey: statement.accountKey)
-            if seen.insert(item.id).inserted { result.append(item) }
+            if seen.insert(item.id).inserted { imported.append(item) }
         }
-        return result.sorted { left, right in
-            let leftRank = preferred.firstIndex(of: left.source) ?? preferred.count
-            let rightRank = preferred.firstIndex(of: right.source) ?? preferred.count
-            return leftRank != rightRank
-                ? leftRank < rightRank
-                : left.id.localizedCompare(right.id) == .orderedAscending
+
+        var result: [AccountDisplayItem] = []
+        for brand in AccountBrand.allCases {
+            let matching = imported
+                .filter { $0.brand == brand }
+                .sorted { $0.id.localizedCompare($1.id) == .orderedAscending }
+            if matching.isEmpty {
+                result.append(AccountDisplayItem(
+                    source: brand.displayName,
+                    kind: brand.fallbackKind,
+                    accountKey: nil,
+                    isPlaceholder: true
+                ))
+            } else {
+                result.append(contentsOf: matching)
+            }
         }
+        result.append(contentsOf: imported
+            .filter { $0.brand == nil }
+            .sorted { $0.id.localizedCompare($1.id) == .orderedAscending })
+        return result
+    }
+
+    private var selectedAccount: AccountDisplayItem? {
+        displayedAccounts.first(where: { $0.id == selectedAccountID }) ?? displayedAccounts.first
+    }
+
+    private var selectedStatements: [StatementRecord] {
+        guard let account = selectedAccount, !account.isPlaceholder else { return [] }
+        return store.statements(for: account.source, kind: account.kind, accountKey: account.accountKey)
+    }
+
+    private var carouselSelection: Binding<String> {
+        Binding(
+            get: { selectedAccount?.id ?? "" },
+            set: { selectedAccountID = $0 }
+        )
+    }
+
+    private func ensureValidSelection() {
+        guard !displayedAccounts.contains(where: { $0.id == selectedAccountID }) else { return }
+        selectedAccountID = displayedAccounts.first?.id ?? ""
     }
 
     var body: some View {
         NavigationStack {
-            List {
-                Section("Cuentas") {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 22) {
                     if store.dashboardIsBlocked || store.dashboardIsProvisional {
                         LedgerQualityBanner(store: store)
                     }
-                    ForEach(displayedAccounts) { account in
-                        AccountSummaryRow(source: account.source, kind: account.kind, accountKey: account.accountKey)
-                    }
-                    NavigationLink {
-                        MovementsView()
-                    } label: {
-                        Label("Movimientos", systemImage: "list.bullet.rectangle")
-                    }
-                }
-                Section("Documentos importados") {
-                    if store.statements.isEmpty {
-                        Text("Aún no hay documentos importados. Usa el botón de carga en Resumen.")
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Mis cuentas")
+                            .font(.title3.weight(.bold))
+                        Text("Desliza para elegir cuál quieres consultar")
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
-                    } else {
-                        LazyVGrid(
-                            columns: [GridItem(.adaptive(minimum: 142), spacing: 12)],
-                            spacing: 12
-                        ) {
-                            ForEach(store.statements) { statement in
-                                NavigationLink {
-                                    StatementDocumentView(statement: statement)
-                                } label: {
-                                    StatementDocumentTile(statement: statement)
-                                }
-                                .buttonStyle(.plain)
-                            }
+                    }
+
+                    TabView(selection: carouselSelection) {
+                        ForEach(displayedAccounts) { account in
+                            AccountCardArtwork(account: account, isSelected: selectedAccount?.id == account.id)
+                                .tag(account.id)
                         }
-                        .padding(.vertical, 6)
-                        .listRowInsets(EdgeInsets(top: 4, leading: 0, bottom: 8, trailing: 0))
                     }
-                }
-                Section("Editar cifras del corte") {
-                    if store.statements.isEmpty {
-                        Text("Importa un estado para capturar saldos, pagos, crédito y MSI.")
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ForEach(store.statements) { statement in
-                            NavigationLink {
-                                StatementSummaryEditor(statement: statement)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text("\(statement.source) · \(conciseStatementPeriod(statement))")
-                                    Text("Saldos, pagos, crédito y MSI")
+                    .frame(height: 260)
+                    .tabViewStyle(.page(indexDisplayMode: .always))
+                    .animation(.snappy, value: selectedAccountID)
+
+                    if let account = selectedAccount {
+                        HStack(alignment: .firstTextBaseline) {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(account.displayName)
+                                    .font(.title3.weight(.bold))
+                                if let maskedAccount = account.maskedAccount {
+                                    Text(maskedAccount)
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                             }
+                            Spacer()
+                            Text("\(selectedStatements.count) estado\(selectedStatements.count == 1 ? "" : "s")")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(Color.marcelitoNavyMid)
+                        }
+
+                        if account.isPlaceholder || selectedStatements.isEmpty {
+                            ContentUnavailableView(
+                                "Sin estados subidos",
+                                systemImage: "doc.badge.plus",
+                                description: Text("Cuando importes un estado de \(account.displayName), aparecerá aquí identificado por su periodo.")
+                            )
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 20)
+                            .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                        } else {
+                            AccountSummaryRow(source: account.source, kind: account.kind, accountKey: account.accountKey)
+                                .padding(16)
+                                .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+                            Text("Estados subidos")
+                                .font(.headline)
+
+                            // Each tile is scoped to the selected account and
+                            // named by the statement period, never by the PDF's
+                            // arbitrary upload filename.
+                            LazyVGrid(
+                                columns: [GridItem(.adaptive(minimum: 150), spacing: 12)],
+                                spacing: 12
+                            ) {
+                                ForEach(selectedStatements) { statement in
+                                    NavigationLink {
+                                        StatementDocumentView(statement: statement)
+                                    } label: {
+                                        StatementDocumentTile(statement: statement)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
+
+                            Text("Editar cifras del corte")
+                                .font(.headline)
+
+                            VStack(spacing: 10) {
+                                ForEach(selectedStatements) { statement in
+                                    NavigationLink {
+                                        StatementSummaryEditor(statement: statement)
+                                    } label: {
+                                        HStack(spacing: 12) {
+                                            Image(systemName: "slider.horizontal.3")
+                                                .foregroundStyle(Color.marcelitoNavyMid)
+                                            VStack(alignment: .leading, spacing: 3) {
+                                                Text(conciseStatementPeriod(statement))
+                                                    .font(.subheadline.weight(.semibold))
+                                                Text("Saldos, pagos, crédito y MSI")
+                                                    .font(.caption)
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            Spacer()
+                                            Image(systemName: "chevron.right")
+                                                .font(.caption.weight(.bold))
+                                                .foregroundStyle(.tertiary)
+                                        }
+                                        .padding(14)
+                                        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                            }
                         }
                     }
+
+                    NavigationLink {
+                        MovementsView()
+                    } label: {
+                        Label("Ver todos los movimientos", systemImage: "list.bullet.rectangle")
+                            .font(.headline)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(16)
+                            .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
                 }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 28)
             }
+            .scrollIndicators(.hidden)
             .navigationTitle("Cuentas")
-            .listStyle(.insetGrouped)
-            .listRowBackground(Color.marcelitoCreamSoft)
             .foregroundStyle(Color.marcelitoNavy)
-            .scrollContentBackground(.hidden)
             .background(MarcelitoAmbientBackground())
+            .onAppear(perform: ensureValidSelection)
+            .onChange(of: displayedAccounts.map(\.id)) { _, _ in
+                ensureValidSelection()
+            }
         }
     }
 }
