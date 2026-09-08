@@ -639,7 +639,7 @@ struct NativeCorpusCertificationView: View {
         VStack(alignment: .leading, spacing: 8) {
             Label("Certificación privada en el dispositivo", systemImage: "checkmark.shield.fill")
                 .font(.headline)
-            Text("El lector usa PDFKit y Vision dentro del iPhone. OpenCode Zen no recibe PDFs: se usa opcionalmente después para clasificar gastos ya conciliados. El informe exportado contiene únicamente hashes y resultados de calidad.")
+            Text("El lector usa PDFKit y Vision dentro del iPhone. El proveedor de IA seleccionado no recibe PDFs: se usa opcionalmente después para clasificar gastos ya conciliados. El informe exportado contiene únicamente hashes y resultados de calidad.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Text("Se requieren al menos \(NativeCorpusCertificationReport.minimumFileCount) archivos únicos para habilitar la compuerta de publicación.")
@@ -689,24 +689,25 @@ struct NativeCorpusCertificationView: View {
                 .buttonStyle(.marcelitoPrimary)
                 .disabled(selectedFiles.isEmpty || isRunning)
             }
-            if ZenAPIKeyStore.apiKey == nil {
-                Button("Configurar OpenCode Zen") {
+            let provider = ExpenseAISettingsStore.selectedProvider
+            if ExpenseAISettingsStore.apiKey(for: provider) == nil {
+                Button("Configurar clasificación IA") {
                     isAISettingsPresented = true
                 }
                 .buttonStyle(.borderless)
             } else {
                 HStack(spacing: 12) {
-                    Text("Zen disponible solo para clasificar gastos")
+                    Text("\(provider.displayName) disponible solo para clasificar gastos")
                         .font(.subheadline)
                     Button {
                         isAISettingsPresented = true
                     } label: {
                         Image(systemName: "slider.horizontal.3")
-                            .accessibilityLabel("Editar configuración de OpenCode Zen")
+                            .accessibilityLabel("Editar configuración de clasificación IA")
                     }
                     .buttonStyle(.borderless)
                 }
-                Text("La lectura y conciliación de PDFs siempre se ejecutan localmente. Zen recibe únicamente descripciones, fechas e importes de gastos ya validados; nunca recibe el PDF ni puede cambiar cifras contables.")
+                Text("La lectura y conciliación de PDFs siempre se ejecutan localmente. \(provider.displayName) recibe únicamente descripciones, fechas e importes de gastos ya validados; nunca recibe el PDF ni puede cambiar cifras contables.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

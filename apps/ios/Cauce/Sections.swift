@@ -160,7 +160,8 @@ struct MovementsView: View {
                             Label("Configurar clasificación IA", systemImage: "gearshape")
                         }
                         Button {
-                            if ZenAPIKeyStore.apiKey == nil {
+                            let provider = ExpenseAISettingsStore.selectedProvider
+                            if ExpenseAISettingsStore.apiKey(for: provider) == nil {
                                 isAISettingsPresented = true
                             } else {
                                 isAIConfirmationPresented = true
@@ -199,7 +200,7 @@ struct MovementsView: View {
                 }
                 Button("Cancelar", role: .cancel) { }
             } message: {
-                Text("Se enviarán al modelo gratuito de OpenCode Zen únicamente el comercio, importe y fecha de estos gastos. No se envían cuentas, PDFs, saldos, ingresos, transferencias ni movimientos ya clasificados.")
+                Text("Se enviarán a \(ExpenseAISettingsStore.selectedProvider.displayName) únicamente el comercio, importe y fecha de estos gastos. No se envían cuentas, PDFs, saldos, ingresos, transferencias ni movimientos ya clasificados.")
             }
             .alert("Clasificación lista", isPresented: Binding(
                 get: { aiMessage != nil },
@@ -222,20 +223,22 @@ struct MovementsView: View {
     }
 
     private func classifyPending() {
-        guard let apiKey = ZenAPIKeyStore.apiKey else {
+        let provider = ExpenseAISettingsStore.selectedProvider
+        guard let apiKey = ExpenseAISettingsStore.apiKey(for: provider) else {
             isAISettingsPresented = true
             return
         }
         let items = pendingForAI
         guard !items.isEmpty else { return }
-        let model = ZenAPIKeyStore.selectedModel
+        let model = ExpenseAISettingsStore.selectedModel(for: provider)
         isAIProcessing = true
         Task { @MainActor in
             do {
-                let classifications = try await ZenExpenseClassifier.classify(
+                let classifications = try await ExpenseAIClassifier.classify(
                     movements: items,
                     apiKey: apiKey,
-                    model: model
+                    model: model,
+                    provider: provider
                 )
                 let updated = store.applyAIClassifications(classifications)
                 isAIProcessing = false

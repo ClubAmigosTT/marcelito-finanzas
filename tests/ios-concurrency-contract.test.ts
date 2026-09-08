@@ -262,25 +262,43 @@ test("el clasificador iOS divide lotes y filtra respuestas fuera de alcance", as
   assert.match(source, /classifyBatch\(/);
   assert.match(source, /requested\.contains\(movementID\)/);
   assert.match(source, /seen\.insert\(movementID\)\.inserted/);
-  assert.doesNotMatch(source, /maxTokens|temperature/);
+  assert.match(source, /temperature: provider == \.nvidia \? 0 : nil/);
+  assert.match(source, /maxTokens: provider == \.nvidia \? 4096 : nil/);
 });
 
-test("iOS usa Zen solo para enriquecer gastos después de la lectura local", async () => {
+test("iOS usa el proveedor seleccionado solo para enriquecer gastos después de la lectura local", async () => {
   const [models, settings, certification] = await Promise.all([
     readFile(modelsPath, "utf8"),
     readFile(aiClassificationPath, "utf8"),
     readFile(certificationViewPath, "utf8"),
   ]);
   assert.doesNotMatch(settings, /Toggle\("Usar IA cuando Vision no concilie"/);
-  assert.match(settings, /Nunca recibe PDFs ni saldos/);
+  assert.match(settings, /Nunca recibe PDFs, cuentas ni saldos/);
   assert.match(models, /stage\?\("Lectura local lista; conciliando contra los totales/);
   assert.doesNotMatch(models, /ZenStatementReader/);
   assert.doesNotMatch(certification, /allowMultimodalFallback/);
-  assert.match(certification, /OpenCode Zen no recibe PDFs/);
+  assert.match(certification, /El proveedor de IA seleccionado no recibe PDFs/);
   assert.match(models, /Legacy compatibility markers/);
   assert.match(certification, /multimodalFallbackAttempted/);
   assert.match(certification, /static let targetPrecision = 0\.97/);
   assert.match(certification, /cada archivo aceptado debe conciliar al 100%/);
+});
+
+test("iOS permite elegir Zen o NVIDIA sin incluir claves en el código", async () => {
+  const [settings, sections] = await Promise.all([
+    readFile(aiClassificationPath, "utf8"),
+    readFile(sectionsPath, "utf8"),
+  ]);
+  assert.match(settings, /case openCodeZen/);
+  assert.match(settings, /case nvidia/);
+  assert.match(settings, /https:\/\/opencode\.ai\/zen\/v1\/chat\/completions/);
+  assert.match(settings, /https:\/\/integrate\.api\.nvidia\.com\/v1\/chat\/completions/);
+  assert.match(settings, /deepseek-ai\/deepseek-v4-flash-0731/);
+  assert.match(settings, /Picker\("Servicio de IA", selection: \$selectedProvider\)/);
+  assert.match(settings, /kSecAttrAccount as String: "\\\(provider\.rawValue\)-api-key"/);
+  assert.match(settings, /chatTemplateKwargs: provider == \.nvidia \? ChatTemplateKwargs\(thinking: false\) : nil/);
+  assert.match(sections, /provider: provider/);
+  assert.doesNotMatch(settings, /nvapi-/);
 });
 
 test("el clasificador iOS no envía cuentas ni documentos", async () => {
