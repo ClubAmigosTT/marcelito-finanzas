@@ -1777,6 +1777,35 @@ test("la migración conserva filas del lector actual que esperan revisión OCR",
   assert.equal(prepared.statements[0]?.reconciliation?.reason, "OCR provisional");
 });
 
+test("la migración aplica la taxonomía nueva a gastos PDF que seguían en revisión", () => {
+  const statement = {
+    ...bank("bbva-categories", "BBVA", "agosto 2026"),
+    readerVersion: "web-reader-current",
+  };
+  const row = movement({
+    id: "category-row",
+    date: "10 ago 2026",
+    description: "OXXO SUC 1234",
+    account: "BBVA",
+    amount: -95,
+    flow: "expense",
+    category: "Otros / Por revisar",
+    statementId: statement.id,
+  });
+  const prepared = prepareStoredLedger([statement], [row], "web-reader-current");
+  assert.equal(prepared.transactions[0]?.category, "Tiendita");
+  assert.deepEqual(prepared.transactions[0]?.classificationTags, ["personal", "variable", "ordinario"]);
+
+  const protectedReview = prepareStoredLedger(
+    [statement],
+    [row],
+    "web-reader-current",
+    {},
+    { "oxxo suc": "Otros / Por revisar" },
+  );
+  assert.equal(protectedReview.transactions[0]?.category, "Otros / Por revisar");
+});
+
 test("la migración pone en cuarentena estados producidos por el lector multimodal legado", () => {
   const statement = {
     ...bank("bbva-multimodal", "BBVA", "agosto 2026"),

@@ -692,6 +692,18 @@ final class FinanceStore {
     private let statementKey = "marcelito.statements.v1"
     private let importKey = "marcelito.lastImport"
     private let categoryRulesKey = "marcelito.categoryRules.v1"
+    /// Manual category choices are kept separately from the deterministic
+    /// taxonomy so a taxonomy refresh can safely reclassify only rows that
+    /// were still in the review bucket.  The merchant key makes the choice
+    /// survive a PDF re-import, whose row UUID is intentionally new.
+    private let manualCategoryOverridesKey = "marcelito.categoryOverrides.v1"
+    private let categoryTaxonomyVersionKey = "marcelito.categoryTaxonomyVersion.v1"
+    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.2"
+    private static let pendingCategoryNames: Set<String> = [
+        "Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos",
+        "Alimentos", "Comidas", "Servicios", "Compras", "Finanzas",
+        "Educación", "Hogar", "Mascotas"
+    ]
     private let numericRepairKey = "marcelito.numericRepair.v1"
     private let canonicalRebuildKey = "marcelito.canonicalRebuild.v1"
     private let canonicalRebuildReaderVersionKey = "marcelito.canonicalRebuild.readerVersion.v1"
@@ -2282,7 +2294,55 @@ final class FinanceStore {
         }
         movements = canonical
         reconcileStoredMovements()
+        // Reclassify only the review/legacy buckets.  A user-selected primary
+        // category is protected by a merchant override and is never replaced
+        // by a later taxonomy migration.
+        if !isReconciliationOnly {
+            _ = reclassifyPendingCategoriesIfNeeded(force: true)
+        }
         invalidateDerivedProjections()
+    }
+
+    /// Applies the deterministic taxonomy to rows that were imported before
+    /// the current rules existed (or were left in the review bucket by an
+    /// earlier parser).  This intentionally does not touch valid categories,
+    /// card payments, transfers, credits, refunds or MSI rows.
+    @discardableResult
+    private func reclassifyPendingCategoriesIfNeeded(force: Bool) -> Int {
+        guard !isReconciliationOnly else { return 0 }
+        let defaults = UserDefaults.standard
+        let storedVersion = defaults.string(forKey: categoryTaxonomyVersionKey)
+        guard force || storedVersion != Self.categoryTaxonomyVersion else { return 0 }
+        let learnedRules = defaults.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
+        let manualOverrides = defaults.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
+        var changed = 0
+        var nextMovements = movements
+        for index in nextMovements.indices {
+            let movement = nextMovements[index]
+            guard movement.flow == .expense,
+                  Self.pendingCategoryNames.contains(movement.category) else { continue }
+            if let kind = movement.kind,
+               [.cardPayment, .bankTransfer, .income, .credit, .refund, .msi].contains(kind) {
+                continue
+            }
+            let key = Self.categoryRuleKey(movement.title)
+            let normalizedTitle = Self.categoryText(movement.title)
+            let inferred = manualOverrides[key] ?? learnedRules[key] ?? Self.category(for: normalizedTitle, flow: .expense)
+            guard !inferred.isEmpty else { continue }
+            var updated = movement
+            updated.category = inferred
+            updated.classificationTags = Self.categoryTags(for: normalizedTitle, category: inferred)
+            updated.travelRelated = updated.travelRelated || updated.classificationTags.contains("viaje")
+            if updated.category != movement.category
+                || updated.classificationTags != movement.classificationTags
+                || updated.travelRelated != movement.travelRelated {
+                nextMovements[index] = updated
+                changed += 1
+            }
+        }
+        movements = nextMovements
+        defaults.set(Self.categoryTaxonomyVersion, forKey: categoryTaxonomyVersionKey)
+        return changed
     }
 
     private func isValidStoredMovement(_ movement: Movement) -> Bool {
@@ -2519,6 +2579,20 @@ final class FinanceStore {
             return migrated
         }
         recoverInterruptedRebuildIfNeeded()
+        // Category rules are enrichment, not accounting controls.  Apply the
+        // taxonomy migration immediately to rows already accepted in the
+        // canonical ledger so installing an update does not require a PDF
+        // re-import (or an expensive OCR rebuild) just to change labels.
+        if !isReconciliationOnly {
+            let changed = reclassifyPendingCategoriesIfNeeded(force: false)
+            if changed > 0 {
+                persist(markingChange: true)
+                DiagnosticsRecorder.record(
+                    stage: "categories.migration",
+                    message: "Se actualizaron \(changed) movimiento(s) con la taxonomía \(Self.categoryTaxonomyVersion)."
+                )
+            }
+        }
         // The active envelope is already normalized at every successful
         // commit. Re-running the complete dedupe/matching pass synchronously
         // on every cold start made opening the app compete with SwiftUI for
@@ -2571,6 +2645,12 @@ final class FinanceStore {
         let key = Self.categoryRuleKey(movements[index].title)
         if !key.isEmpty {
             var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
+            var overrides = UserDefaults.standard.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
+            // Persist every explicit choice, including "Otros / Por revisar".
+            // Otherwise the next taxonomy refresh would reinterpret a user's
+            // deliberate review decision as an unclassified legacy row.
+            overrides[key] = category
+            UserDefaults.standard.set(overrides, forKey: manualCategoryOverridesKey)
             if ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains(category) {
                 rules.removeValue(forKey: key)
             } else {
@@ -2699,6 +2779,8 @@ final class FinanceStore {
         defaults.removeObject(forKey: statementKey)
         defaults.removeObject(forKey: importKey)
         defaults.removeObject(forKey: categoryRulesKey)
+        defaults.removeObject(forKey: manualCategoryOverridesKey)
+        defaults.removeObject(forKey: categoryTaxonomyVersionKey)
         defaults.removeObject(forKey: numericRepairKey)
         defaults.removeObject(forKey: canonicalRebuildKey)
         defaults.removeObject(forKey: canonicalRebuildReaderVersionKey)
@@ -9251,6 +9333,49 @@ final class FinanceStore {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Uses the same token normalization for every issuer. OCR and PDF text
+    /// frequently insert punctuation or split merchant names (for example
+    /// 7-ELEVEN, APPLE.COM/BILL or TAQUERIA-ORINOCO); matching the raw string
+    /// made those rows fall through to "Otros" even though the merchant was recognizable.
+    private static func categoryText(_ value: String) -> String {
+        value
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: #"\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizacion)?|operacion)\s*[:#./_-]+\s*[a-z0-9-]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\b\d{2,}\b"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func categoryContains(_ text: String, _ markers: [String]) -> Bool {
+        let padded = " \(text) "
+        return markers.contains { marker in
+            let normalizedMarker = categoryText(marker)
+            guard !normalizedMarker.isEmpty else { return false }
+            return padded.contains(" \(normalizedMarker) ")
+                || (normalizedMarker.count >= 6 && text.contains(normalizedMarker))
+        }
+    }
+
+    private static func categoryTags(for title: String, category: String) -> [String] {
+        let text = categoryText(title)
+        let projectMarkers = ["club amigos", "clubamigos", "proyecto", "proveedor club", "material club"]
+        let travelMarkers = ["airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico", "aerobus", "volaris", "vivaaerobus", "american airlines", "united airlines", "delta air", "iberia", "vuelo", "flight", "holafly", "esim", "roaming", "equipaje", "airport", "aeropuerto", "renta de auto", "car rental", "nueva york", "new york", "medellin", "atlanta"]
+        let fixedMarkers = ["canva", "cursor", "google one", "google storage", "youtube premium", "apple music", "adobe", "microsoft 365", "microsoft office", "suscripcion", "saas", "software", "icloud", "dropbox", "apple com bill", "renta", "telcel", "at t", "movistar", "izzi", "totalplay", "cfe", "luz", "agua", "internet", "seguro", "membresia"]
+        let project = category == "Club Amigos / Proyectos" || categoryContains(text, projectMarkers)
+        let travel = category == "Viajes" || categoryContains(text, travelMarkers)
+        let extraordinary = travel
+            || category == "Entretenimiento"
+            || categoryContains(text, ["evento", "concierto", "festival", "emergencia", "reparacion"])
+        return [
+            project ? "proyecto" : "personal",
+            travel ? "viaje" : nil,
+            categoryContains(text, fixedMarkers) ? "fijo" : "variable",
+            extraordinary ? "extraordinario" : "ordinario"
+        ].compactMap { $0 }
+    }
+
     private static func category(for title: String, flow: FlowKind) -> String {
         if flow == .income { return "Ingresos" }
         if flow == .transfer { return "Transferencia" }
@@ -9258,7 +9383,7 @@ final class FinanceStore {
 
         let rules: [(String, [String])] = [
             // Project identity is always evaluated first and is handled below.
-            ("Comisiones y finanzas", ["comision", "comisión", "interes", "interés", "cajero", "anualidad", "cargo bancario", "seguro financiero"]),
+            ("Comisiones y finanzas", ["comision", "interés", "iva com", "cajero", "anualidad", "cargo bancario", "seguro financiero", "financiera", "finanzas"]),
             ("Software y suscripciones", ["canva", "cursor", "google one", "google storage", "youtube premium", "apple music", "adobe", "microsoft 365", "microsoft office", "suscripcion", "suscripción", "saas", "software", "icloud", "dropbox", "apple.com/bill"]),
             ("Viajes", ["airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico", "aerobus", "volaris", "vivaaerobus", "american airlines", "united airlines", "delta air", "iberia", "vuelo", "flight", "holafly", "esim", "roaming", "airport", "aeropuerto", "renta de auto", "car rental", "nueva york", "new york", "medellin", "atlanta"]),
             ("Entretenimiento", ["cinemex", "cinemas wtc", "cinepolis", "cine", "teatro", "museo", "museum", "moma", "guggenheim", "summit one", "concierto", "festival", "boleto", "ticket", "show", "smoke jazz", "jazz", "nekoma", "club nocturno", "experiencia", "ocio"]),
@@ -9270,17 +9395,8 @@ final class FinanceStore {
             ("Transporte", ["uber", "didi", "cabify", "taxi", "metrobus", "metro ", "metrotap", "nyct", "nj transit", "njtransit", "nyc ferry", "subway", "mta ", "train ", "estacionamiento", "parking", "parco ", "gasolina", "pemex", "shell", "bp ", "gulf", "mobil", "caseta", "autopista", "toll", "ecobici", "transporte", "movilidad"]),
             ("Compras personales", ["apple", "shein", "amazon", "sanborns", "miniso", "old navy", "mercadolibre", "mercado libre", "mercadopago", "lumen", "steren", "boutique", "tienda", "shop", "store", "ropa", "zapateria", "departamental", "electronic", "electronico", "accesorio", "compras"])
         ]
-        let paddedTitle = " \(title) "
-        let matchesMarker: (String) -> Bool = { marker in
-            let normalizedMarker = marker
-                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-                .lowercased()
-                .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !normalizedMarker.isEmpty else { return false }
-            return paddedTitle.contains(" \(normalizedMarker) ")
-                || (normalizedMarker.count >= 6 && title.contains(normalizedMarker))
-        }
+        let normalizedTitle = categoryText(title)
+        let matchesMarker: (String) -> Bool = { marker in categoryContains(normalizedTitle, [marker]) }
         if ["club amigos", "clubamigos", "proyecto", "proveedor club", "material club"].contains(where: matchesMarker) {
             return "Club Amigos / Proyectos"
         }
