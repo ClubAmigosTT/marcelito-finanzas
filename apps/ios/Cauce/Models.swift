@@ -537,6 +537,8 @@ struct CashFlowPoint: Identifiable {
     let income: Double
     let expense: Double
     let balance: Double
+
+    var net: Double { income - expense }
 }
 
 enum FinanceImportError: LocalizedError {

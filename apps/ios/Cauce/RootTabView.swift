@@ -1185,7 +1185,7 @@ private struct CashFlowChart: View {
     }
 
     private var yDomain: ClosedRange<Double> {
-        let values = points.flatMap { [$0.income, $0.expense, $0.balance] }
+        let values = points.map(\.net)
         guard let minimumValue = values.min(), let maximumValue = values.max() else {
             return -1...1
         }
@@ -1204,9 +1204,9 @@ private struct CashFlowChart: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Ingresos, gastos y balance")
+                Text("Flujo neto")
                     .font(.title3.weight(.bold))
-                Text("Monto en MXN · balance acumulado por fecha")
+                Text("Ingresos reales menos gastos reales por fecha · MXN")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1218,7 +1218,7 @@ private struct CashFlowChart: View {
                         .foregroundStyle(Color.marcelitoNavyMid)
                     Text("Aún no hay movimientos con fecha")
                         .font(.subheadline.weight(.semibold))
-                    Text("Importa un estado de cuenta para comparar visualmente tus ingresos y gastos.")
+                    Text("Importa un estado de cuenta para ver cómo cambia tu flujo neto.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1326,19 +1326,9 @@ private struct CashFlowLineChart: View {
                         .stroke(Color.marcelitoNavy.opacity(0.15), style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
 
                         Path { path in
-                            path.addPath(linePath(keyPath: \CashFlowPoint.income, width: plotWidth, height: plotHeight))
+                            path.addPath(linePath(keyPath: \CashFlowPoint.net, width: plotWidth, height: plotHeight))
                         }
-                        .stroke(Color.marcelitoSuccess, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-
-                        Path { path in
-                            path.addPath(linePath(keyPath: \CashFlowPoint.expense, width: plotWidth, height: plotHeight))
-                        }
-                        .stroke(Color.marcelitoAmber, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-
-                        Path { path in
-                            path.addPath(linePath(keyPath: \CashFlowPoint.balance, width: plotWidth, height: plotHeight))
-                        }
-                        .stroke(Color.marcelitoNavy, style: StrokeStyle(lineWidth: 2, lineCap: .round, lineJoin: .round, dash: [6, 4]))
+                        .stroke(Color.marcelitoNavyMid, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
 
                         if let selectedIndex {
                             let x = xPosition(index: selectedIndex, width: plotWidth)
@@ -1377,16 +1367,12 @@ private struct CashFlowLineChart: View {
                 .foregroundStyle(.secondary)
             }
 
-            HStack(spacing: 12) {
-                CashFlowLegendItem(label: "Ingresos", color: Color.marcelitoSuccess)
-                CashFlowLegendItem(label: "Gastos", color: Color.marcelitoAmber)
-                CashFlowLegendItem(label: "Balance", color: Color.marcelitoNavy)
-            }
-            .font(.caption2)
+            CashFlowLegendItem(label: "Flujo neto", color: Color.marcelitoNavyMid)
+                .font(.caption2)
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Gráfica de líneas de ingresos, gastos y balance acumulado por fecha")
-        .accessibilityHint("Toca una fecha para ver sus importes y comportamiento reciente")
+        .accessibilityLabel("Gráfica de flujo neto por fecha")
+        .accessibilityHint("Toca una fecha para ver el flujo neto y su desglose")
     }
 }
 
@@ -1429,18 +1415,19 @@ private struct CashFlowPointDetail: View {
                             .foregroundStyle(.secondary)
                     }
 
+                    CashFlowDetailValue(title: "Flujo neto", value: point.net, color: Color.marcelitoNavyMid)
+
                     HStack(spacing: 10) {
                         CashFlowDetailValue(title: "Ingresos", value: point.income, color: Color.marcelitoSuccess)
                         CashFlowDetailValue(title: "Gastos", value: point.expense, color: Color.marcelitoAmber)
                     }
-                    CashFlowDetailValue(title: "Balance acumulado", value: point.balance, color: Color.marcelitoNavy)
 
                     VStack(alignment: .leading, spacing: 8) {
                         Text("Comportamiento cercano")
                             .font(.subheadline.weight(.semibold))
                         MiniCashFlowChart(points: nearbyPoints)
                             .frame(height: 150)
-                        Text("El balance acumula ingresos menos gastos desde la primera fecha registrada.")
+                        Text("Cada punto representa ingresos reales menos gastos reales de esa fecha.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -1494,30 +1481,18 @@ private struct MiniCashFlowChart: View {
             ForEach(points) { point in
                 LineMark(
                     x: .value("Fecha", point.date),
-                    y: .value("Monto", point.income),
-                    series: .value("Serie", "Ingresos")
+                    y: .value("Monto", point.net),
+                    series: .value("Serie", "Flujo neto")
                 )
-                .foregroundStyle(Color.marcelitoSuccess)
-                LineMark(
-                    x: .value("Fecha", point.date),
-                    y: .value("Monto", point.expense),
-                    series: .value("Serie", "Gastos")
-                )
-                .foregroundStyle(Color.marcelitoAmber)
-                LineMark(
-                    x: .value("Fecha", point.date),
-                    y: .value("Monto", point.balance),
-                    series: .value("Serie", "Balance")
-                )
-                .foregroundStyle(Color.marcelitoNavy)
-                .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
+                .foregroundStyle(Color.marcelitoNavyMid)
+                .lineStyle(StrokeStyle(lineWidth: 2.5))
             }
         }
         .chartXAxis(.hidden)
         .chartYAxis(.hidden)
         .chartLegend(.hidden)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Mini gráfica del comportamiento de ingresos, gastos y balance")
+        .accessibilityLabel("Mini gráfica del comportamiento del flujo neto")
     }
 }
 
