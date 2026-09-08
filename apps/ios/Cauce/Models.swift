@@ -679,7 +679,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.07.7"
+    static let readerVersion = "ios-reader-deterministic-2026.09.07.8"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -6480,18 +6480,36 @@ final class FinanceStore {
         return CGRect(x: left, y: top, width: max(0, right - left), height: max(0, bottom - top))
     }
 
-    /// Agreement is based only on complete cell readings, never on an expected
+    /// Normalize only a fixed-column monetary cell. A missing decimal separator
+    /// is recoverable only with an explicit thousands group and two cent digits.
+    /// Bare digit strings, administrative prefixes and extra numbers stay invalid.
+    static func santanderNormalizedCellReading(_ reading: String) -> String? {
+        var text = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+        if text.isEmpty { return "" }
+        // Some crops include a rule or a nonnumeric fragment after the amount.
+        // Never strip a suffix containing another digit or currency symbol.
+        if let noise = text.range(of: #"\s+[-–—][^\d$€£¥]*$"#, options: .regularExpression) {
+            text.removeSubrange(noise)
+        }
+        let complete = #"^\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}$"#
+        if text.range(of: complete, options: .regularExpression) != nil { return text }
+        let spaced = #"^\$?\d{1,3}(?:[ ,]\d{3})+(?:[ .]\d{2})$"#
+        let joinedCents = #"^\$?\d{1,3}(?:[ ,]\d{3})*[ ]\d{5}$"#
+        guard text.range(of: spaced, options: .regularExpression) != nil
+                || text.range(of: joinedCents, options: .regularExpression) != nil else { return nil }
+        let digits = text.filter { $0.isASCII && $0.isNumber }
+        return String(digits.dropLast(2)) + "." + String(digits.suffix(2))
+    }
+
+    /// Agreement is based only on normalized cell readings, never on an expected
     /// balance or statement total. Conflicting readable values fail closed.
     /// Nil means unreadable; an empty string is an explicitly blank cell.
     static func santanderCellConsensus(_ readings: [String?]) -> String? {
-        let pattern = #"^\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}$"#
         var votes: [String: [String]] = [:]
         for reading in readings {
-            guard let reading else { continue }
-            let text = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard let reading, let text = santanderNormalizedCellReading(reading) else { continue }
             if text.isEmpty { votes["blank", default: []].append(""); continue }
-            guard text.range(of: pattern, options: .regularExpression) != nil,
-                  let amount = parseAmount(text) else { continue }
+            guard let amount = parseAmount(text) else { continue }
             let key = NSDecimalNumber(decimal: amount).stringValue
             votes[key, default: []].append(text)
         }
@@ -6898,8 +6916,8 @@ final class FinanceStore {
                     outcomes.append("no-consensus-cell-\(cell)"); continue
                 }
                 if text.isEmpty { recovered[cell] = []; outcomes.append("blank-cell-\(cell)"); continue }
-                // The entire crop must contain exactly one monetary value;
-                // arbitrary text, multiple values and malformed decimals reject.
+                // Consensus returns one normalized monetary value; validate the
+                // entire normalized token before creating a recovered observation.
                 let matches = allMatches(in: text, regex: amountRegex)
                 physical.retryOutcome = "ambiguous-crop-cell-\(cell)"
                 guard matches.count == 1,
