@@ -26,3 +26,15 @@ test("la pantalla ofrece reglas locales y reporta solo cambios realmente aplicad
   assert.match(source, /stage: "categories\.ai"/);
   assert.equal(source.includes("Se actualizaron \\(classifications.count)"), false);
 });
+
+test("Gastos resume todo el libro real y conserva las categorías manuales entre cortes", async () => {
+  const source = await readFile(sectionsPath, "utf8");
+  const expensesStart = source.indexOf("struct ExpensesView");
+  const expensesEnd = source.indexOf("private struct ExpenseTrendPoint", expensesStart);
+  const expenses = source.slice(expensesStart, expensesEnd);
+
+  assert.ok(expensesStart >= 0 && expensesEnd > expensesStart);
+  assert.equal((source.match(/store\.realExpenseMovements/g) ?? []).length, 2);
+  assert.doesNotMatch(expenses, /currentPeriodExpenseMovements/);
+  assert.match(expenses, /Incluye todo el historial conciliado/);
+});

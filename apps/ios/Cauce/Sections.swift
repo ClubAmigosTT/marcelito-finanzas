@@ -461,7 +461,11 @@ struct ExpensesView: View {
     @State private var selectedCategory: ExpenseCategorySelection?
 
     private var groups: [(category: String, amount: Decimal)] {
-        Dictionary(grouping: store.currentPeriodExpenseMovements, by: { $0.category })
+        // Movements already contains the user's saved/manual category. The
+        // expense dashboard must summarize the complete reconciled spend
+        // ledger instead of borrowing one institution's latest cutoff period;
+        // BBVA, Santander and Amex do not share the same statement dates.
+        Dictionary(grouping: store.realExpenseMovements, by: { $0.category })
             .map { (category: $0.key, amount: $0.value.reduce(0) { $0 + abs($1.amount) }) }
             .sorted { $0.amount > $1.amount }
     }
@@ -499,7 +503,7 @@ struct ExpensesView: View {
                 Text("\(groups.count) categorías explican")
                 Text(total, format: .currency(code: "MXN").precision(.fractionLength(0)))
                     .font(.headline)
-                Text("Puedes corregir el origen o la categoría desde Cuentas > Movimientos.")
+                Text("Incluye todo el historial conciliado. Puedes corregir el origen o la categoría desde Cuentas > Movimientos.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -601,7 +605,7 @@ private struct ExpenseCategoryDetailView: View {
     @Environment(\.dismiss) private var dismiss
 
     private var movements: [Movement] {
-        store.currentPeriodExpenseMovements.filter { $0.category == category }
+        store.realExpenseMovements.filter { $0.category == category }
     }
 
     private var total: Decimal {
