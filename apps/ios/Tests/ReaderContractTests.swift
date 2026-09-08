@@ -38,6 +38,58 @@ final class ReaderContractTests: XCTestCase {
         ))
     }
 
+    func testManualExpenseCategoryIsSavedAndProtectedFromAutomaticRules() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let movement = Movement(
+            date: .now,
+            title: "OXXO SUC 1234",
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -125,
+            flow: .expense,
+            kind: .purchase
+        )
+        store.movements = [movement]
+
+        XCTAssertTrue(store.updateCategory(for: movement, to: "Restaurantes y bares"))
+        XCTAssertEqual(store.movements.first?.category, "Restaurantes y bares")
+        let futureMovement = Movement(
+            date: .now,
+            title: "OXXO SUC 9999",
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -80,
+            flow: .expense,
+            kind: .purchase
+        )
+        store.movements = [futureMovement]
+
+        XCTAssertEqual(store.applyDeterministicCategoryRules(), 1)
+        XCTAssertEqual(store.movements.first?.category, "Restaurantes y bares")
+        XCTAssertTrue(store.movements.first?.classificationTags.contains("personal") == true)
+    }
+
+    func testManualTravelCategoryUpdatesItsSecondaryDimensions() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let movement = Movement(
+            date: .now,
+            title: "Hospedaje de prueba",
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -500,
+            flow: .expense,
+            kind: .purchase
+        )
+        store.movements = [movement]
+
+        XCTAssertTrue(store.updateCategory(for: movement, to: "Viajes"))
+        XCTAssertEqual(store.movements.first?.category, "Viajes")
+        XCTAssertTrue(store.movements.first?.travelRelated == true)
+        XCTAssertTrue(store.movements.first?.classificationTags.contains("viaje") == true)
+    }
+
     func testCanonicalRebuildIsInvalidatedWhenReaderVersionChanges() {
         XCTAssertTrue(FinanceStore.needsCanonicalRebuild(
             completed: true,

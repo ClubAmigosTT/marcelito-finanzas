@@ -698,7 +698,7 @@ final class FinanceStore {
     /// survive a PDF re-import, whose row UUID is intentionally new.
     private let manualCategoryOverridesKey = "marcelito.categoryOverrides.v1"
     private let categoryTaxonomyVersionKey = "marcelito.categoryTaxonomyVersion.v1"
-    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.2"
+    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.3"
     private static let pendingCategoryNames: Set<String> = [
         "Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos",
         "Alimentos", "Comidas", "Servicios", "Compras", "Finanzas",
@@ -2639,9 +2639,18 @@ final class FinanceStore {
         manualDashboardUnlockEnabled = false
     }
 
-    func updateCategory(for movement: Movement, to category: String) {
-        guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return }
+    @discardableResult
+    func updateCategory(for movement: Movement, to category: String) -> Bool {
+        guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return false }
         movements[index].category = category
+        var tags = Self.categoryTags(for: movements[index].title, category: category)
+        if movements[index].travelRelated, !tags.contains("viaje") {
+            tags.append("viaje")
+        }
+        if category == "Viajes" {
+            movements[index].travelRelated = true
+        }
+        movements[index].classificationTags = tags
         let key = Self.categoryRuleKey(movements[index].title)
         if !key.isEmpty {
             var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
@@ -2659,10 +2668,33 @@ final class FinanceStore {
             UserDefaults.standard.set(rules, forKey: categoryRulesKey)
         }
         persist(markingChange: true)
+        DiagnosticsRecorder.record(
+            stage: "categories.manual",
+            message: "Categoría manual actualizada a \(category)."
+        )
+        return true
     }
 
-    func applyAIClassifications(_ classifications: [AIClassification]) {
+    /// Re-runs the local, deterministic taxonomy on the review bucket. This
+    /// gives the UI an explicit recovery action while preserving manual
+    /// merchant overrides and every accounting field.
+    @discardableResult
+    func applyDeterministicCategoryRules() -> Int {
+        let changed = reclassifyPendingCategoriesIfNeeded(force: true)
+        if changed > 0 {
+            persist(markingChange: true)
+        }
+        DiagnosticsRecorder.record(
+            stage: "categories.local",
+            message: "Reglas locales aplicadas: \(changed) movimiento(s) actualizado(s)."
+        )
+        return changed
+    }
+
+    @discardableResult
+    func applyAIClassifications(_ classifications: [AIClassification]) -> Int {
         var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
+        var changed = 0
         for classification in classifications {
             guard let index = movements.firstIndex(where: { $0.id == classification.movementID }) else { continue }
             // Enrichment cannot promote or mutate a quarantined row. Only a
@@ -2681,9 +2713,15 @@ final class FinanceStore {
             default:
                 break
             }
+            let previous = movements[index]
             movements[index].category = classification.category
             movements[index].travelRelated = classification.travelRelated
             movements[index].classificationTags = classification.tags
+            if movements[index].category != previous.category
+                || movements[index].travelRelated != previous.travelRelated
+                || movements[index].classificationTags != previous.classificationTags {
+                changed += 1
+            }
             let key = Self.categoryRuleKey(movements[index].title)
             if !key.isEmpty {
                 rules[key] = classification.category
@@ -2691,6 +2729,7 @@ final class FinanceStore {
         }
         UserDefaults.standard.set(rules, forKey: categoryRulesKey)
         persist(markingChange: true)
+        return changed
     }
 
     func updateClassification(for movement: Movement, kind: MovementKind, travelRelated: Bool) {
