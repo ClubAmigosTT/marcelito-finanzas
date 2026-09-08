@@ -14,6 +14,25 @@ struct AIClassification: Identifiable {
     var id: UUID { movementID }
 }
 
+struct AIClassificationRunResult {
+    let classifications: [AIClassification]
+    let provider: ExpenseAIProvider
+    let model: String
+    let requestedCount: Int
+    let receivedCount: Int
+    let acceptedCount: Int
+    let unresolvedCount: Int
+    let retryCount: Int
+    let finishReasons: [String]
+    let issues: [String]
+
+    var diagnosticSummary: String {
+        let finishes = finishReasons.isEmpty ? "sin-dato" : finishReasons.joined(separator: ",")
+        let issueText = issues.isEmpty ? "ninguna" : issues.joined(separator: ",")
+        return "Proveedor \(provider.displayName); modelo \(model); solicitados \(requestedCount); recibidos \(receivedCount); aceptados \(acceptedCount); por resolver \(unresolvedCount); reintentos \(retryCount); finish_reason \(finishes); incidencias \(issueText)."
+    }
+}
+
 enum ExpenseAIProvider: String, CaseIterable, Identifiable {
     case gemini
     case openCodeZen
@@ -53,7 +72,7 @@ enum ExpenseAIClassifier {
     /// Keep each response comfortably below the output limit. A long list of
     /// pending movements must be split instead of silently truncating the
     /// JSON returned by the provider.
-    static let maxBatchSize = 12
+    static let maxBatchSize = 5
     static let zenModels: [ModelOption] = [
         ModelOption(id: "mimo-v2.5-free", name: "MiMo V2.5 Free"),
         ModelOption(id: "ling-3.0-flash-fin-free", name: "Ling 3.0 Flash Fin Free"),
@@ -96,7 +115,7 @@ enum ExpenseAIClassifier {
         case missingAPIKey(ExpenseAIProvider)
         case invalidModel
         case provider(String)
-        case invalidResponse
+        case invalidResponse(String)
 
         var errorDescription: String? {
             switch self {
@@ -106,8 +125,8 @@ enum ExpenseAIClassifier {
                 return "El modelo seleccionado no está disponible para este proveedor."
             case .provider(let message):
                 return message
-            case .invalidResponse:
-                return "La respuesta de IA no tenía un formato reconocible."
+            case .invalidResponse(let diagnostic):
+                return "La respuesta de IA no tenía un formato reconocible. \(diagnostic)"
             }
         }
     }
@@ -135,6 +154,103 @@ enum ExpenseAIClassifier {
 
     private struct ResponseFormat: Encodable {
         let type: String
+        let jsonSchema: JSONSchema?
+
+        enum CodingKeys: String, CodingKey {
+            case type
+            case jsonSchema = "json_schema"
+        }
+    }
+
+    private struct JSONSchema: Encodable {
+        let name: String
+        let strict: Bool
+        let schema: ClassificationSchema
+    }
+
+    private struct ClassificationSchema: Encodable {
+        struct RootProperties: Encodable {
+            let classifications: ClassificationArray
+        }
+
+        struct ClassificationArray: Encodable {
+            let type = "array"
+            let items = ClassificationItem()
+        }
+
+        struct ClassificationItem: Encodable {
+            let type = "object"
+            let properties = ClassificationProperties()
+            let required = ["id", "category", "tags", "travelRelated", "confidence", "reason", "requires_review"]
+            let additionalProperties = false
+
+            enum CodingKeys: String, CodingKey {
+                case type, properties, required
+                case additionalProperties = "additionalProperties"
+            }
+        }
+
+        struct ClassificationProperties: Encodable {
+            let id = StringProperty()
+            let category = CategoryProperty()
+            let tags = TagsProperty()
+            let travelRelated = BooleanProperty()
+            let confidence = NumberProperty()
+            let reason = StringProperty()
+            let requiresReview = BooleanProperty()
+
+            enum CodingKeys: String, CodingKey {
+                case id, category, tags, confidence, reason, travelRelated
+                case requiresReview = "requires_review"
+            }
+        }
+
+        struct StringProperty: Encodable { let type = "string" }
+        struct BooleanProperty: Encodable { let type = "boolean" }
+        struct NumberProperty: Encodable {
+            let type = "number"
+            let minimum = 0.0
+            let maximum = 1.0
+        }
+        struct CategoryProperty: Encodable {
+            let type = "string"
+            let values = ExpenseAIClassifier.allowedCategories
+
+            enum CodingKeys: String, CodingKey {
+                case type
+                case values = "enum"
+            }
+        }
+        struct TagsProperty: Encodable {
+            struct Items: Encodable {
+                let type = "string"
+                let values = ExpenseAIClassifier.allowedTags
+
+                enum CodingKeys: String, CodingKey {
+                    case type
+                    case values = "enum"
+                }
+            }
+
+            let type = "array"
+            let items = Items()
+            let uniqueItems = true
+
+            enum CodingKeys: String, CodingKey {
+                case type, items
+                case uniqueItems = "uniqueItems"
+            }
+        }
+
+        let type = "object"
+        let properties = RootProperties()
+        let required = ["classifications"]
+        let additionalProperties = false
+
+        enum CodingKeys: String, CodingKey {
+            case type, properties, required
+            case additionalProperties = "additionalProperties"
+        }
     }
 
     private struct ChatTemplateKwargs: Encodable {
@@ -152,10 +268,34 @@ enum ExpenseAIClassifier {
 
     private struct Choice: Decodable {
         let message: ResponseMessage
+        let finishReason: String?
+
+        enum CodingKeys: String, CodingKey {
+            case message
+            case finishReason = "finish_reason"
+        }
     }
 
     private struct ResponseMessage: Decodable {
         let content: String?
+
+        private struct ContentBlock: Decodable {
+            let text: String?
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            if let text = try? container.decode(String.self, forKey: .content) {
+                content = text
+            } else if let blocks = try? container.decode([ContentBlock].self, forKey: .content) {
+                let joined = blocks.compactMap(\.text).joined(separator: "\n")
+                content = joined.isEmpty ? nil : joined
+            } else {
+                content = nil
+            }
+        }
+
+        private enum CodingKeys: String, CodingKey { case content }
     }
 
     private struct ProviderErrorEnvelope: Decodable {
@@ -165,8 +305,8 @@ enum ExpenseAIClassifier {
     }
 
     private struct ClassificationPayload: Decodable {
-        let id: String
-        let category: String
+        let id: String?
+        let category: String?
         let travelRelated: Bool?
         let tags: [String]?
         let confidence: Double?
@@ -178,10 +318,58 @@ enum ExpenseAIClassifier {
             case travelRelated = "travelRelated"
             case requiresReview = "requires_review"
         }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            id = try? container.decode(String.self, forKey: .id)
+            category = try? container.decode(String.self, forKey: .category)
+            reason = try? container.decode(String.self, forKey: .reason)
+
+            if let values = try? container.decode([String].self, forKey: .tags) {
+                tags = values
+            } else if let value = try? container.decode(String.self, forKey: .tags) {
+                tags = value.split(separator: ",").map(String.init)
+            } else {
+                tags = nil
+            }
+
+            if let value = try? container.decode(Double.self, forKey: .confidence) {
+                confidence = value
+            } else if let value = try? container.decode(String.self, forKey: .confidence) {
+                confidence = Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
+            } else {
+                confidence = nil
+            }
+
+            travelRelated = Self.decodeFlexibleBool(container, key: .travelRelated)
+            requiresReview = Self.decodeFlexibleBool(container, key: .requiresReview)
+        }
+
+        private static func decodeFlexibleBool(
+            _ container: KeyedDecodingContainer<CodingKeys>,
+            key: CodingKeys
+        ) -> Bool? {
+            if let value = try? container.decode(Bool.self, forKey: key) { return value }
+            if let value = try? container.decode(String.self, forKey: key) {
+                switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                case "true", "si", "sí", "1": return true
+                case "false", "no", "0": return false
+                default: return nil
+                }
+            }
+            return nil
+        }
     }
 
     private struct ClassificationWrapper: Decodable {
         let classifications: [ClassificationPayload]
+    }
+
+    private struct BatchResult {
+        let classifications: [AIClassification]
+        let receivedCount: Int
+        let finishReason: String?
+        let issues: [String]
     }
 
     static func classify(
@@ -189,14 +377,20 @@ enum ExpenseAIClassifier {
         apiKey: String,
         model: String,
         provider: ExpenseAIProvider
-    ) async throws -> [AIClassification] {
+    ) async throws -> AIClassificationRunResult {
         guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ClassificationError.missingAPIKey(provider)
         }
         guard models(for: provider).contains(where: { $0.id == model }) else {
             throw ClassificationError.invalidModel
         }
-        guard !movements.isEmpty else { return [] }
+        guard !movements.isEmpty else {
+            return AIClassificationRunResult(
+                classifications: [], provider: provider, model: model,
+                requestedCount: 0, receivedCount: 0, acceptedCount: 0,
+                unresolvedCount: 0, retryCount: 0, finishReasons: [], issues: []
+            )
+        }
         // This API is deliberately narrower than the UI's pending list. If a
         // caller accidentally passes a quarantined row, income, refund, card
         // payment or own-account transfer, fail closed before any description
@@ -210,28 +404,122 @@ enum ExpenseAIClassifier {
                 return true
             }
         }) else {
-            throw ClassificationError.invalidResponse
+            throw ClassificationError.invalidResponse("Se rechazó un movimiento que no era un gasto canónico elegible.")
         }
 
-        var classifications: [AIClassification] = []
+        var classificationsByID: [UUID: AIClassification] = [:]
+        var receivedCount = 0
+        var retryCount = 0
+        var finishReasons = Set<String>()
+        var issues: [String] = []
+        var consecutiveEmptyBatches = 0
         var start = 0
         while start < movements.count {
             let end = min(start + maxBatchSize, movements.count)
-            classifications.append(contentsOf: try await classifyBatch(
-                movements: Array(movements[start..<end]),
-                apiKey: apiKey,
-                model: model,
-                provider: provider
-            ))
+            let batch = Array(movements[start..<end])
+            let batchResult: BatchResult
+            do {
+                batchResult = try await classifyBatch(
+                    movements: batch,
+                    apiKey: apiKey,
+                    model: model,
+                    provider: provider
+                )
+            } catch {
+                issues.append("provider-error")
+                if classificationsByID.isEmpty { throw error }
+                break
+            }
+
+            receivedCount += batchResult.receivedCount
+            issues.append(contentsOf: batchResult.issues)
+            if let finish = batchResult.finishReason { finishReasons.insert(finish) }
+            for classification in batchResult.classifications where classificationsByID[classification.movementID] == nil {
+                classificationsByID[classification.movementID] = classification
+            }
+
+            var unresolved = batch.filter { classificationsByID[$0.id] == nil }
+            if unresolved.isEmpty {
+                consecutiveEmptyBatches = 0
+                start = end
+                continue
+            }
+
+            // Recover only the missing rows. If an entire batch has an
+            // unrecognizable shape, probe one row first so a provider outage
+            // cannot fan out into dozens of futile requests.
+            let firstPass = batchResult.classifications.isEmpty ? Array(unresolved.prefix(1)) : unresolved
+            var probeSucceeded = !batchResult.classifications.isEmpty
+            for movement in firstPass {
+                retryCount += 1
+                do {
+                    let retry = try await classifyBatch(
+                        movements: [movement], apiKey: apiKey, model: model, provider: provider
+                    )
+                    receivedCount += retry.receivedCount
+                    issues.append(contentsOf: retry.issues)
+                    if let finish = retry.finishReason { finishReasons.insert(finish) }
+                    if let classification = retry.classifications.first {
+                        classificationsByID[classification.movementID] = classification
+                        probeSucceeded = true
+                    }
+                } catch {
+                    issues.append("retry-provider-error")
+                }
+            }
+
+            unresolved = batch.filter { classificationsByID[$0.id] == nil }
+            if batchResult.classifications.isEmpty && probeSucceeded {
+                for movement in unresolved {
+                    retryCount += 1
+                    do {
+                        let retry = try await classifyBatch(
+                            movements: [movement], apiKey: apiKey, model: model, provider: provider
+                        )
+                        receivedCount += retry.receivedCount
+                        issues.append(contentsOf: retry.issues)
+                        if let finish = retry.finishReason { finishReasons.insert(finish) }
+                        if let classification = retry.classifications.first {
+                            classificationsByID[classification.movementID] = classification
+                        }
+                    } catch {
+                        issues.append("retry-provider-error")
+                    }
+                }
+            }
+
+            if batchResult.classifications.isEmpty && !probeSucceeded {
+                consecutiveEmptyBatches += 1
+                if consecutiveEmptyBatches >= 2 {
+                    issues.append("provider-format-stopped")
+                    break
+                }
+            } else {
+                consecutiveEmptyBatches = 0
+            }
             start = end
         }
 
-        // A provider may repeat an item when a batch contains similar rows.
-        // Keep the first answer for each requested movement and never allow
-        // an unknown ID to mutate the local ledger.
-        var seen = Set<UUID>()
-        let requested = Set(movements.map(\.id))
-        return classifications.filter { requested.contains($0.movementID) && seen.insert($0.movementID).inserted }
+        let classifications = movements.compactMap { classificationsByID[$0.id] }
+        let autoApplicable = classifications.filter {
+            !$0.requiresReview && $0.confidence >= 0.8 && $0.category != "Otros / Por revisar"
+        }.count
+        let result = AIClassificationRunResult(
+            classifications: classifications,
+            provider: provider,
+            model: model,
+            requestedCount: movements.count,
+            receivedCount: receivedCount,
+            acceptedCount: classifications.count,
+            unresolvedCount: max(movements.count - autoApplicable, 0),
+            retryCount: retryCount,
+            finishReasons: finishReasons.sorted(),
+            issues: Array(Set(issues)).sorted()
+        )
+        guard !classifications.isEmpty else {
+            throw ClassificationError.invalidResponse(result.diagnosticSummary)
+        }
+        return result
     }
 
     private static func classifyBatch(
@@ -239,13 +527,15 @@ enum ExpenseAIClassifier {
         apiKey: String,
         model: String,
         provider: ExpenseAIProvider
-    ) async throws -> [AIClassification] {
-        guard !movements.isEmpty else { return [] }
+    ) async throws -> BatchResult {
+        guard !movements.isEmpty else {
+            return BatchResult(classifications: [], receivedCount: 0, finishReason: nil, issues: [])
+        }
 
         let input = movements.map { movement in
             [
                 "id": movement.id.uuidString,
-                "comercio": String(movement.title.prefix(240)),
+                "comercio": String(movement.title.prefix(180)),
                 "importe_mxn": NSDecimalNumber(decimal: movement.amount < 0 ? -movement.amount : movement.amount).stringValue,
                 "fecha": ISO8601DateFormatter().string(from: movement.date)
             ]
@@ -256,11 +546,11 @@ enum ExpenseAIClassifier {
         let categories = allowedCategories.joined(separator: ", ")
         let tags = allowedTags.joined(separator: ", ")
         let system = """
-        Eres el clasificador de gastos de una app financiera. Clasifica cada movimiento usando solo estas categorías: \(categories). Usa únicamente estas etiquetas secundarias, sin duplicarlas: \(tags). Club Amigos / Proyectos tiene prioridad si el concepto identifica un proyecto. No clasifiques ingresos, reembolsos, pagos de tarjeta, transferencias ni MSI: esos movimientos no deben enviarse a esta función. No recibes ni debes solicitar PDFs, cuentas, números de tarjeta, saldos o metadatos del estado. Identifica si pertenece a un viaje. Conserva exactamente cada id. Responde únicamente un objeto JSON sin markdown, con la propiedad \"classifications\" que contenga un objeto por movimiento de la forma {\"id\":\"UUID\",\"category\":\"Categoría\",\"tags\":[\"personal\",\"variable\",\"ordinario\"],\"travelRelated\":true|false,\"confidence\":0.0,"reason":"evidencia breve","requires_review":false}.
+        Eres el clasificador de gastos de una app financiera. Clasifica cada movimiento usando solo estas categorías: \(categories). Usa únicamente estas etiquetas secundarias, sin duplicarlas: \(tags). Club Amigos / Proyectos tiene prioridad si el concepto identifica un proyecto. No clasifiques ingresos, reembolsos, pagos de tarjeta, transferencias ni MSI: esos movimientos no deben enviarse a esta función. No recibes ni debes solicitar PDFs, cuentas, números de tarjeta, saldos o metadatos del estado. Identifica si pertenece a un viaje. Conserva exactamente cada id. Devuelve una clasificación por cada id recibido. confidence debe ser un número entre 0 y 1. Si no hay evidencia suficiente usa Otros / Por revisar y requires_review=true. Responde únicamente un objeto JSON sin markdown, con la propiedad \"classifications\" que contenga objetos de la forma {\"id\":\"UUID\",\"category\":\"Categoría\",\"tags\":[\"personal\",\"variable\",\"ordinario\"],\"travelRelated\":true,\"confidence\":0.9,\"reason\":\"evidencia breve\",\"requires_review\":false}.
         """
         let user = "Clasifica estos movimientos pendientes:\n\(inputJSON)"
         let usesDeterministicOptions = provider == .nvidia || provider == .gemini
-        let requestBody = Request(
+        var requestBody = Request(
             model: model,
             messages: [
                 Message(role: "system", content: system),
@@ -271,20 +561,43 @@ enum ExpenseAIClassifier {
             // explicit deterministic JSON-oriented configuration.
             temperature: usesDeterministicOptions ? 0 : nil,
             topP: usesDeterministicOptions ? 1 : nil,
-            maxTokens: usesDeterministicOptions ? 2048 : nil,
+            maxTokens: usesDeterministicOptions ? 4096 : nil,
             stream: usesDeterministicOptions ? false : nil,
             chatTemplateKwargs: provider == .nvidia && model == nvidiaDefaultModel ? ChatTemplateKwargs(thinking: false) : nil,
-            responseFormat: provider == .gemini ? ResponseFormat(type: "json_object") : nil,
+            responseFormat: responseFormat(for: provider),
             reasoningEffort: provider == .nvidia && model == "moonshotai/kimi-k3" ? "low" : nil
         )
         var request = URLRequest(url: provider.endpoint)
         request.httpMethod = "POST"
-        request.timeoutInterval = 60
+        request.timeoutInterval = 90
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(requestBody)
 
-        let (data, response) = try await perform(request: request, provider: provider)
+        var requestIssues: [String] = []
+        var networkResult = try await perform(request: request, provider: provider)
+        if provider == .nvidia,
+           let status = (networkResult.1 as? HTTPURLResponse)?.statusCode,
+           [400, 422].contains(status),
+           requestBody.responseFormat != nil {
+            // Some NIM deployments expose Chat Completions but not JSON mode.
+            // Retry the same narrow prompt without that optional capability.
+            requestIssues.append("structured-output-fallback")
+            requestBody = Request(
+                model: model,
+                messages: requestBody.messages,
+                temperature: requestBody.temperature,
+                topP: requestBody.topP,
+                maxTokens: requestBody.maxTokens,
+                stream: requestBody.stream,
+                chatTemplateKwargs: requestBody.chatTemplateKwargs,
+                responseFormat: nil,
+                reasoningEffort: requestBody.reasoningEffort
+            )
+            request.httpBody = try encoder.encode(requestBody)
+            networkResult = try await perform(request: request, provider: provider)
+        }
+        let (data, response) = networkResult
         guard let httpResponse = response as? HTTPURLResponse else {
             throw ClassificationError.provider("No pudimos conectar con \(provider.displayName).")
         }
@@ -295,47 +608,91 @@ enum ExpenseAIClassifier {
             let detail = providerMessage.map { ": \($0)" } ?? "."
             throw ClassificationError.provider("\(provider.displayName) devolvió un error (\(httpResponse.statusCode))\(detail)")
         }
-        let decoded = try JSONDecoder().decode(Response.self, from: data)
-        guard let content = decoded.choices.first?.message.content,
-              let json = extractJSON(from: content) else {
-            throw ClassificationError.invalidResponse
+        guard let decoded = try? JSONDecoder().decode(Response.self, from: data),
+              let choice = decoded.choices.first else {
+            return BatchResult(
+                classifications: [], receivedCount: 0, finishReason: nil,
+                issues: requestIssues + ["response-envelope-invalid"]
+            )
         }
-        let payloads: [ClassificationPayload]
-        if let array = try? JSONDecoder().decode([ClassificationPayload].self, from: Data(json.utf8)) {
-            payloads = array
-        } else if let wrapper = try? JSONDecoder().decode(ClassificationWrapper.self, from: Data(json.utf8)) {
-            payloads = wrapper.classifications
-        } else {
-            throw ClassificationError.invalidResponse
+        guard let content = choice.message.content, !content.isEmpty,
+              let payloads = decodePayloads(from: content) else {
+            let issue = choice.finishReason == "length" ? "response-truncated" : "response-json-invalid"
+            return BatchResult(
+                classifications: [], receivedCount: 0, finishReason: choice.finishReason,
+                issues: requestIssues + [issue]
+            )
         }
 
         let requested = Set(movements.map(\.id))
         var seen = Set<UUID>()
-        let parsed = payloads.compactMap { (payload: ClassificationPayload) -> AIClassification? in
-            guard let movementID = UUID(uuidString: payload.id),
-                  requested.contains(movementID),
-                  seen.insert(movementID).inserted,
-                  let category = canonicalCategory(payload.category),
-                  let validTags = normalizedTags(payload.tags ?? []),
-                  let confidence = payload.confidence,
-                  confidence >= 0, confidence <= 1 else { return nil }
-            return AIClassification(
+        var parsed: [AIClassification] = []
+        var issues = requestIssues
+        for payload in payloads {
+            guard let rawID = payload.id,
+                  let movementID = UUID(uuidString: rawID) else {
+                issues.append("id-invalid")
+                continue
+            }
+            guard requested.contains(movementID) else {
+                issues.append("id-out-of-scope")
+                continue
+            }
+            guard seen.insert(movementID).inserted else {
+                issues.append("id-duplicate")
+                continue
+            }
+            guard let rawCategory = payload.category,
+                  let category = canonicalCategory(rawCategory) else {
+                issues.append("category-invalid")
+                continue
+            }
+            guard let confidence = payload.confidence,
+                  confidence >= 0, confidence <= 1 else {
+                issues.append("confidence-invalid")
+                continue
+            }
+            let validTags = normalizedTags(payload.tags ?? [])
+            let mustReview = payload.requiresReview ?? (confidence < 0.8 || category == "Otros / Por revisar")
+            parsed.append(AIClassification(
                 movementID: movementID,
                 category: category,
                 travelRelated: payload.travelRelated ?? (category == "Viajes"),
                 tags: validTags,
                 confidence: confidence,
-                requiresReview: payload.requiresReview ?? (confidence < 0.8),
-                reason: payload.reason
+                requiresReview: mustReview || category == "Otros / Por revisar",
+                reason: payload.reason.map { String($0.prefix(160)) }
+            ))
+        }
+        if parsed.count < movements.count {
+            issues.append(choice.finishReason == "length" ? "response-truncated" : "rows-missing")
+        }
+        return BatchResult(
+            classifications: parsed,
+            receivedCount: payloads.count,
+            finishReason: choice.finishReason,
+            issues: Array(Set(issues)).sorted()
+        )
+    }
+
+    private static func responseFormat(for provider: ExpenseAIProvider) -> ResponseFormat? {
+        switch provider {
+        case .gemini:
+            return ResponseFormat(
+                type: "json_schema",
+                jsonSchema: JSONSchema(
+                    name: "expense_classifications",
+                    strict: true,
+                    schema: ClassificationSchema()
+                )
             )
+        case .nvidia:
+            return ResponseFormat(type: "json_object", jsonSchema: nil)
+        case .openCodeZen:
+            // The free Zen gateway rejects structured-output fields for some
+            // hosted models, so it receives the minimal compatible request.
+            return nil
         }
-        // A partial answer is not safe to apply: it makes the UI look as if
-        // every pending expense was classified while silently leaving gaps.
-        // Require exactly one valid result for every requested movement.
-        guard parsed.count == movements.count, seen.count == movements.count else {
-            throw ClassificationError.invalidResponse
-        }
-        return parsed
     }
 
     private static func perform(request: URLRequest, provider: ExpenseAIProvider) async throws -> (Data, URLResponse) {
@@ -381,19 +738,81 @@ enum ExpenseAIClassifier {
         return nil
     }
 
+    private static func decodePayloads(from content: String) -> [ClassificationPayload]? {
+        let cleaned = content
+            .replacingOccurrences(of: "```json", with: "")
+            .replacingOccurrences(of: "```JSON", with: "")
+            .replacingOccurrences(of: "```", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var candidates = [cleaned]
+        if let extracted = extractJSON(from: cleaned), extracted != cleaned {
+            candidates.append(extracted)
+        }
+        for candidate in candidates {
+            let data = Data(candidate.utf8)
+            if let wrapper = try? JSONDecoder().decode(ClassificationWrapper.self, from: data) {
+                return wrapper.classifications
+            }
+            if let array = try? JSONDecoder().decode([ClassificationPayload].self, from: data) {
+                return array
+            }
+        }
+        return nil
+    }
+
     private static func canonicalCategory(_ raw: String) -> String? {
-        let normalized = raw.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let normalized = normalizedLabel(raw)
+        let aliases: [String: String] = [
+            "restaurante": "Restaurantes y bares",
+            "restaurantes": "Restaurantes y bares",
+            "restaurantes bares": "Restaurantes y bares",
+            "bares restaurantes": "Restaurantes y bares",
+            "cafeteria": "Restaurantes y bares",
+            "delivery": "Restaurantes y bares",
+            "tienda de conveniencia": "Tiendita",
+            "tiendas de conveniencia": "Tiendita",
+            "minisuper": "Tiendita",
+            "despensa": "Despensa / supermercado",
+            "supermercado": "Despensa / supermercado",
+            "compras": "Compras personales",
+            "compra personal": "Compras personales",
+            "software": "Software y suscripciones",
+            "suscripciones": "Software y suscripciones",
+            "club amigos": "Club Amigos / Proyectos",
+            "proyectos": "Club Amigos / Proyectos",
+            "comisiones": "Comisiones y finanzas",
+            "finanzas": "Comisiones y finanzas",
+            "otro": "Otros / Por revisar",
+            "otros": "Otros / Por revisar",
+            "por revisar": "Otros / Por revisar",
+            "viaje": "Viajes"
+        ]
+        if let alias = aliases[normalized] { return alias }
         return allowedCategories.first {
-            $0.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current) == normalized
+            normalizedLabel($0) == normalized
         }
     }
 
-    private static func normalizedTags(_ raw: [String]) -> [String]? {
+    private static func normalizedTags(_ raw: [String]) -> [String] {
         var seen = Set<String>()
+        var result: [String] = []
         for tag in raw {
-            guard allowedTags.contains(tag), seen.insert(tag).inserted else { return nil }
+            let normalized = normalizedLabel(tag)
+            guard let canonical = allowedTags.first(where: { normalizedLabel($0) == normalized }),
+                  seen.insert(canonical).inserted else { continue }
+            result.append(canonical)
         }
-        return raw
+        return result
+    }
+
+    private static func normalizedLabel(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+            .replacingOccurrences(of: "&", with: " y ")
+            .replacingOccurrences(of: "/", with: " ")
+            .replacingOccurrences(of: "-", with: " ")
+            .split(whereSeparator: { $0.isWhitespace })
+            .joined(separator: " ")
     }
 }
 

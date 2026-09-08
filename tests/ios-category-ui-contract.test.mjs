@@ -21,6 +21,8 @@ test("la pantalla ofrece reglas locales y reporta solo cambios realmente aplicad
 
   assert.match(source, /Aplicar reglas automáticas/);
   assert.ok(source.includes("de \\(eligible) gastos clasificados"));
-  assert.match(source, /let updated = store\.applyAIClassifications\(classifications\)/);
+  assert.match(source, /let updated = store\.applyAIClassifications\(result\.classifications\)/);
+  assert.ok(source.includes("Quedan \\(remaining) por revisar"));
+  assert.match(source, /stage: "categories\.ai"/);
   assert.equal(source.includes("Se actualizaron \\(classifications.count)"), false);
 });

@@ -234,18 +234,29 @@ struct MovementsView: View {
         isAIProcessing = true
         Task { @MainActor in
             do {
-                let classifications = try await ExpenseAIClassifier.classify(
+                let result = try await ExpenseAIClassifier.classify(
                     movements: items,
                     apiKey: apiKey,
                     model: model,
                     provider: provider
                 )
-                let updated = store.applyAIClassifications(classifications)
+                let updated = store.applyAIClassifications(result.classifications)
+                DiagnosticsRecorder.record(
+                    level: result.unresolvedCount > 0 ? "error" : "info",
+                    stage: "categories.ai",
+                    message: "\(result.diagnosticSummary) Aplicados \(updated)."
+                )
                 isAIProcessing = false
+                let remaining = max(items.count - updated, 0)
                 aiMessage = updated == 0
-                    ? "La IA no encontró categorías con confianza suficiente. Puedes asignarlas manualmente desde el detalle del movimiento."
-                    : "Se actualizaron \(updated) movimientos y Marcelito recordará esas categorías para próximos estados."
+                    ? "La IA respondió, pero no encontró categorías con confianza suficiente. Quedan \(remaining) por revisar y puedes asignarlas manualmente desde el detalle."
+                    : "Se actualizaron \(updated) movimientos y Marcelito recordará esas categorías. Quedan \(remaining) por revisar."
             } catch {
+                DiagnosticsRecorder.record(
+                    level: "error",
+                    stage: "categories.ai",
+                    message: "Proveedor \(provider.displayName); modelo \(model); solicitados \(items.count); ejecución fallida antes de aplicar cambios."
+                )
                 isAIProcessing = false
                 aiErrorMessage = error.localizedDescription
             }

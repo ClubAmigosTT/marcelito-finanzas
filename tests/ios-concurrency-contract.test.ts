@@ -258,12 +258,14 @@ test("el clasificador iOS interpola categorías y movimientos reales en el promp
 
 test("el clasificador iOS divide lotes y filtra respuestas fuera de alcance", async () => {
   const source = await readFile(aiClassificationPath, "utf8");
-  assert.match(source, /static let maxBatchSize = 12/);
+  assert.match(source, /static let maxBatchSize = 5/);
   assert.match(source, /classifyBatch\(/);
   assert.match(source, /requested\.contains\(movementID\)/);
   assert.match(source, /seen\.insert\(movementID\)\.inserted/);
   assert.match(source, /let usesDeterministicOptions = provider == \.nvidia \|\| provider == \.gemini/);
-  assert.match(source, /maxTokens: usesDeterministicOptions \? 2048 : nil/);
+  assert.match(source, /maxTokens: usesDeterministicOptions \? 4096 : nil/);
+  assert.match(source, /let firstPass = batchResult\.classifications\.isEmpty/);
+  assert.match(source, /provider-format-stopped/);
 });
 
 test("iOS usa el proveedor seleccionado solo para enriquecer gastos después de la lectura local", async () => {
@@ -300,7 +302,8 @@ test("iOS permite elegir Gemini, Zen o NVIDIA sin incluir claves en el código",
   assert.match(settings, /Picker\("Servicio de IA", selection: \$selectedProvider\)/);
   assert.match(settings, /kSecAttrAccount as String: "\\\(provider\.rawValue\)-api-key"/);
   assert.match(settings, /chatTemplateKwargs: provider == \.nvidia && model == nvidiaDefaultModel \? ChatTemplateKwargs\(thinking: false\) : nil/);
-  assert.match(settings, /responseFormat: provider == \.gemini \? ResponseFormat\(type: "json_object"\) : nil/);
+  assert.match(settings, /type: "json_schema"/);
+  assert.match(settings, /return ResponseFormat\(type: "json_object", jsonSchema: nil\)/);
   assert.match(settings, /reasoningEffort: provider == \.nvidia && model == "moonshotai\/kimi-k3" \? "low" : nil/);
   assert.match(settings, /retryableStatusCodes = Set\(\[408, 425, 429, 500, 502, 503, 504, 529\]\)/);
   assert.match(sections, /provider: provider/);
@@ -312,5 +315,7 @@ test("el clasificador iOS no envía cuentas ni documentos", async () => {
   const source = await readFile(aiClassificationPath, "utf8");
   assert.doesNotMatch(source, /"cuenta"\s*:/);
   assert.match(source, /No recibes ni debes solicitar PDFs/);
-  assert.match(source, /guard parsed\.count == movements\.count/);
+  assert.match(source, /for payload in payloads/);
+  assert.match(source, /"rows-missing"/);
+  assert.doesNotMatch(source, /guard parsed\.count == movements\.count/);
 });
