@@ -679,7 +679,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.07.6"
+    static let readerVersion = "ios-reader-deterministic-2026.09.07.7"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4547,6 +4547,9 @@ final class FinanceStore {
         // fixtures. Rebuilding from concrete ranges is idempotent and leaves
         // every original character untouched.
         let boundaries = [
+            #"(?i)estado\s+de\s+cuenta"#,
+            #"(?i)este\s+no\s+es\s+un\s+documento"#,
+            #"(?i)paga\s+desde\s+los\s+canales"#,
             #"(?i)fecha\s+y\s+detalle\s+de\s+las\s+operaciones"#,
             #"(?i)total\s+de\s+las\s+transacciones\s+en"#,
             #"(?i)total\s+de\s+transacciones\s+en\s+moneda\s+extranjera"#,
@@ -4954,7 +4957,109 @@ final class FinanceStore {
         let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         guard normalized.contains("fecha y detalle de las operaciones") else { return [] }
         let structured = rebuildAmexSelectableLines(text)
-        return parse(text: structured, fileName: fileName, sourceHint: "Amex", diagnosticSink: diagnosticSink)
+        guard let dateRegex = try? NSRegularExpression(pattern: #"(?i)^(?:\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{1,2}\s*(?:de\s*|[/-])(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)(?:[/-]\d{4})?)(?![a-z])"#),
+              let moneyRegex = try? NSRegularExpression(pattern: #"(?<![\w.,])\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?![\d.,])"#) else { return [] }
+        let yearSource = fileName + " " + text
+        let year = yearSource.range(of: #"\b20\d{2}\b"#, options: .regularExpression)
+            .flatMap { Int(yearSource[$0]) } ?? Calendar.current.component(.year, from: .now)
+        var section = 0
+        var tableOpen = false
+        var page: Int?
+        var rowPage: Int?
+        var pending = ""
+        var result: [Movement] = []
+        func flush() {
+            guard !pending.isEmpty else { return }
+            let original = pending
+            pending = ""
+            let label = [1: "NACIONALES_PAGOS_CREDITOS", 2: "MONEDA_EXTRANJERA", 3: "MSI"][section] ?? "FUERA_DE_SECCION"
+            var reason = "amex.date-invalid"
+            var selected: Decimal?
+            var tokens: [String] = []
+            var accepted = false
+            defer {
+                diagnosticSink?(OCRRowDiagnostic(page: rowPage, rawText: original,
+                    selectedColumn: label, selectedAmount: selected,
+                    reason: reason, accepted: accepted, cellTexts: tokens))
+            }
+            guard let dateMatch = firstMatch(in: original, regex: dateRegex),
+                  let date = parseDate(dateMatch.text, defaultYear: year),
+                  let range = Range(dateMatch.range, in: original) else { return }
+            var body = String(original[range.upperBound...])
+            // Native PDF text can put RFC/REF before or after the MXN cell.
+            // Remove only these explicitly labelled identifiers, not numbers
+            // selected by magnitude, proximity or a reconciliation target.
+            body = body.replacingOccurrences(of: #"(?i)\bRFC\s*[:#]?\s*[A-Z0-9]+\b|/REF[^\s]+"#, with: " ", options: .regularExpression)
+            // The foreign annotation is source amount + TC (five decimals).
+            // MXN can precede or follow it depending on native text ordering.
+            body = body.replacingOccurrences(of: #"(?i)(?:peso\s+colombiano|d[oó�]lar\s+U\.S\.A\.|euro)\s+[\d,.]+\s+TC\s*:\s*\d+[.,]\d+"#, with: " ", options: .regularExpression)
+            reason = "amex.foreign-annotation-incomplete"
+            guard body.range(of: #"(?i)\bTC\s*:|peso\s+colombiano|d[oó�]lar\s+U\.S\.A\."#, options: .regularExpression) == nil else { return }
+            // CARGO nn DEnn is the installment number, not money.
+            body = body.replacingOccurrences(of: #"(?i)\bCARGO\s+\d+\s+DE\s*\d+\b"#, with: " ", options: .regularExpression)
+            let allMoney = allMatches(in: body, regex: moneyRegex)
+            tokens = allMoney.map(\.text)
+            // The MN cell closes the operation (optionally followed by CR).
+            // A price embedded in a merchant name is not the closing cell.
+            let matches = allMoney.filter { match in
+                guard let range = Range(match.range, in: body) else { return false }
+                return body[range.upperBound...].range(of: #"(?i)^\s*(?:CR)?\s*$"#, options: .regularExpression) != nil
+            }
+            reason = "amex.mxn-cell-ambiguous"
+            guard matches.count == 1, let match = matches.first,
+                  let amount = parseAmount(match.text), amount > 0,
+                  let moneyRange = Range(match.range, in: body) else { return }
+            selected = amount
+            body.removeSubrange(moneyRange)
+            let credit = body.range(of: #"(?i)\bCR\b"#, options: .regularExpression) != nil
+            body = body.replacingOccurrences(of: #"(?i)\bCR\b"#, with: " ", options: .regularExpression)
+            let title = body.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            reason = "amex.description-invalid"
+            guard title.count >= 3, title.rangeOfCharacter(from: .letters) != nil else { return }
+            let lower = title.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+            let payment = lower.hasPrefix("gracias por su pago")
+            reason = "amex.payment-without-credit-marker"
+            guard !payment || credit else { return }
+            let kind: MovementKind = payment ? .cardPayment : credit ? .credit : section == 3 ? .msi : .purchase
+            let flow: FlowKind = payment ? .debt : credit ? .income : .expense
+            let signed = credit && !payment ? amount : -amount
+            reason = "amex.mxn-cell-verified; kind=\(kind.rawValue)"
+            result.append(Movement(date: date, title: title, account: "Amex",
+                category: category(for: lower, flow: flow), amount: signed, flow: flow,
+                kind: kind, foreignCurrency: section == 2 || Self.hasForeignCurrency(in: original.lowercased()),
+                extractionEvidence: MovementExtractionEvidence(method: "pdf-text", page: rowPage,
+                    confidence: 1, sourceText: String(original.prefix(500)), selectedColumn: label,
+                    selectedAmount: amount, selectionReason: reason)))
+            accepted = true
+        }
+        for raw in structured.components(separatedBy: .newlines) {
+            let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            let lower = line.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+            if lower.hasPrefix("__pdf_page_") {
+                flush(); tableOpen = false; page = Int(lower.filter(\.isNumber)); continue
+            }
+            if lower.contains("fecha y detalle de las operaciones") {
+                flush(); if section == 0 { section = 1 }; tableOpen = true; continue
+            }
+            if lower.contains("total de las transacciones en") { flush(); section = 2; continue }
+            if lower.contains("total de transacciones en moneda extranjera") { flush(); section = 0; continue }
+            if lower.contains("transacciones de meses sin intereses") { flush(); section = 3; tableOpen = true; continue }
+            if lower.contains("total de meses sin intereses") || lower.contains("resumen de meses sin intereses")
+                || lower.contains("consolidado de compras") || lower.contains("total de plan de meses") {
+                flush(); section = 0; continue
+            }
+            if lower.hasPrefix("estado de cuenta") || lower.contains("este no es un documento")
+                || lower.hasPrefix("paga desde los canales") {
+                flush(); tableOpen = false; continue
+            }
+            guard section > 0, tableOpen else { continue }
+            if firstMatch(in: line, regex: dateRegex) != nil {
+                flush(); pending = line; rowPage = page
+            } else if !pending.isEmpty { pending += " " + line }
+        }
+        flush()
+        return result
     }
 
     private static func parse(text: String, fileName: String, sourceHint: String? = nil, diagnosticSink: ((OCRRowDiagnostic) -> Void)? = nil) -> [Movement] {
@@ -6333,6 +6438,16 @@ final class FinanceStore {
         source: String,
         diagnostics: [OCRRowDiagnostic]
     ) -> StatementReconciliationRecord {
+        // Amex's independent text parser must not hide a rejected row just
+        // because other mistakes happen to compensate in aggregate totals.
+        if source == "Amex", let rejected = diagnostics.first(where: {
+            !$0.accepted && $0.reason.hasPrefix("amex.")
+        }) {
+            var result = reconciliation
+            result.status = .invalid
+            result.reason = [reconciliation.reason, rejected.reason].compactMap { $0 }.joined(separator: "; ")
+            return result
+        }
         guard source == "Santander" else { return reconciliation }
         let rejected = diagnostics.filter { !$0.accepted }
         guard diagnostics.isEmpty || !rejected.isEmpty else { return reconciliation }
@@ -6363,6 +6478,42 @@ final class FinanceStore {
         let top = ceil((1 - clipped.maxY) * CGFloat(height))
         let bottom = floor((1 - clipped.minY) * CGFloat(height))
         return CGRect(x: left, y: top, width: max(0, right - left), height: max(0, bottom - top))
+    }
+
+    /// Agreement is based only on complete cell readings, never on an expected
+    /// balance or statement total. Conflicting readable values fail closed.
+    /// Nil means unreadable; an empty string is an explicitly blank cell.
+    static func santanderCellConsensus(_ readings: [String?]) -> String? {
+        let pattern = #"^\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}$"#
+        var votes: [String: [String]] = [:]
+        for reading in readings {
+            guard let reading else { continue }
+            let text = reading.trimmingCharacters(in: .whitespacesAndNewlines)
+            if text.isEmpty { votes["blank", default: []].append(""); continue }
+            guard text.range(of: pattern, options: .regularExpression) != nil,
+                  let amount = parseAmount(text) else { continue }
+            let key = NSDecimalNumber(decimal: amount).stringValue
+            votes[key, default: []].append(text)
+        }
+        guard votes.count == 1, let agreeing = votes.values.first,
+              agreeing.count >= 2 else { return nil }
+        return agreeing[0]
+    }
+
+    /// Change scale and whitespace only; never expand into neighbouring cells.
+    private static func santanderRetryImage(_ crop: CGImage, scale: CGFloat) -> CGImage? {
+        let padding: CGFloat = 20
+        let size = CGSize(width: CGFloat(crop.width) * scale + padding * 2,
+                          height: CGFloat(crop.height) * scale + padding * 2)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            UIImage(cgImage: crop).draw(in: CGRect(x: padding, y: padding,
+                width: CGFloat(crop.width) * scale, height: CGFloat(crop.height) * scale))
+        }.cgImage
     }
 
     private static func parseSantanderTable(
@@ -6722,14 +6873,30 @@ final class FinanceStore {
                 guard !pixels.isEmpty, let crop = image.cropping(to: pixels) else {
                     outcomes.append("crop-unavailable-cell-\(cell)"); continue
                 }
-                let request = VNRecognizeTextRequest()
-                request.recognitionLevel = .accurate
-                request.usesLanguageCorrection = false
-                do { try VNImageRequestHandler(cgImage: crop, options: [:]).perform([request]) }
-                catch { outcomes.append("vision-error-cell-\(cell)"); continue }
-                let candidates = (request.results ?? []).compactMap { $0.topCandidates(1).first }
-                let text = candidates.map(\.string).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-                physical.retryTexts[cell] = text
+                var readings: [String?] = []
+                var confidences: [Double] = []
+                for scale: CGFloat in [1, 1.5, 2] {
+                    guard let variant = santanderRetryImage(crop, scale: scale) else {
+                        readings.append(nil); continue
+                    }
+                    let request = VNRecognizeTextRequest()
+                    request.recognitionLevel = .accurate
+                    request.usesLanguageCorrection = false
+                    request.recognitionLanguages = ["en-US"]
+                    do { try VNImageRequestHandler(cgImage: variant, options: [:]).perform([request]) }
+                    catch { readings.append(nil); continue }
+                    let candidates = (request.results ?? []).compactMap { $0.topCandidates(1).first }
+                    readings.append(candidates.map(\.string).joined(separator: " ")
+                        .trimmingCharacters(in: .whitespacesAndNewlines))
+                    confidences.append(contentsOf: candidates.map { Double($0.confidence) })
+                }
+                physical.retryTexts[cell] = zip(["1x", "1.5x", "2x"], readings)
+                    .map { "\($0.0): \($0.1 ?? "<read-error>")" }.joined(separator: "\n")
+                guard let text = santanderCellConsensus(readings) else {
+                    // A disputed reread cannot silently retain an old value.
+                    recovered[cell] = []
+                    outcomes.append("no-consensus-cell-\(cell)"); continue
+                }
                 if text.isEmpty { recovered[cell] = []; outcomes.append("blank-cell-\(cell)"); continue }
                 // The entire crop must contain exactly one monetary value;
                 // arbitrary text, multiple values and malformed decimals reject.
@@ -6741,7 +6908,7 @@ final class FinanceStore {
                     outcomes.append("ambiguous-crop-cell-\(cell)"); continue
                 }
                 recovered[cell] = [OCRObservation(page: pageIndex, text: text, boundingBox: region,
-                    confidence: candidates.map { Double($0.confidence) }.min() ?? 0)]
+                    confidence: confidences.min() ?? 0)]
                 outcomes.append("read-cell-\(cell)")
             }
             physical.cells = recovered
