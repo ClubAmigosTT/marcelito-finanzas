@@ -5,6 +5,17 @@ import UIKit
 
 /// Synthetic geometry regressions, not certification of the private PDF corpus.
 final class SantanderIndependentRowsTests: XCTestCase {
+    func testCellConsensusRequiresRepeatedCompleteReadings() {
+        XCTAssertEqual(FinanceStore.santanderCellConsensus(["54,977.93", "54977.93", nil]), "54,977.93")
+        XCTAssertEqual(FinanceStore.santanderCellConsensus(["", "", nil]), "")
+        XCTAssertNil(FinanceStore.santanderCellConsensus(["54,977.93", nil, "noise"]))
+        XCTAssertNil(FinanceStore.santanderCellConsensus(["54,977.93", "54,977.93", "4,977.93"]))
+        XCTAssertNil(FinanceStore.santanderCellConsensus(["", "", "500.00"]))
+        for invalid in ["RFC 500.00", "500.00 800.00", "54,97.93", "5497793", "500.001"] {
+            XCTAssertNil(FinanceStore.santanderCellConsensus([invalid, invalid, invalid]))
+        }
+    }
+
     private var header: [OCRObservationFixture] {
         [OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.09, y: 0.96, width: 0.42),
          OCRObservationFixture(text: "FECHA FOLIO DESCRIPCION DEPOSITO RETIRO SALDO", x: 0.05, y: 0.90, width: 0.89)]
@@ -173,10 +184,13 @@ final class SantanderIndependentRowsTests: XCTestCase {
             ("970.00" as NSString).draw(at: CGPoint(x: 0.86 * 612, y: 0.16 * 792), withAttributes: attributes)
         }
         let pdf = try XCTUnwrap(PDFDocument(data: data))
-        let result = read(row(1, amount: nil, balance: "970.00"), pdf: pdf)
-        XCTAssertEqual(result.movements.map(\.amount), [-30])
-        XCTAssertEqual(result.diagnostics.map(\.accepted), [true])
-        XCTAssertTrue(result.diagnostics[0].reason.contains("relectura de celdas sí"))
-        XCTAssertEqual(result.diagnostics[0].cellTexts, ["", "30.00", "970.00"])
+        for _ in 0..<3 {
+            let result = read(row(1, amount: nil, balance: "970.00"), pdf: pdf)
+            XCTAssertEqual(result.movements.map(\.amount), [-30])
+            XCTAssertEqual(result.diagnostics.map(\.accepted), [true])
+            XCTAssertTrue(result.diagnostics[0].reason.contains("relectura de celdas sí"))
+            XCTAssertEqual(result.diagnostics[0].cellTexts, ["", "30.00", "970.00"])
+            XCTAssertTrue(result.diagnostics[0].cellRetryTexts?[1].contains("2x:") == true)
+        }
     }
 }
