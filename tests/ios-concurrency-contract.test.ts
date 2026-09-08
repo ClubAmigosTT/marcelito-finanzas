@@ -296,10 +296,12 @@ test("iOS permite elegir Gemini, Zen o NVIDIA sin incluir claves en el código",
   assert.match(settings, /https:\/\/opencode\.ai\/zen\/v1\/chat\/completions/);
   assert.match(settings, /https:\/\/integrate\.api\.nvidia\.com\/v1\/chat\/completions/);
   assert.match(settings, /deepseek-ai\/deepseek-v4-flash-0731/);
+  assert.match(settings, /moonshotai\/kimi-k3/);
   assert.match(settings, /Picker\("Servicio de IA", selection: \$selectedProvider\)/);
   assert.match(settings, /kSecAttrAccount as String: "\\\(provider\.rawValue\)-api-key"/);
-  assert.match(settings, /chatTemplateKwargs: provider == \.nvidia \? ChatTemplateKwargs\(thinking: false\) : nil/);
+  assert.match(settings, /chatTemplateKwargs: provider == \.nvidia && model == nvidiaDefaultModel \? ChatTemplateKwargs\(thinking: false\) : nil/);
   assert.match(settings, /responseFormat: provider == \.gemini \? ResponseFormat\(type: "json_object"\) : nil/);
+  assert.match(settings, /reasoningEffort: provider == \.nvidia && model == "moonshotai\/kimi-k3" \? "low" : nil/);
   assert.match(settings, /retryableStatusCodes = Set\(\[408, 425, 429, 500, 502, 503, 504, 529\]\)/);
   assert.match(sections, /provider: provider/);
   assert.doesNotMatch(settings, /nvapi-/);

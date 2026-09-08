@@ -62,7 +62,8 @@ enum ExpenseAIClassifier {
         ModelOption(id: "big-pickle", name: "Big Pickle")
     ]
     static let nvidiaModels: [ModelOption] = [
-        ModelOption(id: nvidiaDefaultModel, name: "DeepSeek V4 Flash 0731")
+        ModelOption(id: nvidiaDefaultModel, name: "DeepSeek V4 Flash 0731"),
+        ModelOption(id: "moonshotai/kimi-k3", name: "Kimi K3")
     ]
     static let geminiModels: [ModelOption] = [
         ModelOption(id: geminiDefaultModel, name: "Gemini 3.1 Flash-Lite"),
@@ -120,6 +121,7 @@ enum ExpenseAIClassifier {
         let stream: Bool?
         let chatTemplateKwargs: ChatTemplateKwargs?
         let responseFormat: ResponseFormat?
+        let reasoningEffort: String?
 
         enum CodingKeys: String, CodingKey {
             case model, messages, temperature, stream
@@ -127,6 +129,7 @@ enum ExpenseAIClassifier {
             case maxTokens = "max_tokens"
             case chatTemplateKwargs = "chat_template_kwargs"
             case responseFormat = "response_format"
+            case reasoningEffort = "reasoning_effort"
         }
     }
 
@@ -270,8 +273,9 @@ enum ExpenseAIClassifier {
             topP: usesDeterministicOptions ? 1 : nil,
             maxTokens: usesDeterministicOptions ? 2048 : nil,
             stream: usesDeterministicOptions ? false : nil,
-            chatTemplateKwargs: provider == .nvidia ? ChatTemplateKwargs(thinking: false) : nil,
-            responseFormat: provider == .gemini ? ResponseFormat(type: "json_object") : nil
+            chatTemplateKwargs: provider == .nvidia && model == nvidiaDefaultModel ? ChatTemplateKwargs(thinking: false) : nil,
+            responseFormat: provider == .gemini ? ResponseFormat(type: "json_object") : nil,
+            reasoningEffort: provider == .nvidia && model == "moonshotai/kimi-k3" ? "low" : nil
         )
         var request = URLRequest(url: provider.endpoint)
         request.httpMethod = "POST"
