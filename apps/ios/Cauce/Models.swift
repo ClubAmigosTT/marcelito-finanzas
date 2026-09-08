@@ -188,10 +188,11 @@ struct OCRRowDiagnostic: Codable, Identifiable {
     let rowOrdinal: Int?
     let rowBounds: MovementExtractionBounds?
     let cellTexts: [String]?
+    let cellRetryTexts: [String]?
 
     private enum CodingKeys: String, CodingKey {
         case id, page, rawText, selectedColumn, selectedAmount, direction, reason, accepted
-        case rowOrdinal, rowBounds, cellTexts
+        case rowOrdinal, rowBounds, cellTexts, cellRetryTexts
     }
 
     init(
@@ -205,7 +206,8 @@ struct OCRRowDiagnostic: Codable, Identifiable {
         accepted: Bool,
         rowOrdinal: Int? = nil,
         rowBounds: MovementExtractionBounds? = nil,
-        cellTexts: [String]? = nil
+        cellTexts: [String]? = nil,
+        cellRetryTexts: [String]? = nil
     ) {
         self.id = id
         self.page = page
@@ -218,6 +220,7 @@ struct OCRRowDiagnostic: Codable, Identifiable {
         self.rowOrdinal = rowOrdinal
         self.rowBounds = rowBounds
         self.cellTexts = cellTexts
+        self.cellRetryTexts = cellRetryTexts
     }
 
     func encode(to encoder: Encoder) throws {
@@ -233,6 +236,7 @@ struct OCRRowDiagnostic: Codable, Identifiable {
         try container.encodeIfPresent(rowOrdinal, forKey: .rowOrdinal)
         try container.encodeIfPresent(rowBounds, forKey: .rowBounds)
         try container.encodeIfPresent(cellTexts, forKey: .cellTexts)
+        try container.encodeIfPresent(cellRetryTexts, forKey: .cellRetryTexts)
     }
 }
 
@@ -675,7 +679,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.07.5"
+    static let readerVersion = "ios-reader-deterministic-2026.09.07.6"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -1007,6 +1011,12 @@ final class FinanceStore {
     /// observations are accepted by this seam by design.
     static func amexTextRowsForTesting(_ text: String, fileName: String) -> [Movement] {
         parseAmexText(text, fileName: fileName)
+    }
+
+    static func amexTextDiagnosticsForTesting(_ text: String, fileName: String) -> [OCRRowDiagnostic] {
+        var diagnostics: [OCRRowDiagnostic] = []
+        _ = parseAmexText(text, fileName: fileName, diagnosticSink: { diagnostics.append($0) })
+        return diagnostics
     }
 
     /// Decides whether a PDF's selectable text is structurally usable. Kept
@@ -3616,8 +3626,7 @@ final class FinanceStore {
         } else if source.localizedCaseInsensitiveContains("Amex") {
             // The selectable Amex parser is section-aware and ignores all
             // dates outside Fecha y Detalle de las operaciones.
-            parsedCandidates = Self.parseAmexText(text, fileName: fileName)
-            rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "fila Amex dentro de Fecha y Detalle de las operaciones")
+            parsedCandidates = Self.parseAmexText(text, fileName: fileName, diagnosticSink: { rowDiagnostics.append($0) })
         } else {
             // Santander uses its fixed visual columns; unsupported issuers
             // have no generic text parser. Both remain rejected when Vision
@@ -4941,14 +4950,14 @@ final class FinanceStore {
     /// performed by the section-aware reader below, never by Vision/OCR or a
     /// global numeric scan. The caller runs the resulting rows through the
     /// same cent-level issuer reconciliation gate before canonical persistence.
-    private static func parseAmexText(_ text: String, fileName: String) -> [Movement] {
+    private static func parseAmexText(_ text: String, fileName: String, diagnosticSink: ((OCRRowDiagnostic) -> Void)? = nil) -> [Movement] {
         let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         guard normalized.contains("fecha y detalle de las operaciones") else { return [] }
         let structured = rebuildAmexSelectableLines(text)
-        return parse(text: structured, fileName: fileName, sourceHint: "Amex")
+        return parse(text: structured, fileName: fileName, sourceHint: "Amex", diagnosticSink: diagnosticSink)
     }
 
-    private static func parse(text: String, fileName: String, sourceHint: String? = nil) -> [Movement] {
+    private static func parse(text: String, fileName: String, sourceHint: String? = nil, diagnosticSink: ((OCRRowDiagnostic) -> Void)? = nil) -> [Movement] {
         let dateRegex = try? NSRegularExpression(
             pattern: #"(?<!\d)(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?!\d)"#
         )
@@ -5020,6 +5029,7 @@ final class FinanceStore {
             /// purchase without an explicit currency label still uses the
             /// local MXN amount and reconciles against the right subtotal.
             let forcedForeignCurrency: Bool
+            let section: Int
         }
         let isAmexText = account.localizedCaseInsensitiveContains("Amex")
         // A selectable Amex statement has three separate transaction tables.
@@ -5033,6 +5043,7 @@ final class FinanceStore {
         var pendingRow = ""
         var pendingPage: Int?
         var pendingForcedForeignCurrency = false
+        var pendingSection = 0
         var currentPage: Int?
         func flushPending() {
             guard !pendingRow.isEmpty else { return }
@@ -5040,7 +5051,8 @@ final class FinanceStore {
                 ParsedTextRow(
                     text: pendingRow,
                     page: pendingPage,
-                    forcedForeignCurrency: pendingForcedForeignCurrency
+                    forcedForeignCurrency: pendingForcedForeignCurrency,
+                    section: pendingSection
                 )
             )
             pendingRow = ""
@@ -5138,6 +5150,7 @@ final class FinanceStore {
                 pendingRow = line
                 pendingPage = currentPage
                 pendingForcedForeignCurrency = amexSectionAware && amexSection == 2
+                pendingSection = amexSection
             } else if !pendingRow.isEmpty {
                 pendingRow += " " + line
             }
@@ -5146,14 +5159,32 @@ final class FinanceStore {
 
         return rows.compactMap { parsedRow in
             let original = parsedRow.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            // Diagnostic-only trace: preserves rejected anchors as well as
+            // accepted candidates. It does not change selection or accounting.
+            var diagnosticReason = "amex.row-too-short"
+            var diagnosticAmount: Decimal?
+            var diagnosticTokens: [String] = []
+            var diagnosticMovement: Movement?
+            let diagnosticSection = [1: "NACIONALES_PAGOS_CREDITOS", 2: "MONEDA_EXTRANJERA", 3: "MSI"][parsedRow.section] ?? "FUERA_DE_SECCION"
+            defer {
+                if isAmexText {
+                    diagnosticSink?(OCRRowDiagnostic(page: parsedRow.page, rawText: original,
+                        selectedColumn: diagnosticSection, selectedAmount: diagnosticAmount,
+                        direction: diagnosticMovement.map { $0.amount >= 0 ? "in" : "out" },
+                        reason: diagnosticReason, accepted: diagnosticMovement != nil,
+                        cellTexts: diagnosticTokens))
+                }
+            }
             guard original.count > 3 else { return nil }
 
             let normalized = original.folding(
                 options: [.diacriticInsensitive, .caseInsensitive],
                 locale: .current
             )
+            diagnosticReason = "amex.administrative-row"
             guard !ignoredPhrases.contains(where: { normalized.contains($0) }) else { return nil }
 
+            diagnosticReason = "amex.date-invalid"
             guard let dateMatch = leadingDateMatch(in: original),
                   let parsedDate = parseDate(dateMatch.text, defaultYear: defaultYear) else { return nil }
             var working = original
@@ -5183,6 +5214,8 @@ final class FinanceStore {
                 $0.text.contains("$") || $0.text.range(of: #"[.,]\d{1,2}$"#, options: .regularExpression) != nil
             }
             let usableAmountMatches = moneyMatches.isEmpty ? allAmountMatches : moneyMatches
+            diagnosticTokens = usableAmountMatches.map(\.text)
+            diagnosticReason = "amex.amount-invalid"
             let foreignCurrency = parsedRow.forcedForeignCurrency || Self.hasForeignCurrency(in: normalized)
             let bankLikeRow = documentKind == .bank
                 || ["deposito", "retiro", "saldo", "cuenta de cheques", "cuenta de ahorro", "abono"]
@@ -5222,6 +5255,8 @@ final class FinanceStore {
             // currency marker, grouping separator or cents for larger values
             // so administrative numbers cannot become million-peso expenses.
             let rawAmount = amountMatch.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            diagnosticAmount = parsedAmount
+            diagnosticReason = "amex.amount-looks-like-reference"
             let digitsOnly = rawAmount.filter { $0.isNumber }
             let hasMoneyShape = rawAmount.contains("$")
                 || rawAmount.range(of: #"[.,]\d{1,2}$"#, options: .regularExpression) != nil
@@ -5252,6 +5287,7 @@ final class FinanceStore {
                 .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             title = cleanMerchantTitle(title)
+            diagnosticReason = "amex.description-invalid"
             guard title.count >= 3, !isAdministrativeTitle(title) else { return nil }
             guard title.rangeOfCharacter(from: .letters) != nil else { return nil }
 
@@ -5295,6 +5331,7 @@ final class FinanceStore {
                 || amountMatch.text.contains("-")
                 || amountMatch.text.contains("+")
                 || hasCreditMarker
+            diagnosticReason = "amex.direction-unresolved"
             guard directionSignal else { return nil }
             let isStatementCredit = hasCreditMarker && !isCardPayment && !isRefund && !isIncome
             let flow: FlowKind
@@ -5356,7 +5393,7 @@ final class FinanceStore {
             }
             let travelRelated = ["viaje", "hotel", "hospedaje", "aerolinea", "vuelo", "avion", "transporte", "uber", "taxi", "metro", "renta de auto", "destino", "equipaje"].contains { titleNormalized.contains($0) }
 
-            return Movement(
+            let movement = Movement(
                 date: date,
                 title: title,
                 account: displayAccount,
@@ -5370,9 +5407,15 @@ final class FinanceStore {
                     method: "pdf-text",
                     page: parsedRow.page,
                     confidence: 0.93,
-                    sourceText: String(original.prefix(240))
+                    sourceText: String(original.prefix(isAmexText ? 500 : 240)),
+                    selectedColumn: isAmexText ? diagnosticSection : nil,
+                    selectedAmount: isAmexText ? parsedAmount : nil,
+                    selectionReason: isAmexText ? "amex.selected-token; token=\(rawAmount); kind=\(kind.rawValue); foreign=\(foreignCurrency)" : nil
                 )
             )
+            diagnosticMovement = movement
+            diagnosticReason = "amex.candidate-extracted; kind=\(kind.rawValue); foreign=\(foreignCurrency); signed=\(NSDecimalNumber(decimal: signedAmount).stringValue); token=\(rawAmount)"
+            return movement
         }
     }
 
@@ -6303,6 +6346,15 @@ final class FinanceStore {
 
     /// Vision uses bottom-left normalized coordinates; CGImage crops use
     /// top-left pixels. Round inward so a crop cannot cross a money column.
+    static func santanderRetryCells(problem: String?) -> [Int] {
+        switch problem {
+        case "santander.balance-cell-missing-or-ambiguous": return [2]
+        case "santander.movement-cell-missing", "santander.movement-cell-ambiguous": return [0, 1]
+        case "santander.date-description-or-amount-invalid": return []
+        default: return [0, 1, 2]
+        }
+    }
+
     static func santanderCropPixelRect(_ region: CGRect, width: Int, height: Int) -> CGRect {
         let clipped = region.intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
         guard !clipped.isNull, width > 0, height > 0 else { return .zero }
@@ -6574,6 +6626,7 @@ final class FinanceStore {
             var problem: String?
             var retried = false
             var retryOutcome = "not-needed"
+            var retryTexts = ["not-read", "not-read", "not-read"]
         }
         let cellEdges = [columns.movementMinX, columns.depositMaxX, columns.balanceMinX, CGFloat(0.955)]
         var physicalRows: [PhysicalRow] = []
@@ -6654,33 +6707,45 @@ final class FinanceStore {
                 renderedPage = pageIndex
             }
             guard let image = renderedImage else { return }
-            var recovered: [[OCRObservation]] = []
-            for cell in 0..<3 {
+            // Recover the failed cell independently. A noisy crop of an
+            // already readable withdrawal must not prevent reading its saldo.
+            // Equation failures (no structural problem) still retry all cells.
+            var recovered = physical.cells
+            let targetCells = Array(Set(santanderRetryCells(problem: physical.problem)
+                + (physical.balance == nil ? [2] : []))).sorted()
+            var outcomes: [String] = []
+            for cell in targetCells {
                 let region = CGRect(x: cellEdges[cell], y: physical.band.minY,
                     width: cellEdges[cell + 1] - cellEdges[cell], height: physical.band.height)
                 let pixels = santanderCropPixelRect(region, width: image.width, height: image.height)
                 physical.retryOutcome = "crop-unavailable-cell-\(cell)"
-                guard !pixels.isEmpty, let crop = image.cropping(to: pixels) else { return }
+                guard !pixels.isEmpty, let crop = image.cropping(to: pixels) else {
+                    outcomes.append("crop-unavailable-cell-\(cell)"); continue
+                }
                 let request = VNRecognizeTextRequest()
                 request.recognitionLevel = .accurate
                 request.usesLanguageCorrection = false
                 do { try VNImageRequestHandler(cgImage: crop, options: [:]).perform([request]) }
-                catch { physical.retryOutcome = "vision-error-cell-\(cell)"; return }
+                catch { outcomes.append("vision-error-cell-\(cell)"); continue }
                 let candidates = (request.results ?? []).compactMap { $0.topCandidates(1).first }
                 let text = candidates.map(\.string).joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)
-                if text.isEmpty { recovered.append([]); continue }
+                physical.retryTexts[cell] = text
+                if text.isEmpty { recovered[cell] = []; outcomes.append("blank-cell-\(cell)"); continue }
                 // The entire crop must contain exactly one monetary value;
                 // arbitrary text, multiple values and malformed decimals reject.
                 let matches = allMatches(in: text, regex: amountRegex)
                 physical.retryOutcome = "ambiguous-crop-cell-\(cell)"
                 guard matches.count == 1,
                       matches[0].text.trimmingCharacters(in: .whitespacesAndNewlines) == text,
-                      parseAmount(text) != nil else { return }
-                recovered.append([OCRObservation(page: pageIndex, text: text, boundingBox: region,
-                    confidence: candidates.map { Double($0.confidence) }.min() ?? 0)])
+                      parseAmount(text) != nil else {
+                    outcomes.append("ambiguous-crop-cell-\(cell)"); continue
+                }
+                recovered[cell] = [OCRObservation(page: pageIndex, text: text, boundingBox: region,
+                    confidence: candidates.map { Double($0.confidence) }.min() ?? 0)]
+                outcomes.append("read-cell-\(cell)")
             }
             physical.cells = recovered
-            physical.retryOutcome = "completed"
+            physical.retryOutcome = outcomes.joined(separator: ",")
             decode(&physical)
         }
 
@@ -6745,7 +6810,8 @@ final class FinanceStore {
                 direction: physical.movement.map { $0.amount >= 0 ? "in" : "out" },
                 reason: reason, accepted: accepted, rowOrdinal: index + 1,
                 rowBounds: MovementExtractionBounds(rect: physical.band),
-                cellTexts: physical.cells.map { $0.map(\.text).joined(separator: " | ") }))
+                cellTexts: physical.cells.map { $0.map(\.text).joined(separator: " | ") },
+                cellRetryTexts: physical.retried ? physical.retryTexts : nil))
             previousPrintedBalance = physical.balance
         }
         if diagnostics.isEmpty {
@@ -7380,6 +7446,13 @@ final class FinanceStore {
             .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // In this fixed table, RFC may end the first description line while
+        // its identifier is on a continuation outside Vision's row box.
+        // Remove only that dangling label, not the administrative guard and
+        // not references elsewhere. Date, money cells and balance stay required.
+        if requireFixedMovementColumn {
+            title = title.replacingOccurrences(of: #"(?i)\s+RFC\s*$"#, with: "", options: .regularExpression)
+        }
         title = cleanMerchantTitle(title)
         guard title.count >= 3, title.rangeOfCharacter(from: .letters) != nil, !isAdministrativeTitle(title) else { return nil }
 
