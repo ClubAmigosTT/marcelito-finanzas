@@ -553,10 +553,15 @@ private struct ImportReportRow: View {
                     .foregroundStyle(item.state == .empty || item.state == .error ? item.state.color : Color.marcelitoNavyMid)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text(item.fileName)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                // Successful imports are identified by their accounting
+                // period. Keep the filename only as the fallback for a file
+                // that failed before a period could be read.
+                if item.period == nil {
+                    Text(item.fileName)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
 
                 if let detection = item.sourceDetection {
                     Text("Emisor \(Int((detection.confidence * 100).rounded()))% · \(detection.evidence.joined(separator: ", "))")
