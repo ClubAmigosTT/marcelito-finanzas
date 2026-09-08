@@ -295,6 +295,78 @@ test("una coincidencia externa de importe y fecha no se oculta como transferenci
   assert.equal(buildFinanceMetrics(transactions, statements, result).realIncome, 700);
 });
 
+test("el nombre del titular y una señal SPEI identifican una transferencia propia", () => {
+  const statements = [bank("santander", "Santander", "agosto 2026"), bank("bbva", "BBVA", "agosto 2026")];
+  const result = runTransactionPipeline([
+    movement({ id: "owner-out", date: "20 ago 2026", description: "SPEI ENVIADO MARCELO A DIAZ", account: "Santander", amount: -4200, flow: "expense", statementId: "santander" }),
+    movement({ id: "owner-in", date: "22 ago 2026", description: "ABONO MARCELO DIAZ", account: "BBVA", amount: 4200, flow: "income", statementId: "bbva" }),
+  ], statements);
+  const outgoing = result.transactions.find((row) => row.id === "owner-out");
+  const incoming = result.transactions.find((row) => row.id === "owner-in");
+
+  assert.equal(result.audit.internalTransferCount, 1);
+  assert.equal(outgoing?.matchedTransactionId, "owner-in");
+  assert.equal(incoming?.matchedTransactionId, "owner-out");
+  assert.ok((outgoing?.reconciliationConfidence ?? 0) >= 90);
+  assert.match(outgoing?.reconciliationReason ?? "", /titular propio/);
+  assert.equal(buildFinanceMetrics(result.transactions, statements, result).consolidatedRealSpend, 0);
+  assert.equal(buildFinanceMetrics(result.transactions, statements, result).realIncome, 0);
+});
+
+test("el nombre del titular sin señal de transferencia no oculta una compra y un depósito", () => {
+  const statements = [bank("santander", "Santander", "agosto 2026"), bank("bbva", "BBVA", "agosto 2026")];
+  const result = runTransactionPipeline([
+    movement({ id: "owner-purchase", date: "20 ago 2026", description: "COMPRA MARCELO DIAZ", account: "Santander", amount: -900, flow: "expense", statementId: "santander" }),
+    movement({ id: "owner-deposit", date: "20 ago 2026", description: "DEPOSITO MARCELO DIAZ", account: "BBVA", amount: 900, flow: "income", statementId: "bbva" }),
+  ], statements);
+
+  assert.equal(result.audit.internalTransferCount, 0);
+  assert.equal(buildFinanceMetrics(result.transactions, statements, result).consolidatedRealSpend, 900);
+  assert.equal(buildFinanceMetrics(result.transactions, statements, result).realIncome, 900);
+});
+
+test("una transferencia propia sin el estado contraparte queda excluida con explicación", () => {
+  const statements = [bank("santander", "Santander", "agosto 2026")];
+  const result = runTransactionPipeline([
+    movement({ id: "missing-counterpart", date: "20 ago 2026", description: "SPEI ENVIADO MARCELO DIAZ", account: "Santander", amount: -1500, flow: "expense", statementId: "santander" }),
+  ], statements);
+  const row = result.transactions[0];
+
+  assert.equal(row.flow, "transfer");
+  assert.equal(row.kind, "bankTransfer");
+  assert.equal(row.reconciliationConfidence, 90);
+  assert.match(row.reconciliationReason ?? "", /contraparte no importada/);
+  assert.equal(buildFinanceMetrics(result.transactions, statements, result).consolidatedRealSpend, 0);
+});
+
+test("referencias repetidas resuelven globalmente transferencias del mismo monto", () => {
+  const statements = [bank("santander", "Santander", "agosto 2026"), bank("bbva", "BBVA", "agosto 2026")];
+  const result = runTransactionPipeline([
+    movement({ id: "out-a", date: "20 ago 2026", description: "SPEI MARCELO DIAZ REFERENCIA ABC111", account: "Santander", amount: -1000, flow: "expense", statementId: "santander" }),
+    movement({ id: "out-b", date: "20 ago 2026", description: "SPEI MARCELO DIAZ REFERENCIA XYZ222", account: "Santander", amount: -1000, flow: "expense", statementId: "santander" }),
+    movement({ id: "in-b", date: "20 ago 2026", description: "ABONO SPEI MARCELO DIAZ REFERENCIA XYZ222", account: "BBVA", amount: 1000, flow: "income", statementId: "bbva" }),
+    movement({ id: "in-a", date: "20 ago 2026", description: "ABONO SPEI MARCELO DIAZ REFERENCIA ABC111", account: "BBVA", amount: 1000, flow: "income", statementId: "bbva" }),
+  ], statements);
+
+  assert.equal(result.audit.internalTransferCount, 2);
+  assert.equal(result.transactions.find((row) => row.id === "out-a")?.matchedTransactionId, "in-a");
+  assert.equal(result.transactions.find((row) => row.id === "out-b")?.matchedTransactionId, "in-b");
+});
+
+test("dos cuentas del mismo banco se distinguen por su identidad y no por la marca", () => {
+  const statements = [
+    { ...bank("bbva-a", "BBVA", "agosto 2026"), accountKey: "BBVA|1111" },
+    { ...bank("bbva-b", "BBVA", "agosto 2026"), accountKey: "BBVA|2222" },
+  ];
+  const result = runTransactionPipeline([
+    movement({ id: "same-bank-out", date: "20 ago 2026", description: "SPEI ENVIADO MARCELO DIAZ", account: "BBVA", amount: -750, flow: "expense", statementId: "bbva-a" }),
+    movement({ id: "same-bank-in", date: "20 ago 2026", description: "SPEI RECIBIDO MARCELO DIAZ", account: "BBVA", amount: 750, flow: "income", statementId: "bbva-b" }),
+  ], statements);
+
+  assert.equal(result.audit.internalTransferCount, 1);
+  assert.equal(result.transactions.find((row) => row.id === "same-bank-out")?.matchedTransactionId, "same-bank-in");
+});
+
 test("una coincidencia ambigua relevante queda en revisión y vuelve provisionales los KPI", () => {
   const statements = [bank("santander", "Santander", "agosto 2026"), bank("bbva", "BBVA", "agosto 2026")];
   const transactions = [

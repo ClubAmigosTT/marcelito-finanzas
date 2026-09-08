@@ -156,6 +156,21 @@ function hasTransferHint(transaction: Transaction) {
   return /transfer|traspaso|spei|entre cuentas|cuenta propia|clabe/.test(normalizeConcept(transaction.description));
 }
 
+const defaultOwnerAliases = ["marcelo diaz", "marcelo a diaz", "diaz marcelo"];
+
+function containsOwnerAlias(text: string, aliases = defaultOwnerAliases) {
+  const normalized = ` ${normalizeConcept(text)} `;
+  return aliases
+    .map((alias) => normalizeConcept(alias))
+    .filter((alias) => alias.split(" ").length >= 2)
+    .some((alias) => normalized.includes(` ${alias} `));
+}
+
+function referenceTokens(text: string) {
+  const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  return new Set(Array.from(normalized.matchAll(/(?:ref(?:erencia)?|folio|rastreo|clave|operacion)\s*[:#./_-]*\s*([a-z0-9-]{5,})/g), (match) => match[1]));
+}
+
 /**
  * A same-amount/date pair is not enough to prove an own-account transfer:
  * an external deposit can coincidentally mirror a purchase.  Require a
@@ -163,16 +178,35 @@ function hasTransferHint(transaction: Transaction) {
  * known counterpart account/issuer name) before removing both rows from the
  * income and spend KPIs.
  */
-function hasOwnAccountTransferEvidence(outflow: Transaction, inflow: Transaction, statements: Statement[]) {
+function transferPairEvidence(outflow: Transaction, inflow: Transaction, statements: Statement[]) {
   const combined = normalizeConcept(`${outflow.description} ${inflow.description}`);
-  if (/entre cuentas|cuenta propia|mismo titular|traspaso interno|autotransferencia/.test(combined)) return true;
-  // A bank name appearing in a generic merchant/payment description is not
-  // sufficient by itself. At least one side must also carry transfer
-  // semantics (SPEI, traspaso, transferencia, CLABE, ...).
-  if (!hasTransferHint(outflow) && !hasTransferHint(inflow)) return false;
+  let score = 50;
+  const reasons = ["importe exacto", "egreso ↔ ingreso"];
+  const outTime = parseDate(outflow.date) ?? 0;
+  const inTime = parseDate(inflow.date) ?? 0;
+  const days = Math.floor(Math.abs(outTime - inTime) / (24 * 60 * 60 * 1000));
+  const datePoints = days === 0 ? 10 : days === 1 ? 8 : days === 2 ? 5 : 2;
+  score += datePoints;
+  reasons.push(days === 0 ? "mismo día" : `${days} día${days === 1 ? "" : "s"}`);
+
+  if (/entre cuentas|cuenta propia|mismo titular|traspaso interno|autotransferencia/.test(combined)) {
+    score += 25;
+    reasons.push("texto de cuenta propia");
+  }
+  if (containsOwnerAlias(`${outflow.description} ${inflow.description}`)) {
+    score += 20;
+    reasons.push("titular propio");
+  }
+  if (hasTransferHint(outflow) && hasTransferHint(inflow)) {
+    score += 12;
+    reasons.push("transferencia en ambos lados");
+  } else if (hasTransferHint(outflow) || hasTransferHint(inflow)) {
+    score += 6;
+    reasons.push("señal de transferencia");
+  }
+
   const outAccount = normalizeConcept(outflow.account);
   const inAccount = normalizeConcept(inflow.account);
-  if (!outAccount || !inAccount || outAccount === inAccount) return false;
   const counterpartMentioned = (movement: Transaction, counterpart: string) => {
     const text = normalizeConcept(movement.description);
     return counterpart.length >= 3 && text.includes(counterpart);
@@ -188,8 +222,35 @@ function hasOwnAccountTransferEvidence(outflow: Transaction, inflow: Transaction
   );
   const outLabelKnown = knownAccountLabels.has(outAccount);
   const inLabelKnown = knownAccountLabels.has(inAccount);
-  return (outLabelKnown && counterpartMentioned(outflow, inAccount))
-    || (inLabelKnown && counterpartMentioned(inflow, outAccount));
+  if ((outLabelKnown && counterpartMentioned(outflow, inAccount))
+    || (inLabelKnown && counterpartMentioned(inflow, outAccount))) {
+    score += 15;
+    reasons.push("banco contrario");
+  }
+
+  if (distinctBankAccounts(outflow, inflow, statements)) {
+    score += 5;
+    reasons.push("cuentas propias distintas");
+  }
+
+  const outReferences = referenceTokens(outflow.description);
+  const hasSharedReference = [...referenceTokens(inflow.description)].some((token) => outReferences.has(token));
+  if (hasSharedReference) {
+    score += 25;
+    reasons.push("referencia coincidente");
+  }
+
+  const outgoingSignal = /enviado|transferencia|traspaso|spei/.test(normalizeConcept(outflow.description));
+  const incomingSignal = /recibid|abono|deposito|entrada/.test(normalizeConcept(inflow.description));
+  if (outgoingSignal && incomingSignal) {
+    score += 12;
+    reasons.push("dirección explícita");
+  }
+
+  // Keep the raw evidence score for global pairing. Capping each edge here
+  // would erase the advantage of a shared reference once both alternatives
+  // already exceed 100. The user-facing confidence is capped when persisted.
+  return { score, reason: reasons.join(" · ") };
 }
 
 function hasCardPaymentHint(transaction: Transaction) {
@@ -390,21 +451,104 @@ function isInflow(transaction: Transaction) {
   return transaction.amount > 0 || transaction.flow === "income";
 }
 
-function withinTwoDays(left: Transaction, right: Transaction, statements: Statement[]) {
+function withinDays(left: Transaction, right: Transaction, statements: Statement[], days: number) {
   const leftTime = parseDate(left.date, left.statementId ? statements.find((item) => item.id === left.statementId)?.period : undefined);
   const rightTime = parseDate(right.date, right.statementId ? statements.find((item) => item.id === right.statementId)?.period : undefined);
-  return leftTime !== undefined && rightTime !== undefined && Math.abs(leftTime - rightTime) <= 2 * 24 * 60 * 60 * 1000;
+  return leftTime !== undefined && rightTime !== undefined && Math.abs(leftTime - rightTime) <= days * 24 * 60 * 60 * 1000;
 }
 
 function sameAmount(left: Transaction, right: Transaction) {
   return Math.abs(absolute(left.amount) - absolute(right.amount)) <= 0.01;
 }
 
-function reconcilePair(left: Transaction, right: Transaction, type: ReconciliationType, id: string) {
+function distinctBankAccounts(left: Transaction, right: Transaction, statements: Statement[]) {
+  const leftStatement = left.statementId ? statements.find((item) => item.id === left.statementId) : undefined;
+  const rightStatement = right.statementId ? statements.find((item) => item.id === right.statementId) : undefined;
+  if (!leftStatement || !rightStatement || statementKind(leftStatement) !== "bank" || statementKind(rightStatement) !== "bank") return false;
+  if (leftStatement.accountKey && rightStatement.accountKey) return leftStatement.accountKey !== rightStatement.accountKey;
+  if (normalizeConcept(leftStatement.source) !== normalizeConcept(rightStatement.source)) return true;
+  return normalizeConcept(left.account) !== normalizeConcept(right.account);
+}
+
+type ScoredTransferCandidate = {
+  outflow: Transaction;
+  inflow: Transaction;
+  amountKey: string;
+  score: number;
+  reason: string;
+  dateDistance: number;
+};
+
+function globallyBestTransferCandidates(candidates: ScoredTransferCandidate[]) {
+  const byAmount = new Map<string, ScoredTransferCandidate[]>();
+  candidates.forEach((candidate) => {
+    byAmount.set(candidate.amountKey, [...(byAmount.get(candidate.amountKey) ?? []), candidate]);
+  });
+  const selected: ScoredTransferCandidate[] = [];
+  for (const amountKey of [...byAmount.keys()].sort()) {
+    const group = byAmount.get(amountKey) ?? [];
+    const outflows = [...new Set(group.map((candidate) => candidate.outflow.id))].sort();
+    const inflows = [...new Set(group.map((candidate) => candidate.inflow.id))].sort();
+    if (outflows.length > 12 || inflows.length > 12) {
+      const usedOutflows = new Set<string>();
+      const usedInflows = new Set<string>();
+      selected.push(...group
+        .sort((left, right) => right.score - left.score || left.dateDistance - right.dateDistance || left.outflow.id.localeCompare(right.outflow.id))
+        .filter((candidate) => {
+          if (usedOutflows.has(candidate.outflow.id) || usedInflows.has(candidate.inflow.id)) return false;
+          usedOutflows.add(candidate.outflow.id);
+          usedInflows.add(candidate.inflow.id);
+          return true;
+        }));
+      continue;
+    }
+
+    const incomingPosition = new Map(inflows.map((id, index) => [id, index]));
+    const edgesByOutflow = new Map<string, ScoredTransferCandidate[]>();
+    group.forEach((candidate) => {
+      edgesByOutflow.set(candidate.outflow.id, [...(edgesByOutflow.get(candidate.outflow.id) ?? []), candidate]);
+    });
+    const memo = new Map<string, { score: number; distance: number; matches: ScoredTransferCandidate[] }>();
+    const solve = (position: number, usedMask: number): { score: number; distance: number; matches: ScoredTransferCandidate[] } => {
+      if (position >= outflows.length) return { score: 0, distance: 0, matches: [] };
+      const key = `${position}|${usedMask}`;
+      const cached = memo.get(key);
+      if (cached) return cached;
+      let best = solve(position + 1, usedMask);
+      for (const edge of edgesByOutflow.get(outflows[position]) ?? []) {
+        const bitPosition = incomingPosition.get(edge.inflow.id);
+        if (bitPosition === undefined) continue;
+        const bit = 1 << bitPosition;
+        if ((usedMask & bit) !== 0) continue;
+        const tail = solve(position + 1, usedMask | bit);
+        const option = {
+          score: edge.score + tail.score,
+          distance: edge.dateDistance + tail.distance,
+          matches: [edge, ...tail.matches],
+        };
+        if (option.score > best.score
+          || (option.score === best.score && option.matches.length > best.matches.length)
+          || (option.score === best.score && option.matches.length === best.matches.length && option.distance < best.distance)) {
+          best = option;
+        }
+      }
+      memo.set(key, best);
+      return best;
+    };
+    selected.push(...solve(0, 0).matches);
+  }
+  return selected;
+}
+
+function reconcilePair(left: Transaction, right: Transaction, type: ReconciliationType, id: string, confidence = 100, reason = "Importe y fechas compatibles") {
+  const displayedConfidence = Math.min(100, confidence);
   const nextLeft: Transaction = {
     ...left,
     reconciliationId: id,
     reconciledAs: type,
+    matchedTransactionId: right.id,
+    reconciliationConfidence: displayedConfidence,
+    reconciliationReason: reason,
     kind: type === "cardPayment" ? "cardPayment" : "bankTransfer",
     category: "Transferencia",
     flow: type === "cardPayment" && left.flow === "income" ? "debt" : type === "internalTransfer" ? "transfer" : left.flow,
@@ -414,6 +558,9 @@ function reconcilePair(left: Transaction, right: Transaction, type: Reconciliati
     ...right,
     reconciliationId: id,
     reconciledAs: type,
+    matchedTransactionId: left.id,
+    reconciliationConfidence: displayedConfidence,
+    reconciliationReason: reason,
     kind: type === "cardPayment" ? "cardPayment" : "bankTransfer",
     category: "Transferencia",
     flow: type === "cardPayment" && right.flow === "income" ? "debt" : type === "internalTransfer" ? "transfer" : right.flow,
@@ -548,9 +695,9 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
   let cardPaymentAmount = 0;
 
   const candidates = canonical.slice();
-  const replacePair = (left: Transaction, right: Transaction, type: ReconciliationType) => {
+  const replacePair = (left: Transaction, right: Transaction, type: ReconciliationType, confidence = 100, reason = "Importe y fechas compatibles") => {
     const id = `recon-${[left.id, right.id].sort().join("-")}`;
-    const [nextLeft, nextRight] = reconcilePair(left, right, type, id);
+    const [nextLeft, nextRight] = reconcilePair(left, right, type, id, confidence, reason);
     byId.set(nextLeft.id, nextLeft);
     byId.set(nextRight.id, nextRight);
     consumed.add(nextLeft.id);
@@ -579,7 +726,7 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
         && isCardTransaction(card, statements)
         && !isRefund(card)
         && sameAmount(bank, card)
-        && withinTwoDays(bank, card, statements)
+        && withinDays(bank, card, statements, 5)
         // Some issuers label the receiving side only as “pago recibido” or
         // “abono”, so an explicit payment hint or card-payment kind is enough.
         // A positive card row alone is not sufficient: it may be a credit or
@@ -598,6 +745,7 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
   // from an unrelated external deposit of the same amount.
   const ambiguousTransferReviewIds = new Set<string>();
   const ambiguousTransferReviewCountIds = new Set<string>();
+  const scoredTransferCandidates: ScoredTransferCandidate[] = [];
   candidates.forEach((outflow) => {
     if (consumed.has(outflow.id) || !isBankTransaction(outflow, statements) || !isOutflow(outflow)) return;
     const possiblePartners = candidates
@@ -605,13 +753,29 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
         && inflow.id !== outflow.id
         && isBankTransaction(inflow, statements)
         && isInflow(inflow)
-        && normalizeConcept(inflow.account) !== normalizeConcept(outflow.account)
+        && distinctBankAccounts(outflow, inflow, statements)
         && sameAmount(outflow, inflow)
-        && withinTwoDays(outflow, inflow, statements))
+        && withinDays(outflow, inflow, statements, 3))
       .sort((left, right) => absolute((parseDate(left.date) ?? 0) - (parseDate(outflow.date) ?? 0)) - absolute((parseDate(right.date) ?? 0) - (parseDate(outflow.date) ?? 0)));
-    const partner = possiblePartners.find((inflow) => hasOwnAccountTransferEvidence(outflow, inflow, statements));
-    if (partner) replacePair(outflow, partner, "internalTransfer");
-    else if (possiblePartners[0]) {
+    possiblePartners.forEach((inflow) => {
+      const evidence = transferPairEvidence(outflow, inflow, statements);
+      if (evidence.score >= 90) {
+        scoredTransferCandidates.push({
+          outflow,
+          inflow,
+          amountKey: String(Math.round(absolute(outflow.amount) * 100)),
+          score: evidence.score,
+          reason: evidence.reason,
+          dateDistance: absolute((parseDate(inflow.date) ?? 0) - (parseDate(outflow.date) ?? 0)),
+        });
+      } else {
+        [outflow, inflow].forEach((row) => {
+          ambiguousTransferReviewIds.add(row.id);
+          if (row.validationStatus !== "review") ambiguousTransferReviewCountIds.add(row.id);
+        });
+      }
+    });
+    if (possiblePartners[0] && possiblePartners.every((inflow) => transferPairEvidence(outflow, inflow, statements).score < 90)) {
       // Keep a coincident external pair visible as a review item rather than
       // silently deciding that it is internal. Relevant pairs will block the
       // executive KPIs through the normal data-quality gate.
@@ -622,6 +786,34 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
         if (row.validationStatus !== "review") ambiguousTransferReviewCountIds.add(row.id);
       });
     }
+  });
+
+  globallyBestTransferCandidates(scoredTransferCandidates)
+    .sort((left, right) => right.score - left.score || left.dateDistance - right.dateDistance)
+    .forEach((candidate) => {
+      if (consumed.has(candidate.outflow.id) || consumed.has(candidate.inflow.id)) return;
+      replacePair(candidate.outflow, candidate.inflow, "internalTransfer", candidate.score, candidate.reason);
+      ambiguousTransferReviewIds.delete(candidate.outflow.id);
+      ambiguousTransferReviewIds.delete(candidate.inflow.id);
+      ambiguousTransferReviewCountIds.delete(candidate.outflow.id);
+      ambiguousTransferReviewCountIds.delete(candidate.inflow.id);
+    });
+
+  candidates.forEach((transaction) => {
+    if (consumed.has(transaction.id)
+      || !isBankTransaction(transaction, statements)
+      || !hasTransferHint(transaction)
+      || !containsOwnerAlias(transaction.description)) return;
+    byId.set(transaction.id, {
+      ...transaction,
+      kind: "bankTransfer",
+      flow: "transfer",
+      category: "Transferencia",
+      reconciliationConfidence: 90,
+      reconciliationReason: "Titular propio · señal explícita de transferencia · contraparte no importada",
+    });
+    ambiguousTransferReviewIds.delete(transaction.id);
+    ambiguousTransferReviewCountIds.delete(transaction.id);
   });
 
   const classified = canonical.map((transaction) => {
@@ -641,7 +833,9 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
         const source = normalizeConcept(statement.source);
         return source.length >= 3 && source !== normalizeConcept(reconciled.account) && text.includes(source);
       });
-      const ownTransferText = /entre cuentas|cuenta propia|mismo titular|traspaso interno/.test(text) || ownAccountMention;
+      const ownTransferText = /entre cuentas|cuenta propia|mismo titular|traspaso interno/.test(text)
+        || ownAccountMention
+        || (hasTransferHint(reconciled) && containsOwnerAlias(reconciled.description));
       // An unmatched incoming SPEI/transfer is external income. Only an
       // explicit own-account signal (or a matched pair above) is excluded.
       if (reconciled.amount > 0 && isBankTransaction(reconciled, statements) && !ownTransferText) {

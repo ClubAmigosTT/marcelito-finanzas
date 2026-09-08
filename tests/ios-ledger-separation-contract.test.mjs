@@ -45,3 +45,21 @@ test("el importador nativo no tiene fallback genérico ni desbloqueo manual", as
   assert.match(source, /El desbloqueo manual fue eliminado/);
   assert.doesNotMatch(settings, /Desbloquear resultados provisionales/);
 });
+
+test("el matcher nativo compara transferencias propias con puntaje y vínculo auditable", async () => {
+  const [models, sections, settings] = await Promise.all([
+    readFile(modelsPath, "utf8"),
+    readFile(sectionsPath, "utf8"),
+    readFile(settingsPath, "utf8"),
+  ]);
+
+  assert.match(models, /defaultTransferOwnerAliases/);
+  assert.match(models, /globallyBestTransferCandidates/);
+  assert.match(models, /evidence\.score >= 90/);
+  assert.match(models, /matchedMovementId = inflow\.id/);
+  assert.match(models, /contraparte no importada/);
+  assert.match(settings, /Transferencias entre mis cuentas/);
+  assert.match(settings, /Guardar y volver a comparar/);
+  assert.match(sections, /Section\("Conciliación entre cuentas"\)/);
+  assert.match(sections, /LabeledContent\("Confianza"/);
+});
