@@ -46,6 +46,7 @@ const moneyPrecise = new Intl.NumberFormat("es-MX", { style: "currency", currenc
 const transactionStorageKey = "marcelito-transactions.v2";
 const statementStorageKey = "marcelito-statements.v1";
 const categoryRulesStorageKey = "marcelito-category-rules.v1";
+const categoryOverridesStorageKey = "marcelito-category-overrides.v1";
 const goalsStorageKey = "marcelito-goals.v1";
 const auditStorageKey = "marcelito-audit.last.v1";
 // Backwards-compatible environment fallback: the configured service is now a
@@ -90,6 +91,7 @@ function deleteLocalAccount() {
   localStorage.removeItem(transactionStorageKey);
   localStorage.removeItem(statementStorageKey);
   localStorage.removeItem(categoryRulesStorageKey);
+  localStorage.removeItem(categoryOverridesStorageKey);
   localStorage.removeItem(goalsStorageKey);
   void clearImportedPdfs();
 }
@@ -119,7 +121,9 @@ function displayMoney(value: number | undefined | null) {
 function readStoredLedgerState() {
   const storedStatements = readStored<Statement[]>(statementStorageKey, []);
   const storedTransactions = readStored<Transaction[]>(transactionStorageKey, []);
-  return prepareStoredLedger(storedStatements, storedTransactions);
+  const learnedRules = readStored<CategoryRules>(categoryRulesStorageKey, {});
+  const manualOverrides = readStored<CategoryRules>(categoryOverridesStorageKey, {});
+  return prepareStoredLedger(storedStatements, storedTransactions, PDF_READER_VERSION, learnedRules, manualOverrides);
 }
 
 function dashboardMoney(blocked: boolean, value: number | undefined | null) {
@@ -323,6 +327,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   const [transactions, setTransactions] = useState<Transaction[]>(() => initialLedger.transactions);
   const [statements, setStatements] = useState<Statement[]>(() => initialLedger.statements);
   const [categoryRules, setCategoryRules] = useState<CategoryRules>(() => readStored(categoryRulesStorageKey, {}));
+  const [categoryOverrides, setCategoryOverrides] = useState<CategoryRules>(() => readStored(categoryOverridesStorageKey, {}));
   const [goals, setGoals] = useState<FinancialGoal[]>(() => readStored(goalsStorageKey, []));
   const [lastAuditRun, setLastAuditRun] = useState<AuditRunRecord | null>(() => readStored<AuditRunRecord | null>(auditStorageKey, null));
   const [importOpen, setImportOpen] = useState(false);
@@ -356,6 +361,10 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   useEffect(() => {
     localStorage.setItem(categoryRulesStorageKey, JSON.stringify(categoryRules));
   }, [categoryRules]);
+
+  useEffect(() => {
+    localStorage.setItem(categoryOverridesStorageKey, JSON.stringify(categoryOverrides));
+  }, [categoryOverrides]);
 
   useEffect(() => {
     localStorage.setItem(goalsStorageKey, JSON.stringify(goals));
@@ -477,6 +486,20 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       : item));
   }
 
+  function learnCategory(description: string, category: string) {
+    const key = merchantKey(description);
+    if (!key) return;
+    setCategoryOverrides((current) => ({ ...current, [key]: category }));
+    setCategoryRules((current) => {
+      if (["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"].includes(category)) {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      }
+      return { ...current, [key]: category };
+    });
+  }
+
   async function runReaderPreflight() {
     if (!transactionClassifierEndpoint || readerPreflightBusy) return;
     const token = readerAuthorization.current
@@ -537,7 +560,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
             {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => setImportOpen(true)} onRunReaderPreflight={transactionClassifierEndpoint ? runReaderPreflight : undefined} readerPreflight={readerPreflight} readerPreflightBusy={readerPreflightBusy} readerPreflightError={readerPreflightError} />}
             {section === "Gastos" && <Expenses transactions={ledgerTransactions} statements={statements} metrics={metrics} onImport={() => setImportOpen(true)} />}
-            {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onOpenStatement={(statement) => openImportedPdf(statement.sourceFingerprint)} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"].includes(category)) { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
+            {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onOpenStatement={(statement) => openImportedPdf(statement.sourceFingerprint)} onLearnCategory={learnCategory} />}
             {section === "Patrimonio" && <NetWorth metrics={metrics} transactions={ledgerTransactions} statements={statements} />}
           </motion.div>
         </AnimatePresence>

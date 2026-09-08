@@ -1,6 +1,7 @@
 import { inferLocalCategory, PDF_READER_VERSION, reconcileStatementImport } from "./pdfImport.ts";
 import { defaultStatementKind, hasSufficientOcrQuality, hasVerifiedSourceEvidence } from "./finance.ts";
 import { hasTraceableEvidence } from "./reconciliation.ts";
+import { categoryFromRules, type CategoryRules } from "./categoryRules.ts";
 import type { Statement, Transaction } from "./types.ts";
 
 const MIGRATION_TOLERANCE = 0;
@@ -16,9 +17,20 @@ function isSupportedReaderVersion(version: string | undefined, currentReaderVers
     && version === "web-reader-2026.09.01.9";
 }
 
-function enrichStoredTransaction(transaction: Transaction): Transaction {
-  const legacyCategories = ["Alimentos", "Comidas", "Servicios", "Compras", "Finanzas", "Educación", "Hogar", "Mascotas", "Otros gastos"];
-  if (transaction.category?.trim() && transaction.category !== "Sin categoría" && !legacyCategories.includes(transaction.category)) return transaction;
+const pendingCategories = new Set([
+  "Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos",
+  "Alimentos", "Comidas", "Servicios", "Compras", "Finanzas",
+  "Educación", "Hogar", "Mascotas",
+]);
+
+function enrichStoredTransaction(
+  transaction: Transaction,
+  learnedRules: CategoryRules = {},
+  manualOverrides: CategoryRules = {},
+): Transaction {
+  // Valid categories are intentionally stable. Only rows in the old/review
+  // buckets are eligible for the taxonomy migration.
+  if (!pendingCategories.has(transaction.category)) return transaction;
   if (transaction.flow === "income") return { ...transaction, category: "Ingresos" };
   if (["cardPayment", "bankTransfer", "credit", "refund"].includes(transaction.kind ?? "")) {
     return { ...transaction, category: "Transferencia", classificationProvider: "rules", classificationConfidence: 1, classificationReason: "Movimiento contable identificado por conciliación" };
@@ -28,7 +40,11 @@ function enrichStoredTransaction(transaction: Transaction): Transaction {
   // Only migrate PDF-derived rows whose extraction will still be checked by
   // statement reconciliation and page-level provenance below.
   if (!transaction.statementId) return transaction;
-  const inferred = inferLocalCategory(transaction.description);
+  const explicit = categoryFromRules(transaction.description, manualOverrides)
+    ?? categoryFromRules(transaction.description, learnedRules);
+  const inferred = explicit
+    ? { ...inferLocalCategory(transaction.description, transaction.flow, transaction.kind), category: explicit, confidence: 1, reason: "Regla local aprendida o corrección explícita del usuario." }
+    : inferLocalCategory(transaction.description, transaction.flow, transaction.kind);
   return {
     ...transaction,
     category: inferred.category,
@@ -110,11 +126,13 @@ export function prepareStoredLedger(
   statements: Statement[],
   transactions: Transaction[],
   readerVersion = PDF_READER_VERSION,
+  learnedRules: CategoryRules = {},
+  manualOverrides: CategoryRules = {},
 ) {
   // Never discard a user's imported ledger during a reader migration. Rows
   // from a genuinely unsupported statement remain visible to the audit layer
   // but are excluded from KPI by the single eligibility boundary in finance.
-  const preparedTransactions = transactions.map(enrichStoredTransaction);
+  const preparedTransactions = transactions.map((transaction) => enrichStoredTransaction(transaction, learnedRules, manualOverrides));
   const initiallyPrepared = prepareStoredStatements(statements, readerVersion);
   const preparedStatements = initiallyPrepared.map((prepared, index) => {
     const original = statements[index];
