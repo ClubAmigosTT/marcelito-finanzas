@@ -3,6 +3,14 @@ import PDFKit
 import UIKit
 import Charts
 
+private let expenseCategoryOptions = [
+    "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento",
+    "Viajes", "Transporte", "Deporte", "Compras personales", "Software y suscripciones",
+    "Salud", "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar"
+]
+
+private let movementCategoryOptions = ["Ingresos", "Transferencia"] + expenseCategoryOptions
+
 func conciseStatementPeriod(_ statement: StatementRecord) -> String {
     let monthNames: [(token: String, label: String)] = [
         ("enero", "Enero"), ("ene", "Enero"),
@@ -130,6 +138,14 @@ struct MovementsView: View {
                 ToolbarItem(placement: .topBarTrailing) {
                     Menu {
                         Button {
+                            let updated = store.applyDeterministicCategoryRules()
+                            aiMessage = updated == 0
+                                ? "Las reglas locales ya estaban aplicadas. Los movimientos restantes necesitan IA o una categoría manual."
+                                : "Se asignaron categorías locales a \(updated) movimientos."
+                        } label: {
+                            Label("Aplicar reglas automáticas", systemImage: "bolt.fill")
+                        }
+                        Button {
                             isAISettingsPresented = true
                         } label: {
                             Label("Configurar clasificación IA", systemImage: "gearshape")
@@ -212,11 +228,11 @@ struct MovementsView: View {
                     apiKey: apiKey,
                     model: model
                 )
-                store.applyAIClassifications(classifications)
+                let updated = store.applyAIClassifications(classifications)
                 isAIProcessing = false
-                aiMessage = classifications.isEmpty
-                    ? "La IA no encontró categorías confiables. Puedes corregirlas manualmente."
-                    : "Se actualizaron \(classifications.count) movimientos y Marcelito recordará esas categorías para próximos estados."
+                aiMessage = updated == 0
+                    ? "La IA no encontró categorías con confianza suficiente. Puedes asignarlas manualmente desde el detalle del movimiento."
+                    : "Se actualizaron \(updated) movimientos y Marcelito recordará esas categorías para próximos estados."
             } catch {
                 isAIProcessing = false
                 aiErrorMessage = error.localizedDescription
@@ -238,16 +254,12 @@ private struct AddMovementView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var title = ""
     @State private var account = "Importado"
-    @State private var category = "Por revisar"
+    @State private var category = "Otros / Por revisar"
     @State private var amount = ""
     @State private var flow: FlowKind = .expense
     @State private var date = Date.now
 
-    private let categoryOptions = [
-        "Otros / Por revisar", "Ingresos", "Transferencia", "Restaurantes y bares", "Tiendita",
-        "Despensa / supermercado", "Viajes", "Transporte", "Deporte", "Compras personales",
-        "Software y suscripciones", "Salud", "Club Amigos / Proyectos", "Comisiones y finanzas"
-    ]
+    private let categoryOptions = movementCategoryOptions
 
     private var numericAmount: Decimal? {
         let clean = amount
@@ -275,7 +287,9 @@ private struct AddMovementView: View {
                         }
                     }
                     Picker("Categoría", selection: $category) {
-                        ForEach(categoryOptions, id: \.self) { Text($0) }
+                        ForEach(categoryOptions, id: \.self) { option in
+                            Text(option).tag(option)
+                        }
                     }
                     DatePicker("Fecha", selection: $date, displayedComponents: .date)
                 }
@@ -317,11 +331,15 @@ private struct MovementDetailView: View {
     @State private var selectedCategory: String
     @State private var selectedKind: MovementKind
     @State private var isTravel: Bool
-    private let categories = ["Ingresos", "Transferencia", "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Viajes", "Transporte", "Deporte", "Compras personales", "Software y suscripciones", "Salud", "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar"]
+    private let categories = movementCategoryOptions
+
+    private var currentMovement: Movement {
+        store.movements.first(where: { $0.id == movement.id }) ?? movement
+    }
 
     init(movement: Movement) {
         self.movement = movement
-        _selectedCategory = State(initialValue: movement.category)
+        _selectedCategory = State(initialValue: movementCategoryOptions.contains(movement.category) ? movement.category : "Otros / Por revisar")
         _selectedKind = State(initialValue: movement.kind ?? .purchase)
         _isTravel = State(initialValue: movement.travelRelated)
     }
@@ -371,10 +389,15 @@ private struct MovementDetailView: View {
                     store.updateCategory(for: movement, to: $0)
                 }
             )) {
-                ForEach(categories, id: \.self) { Text($0) }
+                ForEach(categories, id: \.self) { option in
+                    Text(option).tag(option)
+                }
             }
-            if !movement.classificationTags.isEmpty {
-                LabeledContent("Etiquetas", value: movement.classificationTags.joined(separator: " · "))
+            Text("La categoría se guarda al seleccionarla y se recordará para movimientos futuros del mismo comercio.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if !currentMovement.classificationTags.isEmpty {
+                LabeledContent("Etiquetas", value: currentMovement.classificationTags.joined(separator: " · "))
             }
             Picker("Tipo de movimiento", selection: Binding(
                 get: { selectedKind },
@@ -671,23 +694,32 @@ private struct ExpenseCategoryDetailView: View {
                             Text("Gastos más altos")
                                 .font(.subheadline.weight(.semibold))
                             ForEach(highestMovements) { movement in
-                                HStack(alignment: .top, spacing: 10) {
-                                    Image(systemName: "arrow.up.right")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(Color.marcelitoNavyMid)
-                                        .frame(width: 20)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(movement.title)
-                                            .font(.subheadline.weight(.medium))
-                                            .lineLimit(2)
-                                        Text(movement.date.formatted(.dateTime.day().month(.abbreviated)))
-                                            .font(.caption)
+                                NavigationLink {
+                                    MovementDetailView(movement: movement)
+                                } label: {
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Image(systemName: "arrow.up.right")
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(Color.marcelitoNavyMid)
+                                            .frame(width: 20)
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(movement.title)
+                                                .font(.subheadline.weight(.medium))
+                                                .lineLimit(2)
+                                            Text(movement.date.formatted(.dateTime.day().month(.abbreviated)))
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer(minLength: 8)
+                                        Text(abs(movement.amount), format: .currency(code: "MXN").precision(.fractionLength(0)))
+                                            .font(.subheadline.monospacedDigit())
+                                        Image(systemName: "chevron.right")
+                                            .font(.caption.weight(.semibold))
                                             .foregroundStyle(.secondary)
                                     }
-                                    Spacer(minLength: 8)
-                                    Text(abs(movement.amount), format: .currency(code: "MXN").precision(.fractionLength(0)))
-                                        .font(.subheadline.monospacedDigit())
                                 }
+                                .buttonStyle(.plain)
+                                .accessibilityHint("Toca para cambiar la categoría")
                             }
                         }
                         .padding(14)
