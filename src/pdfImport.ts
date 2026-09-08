@@ -1,6 +1,7 @@
 import type { ImportResult, SourceDetection, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types.ts";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
+import { deterministicExpenseClassification } from "./categoryRules.ts";
 import { parseDeterministicStatement, reconcileExactly } from "./issuerParsers/index.ts";
 import type { DocumentLayout, DocumentLayoutLine, DocumentLayoutPage } from "./issuerParsers/types.ts";
 
@@ -837,6 +838,8 @@ export function gateOcrReconciliation(
 
 export type LocalCategoryInference = {
   category: string;
+  merchant: string;
+  tags: import("./types.ts").ExpenseTag[];
   confidence: number;
   reason: string;
   travel: boolean;
@@ -846,32 +849,27 @@ export type LocalCategoryInference = {
 /**
  * Deterministic, local-only enrichment used for both fresh imports and old
  * canonical rows. The broad `Otros gastos` fallback is intentional: it is an
- * honest accounting bucket, not an unresolved parser state, so a valid row
+ * honest accounting bucket, not an invented merchant category, so a valid row
  * does not remain in review merely because the issuer printed a terse memo.
  */
-export function inferLocalCategory(description: string): LocalCategoryInference {
-  const value = normalizeText(description);
-  const rules: Array<[string, RegExp, string]> = [
-    ["Viajes", /airbnb|booking|expedia|hotel|hospedaje|aeromexico|aerobus|volaris|vivaaerobus|american airlines|united airlines|delta air|iberia|vuelo|flight|travel|renta de auto|car rental|airport|aeropuerto|equipaje|luggage/, "Marcador explícito de viaje"],
-    ["Transporte", /uber|didi|cabify|taxi|metrobus|metrotap|nyct paygo|njtransit|nyc ferry|subway|mta |train |estacionamiento|estac |parking|parco |gasolina|pemex|shell|\bbp\b|gulf|mobil|caseta|autopista|toll|ecobici|mueve|transporte/, "Movilidad, combustible o estacionamiento"],
-    ["Salud", /farmacia|farmacias|hospital|clinica|doctor|consultorio|dent(?:al|ista)|laboratorio|salud|medic/, "Proveedor de salud"],
-    ["Comidas", /restaurant|rest |rest\.|taquer|taco|sushi|cafe|coffee|starbucks|burger|pizza|pub|bar |comida|food|flauta|ramen|krispy|pan |pastel|helado|neveria|churro|frutos prohibidos|grill|deli|pantry|wine|beer|chicken|cocina|parrilla|guac time|chipotle|dos toros|dunkin|italian|crepes|sanborns|cerv|mariscos|exquisito|faunna|terraza|los gueros|guero|harp helu|serena horneando|tierra garat|malachy|sophie|lovejoy|smokejazz|smoke and gift|metropolis|mandarin mo|social|goldbergs|marta tap|hana group|tst\*|shreeji|jimmys|primavera|saio la octava|pickle|fogoncito|burger king|aifa|asador|uber eats|rappi.*(?:food|rest)|didi food/, "Restaurante, cafetería o entrega de comida"],
-    ["Alimentos", /walmart|superama|soriana|costco|chedraui|la comer|city market|sam'?s|sams |oxxo|7 eleven|seven eleven|extra k|extra |super |mercado\s|grocery|market|mkt |frutos|abarrotes|cvs|pharmacy|wholefds|whole foods|queens mkt|convenience|meadowland|mart corp|7-eleven/, "Supermercado o tienda de conveniencia"],
-    ["Entretenimiento", /cinemex|cinepolis|cine |cinemas|teatro|spotify|netflix|disney|hbo|prime video|apple music|xbox|playstation|nintendo|steam|videojuego|club deportivo|entret |jazz|museum|museo|amnh|guggenheim|aquarium|acuario|zoo|attraction|atraccion|ticket|boletos|show|concierto|club |soccer|summit one|world of coca|circo|stadium|rounders|empire hall|hard rock|salon de perreo|asdeporte/, "Entretenimiento, evento o suscripción audiovisual"],
-    ["Educación", /universidad|escuela|colegio|curso|udemy|coursera|domestika|libros|libreria|instituto tecnologic/, "Educación o material formativo"],
-    ["Mascotas", /veterin|petco|pet shop|mascota|mundo animal/, "Comercio o servicio para mascotas"],
-    ["Hogar", /ikea|home depot|ferreter|muebles|hogar|limpieza|decoracion|mantenimiento/, "Hogar, mobiliario o mantenimiento"],
-    ["Servicios", /canva|telcel|at&t|movistar|telef movis|izzi|totalplay|cfe|luz |agua |internet|seguro|asegur|suscripcion|membresia|adobe|microsoft|google storage|googplay|youtube|apple\.com\/bill|apple\.com\/mx|paypal|stripe|holafly|wi-fi onboard|wifi onboard|facebk/, "Servicio, telecomunicación o suscripción"],
-    ["Compras", /amazon|shein|mercadolibre|mercado libre|mercadopago|billpocket|conectapp|lumen|steren|bout|tienda|shop|store|ropa|zapateria|departamental|old navy|fanatics|thriftland|miniso/, "Comercio o compra minorista"],
-    ["Finanzas", /comision|iva rep tarj|interes|cajero|retiro|anualidad|financ|keepcash|meses sin intereses|meses en automatico|meses automatico|monto a diferir|diferid/, "Costo financiero, comisión o disposición de efectivo"],
-  ];
-  const match = rules.find(([, marker]) => marker.test(value));
-  if (match) {
-    const travel = match[0] === "Viajes";
-    const extraordinary = travel || /hospital|emergencia|mueble|reparacion|impuesto|anualidad|concierto|festival/.test(value);
-    return { category: match[0], confidence: 0.9, reason: match[2], travel, extraordinary };
+export function inferLocalCategory(description: string, flow: Transaction["flow"] = "expense", kind?: Transaction["kind"]): LocalCategoryInference {
+  const classification = deterministicExpenseClassification(description, flow, kind);
+  if (!classification) {
+    return {
+      category: "Otros / Por revisar",
+      merchant: description.trim().slice(0, 80) || "Sin descripción",
+      tags: ["personal", "variable", "ordinario"],
+      confidence: 0.35,
+      reason: "Movimiento no clasificable como gasto personal.",
+      travel: false,
+      extraordinary: false,
+    };
   }
-  return { category: "Otros gastos", confidence: 0.6, reason: "Egreso válido sin un giro inequívoco en el texto del banco", travel: false, extraordinary: false };
+  return {
+    ...classification,
+    travel: classification.tags.includes("viaje"),
+    extraordinary: classification.tags.includes("extraordinario"),
+  };
 }
 
 function inferImportedKind(description: string, amount: number, isCredit: boolean, statementKind: StatementKind, explicitOwnTransfer = false): TransactionKind {
@@ -1244,7 +1242,7 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     const flow: Transaction["flow"] = isRefund || isIncome || isDeferredCredit || cardCredit ? "income" : isCardPayment ? "debt" : explicitOwnTransfer ? "transfer" : "expense";
     const value = Math.round(amountValue * 100) / 100 * (flow === "income" ? 1 : -1);
     const importedKind = inferImportedKind(description, value, isCredit, kind, explicitOwnTransfer);
-    const localClassification = inferLocalCategory(description);
+    const localClassification = inferLocalCategory(description, flow, importedKind);
     const category = importedKind === "cardPayment" || importedKind === "bankTransfer" ? "Transferencia" : localClassification.category;
     const travelRelated = localClassification.travel
       || foreignCurrency
@@ -1261,6 +1259,8 @@ export function extractTransactions(text: string, source: StatementSource, fileN
       travelRelated,
       foreignCurrency: kind === "card" ? foreignCurrency : undefined,
       classificationProvider: "rules",
+      classificationTags: importedKind === "cardPayment" || importedKind === "bankTransfer" ? undefined : localClassification.tags,
+      merchantNormalized: importedKind === "cardPayment" || importedKind === "bankTransfer" ? undefined : localClassification.merchant,
       classificationConfidence: importedKind === "cardPayment" || importedKind === "bankTransfer" ? 1 : localClassification.confidence,
       classificationReason: importedKind === "cardPayment" || importedKind === "bankTransfer" ? "Movimiento contable identificado por conciliación" : localClassification.reason,
       extraordinary: localClassification.extraordinary || travelRelated,

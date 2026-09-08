@@ -402,6 +402,15 @@ export function isSpendTransaction(transaction: Transaction) {
   return transaction.flow === "expense" && !["cardPayment", "bankTransfer", "refund", "credit"].includes(kind);
 }
 
+/**
+ * MSI remains part of the debt/charge ledger, but it is intentionally kept
+ * out of category and merchant spend views to avoid mixing financing with
+ * everyday consumption or counting the installment twice.
+ */
+export function isCategorizedSpendTransaction(transaction: Transaction) {
+  return isSpendTransaction(transaction) && inferTransactionKind(transaction) !== "msi";
+}
+
 function isTravelTransaction(transaction: Transaction) {
   if (transaction.travelRelated || transaction.foreignCurrency) return true;
   const text = normalize(`${transaction.description} ${transaction.category}`);
@@ -1011,7 +1020,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     } satisfies AnalyticsPeriod;
   });
 
-  const currentSpendTransactions = currentPeriodKey ? transactionsForPeriod(currentPeriodKey).filter(isSpendTransaction) : spendTransactions;
+  const currentSpendTransactions = currentPeriodKey ? transactionsForPeriod(currentPeriodKey).filter(isCategorizedSpendTransaction) : spendTransactions.filter(isCategorizedSpendTransaction);
   const currentSpendTotal = sum(currentSpendTransactions.map((transaction) => absolute(transaction.amount)));
   const categoryMap = new Map<string, { name: string; total: number }>();
   currentSpendTransactions.forEach((transaction) => {
@@ -1089,7 +1098,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     } satisfies TravelTrip;
   });
 
-  const previousSpendTransactions = periodKeys[1] ? transactionsForPeriod(periodKeys[1]).filter(isSpendTransaction) : [];
+  const previousSpendTransactions = periodKeys[1] ? transactionsForPeriod(periodKeys[1]).filter(isCategorizedSpendTransaction) : [];
   const previousCategoryMap = new Map<string, number>();
   previousSpendTransactions.forEach((transaction) => {
     const key = normalizeConcept(transaction.category.trim() || "Sin categoría") || normalize(transaction.category.trim() || "Sin categoría");
@@ -1119,7 +1128,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   ).values());
   const quarantinedTransactions = observedTransactions.filter((transaction) => Boolean(transaction.statementId && blockedStatementIds.has(transaction.statementId)));
   const eligibleMovementCount = transactions.length;
-  const eligibleReviewItems = transactions.filter((transaction) => transaction.category === "Sin categoría" || (transaction.confidence ?? 1) < 0.75 || transaction.validationStatus === "review");
+  const eligibleReviewItems = transactions.filter((transaction) => ["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"].includes(transaction.category) || (transaction.confidence ?? 1) < 0.75 || transaction.validationStatus === "review");
   const eligibleClassifiedCount = Math.max(0, eligibleMovementCount - eligibleReviewItems.length);
   const eligibleClassifiedPercent = eligibleMovementCount ? (eligibleClassifiedCount / eligibleMovementCount) * 100 : 100;
   const eligibleEvidenceRows = transactions.filter((transaction) => Boolean(transaction.statementId) || transaction.extractionEvidence?.method === "pdf-text" || transaction.extractionEvidence?.method === "ocr");

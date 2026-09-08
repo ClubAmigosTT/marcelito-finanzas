@@ -17,7 +17,8 @@ function isSupportedReaderVersion(version: string | undefined, currentReaderVers
 }
 
 function enrichStoredTransaction(transaction: Transaction): Transaction {
-  if (transaction.category?.trim() && transaction.category !== "Sin categoría") return transaction;
+  const legacyCategories = ["Alimentos", "Comidas", "Servicios", "Compras", "Finanzas", "Educación", "Hogar", "Mascotas", "Otros gastos"];
+  if (transaction.category?.trim() && transaction.category !== "Sin categoría" && !legacyCategories.includes(transaction.category)) return transaction;
   if (transaction.flow === "income") return { ...transaction, category: "Ingresos" };
   if (["cardPayment", "bankTransfer", "credit", "refund"].includes(transaction.kind ?? "")) {
     return { ...transaction, category: "Transferencia", classificationProvider: "rules", classificationConfidence: 1, classificationReason: "Movimiento contable identificado por conciliación" };
@@ -36,6 +37,8 @@ function enrichStoredTransaction(transaction: Transaction): Transaction {
     // retaining that sentinel would recreate the misleading 93% review rate.
     confidence: Math.max(transaction.confidence ?? 0, 0.92),
     classificationProvider: "rules",
+    classificationTags: inferred.tags,
+    merchantNormalized: inferred.merchant,
     classificationConfidence: inferred.confidence,
     classificationReason: inferred.reason,
     travelRelated: transaction.travelRelated || inferred.travel,

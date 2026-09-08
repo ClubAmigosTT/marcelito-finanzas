@@ -19,7 +19,8 @@ const classification = {
   classifications: [{
     index: 0,
     merchant: "Supermercado local",
-    category: "Alimentos",
+    category: "Despensa / supermercado",
+    tags: ["personal", "variable", "ordinario"],
     recurring: false,
     extraordinary: false,
     travel: false,
@@ -30,8 +31,8 @@ const classification = {
 };
 
 const classifierRequestVersion = {
-  classifierVersion: "transaction-classifier-2026.09.03.1",
-  promptVersion: "expense-classification-v1",
+  classifierVersion: "transaction-classifier-2026.09.08.1",
+  promptVersion: "expense-taxonomy-v2",
 };
 
 async function withServer(fetchImpl, callback) {
@@ -66,7 +67,7 @@ test("el endpoint de Zen clasifica filas sin aceptar PDFs ni cuentas", async () 
     });
     assert.equal(response.status, 200);
     const body = await response.json();
-    assert.equal(body.classifications[0].category, "Alimentos");
+    assert.equal(body.classifications[0].category, "Despensa / supermercado");
     const serialized = JSON.stringify(providerBody);
     assert.equal(serialized.includes("pdfBase64"), false);
     assert.equal(/"account"\s*:/.test(serialized), false);
@@ -87,7 +88,7 @@ test("el endpoint bloquea categorías o índices inválidos del proveedor", asyn
 
 test("el endpoint nunca entrega transferencias o pagos de tarjeta a Zen", async () => {
   await withServer(async () => new Response(JSON.stringify({ output_text: JSON.stringify(classification) }), { status: 200 }), async (base) => {
-    for (const kind of ["bankTransfer", "cardPayment", "refund", "credit"]) {
+    for (const kind of ["bankTransfer", "cardPayment", "refund", "credit", "msi"]) {
       const response = await fetch(`${base}/api/transaction-classifier`, {
         method: "POST",
         headers: { "content-type": "application/json", authorization: "Bearer reader-token" },
@@ -95,6 +96,17 @@ test("el endpoint nunca entrega transferencias o pagos de tarjeta a Zen", async 
       });
       assert.equal(response.status, 422, `kind=${kind}`);
     }
+  });
+});
+
+test("el endpoint no acepta filas que ya tienen una categoría manual", async () => {
+  await withServer(async () => new Response(JSON.stringify({ output_text: JSON.stringify(classification) }), { status: 200 }), async (base) => {
+    const response = await fetch(`${base}/api/transaction-classifier`, {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: "Bearer reader-token" },
+      body: JSON.stringify({ rows: [{ ...rows[0], category: "Tiendita" }], ...classifierRequestVersion }),
+    });
+    assert.equal(response.status, 422);
   });
 });
 
@@ -117,6 +129,6 @@ test("el preflight del clasificador usa la misma allowlist gratuita", async () =
       body: "{}",
     });
     assert.equal(response.status, 200);
-    assert.deepEqual(await response.json(), { status: "ready", model: "mimo-v2.5-free", contract: "transaction-classification.v1" });
+    assert.deepEqual(await response.json(), { status: "ready", model: "mimo-v2.5-free", contract: "transaction-classification.v2" });
   });
 });

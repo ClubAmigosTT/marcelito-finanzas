@@ -58,9 +58,9 @@ struct MovementsView: View {
         // user has enabled the provisional dashboard preview.
         store.canonicalMovements.filter {
             guard $0.flow == .expense,
-                  ["Por revisar", "Sin categoría"].contains($0.category) else { return false }
+                  ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains($0.category) else { return false }
             switch $0.kind {
-            case .cardPayment?, .bankTransfer?, .refund?, .credit?:
+            case .cardPayment?, .bankTransfer?, .refund?, .credit?, .msi?:
                 return false
             default:
                 return true
@@ -244,9 +244,9 @@ private struct AddMovementView: View {
     @State private var date = Date.now
 
     private let categoryOptions = [
-        "Por revisar", "Ingresos", "Transferencia", "Alimentos", "Viajes", "Comidas",
-        "Servicios", "Transporte", "Salud", "Compras", "Entretenimiento", "Educación",
-        "Hogar", "Mascotas", "Finanzas", "Sin categoría"
+        "Otros / Por revisar", "Ingresos", "Transferencia", "Restaurantes y bares", "Tiendita",
+        "Despensa / supermercado", "Viajes", "Transporte", "Deporte", "Compras personales",
+        "Software y suscripciones", "Salud", "Club Amigos / Proyectos", "Comisiones y finanzas"
     ]
 
     private var numericAmount: Decimal? {
@@ -317,7 +317,7 @@ private struct MovementDetailView: View {
     @State private var selectedCategory: String
     @State private var selectedKind: MovementKind
     @State private var isTravel: Bool
-    private let categories = ["Ingresos", "Transferencia", "Alimentos", "Viajes", "Comidas", "Servicios", "Transporte", "Salud", "Compras", "Entretenimiento", "Educación", "Hogar", "Mascotas", "Finanzas", "Sin categoría"]
+    private let categories = ["Ingresos", "Transferencia", "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Viajes", "Transporte", "Deporte", "Compras personales", "Software y suscripciones", "Salud", "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar"]
 
     init(movement: Movement) {
         self.movement = movement
@@ -372,6 +372,9 @@ private struct MovementDetailView: View {
                 }
             )) {
                 ForEach(categories, id: \.self) { Text($0) }
+            }
+            if !movement.classificationTags.isEmpty {
+                LabeledContent("Etiquetas", value: movement.classificationTags.joined(separator: " · "))
             }
             Picker("Tipo de movimiento", selection: Binding(
                 get: { selectedKind },

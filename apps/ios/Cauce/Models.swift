@@ -252,6 +252,9 @@ struct Movement: Identifiable, Codable {
     var kind: MovementKind?
     var travelRelated: Bool
     var foreignCurrency: Bool
+    /// Orthogonal expense dimensions learned locally or from the optional classifier.
+    /// Kept as strings for backward-compatible Codable migrations.
+    var classificationTags: [String]
     var extractionEvidence: MovementExtractionEvidence?
 
     init(
@@ -266,6 +269,7 @@ struct Movement: Identifiable, Codable {
         kind: MovementKind? = nil,
         travelRelated: Bool = false,
         foreignCurrency: Bool = false,
+        classificationTags: [String] = [],
         extractionEvidence: MovementExtractionEvidence? = nil
     ) {
         self.id = id
@@ -279,11 +283,12 @@ struct Movement: Identifiable, Codable {
         self.kind = kind
         self.travelRelated = travelRelated
         self.foreignCurrency = foreignCurrency
+        self.classificationTags = classificationTags
         self.extractionEvidence = extractionEvidence
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, date, title, account, category, amount, flow, statementId, kind, travelRelated, foreignCurrency, extractionEvidence
+        case id, date, title, account, category, amount, flow, statementId, kind, travelRelated, foreignCurrency, classificationTags, extractionEvidence
     }
 
     init(from decoder: Decoder) throws {
@@ -299,6 +304,7 @@ struct Movement: Identifiable, Codable {
         kind = try container.decodeIfPresent(MovementKind.self, forKey: .kind)
         travelRelated = try container.decodeIfPresent(Bool.self, forKey: .travelRelated) ?? false
         foreignCurrency = try container.decodeIfPresent(Bool.self, forKey: .foreignCurrency) ?? false
+        classificationTags = try container.decodeIfPresent([String].self, forKey: .classificationTags) ?? []
         extractionEvidence = try container.decodeIfPresent(MovementExtractionEvidence.self, forKey: .extractionEvidence)
     }
 
@@ -315,6 +321,7 @@ struct Movement: Identifiable, Codable {
         try container.encodeIfPresent(kind, forKey: .kind)
         try container.encode(travelRelated, forKey: .travelRelated)
         try container.encode(foreignCurrency, forKey: .foreignCurrency)
+        try container.encode(classificationTags, forKey: .classificationTags)
         try container.encodeIfPresent(extractionEvidence, forKey: .extractionEvidence)
     }
 }
@@ -1215,7 +1222,7 @@ final class FinanceStore {
         // "Por revisar" is an actionable canonical-ledger queue. Rejected
         // statement rows are kept only as bounded diagnostics and therefore
         // must not inflate the actionable review percentage.
-        let reviewRows = canonical.filter { $0.category == "Por revisar" || $0.category == "Sin categoría" }
+        let reviewRows = canonical.filter { ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains($0.category) }
         let reviewCount = reviewRows.count
         let reviewAmount = reviewRows.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let absurdCount = movements.filter { abs($0.amount) >= 10_000_000 || !isValidStoredMovement($0) }.count
@@ -1536,7 +1543,7 @@ final class FinanceStore {
                     guard isValidStoredMovement(movement) else { return false }
                     return isEligibleStatement(statement)
                 }
-                let review = canonical.filter { $0.category == "Por revisar" || $0.category == "Sin categoría" }
+                let review = canonical.filter { ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains($0.category) }
                 let income = canonical.filter(isRealIncome)
                 let expenses = canonical.filter(isSpend)
                 let transfers = canonical.filter { movementKind($0) == .bankTransfer }
@@ -2498,6 +2505,19 @@ final class FinanceStore {
         }
         lastAuditRun = defaults.data(forKey: auditRunKey).flatMap { try? JSONDecoder().decode(LedgerAuditRun.self, from: $0) }
         lastImportedFile = defaults.string(forKey: importKey)
+        // Upgrade the former broad taxonomy in memory without changing any
+        // amount, date, account or movement identity. The next canonical
+        // persist writes the new primary category names.
+        let legacyExpenseCategories = Set(["Alimentos", "Comidas", "Servicios", "Compras", "Finanzas", "Educación", "Hogar", "Mascotas", "Otros gastos"])
+        movements = movements.map { movement in
+            guard movement.flow == .expense, legacyExpenseCategories.contains(movement.category) else { return movement }
+            var migrated = movement
+            let normalizedTitle = movement.title
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .lowercased()
+            migrated.category = Self.category(for: normalizedTitle, flow: .expense)
+            return migrated
+        }
         recoverInterruptedRebuildIfNeeded()
         // The active envelope is already normalized at every successful
         // commit. Re-running the complete dedupe/matching pass synchronously
@@ -2551,7 +2571,7 @@ final class FinanceStore {
         let key = Self.categoryRuleKey(movements[index].title)
         if !key.isEmpty {
             var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
-            if ["Por revisar", "Sin categoría"].contains(category) {
+            if ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains(category) {
                 rules.removeValue(forKey: key)
             } else {
                 rules[key] = category
@@ -2573,14 +2593,17 @@ final class FinanceStore {
             // malformed response reclassify income, refunds, card payments or
             // own-account transfers as ordinary spend.
             guard movements[index].flow == .expense else { continue }
+            guard ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains(movements[index].category) else { continue }
+            guard !classification.requiresReview, classification.confidence >= 0.8 else { continue }
             switch movements[index].kind {
-            case .cardPayment?, .bankTransfer?, .refund?, .credit?:
+            case .cardPayment?, .bankTransfer?, .refund?, .credit?, .msi?:
                 continue
             default:
                 break
             }
             movements[index].category = classification.category
             movements[index].travelRelated = classification.travelRelated
+            movements[index].classificationTags = classification.tags
             let key = Self.categoryRuleKey(movements[index].title)
             if !key.isEmpty {
                 rules[key] = classification.category
@@ -9234,77 +9257,39 @@ final class FinanceStore {
         if flow == .debt { return "Pago de tarjeta" }
 
         let rules: [(String, [String])] = [
-            // Travel is intentionally separate from day-to-day transport.
-            ("Viajes", [
-                "airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico",
-                "aerobus", "volaris", "vivaaerobus", "american airlines", "united airlines",
-                "delta air", "iberia", "vuelo", "flight", "travel", "renta de auto", "car rental",
-                "airport", "aeropuerto", "equipaje", "luggage"
-            ]),
-            ("Transporte", [
-                "uber", "didi", "cabify", "taxi", "metrobus", "metro ", "metrotap", "nyct paygo", "njtransit", "nyc ferry",
-                "subway", "mta ", "train ", "estacionamiento", "estac ", "parking", "parco ", "gasolina", "pemex", "shell",
-                "bp ", "gulf", "mobil", "caseta", "autopista", "toll", "ecobici", "mueve", "transporte"
-            ]),
-            ("Salud", [
-                "farmacia", "farmacias", "hospital", "clinica", "clínica", "doctor",
-                "consultorio", "dent", "dental", "laboratorio", "salud", "medic"
-            ]),
-            ("Comidas", [
-                "restaurant", "rest ", "rest.", "taquer", "taco", "sushi", "cafe",
-                "café", "coffee", "starbucks", "burger", "pizza", "pub", "bar ",
-                "comida", "food", "flauta", "ramen", "krispy", "pan ", "pastel",
-                "helado", "neveria", "churro", "frutos prohibidos", "grill", "deli",
-                "pantry", "wine", "beer", "chicken", "cocina", "parrilla", "guac time", "chipotle",
-                "dos toros", "dunkin", "italian", "crepes", "sanborns", "cerv", "mariscos", "exquisito",
-                "faunna", "terraza", "los gueros", "guero", "harp helu", "serena horneando", "tierra garat",
-                "malachy", "sophie", "lovejoy", "smokejazz", "smoke and gift", "metropolis", "mandarin mo", "social",
-                "goldbergs", "marta tap", "hana group", "tst*", "shreeji", "jimmys", "primavera", "saio la octava", "fogoncito",
-                "burger king", "aifa", "asador"
-            ]),
-            ("Alimentos", [
-                "walmart", "superama", "soriana", "costco", "chedraui", "la comer",
-                "city market", "sam's", "sams ", "oxxo", "7 eleven", "seven eleven",
-                "extra k", "extra ", "super ", "mercado ", "grocery", "market", "mkt ", "frutos", "abarrotes",
-                "cvs", "pharmacy", "wholefds", "whole foods", "queens mkt", "convenience", "meadowland", "mart corp", "7-eleven"
-            ]),
-            ("Entretenimiento", [
-                "cinemex", "cinepolis", "cinépolis", "cine ", "teatro", "spotify",
-                "netflix", "disney", "hbo", "prime video", "apple music", "xbox",
-                "playstation", "nintendo", "steam", "videojuego", "club deportivo", "entret ", "jazz",
-                "museum", "museo", "amnh", "guggenheim", "aquarium", "acuario", "zoo", "attraction", "atraccion", "ticket",
-                "boletos", "show", "concierto", "club ", "soccer", "summit one", "world of coca", "circo", "stadium",
-                "rounders", "empire hall", "hard rock", "salon de perreo", "asdeporte", "pickle"
-            ]),
-            ("Educación", [
-                "universidad", "escuela", "colegio", "curso", "udemy", "coursera",
-                "domestika", "libros", "libreria", "librería"
-            ]),
-            ("Mascotas", [
-                "veterin", "petco", "pet shop", "mascota", "mundo animal"
-            ]),
-            ("Hogar", [
-                "ikea", "home depot", "ferreter", "muebles", "hogar", "limpieza",
-                "decoracion", "decoración", "mantenimiento"
-            ]),
-            ("Servicios", [
-                "canva", "telcel", "at&t", "movistar", "izzi", "totalplay", "cfe",
-                "luz ", "agua ", "internet", "seguro", "asegur", "suscripcion",
-                "suscripción", "membresia", "membresía", "adobe", "microsoft",
-                "google storage", "apple.com/bill", "paypal", "stripe", "apple.com/mx", "holafly", "wi-fi onboard", "wifi onboard"
-            ]),
-            ("Compras", [
-                "amazon", "shein", "mercadolibre", "mercado libre", "mercadopago", "lumen", "steren",
-                "bout", "tienda", "shop", "store", "ropa", "zapateria", "departamental", "old navy", "fanatics", "thriftland", "miniso"
-            ]),
-            ("Finanzas", [
-                "comision", "comisión", "interes", "interés", "cajero", "retiro",
-                "anualidad", "financ", "keepcash", "meses sin intereses", "meses en automatico", "meses automatico", "monto a diferir", "diferid"
-            ])
+            // Project identity is always evaluated first and is handled below.
+            ("Comisiones y finanzas", ["comision", "comisión", "interes", "interés", "cajero", "anualidad", "cargo bancario", "seguro financiero"]),
+            ("Software y suscripciones", ["canva", "cursor", "google one", "google storage", "youtube premium", "apple music", "adobe", "microsoft 365", "microsoft office", "suscripcion", "suscripción", "saas", "software", "icloud", "dropbox", "apple.com/bill"]),
+            ("Viajes", ["airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico", "aerobus", "volaris", "vivaaerobus", "american airlines", "united airlines", "delta air", "iberia", "vuelo", "flight", "holafly", "esim", "roaming", "airport", "aeropuerto", "renta de auto", "car rental", "nueva york", "new york", "medellin", "atlanta"]),
+            ("Entretenimiento", ["cinemex", "cinemas wtc", "cinepolis", "cine", "teatro", "museo", "museum", "moma", "guggenheim", "summit one", "concierto", "festival", "boleto", "ticket", "show", "smoke jazz", "jazz", "nekoma", "club nocturno", "experiencia", "ocio"]),
+            ("Deporte", ["club deportivo", "club deportivo kanoa", "asdeporte", "pickleball", "padel", "pádel", "cancha", "renta de cancha", "gimnasio", "gym", "deporte", "competencia"]),
+            ("Salud", ["farmacia", "farmacias", "hospital", "clinica", "clínica", "doctor", "consultorio", "dentista", "dental", "odont", "laboratorio", "salud", "medic", "tratamiento"]),
+            ("Restaurantes y bares", ["restaurant", "rest ", "taquer", "taco", "sushi", "cafe", "café", "coffee", "starbucks", "burger", "pizza", "pub", "bar ", "comida", "food", "delivery", "rappi", "didi food", "flauta", "ramen", "italian", "crepes", "cerv", "mariscos", "grill", "cocina", "parrilla", "chipotle", "doordash", "ubereats", "uber eats", "casa de tono", "espeto", "japiramen", "orinoco", "waffles"]),
+            ("Tiendita", ["oxxo", "7 eleven", "seven eleven", "7-eleven", "extra", "circle k", "minisuper", "mini super", "tienda de conveniencia", "convenience store", "snack"]),
+            ("Despensa / supermercado", ["walmart", "superama", "soriana", "costco", "chedraui", "la comer", "city market", "sam's", "sams ", "supermercado", "grocery", "whole foods", "wholefds", "despensa", "mercado grande", "abarrotes"]),
+            ("Transporte", ["uber", "didi", "cabify", "taxi", "metrobus", "metro ", "metrotap", "nyct", "nj transit", "njtransit", "nyc ferry", "subway", "mta ", "train ", "estacionamiento", "parking", "parco ", "gasolina", "pemex", "shell", "bp ", "gulf", "mobil", "caseta", "autopista", "toll", "ecobici", "transporte", "movilidad"]),
+            ("Compras personales", ["apple", "shein", "amazon", "sanborns", "miniso", "old navy", "mercadolibre", "mercado libre", "mercadopago", "lumen", "steren", "boutique", "tienda", "shop", "store", "ropa", "zapateria", "departamental", "electronic", "electronico", "accesorio", "compras"])
         ]
-        for (category, markers) in rules where markers.contains(where: { title.contains($0) }) {
+        let paddedTitle = " \(title) "
+        let matchesMarker: (String) -> Bool = { marker in
+            let normalizedMarker = marker
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .lowercased()
+                .replacingOccurrences(of: "[^a-z0-9]+", with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedMarker.isEmpty else { return false }
+            return paddedTitle.contains(" \(normalizedMarker) ")
+                || (normalizedMarker.count >= 6 && title.contains(normalizedMarker))
+        }
+        if ["club amigos", "clubamigos", "proyecto", "proveedor club", "material club"].contains(where: matchesMarker) {
+            return "Club Amigos / Proyectos"
+        }
+        if ["msi", "meses sin intereses", "monto a diferir", "diferid"].contains(where: matchesMarker) {
+            return "Otros / Por revisar"
+        }
+        for (category, markers) in rules where markers.contains(where: matchesMarker) {
             return category
         }
-        return "Por revisar"
+        return "Otros / Por revisar"
     }
 }

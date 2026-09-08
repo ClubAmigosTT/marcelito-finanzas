@@ -1,10 +1,10 @@
-import { categories } from "./data.ts";
+import { expenseCategories, expenseTags, isClassifiableExpense } from "./categoryRules.ts";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
-import type { Transaction, TransactionKind } from "./types.ts";
+import type { ExpenseTag, Transaction, TransactionKind } from "./types.ts";
 
 /** Versiona únicamente el contrato de enriquecimiento, no el lector de PDFs. */
-export const TRANSACTION_CLASSIFIER_VERSION = "transaction-classifier-2026.09.03.1";
-export const TRANSACTION_CLASSIFIER_PROMPT_VERSION = "expense-classification-v1";
+export const TRANSACTION_CLASSIFIER_VERSION = "transaction-classifier-2026.09.08.1";
+export const TRANSACTION_CLASSIFIER_PROMPT_VERSION = "expense-taxonomy-v2";
 export const TRANSACTION_CLASSIFIER_MAX_ROWS = 500;
 
 export type TransactionClassificationInput = {
@@ -25,6 +25,7 @@ export type TransactionClassification = {
   recurring: boolean;
   extraordinary: boolean;
   travel: boolean;
+  tags: ExpenseTag[];
   confidence: number;
   reason: string;
   requires_review: boolean;
@@ -51,13 +52,14 @@ export type TransactionClassifierOptions = {
 export type TransactionClassifierPreflightResult = {
   status: "ready";
   model: string;
-  contract: "transaction-classification.v1";
+  contract: "transaction-classification.v2";
 };
 
 // Only expense categories are valid here. Accounting classes such as income,
 // transfer, refund and card payment are deliberately not part of this
 // contract; those are decided by the deterministic reconciliation pipeline.
-const allowedCategories = new Set(categories);
+const allowedCategories = new Set(expenseCategories);
+const allowedTags = new Set(expenseTags);
 
 class TransactionClassifierError extends Error {
   code: "not_configured" | "request_failed" | "invalid_payload";
@@ -110,6 +112,7 @@ const classificationFields = [
   "recurring",
   "extraordinary",
   "travel",
+  "tags",
   "confidence",
   "reason",
   "requires_review",
@@ -126,9 +129,23 @@ function normalizeCategory(value: string) {
   return [...allowedCategories].find((candidate) => candidate.toLowerCase() === value.toLowerCase());
 }
 
+function normalizeTags(value: unknown, path: string): ExpenseTag[] {
+  if (!Array.isArray(value) || value.length > expenseTags.length) fail(path, "se esperaba una lista de etiquetas");
+  const seen = new Set<ExpenseTag>();
+  for (const tag of value) {
+    if (typeof tag !== "string" || !allowedTags.has(tag as ExpenseTag)) fail(path, "etiqueta no permitida");
+    seen.add(tag as ExpenseTag);
+  }
+  return [...seen];
+}
+
+function pendingCategory(category: string) {
+  return ["Sin categoría", "Por revisar", "Otros gastos", "Otros / Por revisar"].includes(category);
+}
+
 function isClassifiableTransaction(transaction: Transaction) {
-  return transaction.flow === "expense"
-    && !["cardPayment", "bankTransfer", "refund", "credit"].includes(transaction.kind ?? "other")
+  return isClassifiableExpense(transaction.flow, transaction.kind)
+    && pendingCategory(transaction.category)
     && transaction.description.trim().length >= 3
     && Number.isFinite(transaction.amount)
     && transaction.amount !== 0;
@@ -178,6 +195,7 @@ export function validateTransactionClassification(
       recurring: booleanField(item.recurring, `classifications[${index}].recurring`),
       extraordinary: booleanField(item.extraordinary, `classifications[${index}].extraordinary`),
       travel: booleanField(item.travel, `classifications[${index}].travel`),
+      tags: normalizeTags(item.tags, `classifications[${index}].tags`),
       confidence: numberField(item.confidence, `classifications[${index}].confidence`),
       reason: stringField(item.reason, `classifications[${index}].reason`, 2, 240),
       requires_review: booleanField(item.requires_review, `classifications[${index}].requires_review`),
@@ -275,10 +293,10 @@ export async function requestTransactionClassifierPreflight(
       throw new TransactionClassifierError("request_failed", `El clasificador no está listo: ${message}`);
     }
     const model = isRecord(body) ? optionalModel(body.model) : undefined;
-    if (!isRecord(body) || body.status !== "ready" || body.contract !== "transaction-classification.v1" || !model) {
+    if (!isRecord(body) || body.status !== "ready" || body.contract !== "transaction-classification.v2" || !model) {
       throw new TransactionClassifierError("invalid_payload", "El proveedor no confirmó el contrato del clasificador");
     }
-    return { status: "ready", model, contract: "transaction-classification.v1" };
+    return { status: "ready", model, contract: "transaction-classification.v2" };
   } catch (error) {
     if (error instanceof TransactionClassifierError) throw error;
     if (error instanceof DOMException && error.name === "AbortError") throw new TransactionClassifierError("request_failed", "El preflight agotó el tiempo de espera");
@@ -347,17 +365,24 @@ export function applyTransactionClassifications(transactions: Transaction[], res
     const classification = byIndex.get(classifiableIndex);
     classifiableIndex += 1;
     if (!classification) return transaction;
-    return {
+    const shared = {
       ...transaction,
-      category: classification.category,
       merchantNormalized: normalizeConcept(classification.merchant) || transaction.normalizedDescription,
       classificationProvider: "zen" as const,
       classificationConfidence: classification.confidence,
       classificationReason: classification.reason,
+      classificationTags: classification.tags,
       recurring: classification.recurring,
       extraordinary: classification.extraordinary,
       travelRelated: classification.travel,
       confidence: Math.max(transaction.confidence ?? 0, classification.confidence),
+    };
+    if (classification.requires_review || classification.confidence < 0.8) {
+      return { ...shared, validationStatus: "review" as const };
+    }
+    return {
+      ...shared,
+      category: classification.category,
       validationStatus: classification.requires_review ? "review" as const : transaction.validationStatus,
     };
   });

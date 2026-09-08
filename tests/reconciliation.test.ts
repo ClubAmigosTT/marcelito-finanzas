@@ -322,11 +322,11 @@ test("los periodos BBVA y Amex se recortan al rango exacto del estado", () => {
 test("las reglas locales asignan una categoría auditable sin dejar gasto genérico por revisar", () => {
   const known = inferLocalCategory("OXXO SUC 1234");
   const broad = inferLocalCategory("COMERCIO LOCAL NO IDENTIFICADO");
-  assert.equal(known.category, "Alimentos");
+  assert.equal(known.category, "Tiendita");
   assert.ok(known.confidence >= 0.9);
-  assert.equal(broad.category, "Otros gastos");
-  assert.equal(broad.confidence, 0.6);
-  assert.match(broad.reason, /giro inequívoco/i);
+  assert.equal(broad.category, "Otros / Por revisar");
+  assert.equal(broad.confidence, 0.35);
+  assert.match(broad.reason, /no permite identificar/i);
 });
 
 test("el gasto ordinario, extraordinario y de viaje es excluyente y la proyección usa el pago Amex", () => {
@@ -1711,7 +1711,7 @@ test("la revisión compatible .9 se revalida sin borrar filas ni pedir recategor
   assert.equal(prepared.quarantinedMovementCount, 0);
   assert.equal(prepared.statements[0]?.status, "ready");
   assert.equal(prepared.statements[0]?.reconciliationStatus, "valid");
-  assert.equal(prepared.transactions[0]?.category, "Alimentos");
+  assert.equal(prepared.transactions[0]?.category, "Tiendita");
   assert.equal(prepared.transactions[0]?.confidence, 0.92);
   const metrics = buildFinanceMetrics(prepared.transactions, prepared.statements);
   assert.equal(metrics.currentMonthSpend, 100);

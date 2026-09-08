@@ -63,10 +63,10 @@ test("verifica el preflight del clasificador cuando se usa la ruta nueva", async
     fetchImpl: async (url, init) => {
       calls.push({ url: String(url), init });
       if (String(url).endsWith("/health")) return new Response(JSON.stringify({ status: "ok", configured: true }), { status: 200 });
-      return new Response(JSON.stringify({ status: "ready", model: "mimo-v2.5-free", contract: "transaction-classification.v1" }), { status: 200 });
+      return new Response(JSON.stringify({ status: "ready", model: "mimo-v2.5-free", contract: "transaction-classification.v2" }), { status: 200 });
     },
   });
-  assert.equal(result.preflight.contract, "transaction-classification.v1");
+  assert.equal(result.preflight.contract, "transaction-classification.v2");
   assert.equal(calls[1].url, "https://reader.example/api/transaction-classifier/preflight");
   assert.equal(calls[1].init.body, "{}");
 });

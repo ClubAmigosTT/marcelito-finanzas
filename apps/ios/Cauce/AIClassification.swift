@@ -6,6 +6,10 @@ struct AIClassification: Identifiable {
     let movementID: UUID
     let category: String
     let travelRelated: Bool
+    let tags: [String]
+    let confidence: Double
+    let requiresReview: Bool
+    let reason: String?
 
     var id: UUID { movementID }
 }
@@ -30,10 +34,11 @@ enum ZenExpenseClassifier {
         FreeModel(id: "big-pickle", name: "Big Pickle")
     ]
     static let allowedCategories = [
-        "Alimentos", "Viajes", "Comidas", "Servicios", "Transporte", "Salud",
-        "Compras", "Entretenimiento", "Educación", "Hogar", "Mascotas", "Finanzas",
-        "Sin categoría"
+        "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento",
+        "Viajes", "Transporte", "Deporte", "Compras personales", "Software y suscripciones",
+        "Salud", "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar"
     ]
+    static let allowedTags = ["viaje", "ordinario", "extraordinario", "fijo", "variable", "personal", "proyecto"]
 
     enum ClassificationError: LocalizedError {
         case missingAPIKey
@@ -89,10 +94,15 @@ enum ZenExpenseClassifier {
         let id: String
         let category: String
         let travelRelated: Bool?
+        let tags: [String]?
+        let confidence: Double?
+        let reason: String?
+        let requiresReview: Bool?
 
         enum CodingKeys: String, CodingKey {
-            case id, category
+            case id, category, tags, confidence, reason
             case travelRelated = "travelRelated"
+            case requiresReview = "requires_review"
         }
     }
 
@@ -119,7 +129,7 @@ enum ZenExpenseClassifier {
         guard movements.allSatisfy({ movement in
             guard movement.flow == .expense else { return false }
             switch movement.kind {
-            case .cardPayment?, .bankTransfer?, .refund?, .credit?:
+            case .cardPayment?, .bankTransfer?, .refund?, .credit?, .msi?:
                 return false
             default:
                 return true
@@ -167,8 +177,9 @@ enum ZenExpenseClassifier {
         let inputData = try encoder.encode(input)
         let inputJSON = String(data: inputData, encoding: .utf8) ?? "[]"
         let categories = allowedCategories.joined(separator: ", ")
+        let tags = allowedTags.joined(separator: ", ")
         let system = """
-        Eres el clasificador de gastos de una app financiera. Clasifica cada movimiento usando solo estas categorías: \(categories). No clasifiques ingresos, reembolsos, pagos de tarjeta ni transferencias: esos movimientos no deben enviarse a esta función. No recibes ni debes solicitar PDFs, cuentas, números de tarjeta, saldos o metadatos del estado. Identifica si pertenece a un viaje. Conserva exactamente cada id. Responde únicamente un arreglo JSON, sin markdown, con objetos de la forma {\"id\":\"UUID\",\"category\":\"Categoría\",\"travelRelated\":true|false}.
+        Eres el clasificador de gastos de una app financiera. Clasifica cada movimiento usando solo estas categorías: \(categories). Usa únicamente estas etiquetas secundarias, sin duplicarlas: \(tags). Club Amigos / Proyectos tiene prioridad si el concepto identifica un proyecto. No clasifiques ingresos, reembolsos, pagos de tarjeta, transferencias ni MSI: esos movimientos no deben enviarse a esta función. No recibes ni debes solicitar PDFs, cuentas, números de tarjeta, saldos o metadatos del estado. Identifica si pertenece a un viaje. Conserva exactamente cada id. Responde únicamente un arreglo JSON, sin markdown, con objetos de la forma {\"id\":\"UUID\",\"category\":\"Categoría\",\"tags\":[\"personal\",\"variable\",\"ordinario\"],\"travelRelated\":true|false,\"confidence\":0.0,\"reason\":\"evidencia breve\",\"requires_review\":false}.
         """
         let user = "Clasifica estos movimientos pendientes:\n\(inputJSON)"
         let requestBody = Request(
@@ -213,11 +224,18 @@ enum ZenExpenseClassifier {
             guard let movementID = UUID(uuidString: payload.id),
                   requested.contains(movementID),
                   seen.insert(movementID).inserted,
-                  let category = canonicalCategory(payload.category) else { return nil }
+                  let category = canonicalCategory(payload.category),
+                  let validTags = normalizedTags(payload.tags ?? []),
+                  let confidence = payload.confidence,
+                  confidence >= 0, confidence <= 1 else { return nil }
             return AIClassification(
                 movementID: movementID,
                 category: category,
-                travelRelated: payload.travelRelated ?? (category == "Viajes")
+                travelRelated: payload.travelRelated ?? (category == "Viajes"),
+                tags: validTags,
+                confidence: confidence,
+                requiresReview: payload.requiresReview ?? (confidence < 0.8),
+                reason: payload.reason
             )
         }
         // A partial answer is not safe to apply: it makes the UI look as if
@@ -252,6 +270,14 @@ enum ZenExpenseClassifier {
         return allowedCategories.first {
             $0.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current) == normalized
         }
+    }
+
+    private static func normalizedTags(_ raw: [String]) -> [String]? {
+        var seen = Set<String>()
+        for tag in raw {
+            guard allowedTags.contains(tag), seen.insert(tag).inserted else { return nil }
+        }
+        return raw
     }
 }
 

@@ -24,6 +24,7 @@ export type TransactionKind =
 
 export type TransactionValidationStatus = "valid" | "review" | "invalid";
 export type ReconciliationType = "internalTransfer" | "cardPayment";
+export type ExpenseTag = "viaje" | "ordinario" | "extraordinario" | "fijo" | "variable" | "personal" | "proyecto";
 
 // Known brands keep stable labels, while the open string branch lets a file
 // from any other bank retain the name detected from its document or filename.
@@ -117,6 +118,8 @@ export type Transaction = {
   merchantNormalized?: string;
   /** Provenance of the optional merchant/category enrichment. */
   classificationProvider?: "rules" | "zen";
+  /** Stable secondary dimensions that do not replace the primary category. */
+  classificationTags?: ExpenseTag[];
   classificationConfidence?: number;
   classificationReason?: string;
   /** Analytics flags; never change the accounting direction or amount. */
