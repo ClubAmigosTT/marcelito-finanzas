@@ -2,6 +2,7 @@ import SwiftUI
 import PDFKit
 import UIKit
 import Charts
+import PhotosUI
 
 private let expenseCategoryOptions = [
     "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento",
@@ -1053,6 +1054,11 @@ struct AccountsView: View {
     @Environment(FinanceStore.self) private var store
     @State private var selectedAccountID = ""
     @State private var isMovementManagementPresented = false
+    @State private var isScreenshotPickerPresented = false
+    @State private var selectedScreenshotItems: [PhotosPickerItem] = []
+    @State private var isImportingScreenshots = false
+    @State private var screenshotImportError: String?
+    @State private var screenshotImportReceipt: BankScreenshotImportReceipt?
 
     private var displayedAccounts: [AccountDisplayItem] {
         var seen = Set<String>()
@@ -1094,6 +1100,11 @@ struct AccountsView: View {
         return store.statements(for: account.source, kind: account.kind, accountKey: account.accountKey)
     }
 
+    private var selectedScreenshotCaptures: [BankScreenshotCapture] {
+        guard let account = selectedAccount else { return [] }
+        return store.screenshotCaptures(for: account.source, accountKey: account.accountKey)
+    }
+
     private var carouselSelection: Binding<String> {
         Binding(
             get: { selectedAccount?.id ?? "" },
@@ -1104,6 +1115,37 @@ struct AccountsView: View {
     private func ensureValidSelection() {
         guard !displayedAccounts.contains(where: { $0.id == selectedAccountID }) else { return }
         selectedAccountID = displayedAccounts.first?.id ?? ""
+    }
+
+    @MainActor
+    private func importSelectedScreenshots(_ items: [PhotosPickerItem]) {
+        guard !items.isEmpty, !isImportingScreenshots else { return }
+        let sourceHint = selectedAccount?.source
+        let accountKey = selectedAccount?.accountKey
+        isImportingScreenshots = true
+        screenshotImportError = nil
+        Task {
+            defer {
+                isImportingScreenshots = false
+                selectedScreenshotItems = []
+            }
+            do {
+                var inputs: [BankScreenshotInput] = []
+                for (index, item) in items.enumerated() {
+                    guard let data = try await item.loadTransferable(type: Data.self) else {
+                        throw BankScreenshotImportError.unreadableImage
+                    }
+                    inputs.append(BankScreenshotInput(data: data, fileName: "captura-\(index + 1)"))
+                }
+                let preparedInputs = inputs
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try BankScreenshotReader.inspect(preparedInputs, sourceHint: sourceHint, accountKey: accountKey)
+                }.value
+                screenshotImportReceipt = try store.saveBankScreenshotImport(result)
+            } catch {
+                screenshotImportError = error.localizedDescription
+            }
+        }
     }
 
     var body: some View {
@@ -1159,6 +1201,36 @@ struct AccountsView: View {
                                 .font(.subheadline.weight(.semibold))
                                 .foregroundStyle(Color.marcelitoNavyMid)
                         }
+
+                        Button {
+                            isScreenshotPickerPresented = true
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: "photo.on.rectangle.angled")
+                                    .font(.title3.weight(.semibold))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Subir capturas")
+                                        .font(.headline)
+                                    Text("BBVA, Santander o American Express")
+                                        .font(.caption)
+                                        .opacity(0.78)
+                                }
+                                Spacer()
+                                if isImportingScreenshots {
+                                    ProgressView().tint(.white)
+                                } else {
+                                    Image(systemName: "plus.circle.fill")
+                                }
+                            }
+                            .frame(maxWidth: .infinity)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 14)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.white)
+                        .background(Color.marcelitoNavy, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+                        .disabled(isImportingScreenshots)
+                        .accessibilityHint("Selecciona pantallas de movimientos; quedan provisionales hasta conciliarlas con un estado oficial")
 
                         if account.isPlaceholder || selectedStatements.isEmpty {
                             ContentUnavailableView(
@@ -1224,6 +1296,38 @@ struct AccountsView: View {
                                 }
                             }
                         }
+
+                        if !selectedScreenshotCaptures.isEmpty {
+                            Text("Capturas provisionales")
+                                .font(.headline)
+
+                            VStack(spacing: 10) {
+                                ForEach(selectedScreenshotCaptures) { capture in
+                                    HStack(spacing: 12) {
+                                        Image(systemName: capture.confirmedCount == capture.uniqueMovements.count ? "checkmark.seal.fill" : "viewfinder")
+                                            .foregroundStyle(capture.confirmedCount == capture.uniqueMovements.count ? Color.green : Color.marcelitoNavyMid)
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(capture.coverageLabel)
+                                                .font(.subheadline.weight(.semibold))
+                                            Text("\(capture.uniqueMovements.count) mov. · \(capture.confirmedCount) confirmados · \(capture.pendingCount) pendientes")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Menu {
+                                            Button("Eliminar capturas", role: .destructive) {
+                                                store.deleteBankScreenshotCapture(capture)
+                                            }
+                                        } label: {
+                                            Image(systemName: "ellipsis")
+                                                .frame(width: 32, height: 32)
+                                        }
+                                    }
+                                    .padding(14)
+                                    .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                                }
+                            }
+                        }
                     }
 
                 }
@@ -1250,6 +1354,26 @@ struct AccountsView: View {
             }
             .sheet(isPresented: $isMovementManagementPresented) {
                 MovementsView()
+            }
+            .photosPicker(
+                isPresented: $isScreenshotPickerPresented,
+                selection: $selectedScreenshotItems,
+                maxSelectionCount: 20,
+                matching: .images
+            )
+            .onChange(of: selectedScreenshotItems) { _, items in
+                importSelectedScreenshots(items)
+            }
+            .sheet(item: $screenshotImportReceipt) { receipt in
+                BankScreenshotImportReceiptView(receipt: receipt)
+            }
+            .alert("No se pudieron importar las capturas", isPresented: Binding(
+                get: { screenshotImportError != nil },
+                set: { if !$0 { screenshotImportError = nil } }
+            )) {
+                Button("Aceptar", role: .cancel) { screenshotImportError = nil }
+            } message: {
+                Text(screenshotImportError ?? "Error desconocido")
             }
         }
     }

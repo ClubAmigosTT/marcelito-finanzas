@@ -154,6 +154,8 @@ Los PDFs importados se conservan en Application Support del dispositivo para que
 
 La importación de la interfaz usa `importPDFAsync` y la reconstrucción de arranque usa `rebuildCanonicalLedgerIfNeededAsync`: la lectura PDFKit/Vision y el cálculo de huellas se ejecutan en tareas de fondo y el indicador de carga permanece visible mientras se procesa cada archivo. El libro canónico solo se actualiza después de terminar extracción, validación y conciliación; así una página pesada o un OCR lento no bloquea el hilo principal ni puede dejar un commit parcial.
 
+En **Cuentas > Subir capturas** se pueden elegir hasta 20 pantallas de movimientos de BBVA, Santander o American Express desde Fotos. Vision las procesa localmente y conserva sus filas en una bitácora provisional separada del libro canónico. Una imagen repetida no se vuelve a guardar; las pantallas solapadas conservan la evidencia pero marcan la fila repetida, y una pantalla complementaria agrega únicamente movimientos nuevos. Al importar después el estado oficial, la app enlaza por emisor, cuenta, fecha, importe y concepto: el PDF sigue siendo la fuente de los KPI y la captura permanece como evidencia confirmada o pendiente.
+
 Si el emisor o el tipo se detectan mal, abre **Cuentas > Editar cifras del corte**, corrige ambos campos y usa **Releer con esta configuración**. Marcelito vuelve a construir las filas desde el PDF original, registra la corrección como revisión manual y no libera el estado a los KPI hasta que la conciliación sea válida y se confirme.
 
 El catálogo de iconos está en `Cauce/Assets.xcassets/AppIcon.appiconset`. Antes de TestFlight registra el Bundle ID `mx.marcelito.personal` y completa App Privacy, export compliance y screenshots en App Store Connect.
