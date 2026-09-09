@@ -6,7 +6,7 @@ import reactRefresh from "eslint-plugin-react-refresh";
 
 export default tseslint.config(
   {
-    ignores: ["dist/**", "node_modules/**", "tmp/**", "apps/ios/**"],
+    ignores: ["dist/**", "artifacts/**", "node_modules/**", "tmp/**", "apps/ios/**"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

@@ -216,6 +216,63 @@ input::placeholder { color: oklch(0.64 0.012 80); }
   .summary-field-grid { grid-template-columns: 1fr; }
 }
 
+/* Provisional mobile-capture workflow. Captures stay visually distinct from
+   official statements so a screenshot can never be mistaken for a KPI source. */
+.import-mode-tabs { display: flex; gap: 6px; margin: 18px 22px 0; padding: 4px; border: 1px solid var(--line); border-radius: 999px; background: var(--surface-raised); }
+.import-mode-tabs button { flex: 1; min-height: 34px; border: 0; border-radius: 999px; background: transparent; color: var(--muted); font-size: 12px; font-weight: 750; }
+.import-mode-tabs button.active { color: var(--cream); background: var(--navy); }
+.screenshot-picker { display: grid; gap: 4px; }
+.screenshot-picker-controls { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 18px 22px 0; }
+.screenshot-picker-controls label { display: grid; gap: 5px; }
+.screenshot-picker-controls label > span { color: var(--navy); font-size: 11px; font-weight: 700; }
+.screenshot-picker-controls select, .screenshot-picker-controls input { width: 100%; height: 38px; padding: 0 10px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); }
+.screenshot-drop-zone { min-height: 310px; }
+.screenshot-review-state .review-summary { grid-template-columns: repeat(5, 1fr); }
+.screenshot-review-meta { display: flex; flex-wrap: wrap; gap: 7px 16px; margin: 12px 0 14px; color: var(--muted); font-size: 11px; }
+.screenshot-review-row.is-duplicate { opacity: .58; background: color-mix(in srgb, var(--muted) 5%, transparent); }
+.screenshot-warning-list { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 6px 10px; margin: 10px 0 14px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--expense) 25%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--expense) 6%, var(--surface)); color: var(--expense); font-size: 11px; line-height: 1.4; }
+.screenshot-warning-list svg { flex: 0 0 auto; margin-top: 1px; }
+.screenshot-warning-list span { flex: 1 1 220px; }
+.screenshot-captures-view { display: grid; gap: 0; }
+.screenshot-capture-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-top: 22px; }
+.screenshot-capture-card { min-width: 0; padding: 18px; border: 1px solid var(--glass-border); border-radius: var(--radius-card); background: var(--glass-bg); box-shadow: var(--glass-shadow); }
+.screenshot-capture-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.screenshot-capture-head h2 { margin-top: 4px; color: var(--navy); font-size: 17px; }
+.screenshot-capture-head small, .screenshot-account-key, .screenshot-capture-actions small, .screenshot-more-rows, .screenshot-capture-footnote { color: var(--muted); font-size: 10px; line-height: 1.4; }
+.screenshot-capture-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 7px; margin: 16px 0 10px; }
+.screenshot-capture-stats span { display: grid; gap: 3px; padding: 9px 7px; border: 1px solid var(--line); border-radius: 12px; color: var(--muted); font-size: 9px; text-align: center; }
+.screenshot-capture-stats strong { color: var(--navy); font: 700 15px ui-monospace, monospace; }
+.screenshot-account-key { display: block; }
+.screenshot-balance-snapshot { display: grid; gap: 3px; margin-top: 12px; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--income) 25%, var(--line)); border-radius: 12px; background: color-mix(in srgb, var(--income) 6%, var(--surface)); }
+.screenshot-balance-snapshot span, .screenshot-balance-snapshot small { color: var(--muted); font-size: 10px; }
+.screenshot-balance-snapshot strong { color: var(--income); font-size: 15px; }
+.screenshot-capture-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 9px; margin: 14px 0; }
+.screenshot-capture-actions .secondary-button { min-height: 32px; padding: 0 12px; font-size: 11px; }
+.screenshot-capture-quality { display: flex; flex-wrap: wrap; gap: 6px 12px; margin: -5px 0 12px; color: var(--muted); font-size: 10px; }
+.screenshot-row-list { border-top: 1px solid var(--line); }
+.screenshot-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 10px 0; border-bottom: 1px solid var(--line); }
+.screenshot-row > div { min-width: 0; display: grid; gap: 3px; }
+.screenshot-row strong { overflow: hidden; color: var(--ink); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+.screenshot-row small { color: var(--muted); font-size: 9px; }
+.screenshot-row .review-amount { font-size: 11px; }
+.screenshot-more-rows { display: block; margin-top: 10px; }
+.screenshot-capture-footnote { margin-top: 16px; text-align: center; }
+.statement-status.provisional, .statement-status.review { color: var(--expense); background: color-mix(in srgb, var(--expense) 10%, transparent); }
+.statement-status.partially-reconciled { color: var(--navy-mid); background: color-mix(in srgb, var(--navy-mid) 10%, transparent); }
+.statement-status.reconciled { color: var(--income); background: color-mix(in srgb, var(--income) 10%, transparent); }
+
+@media (max-width: 820px) {
+  .screenshot-capture-grid { grid-template-columns: 1fr; }
+  .screenshot-review-state .review-summary { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 560px) {
+  .screenshot-picker-controls { grid-template-columns: 1fr; margin-inline: 16px; }
+  .import-mode-tabs { margin-inline: 16px; }
+  .screenshot-capture-card { padding: 16px; }
+  .screenshot-capture-stats { grid-template-columns: 1fr 1fr; }
+}
+
 @media (max-width: 560px) {
   .top-actions .primary-button { font-size: 12px; }.home-heading { display: grid; }.month-button { justify-self: start; }.balance-story { grid-template-columns: auto 1fr; }.balance-story button { grid-column: 2; justify-self: end; }.shape-grid { grid-template-columns: 1.35fr 1fr; }.shape-grid .food { grid-column: 2; }.shape-grid .other { display: none; }.review-summary { grid-template-columns: 1fr; }.review-row { grid-template-columns: 1fr 100px; padding: 10px 0; }.review-row select { grid-column: 1; }.review-row > strong { grid-column: 2; grid-row: 1; }.table-head { display: none; }.dialog-actions { align-items: stretch; flex-direction: column-reverse; }.dialog-actions button { width: 100%; }.import-dialog { width: 100%; max-height: 100dvh; border-radius: 0; border: 0; }.dialog-head { padding: 16px; }.review-state { padding: 16px; }
 }

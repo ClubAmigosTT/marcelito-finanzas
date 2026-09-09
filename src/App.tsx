@@ -36,15 +36,18 @@ import { categoryFromRules, deterministicExpenseClassification, expenseCategorie
 import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey } from "./reconciliation";
 import { prepareStoredLedger } from "./statementMigration";
 import { clearWebErrorDiagnostics, readWebErrorDiagnostics, type WebErrorDiagnostic } from "./WebErrorBoundary";
-import { clearImportedPdfs, openImportedPdf, saveImportedPdf } from "./documentStore";
+import { clearImportedPdfs, openImportedPdf, openImportedScreenshot, saveImportedPdf, saveImportedScreenshot } from "./documentStore";
+import { SCREENSHOT_READER_VERSION, inspectScreenshots, type ScreenshotImportResult } from "./screenshotReader";
+import { deduplicateScreenshotCaptures, deduplicateScreenshotTransactions, reconcileScreenshotCaptures, screenshotCanonicalTransactions } from "./screenshotReconciliation";
 import { requestTransactionClassification, requestTransactionClassifierPreflight, applyTransactionClassifications, TransactionClassifierError } from "./aiClassifier";
 import type { TransactionClassifierPreflightResult } from "./aiClassifier";
-import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, Statement, StatementKind, StatementReconciliation, StatementSource, Transaction } from "./types";
+import type { AuditRunRecord, FinancialGoal, FinancialGoalKind, ImportCommit, ImportResult, Section, ScreenshotCapture, Statement, StatementKind, StatementReconciliation, StatementSource, Transaction } from "./types";
 
 const money = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", maximumFractionDigits: 0 });
 const moneyPrecise = new Intl.NumberFormat("es-MX", { style: "currency", currency: "MXN", minimumFractionDigits: 2 });
 const transactionStorageKey = "marcelito-transactions.v2";
 const statementStorageKey = "marcelito-statements.v1";
+const screenshotCaptureStorageKey = "marcelito-screenshot-captures.v1";
 const categoryRulesStorageKey = "marcelito-category-rules.v1";
 const categoryOverridesStorageKey = "marcelito-category-overrides.v1";
 const goalsStorageKey = "marcelito-goals.v1";
@@ -90,6 +93,7 @@ function deleteLocalAccount() {
   localStorage.removeItem("marcelito-transactions");
   localStorage.removeItem(transactionStorageKey);
   localStorage.removeItem(statementStorageKey);
+  localStorage.removeItem(screenshotCaptureStorageKey);
   localStorage.removeItem(categoryRulesStorageKey);
   localStorage.removeItem(categoryOverridesStorageKey);
   localStorage.removeItem(goalsStorageKey);
@@ -130,7 +134,7 @@ function dashboardMoney(blocked: boolean, value: number | undefined | null) {
   return blocked ? "Bloqueado por conciliación" : displayMoney(value);
 }
 
-function exportAuditDiagnostics(metrics: ReturnType<typeof buildFinanceMetrics>, statements: Statement[], auditRun: AuditRunRecord | null) {
+function exportAuditDiagnostics(metrics: ReturnType<typeof buildFinanceMetrics>, statements: Statement[], screenshotCaptures: ScreenshotCapture[], auditRun: AuditRunRecord | null) {
   const payload = {
     schemaVersion: 1,
     generatedAt: new Date().toISOString(),
@@ -156,6 +160,27 @@ function exportAuditDiagnostics(metrics: ReturnType<typeof buildFinanceMetrics>,
       sourceFingerprint: statement.sourceFingerprint,
       fileSizeBytes: statement.fileSizeBytes,
       pageCount: statement.pageCount,
+    })),
+    screenshotCaptures: screenshotCaptures.map((capture) => ({
+      id: capture.id,
+      source: capture.source,
+      kind: capture.kind,
+      fileCount: capture.fileNames.length,
+      fingerprintPrefixes: capture.sourceFingerprints.map((fingerprint) => fingerprint.slice(0, 8)),
+      coverageStart: capture.coverageStart,
+      coverageEnd: capture.coverageEnd,
+      importedAt: capture.importedAt,
+      readerVersion: capture.readerVersion,
+      parserId: capture.parserId,
+      status: capture.status,
+      transactionCount: capture.transactionCount,
+      duplicateCount: capture.duplicateCount,
+      matchedCount: capture.matchedCount,
+      reviewCount: capture.reviewCount,
+      rejectedRowCount: capture.rejectedRowCount,
+      averageConfidence: capture.averageConfidence,
+      warningCount: capture.warnings.length,
+      hasAccountKey: Boolean(capture.accountKey),
     })),
     audit: metrics.audit,
     dataQuality: metrics.dataQuality,
@@ -326,17 +351,30 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   const [initialLedger] = useState(readStoredLedgerState);
   const [transactions, setTransactions] = useState<Transaction[]>(() => initialLedger.transactions);
   const [statements, setStatements] = useState<Statement[]>(() => initialLedger.statements);
+  const [screenshotCaptures, setScreenshotCaptures] = useState<ScreenshotCapture[]>(() => {
+    const stored = readStored<ScreenshotCapture[]>(screenshotCaptureStorageKey, []);
+    return reconcileScreenshotCaptures(
+      deduplicateScreenshotCaptures(stored, initialLedger.statements),
+      initialLedger.transactions,
+      initialLedger.statements,
+    );
+  });
   const [categoryRules, setCategoryRules] = useState<CategoryRules>(() => readStored(categoryRulesStorageKey, {}));
   const [categoryOverrides, setCategoryOverrides] = useState<CategoryRules>(() => readStored(categoryOverridesStorageKey, {}));
   const [goals, setGoals] = useState<FinancialGoal[]>(() => readStored(goalsStorageKey, []));
   const [lastAuditRun, setLastAuditRun] = useState<AuditRunRecord | null>(() => readStored<AuditRunRecord | null>(auditStorageKey, null));
   const [importOpen, setImportOpen] = useState(false);
+  const [requestedImportMode, setRequestedImportMode] = useState<"statement" | "screenshots">("statement");
   const [readerPreflight, setReaderPreflight] = useState<TransactionClassifierPreflightResult | null>(null);
   const [readerPreflightBusy, setReaderPreflightBusy] = useState(false);
   const [readerPreflightError, setReaderPreflightError] = useState("");
   const readerAuthorization = useRef("");
   const reduceMotion = useReducedMotion();
   const latestStatement = latestStatementFor(statements);
+  function openImport(mode: "statement" | "screenshots" = "statement") {
+    setRequestedImportMode(mode);
+    setImportOpen(true);
+  }
   const pipeline = useMemo(() => runTransactionPipeline(transactions, statements), [transactions, statements]);
   const ledgerTransactions = useMemo(() => pipeline.transactions.filter((transaction) => {
     if (!transaction.statementId) return true;
@@ -357,6 +395,10 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
   useEffect(() => {
     localStorage.setItem(statementStorageKey, JSON.stringify(statements));
   }, [statements]);
+
+  useEffect(() => {
+    localStorage.setItem(screenshotCaptureStorageKey, JSON.stringify(screenshotCaptures));
+  }, [screenshotCaptures]);
 
   useEffect(() => {
     localStorage.setItem(categoryRulesStorageKey, JSON.stringify(categoryRules));
@@ -412,7 +454,13 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
     const importedAt = new Date().toISOString();
     const importedTransactions = commit.transactions
       .filter((item) => item.description.trim().length >= 3 && Number.isFinite(item.amount) && item.amount !== 0)
-      .map((item, index) => ({ ...item, id: `${statementId}-${index}-${item.id}`, statementId }));
+      .map((item, index) => ({
+        ...item,
+        id: `${statementId}-${index}-${item.id}`,
+        statementId,
+        accountKey: item.accountKey ?? commit.accountKey,
+        sourceType: "statement" as const,
+      }));
     const statement: Statement = {
       id: statementId,
       source: commit.source,
@@ -469,6 +517,58 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
     // All KPI and screen consumers use `ledgerTransactions` (the canonical
     // pipeline output), never this raw collection directly.
     setTransactions([...importedTransactions, ...withoutPrevious]);
+    setScreenshotCaptures((current) => reconcileScreenshotCaptures(
+      deduplicateScreenshotCaptures(current, nextStatements),
+      [...importedTransactions, ...withoutPrevious],
+      nextStatements,
+    ));
+    setImportOpen(false);
+  }
+
+  function saveScreenshotImport(result: ScreenshotImportResult, files: File[]) {
+    const captureId = createId("capture");
+    const importedAt = new Date().toISOString();
+    const screenshotTransactions = result.transactions
+      .filter((item) => item.description.trim().length >= 3 && Number.isFinite(item.amount) && item.amount !== 0)
+      .map((item, index) => ({
+        ...item,
+        id: `${captureId}-${index}-${item.id}`,
+        sourceCaptureId: captureId,
+        sourceType: "screenshot" as const,
+        accountKey: item.accountKey ?? result.accountKey,
+        observedAt: item.observedAt ?? result.capturedAt,
+      }));
+    const capture: ScreenshotCapture = {
+      id: captureId,
+      source: result.source,
+      accountKey: result.accountKey,
+      kind: result.kind,
+      fileNames: result.fileNames,
+      sourceFingerprints: result.sourceFingerprints,
+      importedAt,
+      readerVersion: result.readerVersion ?? SCREENSHOT_READER_VERSION,
+      parserId: result.parserId,
+      sourceDetection: result.sourceDetection,
+      averageConfidence: result.averageConfidence,
+      rejectedRowCount: result.rejectedRowCount,
+      coverageStart: result.coverageStart,
+      coverageEnd: result.coverageEnd,
+      status: "provisional",
+      transactionCount: screenshotTransactions.length,
+      duplicateCount: 0,
+      matchedCount: 0,
+      reviewCount: 0,
+      warnings: result.warnings,
+      balanceSnapshots: result.balanceSnapshots.map((snapshot) => ({ ...snapshot, sourceCaptureId: captureId, accountKey: snapshot.accountKey ?? result.accountKey })),
+      transactions: screenshotTransactions,
+    };
+    const next = reconcileScreenshotCaptures(
+      deduplicateScreenshotCaptures([...screenshotCaptures, capture], statements),
+      transactions,
+      statements,
+    );
+    setScreenshotCaptures(next);
+    files.forEach((file, index) => { void saveImportedScreenshot(result.sourceFingerprints[index], file); });
     setImportOpen(false);
   }
 
@@ -552,15 +652,15 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
           <div className="top-actions">
             <button className="icon-button mobile-profile-action" aria-label="Eliminar cuenta" onClick={onDeleteAccount}><Trash size={20} /></button>
             <button className="icon-button" aria-label="Notificaciones"><Bell size={20} /></button>
-            <button className="primary-button" onClick={() => setImportOpen(true)}><UploadSimple size={18} />Importar estado</button>
+            <button className="primary-button" onClick={() => openImport()}><UploadSimple size={18} />Importar estado</button>
           </div>
         </header>
         {initialLedger.quarantinedMovementCount > 0 && <div className="provisional-banner migration-notice" role="status"><Warning size={18} /><span>Se retiraron {initialLedger.quarantinedMovementCount} movimiento{initialLedger.quarantinedMovementCount === 1 ? "" : "s"} generado{initialLedger.quarantinedMovementCount === 1 ? "" : "s"} por una versión anterior del lector. Vuelve a importar esos estados para reconstruirlos con las reglas actuales.</span></div>}
         <AnimatePresence mode="wait">
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
-            {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => setImportOpen(true)} onRunReaderPreflight={transactionClassifierEndpoint ? runReaderPreflight : undefined} readerPreflight={readerPreflight} readerPreflightBusy={readerPreflightBusy} readerPreflightError={readerPreflightError} />}
-            {section === "Gastos" && <Expenses transactions={ledgerTransactions} statements={statements} metrics={metrics} onImport={() => setImportOpen(true)} />}
-            {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onOpenStatement={(statement) => openImportedPdf(statement.sourceFingerprint)} onLearnCategory={learnCategory} />}
+            {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} screenshotCaptures={screenshotCaptures} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => openImport()} onRunReaderPreflight={transactionClassifierEndpoint ? runReaderPreflight : undefined} readerPreflight={readerPreflight} readerPreflightBusy={readerPreflightBusy} readerPreflightError={readerPreflightError} />}
+            {section === "Gastos" && <Expenses transactions={ledgerTransactions} statements={statements} metrics={metrics} onImport={() => openImport()} />}
+            {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} screenshotCaptures={screenshotCaptures} setTransactions={setTransactions} onImport={() => openImport()} onScreenshotImport={() => openImport("screenshots")} onMarkReviewed={markStatementReviewed} onOpenStatement={(statement) => openImportedPdf(statement.sourceFingerprint)} onOpenScreenshot={(key) => openImportedScreenshot(key)} onLearnCategory={learnCategory} />}
             {section === "Patrimonio" && <NetWorth metrics={metrics} transactions={ledgerTransactions} statements={statements} />}
           </motion.div>
         </AnimatePresence>
@@ -568,7 +668,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       <nav className="mobile-nav" aria-label="Navegación principal móvil">
         {navItems.map(({ label, icon: Icon }) => <button key={label} className={section === label ? "active" : ""} onClick={() => setSection(label)}><Icon size={21} weight={section === label ? "fill" : "regular"} /><span>{label}</span></button>)}
       </nav>
-      <ImportDialog open={importOpen} onClose={() => setImportOpen(false)} onSave={saveImport} categoryRules={categoryRules} readerPreflightReady={readerPreflight !== null} />
+      <ImportDialog open={importOpen} initialMode={requestedImportMode} onClose={() => setImportOpen(false)} onSave={saveImport} onSaveScreenshot={saveScreenshotImport} categoryRules={categoryRules} readerPreflightReady={readerPreflight !== null} />
     </div>
   );
 }
@@ -576,7 +676,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
 type DashboardMetricKey = "patrimony" | "cash" | "debt" | "expense" | "flow";
 type MetricSeriesPoint = { key: string; label: string; value: number };
 
-function Home({ transactions, statements, metrics, goals, setGoals, auditRun, onImport, onRunReaderPreflight, readerPreflight, readerPreflightBusy, readerPreflightError }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; goals: FinancialGoal[]; setGoals: React.Dispatch<React.SetStateAction<FinancialGoal[]>>; auditRun: AuditRunRecord | null; onImport: () => void; onRunReaderPreflight?: () => void; readerPreflight: TransactionClassifierPreflightResult | null; readerPreflightBusy: boolean; readerPreflightError: string }) {
+function Home({ transactions, statements, screenshotCaptures, metrics, goals, setGoals, auditRun, onImport, onRunReaderPreflight, readerPreflight, readerPreflightBusy, readerPreflightError }: { transactions: Transaction[]; statements: Statement[]; screenshotCaptures: ScreenshotCapture[]; metrics: ReturnType<typeof buildFinanceMetrics>; goals: FinancialGoal[]; setGoals: React.Dispatch<React.SetStateAction<FinancialGoal[]>>; auditRun: AuditRunRecord | null; onImport: () => void; onRunReaderPreflight?: () => void; readerPreflight: TransactionClassifierPreflightResult | null; readerPreflightBusy: boolean; readerPreflightError: string }) {
   const [selectedMetric, setSelectedMetric] = useState<DashboardMetricKey | null>(null);
   if (!transactions.length && !statements.length) return <RealDataEmpty onImport={onImport} />;
 
@@ -622,7 +722,7 @@ function Home({ transactions, statements, metrics, goals, setGoals, auditRun, on
         <GoalsPanel metrics={metrics} goals={goals} setGoals={setGoals} />
       </>}
       <DataQualityIndicator metrics={metrics} />
-      <AuditDiagnostics metrics={metrics} statements={statements} auditRun={auditRun} onRunReaderPreflight={onRunReaderPreflight} readerPreflight={readerPreflight} readerPreflightBusy={readerPreflightBusy} readerPreflightError={readerPreflightError} />
+            <AuditDiagnostics metrics={metrics} statements={statements} screenshotCaptures={screenshotCaptures} auditRun={auditRun} onRunReaderPreflight={onRunReaderPreflight} readerPreflight={readerPreflight} readerPreflightBusy={readerPreflightBusy} readerPreflightError={readerPreflightError} />
     </>
   );
 }
@@ -972,12 +1072,12 @@ function DebtBreakdown({ metrics }: { metrics: ReturnType<typeof buildFinanceMet
   return <section className="debt-breakdown" aria-label="Desglose de deuda"><div><span>Saldo total de deuda</span><strong>{displayMoney(metrics.debtTotal)}</strong><small>Tarjetas y créditos al último corte</small></div><div><span>Pago próximo</span><strong>{displayMoney(metrics.latestPaymentDue)}</strong><small>Mínimo + MSI del estado</small></div><div><span>Pago para no generar intereses</span><strong>{displayMoney(metrics.latestPaymentForNoInterest)}</strong><small>Importe del estado</small></div><div><span>MSI pendientes</span><strong>{displayMoney(metrics.latestMsiPending)}</strong><small>{metrics.latestMsiInstallmentsCount ? `${metrics.latestMsiInstallmentsCount} mensualidades` : "Principal diferido"}</small></div></section>;
 }
 
-function AuditDiagnostics({ metrics, statements, auditRun, onRunReaderPreflight, readerPreflight, readerPreflightBusy, readerPreflightError }: { metrics: ReturnType<typeof buildFinanceMetrics>; statements: Statement[]; auditRun: AuditRunRecord | null; onRunReaderPreflight?: () => void; readerPreflight: TransactionClassifierPreflightResult | null; readerPreflightBusy: boolean; readerPreflightError: string }) {
+function AuditDiagnostics({ metrics, statements, screenshotCaptures, auditRun, onRunReaderPreflight, readerPreflight, readerPreflightBusy, readerPreflightError }: { metrics: ReturnType<typeof buildFinanceMetrics>; statements: Statement[]; screenshotCaptures: ScreenshotCapture[]; auditRun: AuditRunRecord | null; onRunReaderPreflight?: () => void; readerPreflight: TransactionClassifierPreflightResult | null; readerPreflightBusy: boolean; readerPreflightError: string }) {
   const audit = metrics.audit;
   const [runtimeErrors, setRuntimeErrors] = useState<WebErrorDiagnostic[]>(() => readWebErrorDiagnostics());
   return <details className="audit-diagnostics">
      <summary><div><strong>Auditoría de importación y conciliación</strong><span>Diagnóstico temporal reproducible · {audit.stages.join(" → ")}</span></div><b>{audit.periods.length} periodos</b></summary>
-    <div className="audit-actions"><button type="button" className="text-button" onClick={() => exportAuditDiagnostics(metrics, statements, auditRun)}><DownloadSimple size={15} /> Descargar diagnóstico JSON</button><span>No incluye descripciones ni importes individuales.</span>{onRunReaderPreflight && <><button type="button" className="text-button" onClick={onRunReaderPreflight} disabled={readerPreflightBusy}><ShieldCheck size={15} />{readerPreflightBusy ? "Comprobando Zen…" : "Probar clasificador Zen"}</button>{readerPreflight && <span className="reader-preflight-ok" role="status">Clasificador listo · {readerPreflight.model}</span>}{readerPreflightError && <span className="reader-preflight-error" role="status">{readerPreflightError}</span>}</>}{runtimeErrors.length > 0 && <button type="button" className="text-button" onClick={() => { clearWebErrorDiagnostics(); setRuntimeErrors([]); }}>Limpiar errores de interfaz</button>}</div>
+    <div className="audit-actions"><button type="button" className="text-button" onClick={() => exportAuditDiagnostics(metrics, statements, screenshotCaptures, auditRun)}><DownloadSimple size={15} /> Descargar diagnóstico JSON</button><span>No incluye descripciones ni importes individuales.</span>{onRunReaderPreflight && <><button type="button" className="text-button" onClick={onRunReaderPreflight} disabled={readerPreflightBusy}><ShieldCheck size={15} />{readerPreflightBusy ? "Comprobando Zen…" : "Probar clasificador Zen"}</button>{readerPreflight && <span className="reader-preflight-ok" role="status">Clasificador listo · {readerPreflight.model}</span>}{readerPreflightError && <span className="reader-preflight-error" role="status">{readerPreflightError}</span>}</>}{runtimeErrors.length > 0 && <button type="button" className="text-button" onClick={() => { clearWebErrorDiagnostics(); setRuntimeErrors([]); }}>Limpiar errores de interfaz</button>}</div>
     {runtimeErrors.length > 0 && <div className="runtime-diagnostics" role="status"><strong>{runtimeErrors.length} error{runtimeErrors.length === 1 ? "" : "es"} de interfaz registrado{runtimeErrors.length === 1 ? "" : "s"}</strong>{runtimeErrors.slice(-3).reverse().map((entry) => <div className="runtime-diagnostic-row" key={entry.eventId}><span>{new Intl.DateTimeFormat("es-MX", { dateStyle: "short", timeStyle: "short" }).format(new Date(entry.recordedAt))}</span><code>{entry.eventId}</code><p>{entry.message || "Error sin mensaje"}</p></div>)}</div>}
     {auditRun && <div className="audit-run-meta"><span>Auditoría {auditRun.id} · {auditRun.trigger} · libro {auditRun.ledgerFingerprint}{auditRun.sourceFingerprints?.length ? ` · PDF${auditRun.sourceFingerprints.length === 1 ? "" : "s"} ${auditRun.sourceFingerprints.map((fingerprint) => fingerprint.slice(0, 8)).join(", ")}` : ""}{auditRun.readerVersions?.length ? ` · lector ${auditRun.readerVersions.join(", ")}` : ""}{auditRun.quarantinedMovementCount ? ` · ${auditRun.quarantinedMovementCount} fila${auditRun.quarantinedMovementCount === 1 ? "" : "s"} heredada${auditRun.quarantinedMovementCount === 1 ? "" : "s"} en cuarentena` : ""}</span><b className={`audit-status-${auditRun.status}`}>{auditRun.status === "passed" ? "Verificado" : auditRun.status === "warning" ? "Advertencias" : "Bloqueado"}</b></div>}
     {audit.criticalIssues.length > 0 && <div className="audit-critical">{audit.criticalIssues.join(" · ")}</div>}
@@ -1237,10 +1337,10 @@ function TravelTrips({ trips, period }: { trips: TravelTrip[]; period?: Analytic
   return <section className="detail-card travel-trips" aria-labelledby="travel-trips-title"><div className="section-heading"><div><h2 id="travel-trips-title">Viajes</h2><p>{periodLabel(period)} · {period?.spend ? `${Math.round(total / period.spend * 100)}% del gasto` : "sin porcentaje disponible"}.</p></div><strong className="detail-total">{displayMoney(total)}</strong></div>{trips.length ? <div className="travel-list">{trips.map((trip) => <article className="travel-trip" key={trip.id}><div className="travel-trip-head"><div><h3>{trip.name}</h3><small>{trip.startDate}{trip.endDate !== trip.startDate ? ` → ${trip.endDate}` : ""}</small></div><strong>{displayMoney(trip.total)}</strong></div><div className="travel-breakdown">{trip.movements.map((movement) => <div key={movement.id}><span>{movement.description}</span><small>{movement.date}</small><strong>{signedMoney(-Math.abs(movement.amount))}</strong></div>)}</div></article>)}</div> : <EmptyState title="Sin viajes identificados" body="Los movimientos de viaje aparecerán aquí agrupados por fechas." />}</section>;
 }
 
-function Accounts({ transactions, statements, metrics, setTransactions, onImport, onMarkReviewed, onOpenStatement, onLearnCategory }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>>; onImport: () => void; onMarkReviewed: (statementId: string) => void; onOpenStatement: (statement: Statement) => Promise<boolean>; onLearnCategory: (description: string, category: string) => void }) {
+function Accounts({ transactions, statements, metrics, screenshotCaptures, setTransactions, onImport, onScreenshotImport, onMarkReviewed, onOpenStatement, onOpenScreenshot, onLearnCategory }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; screenshotCaptures: ScreenshotCapture[]; setTransactions: React.Dispatch<React.SetStateAction<Transaction[]>>; onImport: () => void; onScreenshotImport: () => void; onMarkReviewed: (statementId: string) => void; onOpenStatement: (statement: Statement) => Promise<boolean>; onOpenScreenshot: (key: string | undefined) => Promise<boolean>; onLearnCategory: (description: string, category: string) => void }) {
   const [sourceFilter, setSourceFilter] = useState<StatementSource | "Todos">("Todos");
   const [periodFilter, setPeriodFilter] = useState("Todos");
-  const [view, setView] = useState<"accounts" | "movements">("accounts");
+  const [view, setView] = useState<"accounts" | "movements" | "captures">("accounts");
   const [openingStatementId, setOpeningStatementId] = useState<string | null>(null);
   const [documentError, setDocumentError] = useState("");
   const periods = Array.from(new Set(statements.map((item) => item.period)));
@@ -1282,11 +1382,16 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
   const tabs = <div className="accounts-tabs" role="tablist" aria-label="Contenido de cuentas">
     <button role="tab" aria-selected={view === "accounts"} className={view === "accounts" ? "active" : ""} onClick={() => setView("accounts")}>Cuentas <span>{knownAccounts.length}</span></button>
     <button role="tab" aria-selected={view === "movements"} className={view === "movements" ? "active" : ""} onClick={() => setView("movements")}>Movimientos <span>{transactions.length}</span></button>
+    <button role="tab" aria-selected={view === "captures"} className={view === "captures" ? "active" : ""} onClick={() => setView("captures")}>Capturas <span>{screenshotCanonicalTransactions(screenshotCaptures).length}</span></button>
   </div>;
 
   if (view === "movements") {
     const movementTransactions = sourceFilter === "Todos" ? transactions : transactions.filter((item) => statements.find((statement) => statement.id === item.statementId)?.source === sourceFilter);
     return <section>{tabs}<Movements transactions={movementTransactions} statements={statements} setTransactions={setTransactions} onLearnCategory={onLearnCategory} onImport={onImport} embedded /></section>;
+  }
+
+  if (view === "captures") {
+    return <ScreenshotCapturesPanel captures={screenshotCaptures} onImport={onScreenshotImport} onOpenScreenshot={onOpenScreenshot} />;
   }
 
   return <section>
@@ -1319,6 +1424,42 @@ function Accounts({ transactions, statements, metrics, setTransactions, onImport
         {statements.length ? <><div className="statement-filters"><select aria-label="Filtrar por banco" value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as StatementSource | "Todos")}><option value="Todos">Todos los bancos</option>{importedSources.map((source) => <option key={source} value={source}>{source}</option>)}</select><select aria-label="Filtrar por periodo" value={periodFilter} onChange={(event) => setPeriodFilter(event.target.value)}><option value="Todos">Todos los periodos</option>{periods.map((period) => <option key={period} value={period}>{period}</option>)}</select></div>{documentError && <p className="document-open-error" role="status"><Warning size={16} />{documentError}</p>}{filteredStatements.length ? <div className="statement-grid">{filteredStatements.map((statement) => <article className="statement-card" key={statement.id}><button className="statement-card-open" onClick={() => openStatement(statement)} disabled={openingStatementId === statement.id} title={statement.sourceFingerprint ? "Abrir el PDF original" : "PDF original no disponible"}><span className={`statement-icon ${sourceColor(statement.source)}`}><FilePdf size={22} /></span><span className="statement-card-copy"><strong>{statement.source}</strong><span>{statement.period}</span><small>{statement.transactionCount} movimientos{statement.pageCount ? ` · ${statement.pageCount} páginas` : ""}</small></span><ArrowRight size={18} /></button><div className="statement-card-footer"><span className={`statement-status ${statement.status}`}>{statement.status === "ready" ? "Revisado" : "Pendiente"}</span>{statement.reconciliation?.status !== "valid" && statement.reconciliation?.reason && <small className="statement-reason">{statement.reconciliation.reason}</small>}{statement.status === "review" && statement.reconciliationStatus === "valid" && statement.sourceDetection?.status === "verified" && <button className="text-button statement-action" onClick={() => onMarkReviewed(statement.id)}>Marcar revisado</button>}</div><small className="statement-card-file" title={statement.fileName}>{statement.fileName}</small></article>)}</div> : <EmptyState title="No coincide ningún documento" body="Prueba otro banco o periodo." />}</> : <EmptyState title="No hay documentos importados" body="Tus estados de cuenta aparecerán aquí después de revisarlos." />}
       </div>
     </details>
+  </section>;
+}
+
+function screenshotStatusLabel(status: ScreenshotCapture["status"]) {
+  if (status === "reconciled") return "Conciliada";
+  if (status === "partially-reconciled") return "Parcialmente conciliada";
+  if (status === "review") return "Revisión requerida";
+  return "Provisional";
+}
+
+function ScreenshotCapturesPanel({ captures, onImport, onOpenScreenshot }: { captures: ScreenshotCapture[]; onImport: () => void; onOpenScreenshot: (key: string | undefined) => Promise<boolean> }) {
+  const [openError, setOpenError] = useState("");
+  const rows = screenshotCanonicalTransactions(captures).slice().sort((left, right) => right.date.localeCompare(left.date) || right.id.localeCompare(left.id));
+  async function openScreenshot(key: string | undefined) {
+    setOpenError("");
+    if (!(await onOpenScreenshot(key))) setOpenError("No encontramos la imagen original en este dispositivo; vuelve a importarla.");
+  }
+  return <section className="screenshot-captures-view">
+    <PageHeading title="Capturas móviles" body="Observaciones OCR de BBVA, Santander y American Express. No alimentan los KPI hasta confirmarse con un estado oficial." action="Importar screenshots" onAction={onImport} />
+    <div className="provisional-banner" role="status"><Warning size={18} /><span>Las capturas se conservan tal como aparecen, incluidos conceptos truncados y movimientos Pendientes. El estado de cuenta mensual/API tendrá prioridad al confirmar o corregir.</span></div>
+    {openError && <p className="document-open-error" role="status"><Warning size={16} />{openError}</p>}
+    {captures.length ? <div className="screenshot-capture-grid">{captures.map((capture) => {
+      const canonical = capture.transactions.filter((transaction) => !transaction.duplicateOf);
+      return <article className="screenshot-capture-card" key={capture.id}>
+        <div className="screenshot-capture-head"><div><span className="eyebrow">{capture.source} · {capture.kind === "card" ? "tarjeta" : "cuenta"}</span><h2>{capture.coverageStart && capture.coverageEnd ? `${capture.coverageStart} → ${capture.coverageEnd}` : "Cobertura pendiente"}</h2><small>{capture.fileNames.length} imagen{capture.fileNames.length === 1 ? "" : "es"} · {capture.transactionCount} fila{capture.transactionCount === 1 ? "" : "s"} leída{capture.transactionCount === 1 ? "" : "s"}</small></div><span className={`statement-status ${capture.status}`}>{screenshotStatusLabel(capture.status)}</span></div>
+        <div className="screenshot-capture-stats"><span><strong>{canonical.length}</strong> canónicas</span><span><strong>{capture.duplicateCount}</strong> duplicadas</span><span><strong>{capture.matchedCount}</strong> confirmadas</span><span><strong>{capture.reviewCount}</strong> por revisar</span></div>
+        {capture.accountKey && <small className="screenshot-account-key">Cuenta identificada: ••••{capture.accountKey.split(":").at(-1)}</small>}
+        {capture.balanceSnapshots?.map((snapshot, index) => <div className="screenshot-balance-snapshot" key={`${snapshot.sourceCaptureId ?? capture.id}-${snapshot.capturedAt}-${index}`}><span>Saldo visible en la captura</span><strong>{moneyPrecise.format(snapshot.amount)} {snapshot.currency}</strong><small>No sustituye el saldo del estado oficial</small></div>)}
+        <div className="screenshot-capture-actions">{capture.sourceFingerprints.map((fingerprint, index) => <button className="secondary-button" type="button" key={`${fingerprint}-${index}`} onClick={() => openScreenshot(fingerprint)}>{capture.sourceFingerprints.length === 1 ? "Abrir imagen original" : `Abrir imagen ${index + 1}`}</button>)}<small>Importada {new Intl.DateTimeFormat("es-MX", { dateStyle: "short", timeStyle: "short" }).format(new Date(capture.importedAt))}</small></div>
+        {(capture.averageConfidence !== undefined || capture.rejectedRowCount !== undefined) && <div className="screenshot-capture-quality"><span>OCR {capture.averageConfidence === undefined ? "—" : `${Math.round(capture.averageConfidence * 100)}%`}</span><span>{capture.rejectedRowCount ?? 0} fila{capture.rejectedRowCount === 1 ? "" : "s"} no reconocida{capture.rejectedRowCount === 1 ? "" : "s"}</span></div>}
+        {capture.warnings.length > 0 && <div className="screenshot-warning-list"><Warning size={15} />{capture.warnings.slice(0, 3).map((warning) => <span key={warning}>{warning}</span>)}</div>}
+        {canonical.length > 0 && <div className="screenshot-row-list">{canonical.slice(0, 12).map((transaction) => <div className="screenshot-row" key={transaction.id}><div><strong>{transaction.displayDescription ?? transaction.description}</strong><small>{transaction.date} · {transaction.captureStatus === "pending" ? "Pendiente" : transaction.matchedTransactionId ? "Confirmada por estado" : "Pendiente de estado oficial"}</small></div><span className={transaction.amount > 0 ? "review-amount positive" : "review-amount"}>{moneyPrecise.format(transaction.amount)}</span></div>)}</div>}
+        {canonical.length > 12 && <small className="screenshot-more-rows">+{canonical.length - 12} filas más en la auditoría de la captura.</small>}
+      </article>;
+    })}</div> : <EmptyState title="Aún no hay capturas" body="Importa las pantallas de movimientos del banco o tarjeta para crear una bitácora provisional." />}
+    {rows.length > 0 && <p className="screenshot-capture-footnote">{rows.length} movimiento{rows.length === 1 ? "" : "s"} visibles como observación provisional. No se suman al gasto, ingresos, efectivo o deuda del Resumen.</p>}
   </section>;
 }
 function NetWorthBase({ metrics, onSelect }: { metrics: ReturnType<typeof buildFinanceMetrics>; onSelect?: (metric: Extract<DashboardMetricKey, "cash" | "debt" | "patrimony">) => void }) {
@@ -1374,12 +1515,17 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   return <div className="empty-state"><ListMagnifyingGlass size={32} /><h3>{title}</h3><p>{body}</p></div>;
 }
 
-function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightReady }: { open: boolean; onClose: () => void; onSave: (commit: ImportCommit) => void; categoryRules: CategoryRules; readerPreflightReady: boolean }) {
+function ImportDialog({ open, initialMode, onClose, onSave, onSaveScreenshot, categoryRules, readerPreflightReady }: { open: boolean; initialMode: "statement" | "screenshots"; onClose: () => void; onSave: (commit: ImportCommit) => void; onSaveScreenshot: (result: ScreenshotImportResult, files: File[]) => void; categoryRules: CategoryRules; readerPreflightReady: boolean }) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [stage, setStage] = useState<"pick" | "processing" | "review" | "error">("pick");
+  const [importMode, setImportMode] = useState<"statement" | "screenshots">("statement");
   const [progress, setProgress] = useState(0);
   const [progressLabel, setProgressLabel] = useState("");
   const [result, setResult] = useState<ImportResult | null>(null);
+  const [screenshotResult, setScreenshotResult] = useState<ScreenshotImportResult | null>(null);
+  const [screenshotFiles, setScreenshotFiles] = useState<File[]>([]);
+  const [screenshotSourceHint, setScreenshotSourceHint] = useState<"Auto" | "BBVA" | "Santander" | "Amex">("Auto");
+  const [screenshotAccountKey, setScreenshotAccountKey] = useState("");
   const [items, setItems] = useState<Transaction[]>([]);
   const [error, setError] = useState("");
   const [classificationBusy, setClassificationBusy] = useState(false);
@@ -1387,6 +1533,20 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
   const initialCategories = useRef<Record<string, string>>({});
   const readerAuthorization = useRef("");
   const readerConsent = useRef(false);
+  const wasOpen = useRef(false);
+
+  useEffect(() => {
+    if (open && !wasOpen.current) {
+      setStage("pick");
+      setImportMode(initialMode);
+      setResult(null);
+      setScreenshotResult(null);
+      setScreenshotFiles([]);
+      setItems([]);
+      setError("");
+    }
+    wasOpen.current = open;
+  }, [initialMode, open]);
 
   if (open && dialog.current && !dialog.current.open) dialog.current.showModal();
   if (!open && dialog.current?.open) dialog.current.close();
@@ -1440,6 +1600,28 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
     }
   }
 
+  async function handleScreenshotFiles(files: File[]) {
+    if (!files.length) return;
+    readerConsent.current = false;
+    readerAuthorization.current = "";
+    setStage("processing"); setProgress(0); setProgressLabel("Preparando screenshots…"); setError("");
+    try {
+      const inspected = await inspectScreenshots(files, {
+        sourceHint: screenshotSourceHint === "Auto" ? undefined : screenshotSourceHint,
+        accountKey: screenshotAccountKey.trim() || undefined,
+        capturedAt: new Date().toISOString(),
+        onProgress: (value, label) => { setProgress(value); setProgressLabel(label); },
+      });
+      setScreenshotFiles(files);
+      setScreenshotResult(inspected);
+      setItems(inspected.transactions);
+      setStage("review");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "No pudimos leer los screenshots.");
+      setStage("error");
+    }
+  }
+
   async function classifyExpensesWithZen() {
     // Never send a provisional import to the classifier. The deterministic
     // reconciliation is the hard boundary that establishes which rows are
@@ -1485,7 +1667,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
 
   function updateCategory(id: string, value: string) { setItems((current) => current.map((item) => item.id === id ? { ...item, category: value } : item)); }
 
-  function resetAndClose() { setStage("pick"); setProgress(0); setProgressLabel(""); setResult(null); setItems([]); setError(""); setClassificationBusy(false); setClassificationMessage(""); initialCategories.current = {}; readerAuthorization.current = ""; readerConsent.current = false; onClose(); }
+  function resetAndClose() { setStage("pick"); setImportMode("statement"); setProgress(0); setProgressLabel(""); setResult(null); setScreenshotResult(null); setScreenshotFiles([]); setItems([]); setError(""); setClassificationBusy(false); setClassificationMessage(""); initialCategories.current = {}; readerAuthorization.current = ""; readerConsent.current = false; onClose(); }
 
   const validItems = items.filter((item) => item.description.trim().length >= 3 && Number.isFinite(item.amount) && item.amount !== 0);
   // Reconciliation is immutable parser output. Category enrichment cannot
@@ -1497,11 +1679,13 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
     const key = merchantKey(item.description);
     return key && previous && previous !== item.category && !["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"].includes(item.category) ? [[key, item.category]] : [];
   }));
-  return <dialog ref={dialog} className="import-dialog" onCancel={(event) => { event.preventDefault(); resetAndClose(); }}><div className="dialog-head"><div><span className="dialog-icon"><FilePdf size={21} /></span><div><h2>Importar estado de cuenta</h2><p>El archivo se procesa localmente y conserva su origen.</p></div></div><button className="icon-button" aria-label="Cerrar" onClick={resetAndClose}><X size={20} /></button></div>
-    {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se aceptan Santander, BBVA y American Express únicamente cuando sus filas concilian al centavo contra el total oficial.</span>{transactionClassifierEndpoint && <small>Zen no lee PDFs: solo podrá enriquecer categorías después de una conciliación local válida.</small>}<span className="file-button">Elegir archivo</span></label>}
+  const screenshotPreview = screenshotResult ? deduplicateScreenshotTransactions(screenshotResult.transactions).transactions : [];
+  const screenshotPreviewDuplicates = screenshotPreview.filter((item) => Boolean(item.duplicateOf)).length;
+  return <dialog ref={dialog} className="import-dialog" onCancel={(event) => { event.preventDefault(); resetAndClose(); }}><div className="dialog-head"><div><span className="dialog-icon">{importMode === "statement" ? <FilePdf size={21} /> : <UploadSimple size={21} />}</span><div><h2>{importMode === "statement" ? "Importar estado de cuenta" : "Importar capturas móviles"}</h2><p>El archivo se procesa localmente y conserva su origen.</p></div></div><button className="icon-button" aria-label="Cerrar" onClick={resetAndClose}><X size={20} /></button></div>
+    {stage === "pick" && <><div className="import-mode-tabs" role="tablist" aria-label="Tipo de importación"><button type="button" role="tab" aria-selected={importMode === "statement"} className={importMode === "statement" ? "active" : ""} onClick={() => { setImportMode("statement"); setError(""); }}>Estado PDF</button><button type="button" role="tab" aria-selected={importMode === "screenshots"} className={importMode === "screenshots" ? "active" : ""} onClick={() => { setImportMode("screenshots"); setError(""); }}>Screenshots</button></div>{importMode === "statement" ? <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se aceptan Santander, BBVA y American Express únicamente cuando sus filas concilian al centavo contra el total oficial.</span>{transactionClassifierEndpoint && <small>Zen no lee PDFs: solo podrá enriquecer categorías después de una conciliación local válida.</small>}<span className="file-button">Elegir archivo</span></label> : <div className="screenshot-picker"><div className="screenshot-picker-controls"><label><span>Banco o tarjeta</span><select value={screenshotSourceHint} onChange={(event) => setScreenshotSourceHint(event.target.value as typeof screenshotSourceHint)}><option value="Auto">Detectar automáticamente</option><option value="BBVA">BBVA</option><option value="Santander">Santander</option><option value="Amex">American Express</option></select></label><label><span>Cuenta opcional</span><input value={screenshotAccountKey} onChange={(event) => setScreenshotAccountKey(event.target.value)} placeholder="Ej. Santander:bank:7079" /></label></div><label className="drop-zone screenshot-drop-zone"><input type="file" accept="image/*" multiple onChange={(event) => handleScreenshotFiles(Array.from(event.target.files ?? []))} /><UploadSimple size={30} /><strong>Selecciona una o varias pantallas</strong><span>Usa el mismo banco o tarjeta por lote. Se leen fechas, conceptos, importes, Pendiente y cuentas enmascaradas.</span><small>La primera lectura queda provisional; las capturas repetidas o solapadas se unen y se marcan para auditoría.</small><span className="file-button">Elegir imágenes</span></label></div>}</>}
     {stage === "processing" && <div className="processing-state" role="status" aria-live="polite" aria-busy="true"><div className="loading-orbit" aria-hidden="true"><CircleNotch size={34} className="spinner" /><span className="loading-pulse"><i /><i /><i /></span></div><h3>{progressLabel || "Cargando estado de cuenta…"}</h3><p>Estamos leyendo y conciliando tu estado. No cierres esta ventana.</p><div className="progress-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div><small>{progress}% completado</small></div>}
     {stage === "error" && <div className="error-state"><Warning size={34} /><h3>No pudimos completar la importación</h3><p>{error}</p><button className="secondary-button" onClick={() => setStage("pick")}>Intentar de nuevo</button></div>}
-    {stage === "review" && result && <div className="review-state">
+    {stage === "review" && importMode === "statement" && result && <div className="review-state">
       <div className="review-summary">
         <div><span>Origen detectado</span><strong>{result.source}</strong></div>
         <div><span>Periodo</span><strong>{result.period}</strong></div>
@@ -1517,6 +1701,21 @@ function ImportDialog({ open, onClose, onSave, categoryRules, readerPreflightRea
       {result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Lectura OCR con plantilla fija</strong><p>Solo se aceptaron filas dentro de la sección contractual del emisor. No se permiten correcciones manuales de importes; si el archivo no concilia, debe reimportarse.</p></div></div>}
       {items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><strong>{item.description}</strong><small>{item.date} · página {item.extractionEvidence?.page ?? "—"}</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)} disabled={reconciliationBlocked}>{["Ingresos", "Transferencia", ...expenseCategories].map((category) => <option key={category}>{category}</option>)}</select><span className={item.amount > 0 ? "review-amount positive" : "review-amount"}>{moneyPrecise.format(item.amount)}</span></div>)}</div> : <EmptyState title="Importación rechazada" body="No se extrajeron movimientos contractuales. Este archivo no puede guardarse ni afectar los KPI." />}
       <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "El parser rechazó el estado; no admite desbloqueo manual" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: result.source, accountKey: result.accountKey, kind: result.kind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, parserId: result.parserId, sourceSection: result.sourceSection, extractionProvider: result.extractionProvider, extractionModel: result.extractionModel, extractionPromptVersion: result.extractionPromptVersion, mode: result.mode, transactions: validItems, summary: result.summary, reconciliation: result.reconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Estado rechazado" : `Guardar estado y ${validItems.length} movimientos`}</button></div>
+    </div>}
+    {stage === "review" && importMode === "screenshots" && screenshotResult && <div className="review-state screenshot-review-state">
+      <div className="review-summary">
+        <div><span>Origen detectado</span><strong>{screenshotResult.source}</strong></div>
+        <div><span>Cuenta</span><strong>{screenshotResult.accountKey ? `••••${screenshotResult.accountKey.split(":").at(-1)}` : "No identificada"}</strong></div>
+        <div><span>Parser</span><strong>{screenshotResult.parserId}</strong></div>
+        <div><span>Imágenes</span><strong>{screenshotResult.fileNames.length}</strong></div>
+        <div><span>Filas leídas</span><strong>{screenshotResult.transactions.length}</strong></div>
+      </div>
+      <div className="ocr-callout"><Warning size={21} /><div><strong>Bitácora provisional</strong><p>Estas filas conservan lo visible en la app —incluidos importes con signo, conceptos truncados y Pendiente— pero no se sumarán a ningún KPI. Un estado oficial las confirmará, corregirá o dejará en revisión.</p></div></div>
+      {screenshotResult.warnings.length > 0 && <div className="screenshot-warning-list"><Warning size={15} />{screenshotResult.warnings.map((warning) => <span key={warning}>{warning}</span>)}</div>}
+      {screenshotResult.balanceSnapshots.length > 0 && <div className="screenshot-balance-snapshot"><span>Saldo visible detectado</span><strong>{screenshotResult.balanceSnapshots.map((snapshot) => `${moneyPrecise.format(snapshot.amount)} ${snapshot.currency}`).join(" · ")}</strong><small>Se conserva como evidencia; no sustituye el saldo del estado oficial.</small></div>}
+      <div className="screenshot-review-meta"><span>Confianza media: {Math.round(screenshotResult.averageConfidence * 100)}%</span><span>{screenshotResult.rejectedRowCount} fila{ screenshotResult.rejectedRowCount === 1 ? "" : "s" } no reconocida{ screenshotResult.rejectedRowCount === 1 ? "" : "s" }</span><span>{screenshotPreviewDuplicates} posible{ screenshotPreviewDuplicates === 1 ? "" : "s" } duplicado{ screenshotPreviewDuplicates === 1 ? "" : "s" } dentro del lote</span></div>
+      {screenshotPreview.length ? <div className="review-table">{screenshotPreview.map((item) => <div className={`review-row screenshot-review-row${item.duplicateOf ? " is-duplicate" : ""}`} key={item.id}><div><strong>{item.displayDescription ?? item.description}</strong><small>{item.date} · {item.captureStatus === "pending" ? "Pendiente" : item.duplicateOf ? "Posible solapamiento" : "Observación OCR"}</small></div><span className={item.amount > 0 ? "review-amount positive" : "review-amount"}>{moneyPrecise.format(item.amount)}</span></div>)}</div> : <EmptyState title="No se extrajeron filas" body="Prueba con una captura completa y nítida de la pantalla de movimientos." />}
+      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otras imágenes</button><button className="primary-button" disabled={!screenshotResult.transactions.length} onClick={() => onSaveScreenshot(screenshotResult, screenshotFiles)}><Check size={18} />Guardar capturas provisionales</button></div>
     </div>}
   </dialog>;
 }

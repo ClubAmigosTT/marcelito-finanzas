@@ -39,7 +39,7 @@ export type SourceDetectionStatus = "verified" | "review" | "unknown";
  * and migrated. New imports must use the local PDF text/OCR paths; Zen is an
  * optional post-reconciliation classifier, not a PDF reader.
  */
-export type ExtractionMethod = "pdf-text" | "ocr" | "multimodal" | "manual";
+export type ExtractionMethod = "pdf-text" | "ocr" | "screenshot-ocr" | "multimodal" | "manual";
 
 export type ExtractionProvider = "local" | "multimodal";
 
@@ -106,6 +106,22 @@ export type Transaction = {
   amount: number;
   flow: FlowType;
   kind?: TransactionKind;
+  /** Stable account identity for imports that expose a masked suffix. */
+  accountKey?: string;
+  /** Source of a movement that is not necessarily a finalized statement row. */
+  sourceType?: "statement" | "screenshot" | "api" | "manual";
+  /** Local screenshot batch that produced this observation. */
+  sourceCaptureId?: string;
+  /** Raw screenshot observation hidden from the provisional canonical view. */
+  duplicateOf?: string;
+  /** Raw description as displayed by a bank app, before normalization. */
+  displayDescription?: string;
+  /** The app visibly truncated the description with an ellipsis. */
+  descriptionTruncated?: boolean;
+  /** Current state in the source app, especially useful for Amex pending rows. */
+  captureStatus?: "displayed" | "pending" | "posted" | "confirmed" | "reversed" | "review";
+  /** When the screenshot was captured, distinct from the operation date. */
+  observedAt?: string;
   travelRelated?: boolean;
   /** Marks rows reconstructed from an issuer's foreign-currency section. */
   foreignCurrency?: boolean;
@@ -138,6 +154,46 @@ export type Transaction = {
 };
 
 export type StatementKind = "card" | "bank" | "unknown";
+
+export type ScreenshotParserId = "bbva-mobile-screenshot-v1" | "santander-mobile-screenshot-v1" | "amex-mobile-screenshot-v1";
+
+export type ScreenshotCaptureStatus = "provisional" | "review" | "partially-reconciled" | "reconciled";
+
+export type BalanceSnapshot = {
+  accountKey?: string;
+  amount: number;
+  currency: string;
+  capturedAt: string;
+  sourceCaptureId?: string;
+  extractionEvidence?: TransactionExtractionEvidence;
+};
+
+/** A local batch of mobile screenshots. It is evidence, not a finalized statement. */
+export type ScreenshotCapture = {
+  id: string;
+  source: StatementSource;
+  accountKey?: string;
+  kind: StatementKind;
+  fileNames: string[];
+  sourceFingerprints: string[];
+  importedAt: string;
+  readerVersion: string;
+  parserId: ScreenshotParserId;
+  sourceDetection?: SourceDetection;
+  averageConfidence?: number;
+  rejectedRowCount?: number;
+  coverageStart?: string;
+  coverageEnd?: string;
+  status: ScreenshotCaptureStatus;
+  transactionCount: number;
+  duplicateCount: number;
+  matchedCount: number;
+  reviewCount: number;
+  warnings: string[];
+  balanceSnapshots?: BalanceSnapshot[];
+  /** Raw observations remain available for reconciliation and audit. */
+  transactions: Transaction[];
+};
 
 /** Totals copied from the statement summary and corrected by the user when needed. */
 export type StatementSummary = {
