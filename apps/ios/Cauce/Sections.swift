@@ -1148,6 +1148,61 @@ struct AccountsView: View {
         }
     }
 
+    private var screenshotImportButton: some View {
+        Button {
+            isScreenshotPickerPresented = true
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "photo.on.rectangle.angled")
+                    .font(.title3.weight(.semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Subir capturas")
+                        .font(.headline)
+                    Text("BBVA, Santander o American Express")
+                        .font(.caption)
+                        .opacity(0.78)
+                }
+                Spacer()
+                if isImportingScreenshots {
+                    ProgressView().tint(.white)
+                } else {
+                    Image(systemName: "plus.circle.fill")
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .background(Color.marcelitoNavy, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        .disabled(isImportingScreenshots)
+        .accessibilityHint("Selecciona pantallas de movimientos; quedan provisionales hasta conciliarlas con un estado oficial")
+    }
+
+    @ViewBuilder
+    private var screenshotCaptureSection: some View {
+        if !selectedScreenshotCaptures.isEmpty {
+            Text("Capturas provisionales")
+                .font(.headline)
+
+            VStack(spacing: 10) {
+                ForEach(selectedScreenshotCaptures) { capture in
+                    ScreenshotCaptureRow(capture: capture) {
+                        store.deleteBankScreenshotCapture(capture)
+                    }
+                }
+            }
+        }
+    }
+
+    private var screenshotErrorIsPresented: Binding<Bool> {
+        Binding(
+            get: { screenshotImportError != nil },
+            set: { if !$0 { screenshotImportError = nil } }
+        )
+    }
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -1202,35 +1257,7 @@ struct AccountsView: View {
                                 .foregroundStyle(Color.marcelitoNavyMid)
                         }
 
-                        Button {
-                            isScreenshotPickerPresented = true
-                        } label: {
-                            HStack(spacing: 12) {
-                                Image(systemName: "photo.on.rectangle.angled")
-                                    .font(.title3.weight(.semibold))
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text("Subir capturas")
-                                        .font(.headline)
-                                    Text("BBVA, Santander o American Express")
-                                        .font(.caption)
-                                        .opacity(0.78)
-                                }
-                                Spacer()
-                                if isImportingScreenshots {
-                                    ProgressView().tint(.white)
-                                } else {
-                                    Image(systemName: "plus.circle.fill")
-                                }
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 14)
-                        }
-                        .buttonStyle(.plain)
-                        .foregroundStyle(.white)
-                        .background(Color.marcelitoNavy, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
-                        .disabled(isImportingScreenshots)
-                        .accessibilityHint("Selecciona pantallas de movimientos; quedan provisionales hasta conciliarlas con un estado oficial")
+                        screenshotImportButton
 
                         if account.isPlaceholder || selectedStatements.isEmpty {
                             ContentUnavailableView(
@@ -1297,37 +1324,7 @@ struct AccountsView: View {
                             }
                         }
 
-                        if !selectedScreenshotCaptures.isEmpty {
-                            Text("Capturas provisionales")
-                                .font(.headline)
-
-                            VStack(spacing: 10) {
-                                ForEach(selectedScreenshotCaptures) { capture in
-                                    HStack(spacing: 12) {
-                                        Image(systemName: capture.confirmedCount == capture.uniqueMovements.count ? "checkmark.seal.fill" : "viewfinder")
-                                            .foregroundStyle(capture.confirmedCount == capture.uniqueMovements.count ? Color.green : Color.marcelitoNavyMid)
-                                        VStack(alignment: .leading, spacing: 3) {
-                                            Text(capture.coverageLabel)
-                                                .font(.subheadline.weight(.semibold))
-                                            Text("\(capture.uniqueMovements.count) mov. · \(capture.confirmedCount) confirmados · \(capture.pendingCount) pendientes")
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        Spacer()
-                                        Menu {
-                                            Button("Eliminar capturas", role: .destructive) {
-                                                store.deleteBankScreenshotCapture(capture)
-                                            }
-                                        } label: {
-                                            Image(systemName: "ellipsis")
-                                                .frame(width: 32, height: 32)
-                                        }
-                                    }
-                                    .padding(14)
-                                    .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                                }
-                            }
-                        }
+                        screenshotCaptureSection
                     }
 
                 }
@@ -1367,15 +1364,44 @@ struct AccountsView: View {
             .sheet(item: $screenshotImportReceipt) { receipt in
                 BankScreenshotImportReceiptView(receipt: receipt)
             }
-            .alert("No se pudieron importar las capturas", isPresented: Binding(
-                get: { screenshotImportError != nil },
-                set: { if !$0 { screenshotImportError = nil } }
-            )) {
+            .alert("No se pudieron importar las capturas", isPresented: screenshotErrorIsPresented) {
                 Button("Aceptar", role: .cancel) { screenshotImportError = nil }
             } message: {
                 Text(screenshotImportError ?? "Error desconocido")
             }
         }
+    }
+}
+
+private struct ScreenshotCaptureRow: View {
+    let capture: BankScreenshotCapture
+    let onDelete: () -> Void
+
+    private var isFullyConfirmed: Bool {
+        !capture.uniqueMovements.isEmpty && capture.confirmedCount == capture.uniqueMovements.count
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: isFullyConfirmed ? "checkmark.seal.fill" : "viewfinder")
+                .foregroundStyle(isFullyConfirmed ? Color.green : Color.marcelitoNavyMid)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(capture.coverageLabel)
+                    .font(.subheadline.weight(.semibold))
+                Text("\(capture.uniqueMovements.count) mov. · \(capture.confirmedCount) confirmados · \(capture.pendingCount) pendientes")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Menu {
+                Button("Eliminar capturas", role: .destructive, action: onDelete)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 32, height: 32)
+            }
+        }
+        .padding(14)
+        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
     }
 }
 
