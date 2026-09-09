@@ -415,7 +415,7 @@ enum BankScreenshotReader {
             ? [#"\d{2}\*{2}(\d{4})"#, #"(?:\*|•|·|\.){2,}\s*(\d{4})"#]
             : [#"(?:\*|•|·|\.){2,}\s*\d?(\d{4})"#]
         for pattern in patterns {
-            if let match = captures(pattern, in: header).first, match.count == 4 {
+            if let match = captures(pattern, in: header)?.first, match.count == 4 {
                 return "\(source.rawValue.lowercased()):\(match)"
             }
         }
