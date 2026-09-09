@@ -9457,12 +9457,11 @@ final class FinanceStore {
                 return String(normalizedFileName[valueRange]).replacingOccurrences(of: "[_-]+", with: " ", options: .regularExpression).replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
             }
         }
-        return fileName
-            .replacingOccurrences(of: ".pdf", with: "", options: .caseInsensitive)
-            .replacingOccurrences(of: "_", with: " ")
-            .replacingOccurrences(of: "-", with: " ")
-            .replacingOccurrences(of: "  ", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // The filename is document identity, not accounting metadata. If the
+        // reader cannot prove a period from the statement itself, keep the
+        // uncertainty explicit instead of presenting the upload name as if it
+        // were a verified date range.
+        return "Periodo no identificado"
     }
 
     private static func statementKind(from text: String, source: String) -> StatementKind {

@@ -26,7 +26,10 @@ func conciseStatementPeriod(_ statement: StatementRecord) -> String {
         ("noviembre", "Noviembre"), ("nov", "Noviembre"),
         ("diciembre", "Diciembre"), ("dic", "Diciembre")
     ]
-    let source = "\(statement.period) \(statement.fileName)"
+    // `period` is accounting metadata; the upload filename is deliberately
+    // excluded so an arbitrary UUID or user-chosen PDF name can never leak
+    // into the account document grid.
+    let source = statement.period
         .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         .lowercased()
     var found: [String] = []
@@ -47,7 +50,11 @@ func conciseStatementPeriod(_ statement: StatementRecord) -> String {
     }
     let fallback = statement.period
         .trimmingCharacters(in: .whitespacesAndNewlines)
-    return fallback.count <= 24 && !fallback.isEmpty ? fallback : "Sin periodo"
+    let looksLikeFileName = fallback.localizedCaseInsensitiveContains(".pdf")
+        || fallback.range(of: #"^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$"#, options: [.regularExpression, .caseInsensitive]) != nil
+    return fallback.count <= 48 && !fallback.isEmpty && !looksLikeFileName
+        ? fallback
+        : "Periodo no identificado"
 }
 
 struct MovementsView: View {
@@ -869,6 +876,26 @@ private enum AccountBrand: String, CaseIterable {
         }
     }
 
+    /// The supplied artwork was photographed/exported with different white
+    /// margins. Matching each viewport to the actual card bounds avoids
+    /// clipping Amex and over-zooming BBVA.
+    var artworkAspectRatio: CGFloat {
+        switch self {
+        case .amex: 1.70
+        case .bbva: 1.75
+        case .santander: 1.66
+        case .rappi: 1.66
+        }
+    }
+
+    var artworkScale: CGFloat {
+        switch self {
+        case .amex: 1.075
+        case .bbva: 1.045
+        case .santander, .rappi: 1.08
+        }
+    }
+
     var fallbackKind: StatementKind {
         switch self {
         case .amex, .rappi: .card
@@ -903,6 +930,8 @@ private struct AccountDisplayItem: Identifiable {
     var brand: AccountBrand? { AccountBrand.identify(source) }
     var displayName: String { brand?.displayName ?? source }
     var artworkName: String? { brand?.artworkName }
+    var artworkAspectRatio: CGFloat { brand?.artworkAspectRatio ?? 1.66 }
+    var artworkScale: CGFloat { brand?.artworkScale ?? 1.0 }
     var id: String {
         "\(isPlaceholder ? "placeholder" : "account")|\(source)|\(kind.rawValue)|\(accountKey ?? "default")"
     }
@@ -928,7 +957,7 @@ private struct AccountCardArtwork: View {
                         // margin. Zooming inside the card-shaped viewport keeps
                         // only the physical card visible without modifying the
                         // original asset.
-                        .scaleEffect(1.08)
+                        .scaleEffect(account.artworkScale)
                 } else {
                     ZStack {
                         LinearGradient(
@@ -943,7 +972,7 @@ private struct AccountCardArtwork: View {
                 }
             }
         }
-        .aspectRatio(1.66, contentMode: .fit)
+        .aspectRatio(account.artworkAspectRatio, contentMode: .fit)
         .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(alignment: .topTrailing) {
@@ -1093,14 +1122,25 @@ struct AccountsView: View {
                             .foregroundStyle(.secondary)
                     }
 
-                    TabView(selection: carouselSelection) {
-                        ForEach(displayedAccounts) { account in
-                            AccountCardArtwork(account: account, isSelected: selectedAccount?.id == account.id)
-                                .tag(account.id)
+                    VStack(spacing: 8) {
+                        TabView(selection: carouselSelection) {
+                            ForEach(displayedAccounts) { account in
+                                AccountCardArtwork(account: account, isSelected: selectedAccount?.id == account.id)
+                                    .tag(account.id)
+                            }
+                        }
+                        .frame(height: 220)
+                        .tabViewStyle(.page(indexDisplayMode: .never))
+
+                        HStack(spacing: 7) {
+                            ForEach(displayedAccounts) { account in
+                                Circle()
+                                    .fill(account.id == selectedAccount?.id ? Color.marcelitoNavy : Color.marcelitoNavy.opacity(0.20))
+                                    .frame(width: 7, height: 7)
+                                    .accessibilityHidden(true)
+                            }
                         }
                     }
-                    .frame(height: 260)
-                    .tabViewStyle(.page(indexDisplayMode: .always))
                     .animation(.snappy, value: selectedAccountID)
 
                     if let account = selectedAccount {
@@ -1406,13 +1446,14 @@ private struct StatementDocumentTile: View {
                     .foregroundStyle(statement.requiresReview ? Color.marcelitoAmber : Color.marcelitoSuccess)
                     .accessibilityLabel(statement.requiresReview ? "Pendiente de revisión" : "Revisado")
             }
-            Text(statement.source)
-                .font(.headline)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
             Text(conciseStatementPeriod(statement))
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(Color.marcelitoNavyMid)
+                .font(.headline)
+                .foregroundStyle(Color.marcelitoNavy)
+                .lineLimit(2)
+                .minimumScaleFactor(0.82)
+            Text(statement.source)
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
             Text("\(statement.transactionCount) mov.")
                 .font(.caption2)
