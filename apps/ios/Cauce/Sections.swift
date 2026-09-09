@@ -3,6 +3,7 @@ import PDFKit
 import UIKit
 import Charts
 import PhotosUI
+import UniformTypeIdentifiers
 
 private let expenseCategoryOptions = [
     "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento",
@@ -1059,6 +1060,12 @@ struct AccountsView: View {
     @State private var isImportingScreenshots = false
     @State private var screenshotImportError: String?
     @State private var screenshotImportReceipt: BankScreenshotImportReceipt?
+    @State private var isStatementImporterPresented = false
+    @State private var statementImportReport: ImportReport?
+    @State private var isImportingStatements = false
+    @State private var statementImportProgress = 0
+    @State private var statementImportStatus = "Preparando…"
+    @State private var isDiagnosticsPresented = false
 
     private var displayedAccounts: [AccountDisplayItem] {
         var seen = Set<String>()
@@ -1148,6 +1155,93 @@ struct AccountsView: View {
         }
     }
 
+    @MainActor
+    private func handleStatementImport(_ result: Result<[URL], Error>) {
+        switch result {
+        case .success(let urls):
+            guard !urls.isEmpty else {
+                statementImportReport = ImportReport(
+                    fileCount: 0,
+                    items: [],
+                    selectionError: "No elegiste ningún PDF. Selecciona un estado de cuenta para revisar sus movimientos."
+                )
+                return
+            }
+            isImportingStatements = true
+            statementImportProgress = 0
+            statementImportStatus = urls.count == 1 ? "Preparando el estado…" : "Preparando \(urls.count) estados…"
+            DiagnosticsRecorder.record(stage: "import.start", message: "Importación iniciada desde Cuentas: \(urls.count) PDF(s).")
+            Task { @MainActor in
+                var items: [ImportReportItem] = []
+                for (index, url) in urls.enumerated() {
+                    statementImportStatus = "Leyendo \(url.lastPathComponent)…"
+                    let totalCount = max(Double(urls.count), 1)
+                    statementImportProgress = Int((Double(index) / totalCount * 100).rounded())
+                    await Task.yield()
+                    do {
+                        let summary = try await store.importPDFAsync(from: url, stage: { message in
+                            statementImportStatus = message
+                        })
+                        items.append(ImportReportItem(summary: summary))
+                        DiagnosticsRecorder.record(
+                            stage: "import.file",
+                            message: "\(summary.source) · \(summary.period): \(summary.imported) movimiento(s)\(summary.usedOCR ? " · OCR" : "")."
+                        )
+                    } catch {
+                        DiagnosticsRecorder.record(level: "error", stage: "import.error", message: "\(url.lastPathComponent): \(error.localizedDescription)")
+                        items.append(ImportReportItem(fileName: url.lastPathComponent, errorMessage: error.localizedDescription))
+                    }
+                    statementImportProgress = Int((Double(index + 1) / totalCount * 100).rounded())
+                    await Task.yield()
+                }
+                statementImportStatus = "Listo"
+                isImportingStatements = false
+                statementImportReport = ImportReport(fileCount: urls.count, items: items)
+                store.runAutomaticAuditIfNeeded(trigger: "import")
+                DiagnosticsRecorder.record(
+                    stage: "import.done",
+                    message: "Importación terminada: \(items.filter { $0.errorMessage == nil }.count)/\(urls.count) archivo(s) procesado(s)."
+                )
+            }
+        case .failure(let error):
+            isImportingStatements = false
+            DiagnosticsRecorder.record(level: "error", stage: "import.selection", message: error.localizedDescription)
+            statementImportReport = ImportReport(fileCount: 0, items: [], selectionError: error.localizedDescription)
+        }
+    }
+
+    private var statementImportButton: some View {
+        Button {
+            isStatementImporterPresented = true
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "doc.badge.plus")
+                    .font(.title3.weight(.semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Subir estado bancario")
+                        .font(.headline)
+                    Text("PDF oficial · uno o varios meses")
+                        .font(.caption)
+                        .opacity(0.78)
+                }
+                Spacer()
+                Image(systemName: "plus.circle.fill")
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Color.marcelitoNavy)
+        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 17, style: .continuous)
+                .stroke(Color.marcelitoNavy.opacity(0.16), lineWidth: 1)
+        }
+        .disabled(isImportingStatements)
+        .accessibilityHint("Selecciona estados de cuenta oficiales en PDF")
+    }
+
     private var screenshotImportButton: some View {
         Button {
             isScreenshotPickerPresented = true
@@ -1183,8 +1277,13 @@ struct AccountsView: View {
     @ViewBuilder
     private var screenshotCaptureSection: some View {
         if !selectedScreenshotCaptures.isEmpty {
-            Text("Capturas provisionales")
-                .font(.headline)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Capturas procesadas")
+                    .font(.headline)
+                Text("Leídas y guardadas; permanecen provisionales hasta coincidir con un estado oficial.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
 
             VStack(spacing: 10) {
                 ForEach(selectedScreenshotCaptures) { capture in
@@ -1313,7 +1412,26 @@ struct AccountsView: View {
     @ViewBuilder
     private func selectedAccountContent(_ account: AccountDisplayItem) -> some View {
         selectedAccountHeading(account)
+        statementImportButton
         screenshotImportButton
+
+        HStack(spacing: 10) {
+            Button {
+                isDiagnosticsPresented = true
+            } label: {
+                Label("Diagnóstico", systemImage: "stethoscope")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+
+            Button {
+                isMovementManagementPresented = true
+            } label: {
+                Label("Movimientos", systemImage: "slider.horizontal.3")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+        }
 
         if account.isPlaceholder || selectedStatements.isEmpty {
             emptyAccountView(account)
@@ -1375,6 +1493,16 @@ struct AccountsView: View {
             .sheet(isPresented: $isMovementManagementPresented) {
                 MovementsView()
             }
+            .sheet(isPresented: $isDiagnosticsPresented) {
+                DiagnosticsView()
+            }
+            .fileImporter(
+                isPresented: $isStatementImporterPresented,
+                allowedContentTypes: [.pdf],
+                allowsMultipleSelection: true
+            ) { result in
+                handleStatementImport(result)
+            }
             .photosPicker(
                 isPresented: $isScreenshotPickerPresented,
                 selection: $selectedScreenshotItems,
@@ -1386,6 +1514,16 @@ struct AccountsView: View {
             }
             .sheet(item: $screenshotImportReceipt) { receipt in
                 BankScreenshotImportReceiptView(receipt: receipt)
+            }
+            .sheet(item: $statementImportReport) { report in
+                ImportReportSheet(report: report)
+            }
+            .disabled(isImportingStatements)
+            .overlay {
+                if isImportingStatements {
+                    ImportProgressOverlay(progress: statementImportProgress, status: statementImportStatus)
+                        .transition(.opacity)
+                }
             }
             .alert("No se pudieron importar las capturas", isPresented: screenshotErrorIsPresented) {
                 Button("Aceptar", role: .cancel) { screenshotImportError = nil }
@@ -1404,6 +1542,17 @@ private struct ScreenshotCaptureRow: View {
         !capture.uniqueMovements.isEmpty && capture.confirmedCount == capture.uniqueMovements.count
     }
 
+    private var statusText: String {
+        if isFullyConfirmed { return "Conciliada con estado oficial" }
+        return "Leída y guardada · \(capture.unconfirmedCount) sin conciliar"
+    }
+
+    private var detailText: String {
+        let base = "\(capture.uniqueMovements.count) movimientos detectados"
+        guard capture.pendingCount > 0 else { return base }
+        return "\(base) · \(capture.pendingCount) pendientes en el banco"
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: isFullyConfirmed ? "checkmark.seal.fill" : "viewfinder")
@@ -1411,7 +1560,10 @@ private struct ScreenshotCaptureRow: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text(capture.coverageLabel)
                     .font(.subheadline.weight(.semibold))
-                Text("\(capture.uniqueMovements.count) mov. · \(capture.confirmedCount) confirmados · \(capture.pendingCount) pendientes")
+                Text(statusText)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(isFullyConfirmed ? Color.green : Color.marcelitoNavyMid)
+                Text(detailText)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

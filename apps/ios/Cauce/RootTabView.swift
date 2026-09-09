@@ -313,7 +313,7 @@ private struct DeferredTab<Content: View>: View {
     }
 }
 
-private struct ImportReport: Identifiable {
+struct ImportReport: Identifiable {
     let id = UUID()
     let fileCount: Int
     let items: [ImportReportItem]
@@ -355,7 +355,7 @@ private struct ImportReport: Identifiable {
     }
 }
 
-private struct ImportReportItem: Identifiable {
+struct ImportReportItem: Identifiable {
     enum State: Equatable {
         case imported
         case review
@@ -443,7 +443,7 @@ private struct ImportReportItem: Identifiable {
     }
 }
 
-private struct ImportReportSheet: View {
+struct ImportReportSheet: View {
     let report: ImportReport
     @Environment(\.dismiss) private var dismiss
 
@@ -739,7 +739,7 @@ struct HistoricalDashboardBlockedCard: View {
     }
 }
 
-private struct ImportProgressOverlay: View {
+struct ImportProgressOverlay: View {
     let progress: Int
     let status: String
 
