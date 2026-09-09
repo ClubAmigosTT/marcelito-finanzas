@@ -25,6 +25,12 @@ se usa únicamente como clasificador posterior de gastos ya conciliados
 ni decide ingresos o transferencias. Su contrato y configuración segura están
 documentados en [docs/transaction-classifier.md](docs/transaction-classifier.md).
 
+Las capturas de movimientos de BBVA, Santander y American Express también se
+leen localmente con lectores por plantilla. Se guardan como bitácora
+provisional, con deduplicación y reconciliación uno-a-uno contra el PDF oficial;
+no alimentan los KPI por sí solas. Consulta el flujo en
+[docs/mobile-screenshot-ingestion.md](docs/mobile-screenshot-ingestion.md).
+
 ## iOS
 
 El proyecto nativo se genera con XcodeGen (`apps/ios/project.yml`). El workflow
