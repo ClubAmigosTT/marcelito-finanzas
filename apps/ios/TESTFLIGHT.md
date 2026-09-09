@@ -57,8 +57,9 @@ Si en algún momento tienes acceso a una Mac, también puedes usar Xcode directa
 1. En apps/ios instala XcodeGen y ejecuta xcodegen generate.
 2. Abre Marcelito.xcodeproj en Xcode 26 o posterior, elige tu Team y confirma la firma automática.
 3. Prueba en un iPhone con Face ID: entrar, importar un Amex, corregir una categoría, agregar un movimiento y eliminar la cuenta.
-4. Captura screenshots reales del build. Como el target incluye iPhone y iPad, prepara al menos un juego para cada familia; si decides distribuir solo iPhone, cambia TARGETED_DEVICE_FAMILY a 1 antes de archivar.
-5. Archive > Distribute App > App Store Connect y sube el build. Aumenta CURRENT_PROJECT_VERSION para cada nueva subida.
+4. En **Cuentas**, toca **Subir capturas**, selecciona varias pantallas del banco, confirma que un lote repetido no duplique filas y que una pantalla solapada agregue solo movimientos nuevos. Después importa el PDF mensual y verifica que las capturas coincidentes cambien a confirmadas sin alterar dos veces los KPI.
+5. Captura screenshots reales del build. Como el target incluye iPhone y iPad, prepara al menos un juego para cada familia; si decides distribuir solo iPhone, cambia TARGETED_DEVICE_FAMILY a 1 antes de archivar.
+6. Archive > Distribute App > App Store Connect y sube el build. Aumenta CURRENT_PROJECT_VERSION para cada nueva subida.
 
 ## Metadatos y respuestas
 
@@ -70,4 +71,4 @@ Si en algún momento tienes acceso a una Mac, también puedes usar Xcode directa
 
 ## Alcance de la primera beta
 
-Esta beta sí incluye persistencia local y carga mensual de estados de cuenta. No sincroniza entre iOS y web todavía. Los PDFs con texto extraíble (como Amex) se leen localmente; los estados escaneados (como algunos Santander) requieren alta manual. El PDF no se almacena ni se envía a servicios externos.
+Esta beta incluye persistencia local, carga mensual de estados de cuenta y una bitácora provisional de capturas bancarias procesadas con Vision en el iPhone. No sincroniza entre iOS y web todavía. Las capturas nunca alimentan KPI por sí solas: el estado oficial conserva prioridad y confirma o corrige sus filas. Los documentos e imágenes no se envían a servicios externos.

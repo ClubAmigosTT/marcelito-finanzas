@@ -141,7 +141,7 @@ struct StatementReconciliationRecord: Codable {
 /// Coordinates and source text that let an auditor locate the exact visual
 /// row that produced a movement. Vision uses normalized coordinates (0–1),
 /// while text-layer imports may leave this nil.
-struct MovementExtractionBounds: Codable {
+struct MovementExtractionBounds: Codable, Equatable, Sendable {
     var x: Double
     var y: Double
     var width: Double
@@ -155,7 +155,7 @@ struct MovementExtractionBounds: Codable {
     }
 }
 
-struct MovementExtractionEvidence: Codable {
+struct MovementExtractionEvidence: Codable, Equatable, Sendable {
     var method: String
     var page: Int? = nil
     var confidence: Double
@@ -1235,6 +1235,10 @@ final class FinanceStore {
     var statements: [StatementRecord] {
         didSet { invalidateDerivedProjections() }
     }
+    /// Mobile screenshots are a provisional observation log. They are stored
+    /// separately from `movements`, so they can never feed balances or KPI
+    /// until an issuer statement confirms the corresponding row.
+    var screenshotCaptures: [BankScreenshotCapture]
     private(set) var ledgerVersion: UUID
     private(set) var lastAuditRun: LedgerAuditRun?
 
@@ -2891,6 +2895,9 @@ final class FinanceStore {
             }
             ledgerVersion = UUID()
         }
+        screenshotCaptures = defaults.data(forKey: bankScreenshotCaptureStorageKey)
+            .flatMap { try? JSONDecoder().decode([BankScreenshotCapture].self, from: $0) }
+            ?? []
         lastAuditRun = defaults.data(forKey: auditRunKey).flatMap { try? JSONDecoder().decode(LedgerAuditRun.self, from: $0) }
         lastImportedFile = defaults.string(forKey: importKey)
         // Upgrade the former broad taxonomy in memory without changing any
@@ -2976,6 +2983,7 @@ final class FinanceStore {
         isReconciliationOnly = reconciliationOnly
         movements = []
         statements = []
+        screenshotCaptures = []
         ledgerVersion = UUID()
         lastAuditRun = nil
         lastImportedFile = nil
@@ -3153,6 +3161,7 @@ final class FinanceStore {
     func clearLocalData() {
         movements = []
         statements = []
+        screenshotCaptures = []
         ledgerVersion = UUID()
         lastAuditRun = nil
         lastImportedFile = nil
@@ -3179,7 +3188,9 @@ final class FinanceStore {
         defaults.removeObject(forKey: rebuildStateKey)
         defaults.removeObject(forKey: auditRunKey)
         defaults.removeObject(forKey: manualDashboardUnlockKey)
+        defaults.removeObject(forKey: bankScreenshotCaptureStorageKey)
         try? FileManager.default.removeItem(at: statementFilesDirectoryURL)
+        try? FileManager.default.removeItem(at: bankScreenshotFilesDirectoryURL)
     }
 
     /// Devuelve la URL local del PDF importado. Solo se aceptan nombres de
@@ -4310,6 +4321,7 @@ final class FinanceStore {
         if normalizeAfterImport {
             normalizeStoredLedger()
         }
+        reconcileBankScreenshotsAgainstOfficialLedger()
         lastImportedFile = url.lastPathComponent
         persist(markingChange: true)
         if !isReconciliationOnly {

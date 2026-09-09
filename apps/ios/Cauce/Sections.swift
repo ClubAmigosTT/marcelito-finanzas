@@ -2,6 +2,7 @@ import SwiftUI
 import PDFKit
 import UIKit
 import Charts
+import PhotosUI
 
 private let expenseCategoryOptions = [
     "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento",
@@ -1053,6 +1054,11 @@ struct AccountsView: View {
     @Environment(FinanceStore.self) private var store
     @State private var selectedAccountID = ""
     @State private var isMovementManagementPresented = false
+    @State private var isScreenshotPickerPresented = false
+    @State private var selectedScreenshotItems: [PhotosPickerItem] = []
+    @State private var isImportingScreenshots = false
+    @State private var screenshotImportError: String?
+    @State private var screenshotImportReceipt: BankScreenshotImportReceipt?
 
     private var displayedAccounts: [AccountDisplayItem] {
         var seen = Set<String>()
@@ -1094,6 +1100,11 @@ struct AccountsView: View {
         return store.statements(for: account.source, kind: account.kind, accountKey: account.accountKey)
     }
 
+    private var selectedScreenshotCaptures: [BankScreenshotCapture] {
+        guard let account = selectedAccount else { return [] }
+        return store.screenshotCaptures(for: account.source, accountKey: account.accountKey)
+    }
+
     private var carouselSelection: Binding<String> {
         Binding(
             get: { selectedAccount?.id ?? "" },
@@ -1106,131 +1117,244 @@ struct AccountsView: View {
         selectedAccountID = displayedAccounts.first?.id ?? ""
     }
 
+    @MainActor
+    private func importSelectedScreenshots(_ items: [PhotosPickerItem]) {
+        guard !items.isEmpty, !isImportingScreenshots else { return }
+        let sourceHint = selectedAccount?.source
+        let accountKey = selectedAccount?.accountKey
+        isImportingScreenshots = true
+        screenshotImportError = nil
+        Task {
+            defer {
+                isImportingScreenshots = false
+                selectedScreenshotItems = []
+            }
+            do {
+                var inputs: [BankScreenshotInput] = []
+                for (index, item) in items.enumerated() {
+                    guard let data = try await item.loadTransferable(type: Data.self) else {
+                        throw BankScreenshotImportError.unreadableImage
+                    }
+                    inputs.append(BankScreenshotInput(data: data, fileName: "captura-\(index + 1)"))
+                }
+                let preparedInputs = inputs
+                let result = try await Task.detached(priority: .userInitiated) {
+                    try BankScreenshotReader.inspect(preparedInputs, sourceHint: sourceHint, accountKey: accountKey)
+                }.value
+                screenshotImportReceipt = try store.saveBankScreenshotImport(result)
+            } catch {
+                screenshotImportError = error.localizedDescription
+            }
+        }
+    }
+
+    private var screenshotImportButton: some View {
+        Button {
+            isScreenshotPickerPresented = true
+        } label: {
+            HStack(spacing: 12) {
+                Image(systemName: "photo.on.rectangle.angled")
+                    .font(.title3.weight(.semibold))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Subir capturas")
+                        .font(.headline)
+                    Text("BBVA, Santander o American Express")
+                        .font(.caption)
+                        .opacity(0.78)
+                }
+                Spacer()
+                if isImportingScreenshots {
+                    ProgressView().tint(.white)
+                } else {
+                    Image(systemName: "plus.circle.fill")
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.white)
+        .background(Color.marcelitoNavy, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
+        .disabled(isImportingScreenshots)
+        .accessibilityHint("Selecciona pantallas de movimientos; quedan provisionales hasta conciliarlas con un estado oficial")
+    }
+
+    @ViewBuilder
+    private var screenshotCaptureSection: some View {
+        if !selectedScreenshotCaptures.isEmpty {
+            Text("Capturas provisionales")
+                .font(.headline)
+
+            VStack(spacing: 10) {
+                ForEach(selectedScreenshotCaptures) { capture in
+                    ScreenshotCaptureRow(capture: capture) {
+                        store.deleteBankScreenshotCapture(capture)
+                    }
+                }
+            }
+        }
+    }
+
+    private var screenshotErrorIsPresented: Binding<Bool> {
+        Binding(
+            get: { screenshotImportError != nil },
+            set: { if !$0 { screenshotImportError = nil } }
+        )
+    }
+
+    private var accountsHeading: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Mis cuentas")
+                .font(.title3.weight(.bold))
+            Text("Desliza para elegir cuál quieres consultar")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private var accountCarousel: some View {
+        VStack(spacing: 8) {
+            TabView(selection: carouselSelection) {
+                ForEach(displayedAccounts) { account in
+                    AccountCardArtwork(account: account, isSelected: selectedAccount?.id == account.id)
+                        .tag(account.id)
+                }
+            }
+            .frame(height: 220)
+            .tabViewStyle(.page(indexDisplayMode: .never))
+
+            HStack(spacing: 7) {
+                ForEach(displayedAccounts) { account in
+                    Circle()
+                        .fill(account.id == selectedAccount?.id ? Color.marcelitoNavy : Color.marcelitoNavy.opacity(0.20))
+                        .frame(width: 7, height: 7)
+                        .accessibilityHidden(true)
+                }
+            }
+        }
+        .animation(.snappy, value: selectedAccountID)
+    }
+
+    private func selectedAccountHeading(_ account: AccountDisplayItem) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(account.displayName)
+                    .font(.title3.weight(.bold))
+                if let maskedAccount = account.maskedAccount {
+                    Text(maskedAccount)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Spacer()
+            Text("\(selectedStatements.count) estado\(selectedStatements.count == 1 ? "" : "s")")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(Color.marcelitoNavyMid)
+        }
+    }
+
+    private func emptyAccountView(_ account: AccountDisplayItem) -> some View {
+        ContentUnavailableView(
+            "Sin estados subidos",
+            systemImage: "doc.badge.plus",
+            description: Text("Cuando importes un estado de \(account.displayName), aparecerá aquí identificado por su periodo.")
+        )
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 20)
+        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var statementTiles: some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 150), spacing: 12)],
+            spacing: 12
+        ) {
+            ForEach(selectedStatements) { statement in
+                NavigationLink {
+                    StatementDocumentView(statement: statement)
+                } label: {
+                    StatementDocumentTile(statement: statement)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var statementEditors: some View {
+        VStack(spacing: 10) {
+            ForEach(selectedStatements) { statement in
+                NavigationLink {
+                    StatementSummaryEditor(statement: statement)
+                } label: {
+                    HStack(spacing: 12) {
+                        Image(systemName: "slider.horizontal.3")
+                            .foregroundStyle(Color.marcelitoNavyMid)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(conciseStatementPeriod(statement))
+                                .font(.subheadline.weight(.semibold))
+                            Text("Saldos, pagos, crédito y MSI")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.tertiary)
+                    }
+                    .padding(14)
+                    .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func selectedAccountContent(_ account: AccountDisplayItem) -> some View {
+        selectedAccountHeading(account)
+        screenshotImportButton
+
+        if account.isPlaceholder || selectedStatements.isEmpty {
+            emptyAccountView(account)
+        } else {
+            AccountSummaryRow(source: account.source, kind: account.kind, accountKey: account.accountKey)
+                .padding(16)
+                .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            Text("Estados subidos")
+                .font(.headline)
+            statementTiles
+
+            Text("Editar cifras del corte")
+                .font(.headline)
+            statementEditors
+        }
+
+        screenshotCaptureSection
+    }
+
+    private var accountsScrollView: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 22) {
+                if store.dashboardIsBlocked || store.dashboardIsProvisional {
+                    LedgerQualityBanner(store: store)
+                }
+                accountsHeading
+                accountCarousel
+                if let account = selectedAccount {
+                    selectedAccountContent(account)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 28)
+        }
+        .scrollIndicators(.hidden)
+    }
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 22) {
-                    if store.dashboardIsBlocked || store.dashboardIsProvisional {
-                        LedgerQualityBanner(store: store)
-                    }
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Mis cuentas")
-                            .font(.title3.weight(.bold))
-                        Text("Desliza para elegir cuál quieres consultar")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    VStack(spacing: 8) {
-                        TabView(selection: carouselSelection) {
-                            ForEach(displayedAccounts) { account in
-                                AccountCardArtwork(account: account, isSelected: selectedAccount?.id == account.id)
-                                    .tag(account.id)
-                            }
-                        }
-                        .frame(height: 220)
-                        .tabViewStyle(.page(indexDisplayMode: .never))
-
-                        HStack(spacing: 7) {
-                            ForEach(displayedAccounts) { account in
-                                Circle()
-                                    .fill(account.id == selectedAccount?.id ? Color.marcelitoNavy : Color.marcelitoNavy.opacity(0.20))
-                                    .frame(width: 7, height: 7)
-                                    .accessibilityHidden(true)
-                            }
-                        }
-                    }
-                    .animation(.snappy, value: selectedAccountID)
-
-                    if let account = selectedAccount {
-                        HStack(alignment: .firstTextBaseline) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text(account.displayName)
-                                    .font(.title3.weight(.bold))
-                                if let maskedAccount = account.maskedAccount {
-                                    Text(maskedAccount)
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                }
-                            }
-                            Spacer()
-                            Text("\(selectedStatements.count) estado\(selectedStatements.count == 1 ? "" : "s")")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(Color.marcelitoNavyMid)
-                        }
-
-                        if account.isPlaceholder || selectedStatements.isEmpty {
-                            ContentUnavailableView(
-                                "Sin estados subidos",
-                                systemImage: "doc.badge.plus",
-                                description: Text("Cuando importes un estado de \(account.displayName), aparecerá aquí identificado por su periodo.")
-                            )
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 20)
-                            .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        } else {
-                            AccountSummaryRow(source: account.source, kind: account.kind, accountKey: account.accountKey)
-                                .padding(16)
-                                .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-                            Text("Estados subidos")
-                                .font(.headline)
-
-                            // Each tile is scoped to the selected account and
-                            // named by the statement period, never by the PDF's
-                            // arbitrary upload filename.
-                            LazyVGrid(
-                                columns: [GridItem(.adaptive(minimum: 150), spacing: 12)],
-                                spacing: 12
-                            ) {
-                                ForEach(selectedStatements) { statement in
-                                    NavigationLink {
-                                        StatementDocumentView(statement: statement)
-                                    } label: {
-                                        StatementDocumentTile(statement: statement)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-
-                            Text("Editar cifras del corte")
-                                .font(.headline)
-
-                            VStack(spacing: 10) {
-                                ForEach(selectedStatements) { statement in
-                                    NavigationLink {
-                                        StatementSummaryEditor(statement: statement)
-                                    } label: {
-                                        HStack(spacing: 12) {
-                                            Image(systemName: "slider.horizontal.3")
-                                                .foregroundStyle(Color.marcelitoNavyMid)
-                                            VStack(alignment: .leading, spacing: 3) {
-                                                Text(conciseStatementPeriod(statement))
-                                                    .font(.subheadline.weight(.semibold))
-                                                Text("Saldos, pagos, crédito y MSI")
-                                                    .font(.caption)
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                            Spacer()
-                                            Image(systemName: "chevron.right")
-                                                .font(.caption.weight(.bold))
-                                                .foregroundStyle(.tertiary)
-                                        }
-                                        .padding(14)
-                                        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                        }
-                    }
-
-                }
-                .padding(.horizontal, 20)
-                .padding(.bottom, 28)
-            }
-            .scrollIndicators(.hidden)
+            accountsScrollView
             .navigationTitle("Cuentas")
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
@@ -1251,7 +1375,56 @@ struct AccountsView: View {
             .sheet(isPresented: $isMovementManagementPresented) {
                 MovementsView()
             }
+            .photosPicker(
+                isPresented: $isScreenshotPickerPresented,
+                selection: $selectedScreenshotItems,
+                maxSelectionCount: 20,
+                matching: .images
+            )
+            .onChange(of: selectedScreenshotItems) { _, items in
+                importSelectedScreenshots(items)
+            }
+            .sheet(item: $screenshotImportReceipt) { receipt in
+                BankScreenshotImportReceiptView(receipt: receipt)
+            }
+            .alert("No se pudieron importar las capturas", isPresented: screenshotErrorIsPresented) {
+                Button("Aceptar", role: .cancel) { screenshotImportError = nil }
+            } message: {
+                Text(screenshotImportError ?? "Error desconocido")
+            }
         }
+    }
+}
+
+private struct ScreenshotCaptureRow: View {
+    let capture: BankScreenshotCapture
+    let onDelete: () -> Void
+
+    private var isFullyConfirmed: Bool {
+        !capture.uniqueMovements.isEmpty && capture.confirmedCount == capture.uniqueMovements.count
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: isFullyConfirmed ? "checkmark.seal.fill" : "viewfinder")
+                .foregroundStyle(isFullyConfirmed ? Color.green : Color.marcelitoNavyMid)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(capture.coverageLabel)
+                    .font(.subheadline.weight(.semibold))
+                Text("\(capture.uniqueMovements.count) mov. · \(capture.confirmedCount) confirmados · \(capture.pendingCount) pendientes")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Menu {
+                Button("Eliminar capturas", role: .destructive, action: onDelete)
+            } label: {
+                Image(systemName: "ellipsis")
+                    .frame(width: 32, height: 32)
+            }
+        }
+        .padding(14)
+        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
     }
 }
 
