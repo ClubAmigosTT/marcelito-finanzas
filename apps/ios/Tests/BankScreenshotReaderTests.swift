@@ -3,6 +3,10 @@ import XCTest
 @testable import Marcelito
 
 final class BankScreenshotReaderTests: XCTestCase {
+    private func decimal(_ value: String) -> Decimal {
+        Decimal(string: value, locale: Locale(identifier: "en_US_POSIX"))!
+    }
+
     private var capturedAt: Date {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "America/Mexico_City")!
@@ -23,7 +27,7 @@ final class BankScreenshotReaderTests: XCTestCase {
         ], source: .bbva, capturedAt: capturedAt)
 
         XCTAssertEqual(result.movements.count, 3)
-        XCTAssertEqual(result.movements.map(\.displayedAmount), [-9.63, -60.23, 4_500])
+        XCTAssertEqual(result.movements.map(\.displayedAmount), [decimal("-9.63"), decimal("-60.23"), decimal("4500")])
         XCTAssertEqual(result.movements[2].title, "Spei recibido santander")
     }
 
@@ -62,7 +66,7 @@ final class BankScreenshotReaderTests: XCTestCase {
         XCTAssertTrue(result.movements[0].pending)
         XCTAssertTrue(result.movements[1].pending)
         XCTAssertEqual(result.movements[0].normalizedAmount, -405)
-        XCTAssertEqual(result.movements[2].normalizedAmount, -3_465.51)
+        XCTAssertEqual(result.movements[2].normalizedAmount, decimal("-3465.51"))
         XCTAssertEqual(result.movements[3].normalizedAmount, 12_000)
     }
 
