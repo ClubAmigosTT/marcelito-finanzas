@@ -334,17 +334,12 @@ struct SpendingCalendarView: View {
                     ContentUnavailableView("Sin gastos", systemImage: "calendar", description: Text("Importa estados conciliados para comparar tus semanas."))
                 } else {
                     ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 18) {
+                        LazyVStack(alignment: .leading, spacing: 12) {
                             if store.dashboardIsProvisional {
                                 LedgerQualityBanner(store: store)
                             }
-                            Picker("Vista", selection: $mode) {
-                                ForEach(SpendingCalendarMode.allCases) { option in Text(option.rawValue).tag(option) }
-                            }
-                            .pickerStyle(.segmented)
-
+                            calendarHeader
                             filterSummary
-                            coverageLabel
                             if filteredMovements.isEmpty {
                                 ContentUnavailableView("Sin coincidencias", systemImage: "line.3.horizontal.decrease.circle", description: Text("Cambia o limpia los filtros para ver gastos."))
                             } else if mode == .week {
@@ -354,11 +349,13 @@ struct SpendingCalendarView: View {
                             }
                         }
                         .padding(.horizontal)
-                        .padding(.bottom, 28)
+                        .padding(.top, 4)
+                        .padding(.bottom, 20)
                     }
                 }
             }
-            .navigationTitle("Calendario")
+            .navigationTitle("")
+            .navigationBarTitleDisplayMode(.inline)
             .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)
             .background(MarcelitoAmbientBackground())
@@ -392,6 +389,19 @@ struct SpendingCalendarView: View {
                 selectedDate = store.realExpenseMovements.map(\.date).max() ?? .now
                 didSelectInitialDate = true
             }
+        }
+    }
+
+    private var calendarHeader: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Calendario")
+                .font(.system(.largeTitle, design: .rounded).weight(.bold))
+            Picker("Vista", selection: $mode) {
+                ForEach(SpendingCalendarMode.allCases) { option in Text(option.rawValue).tag(option) }
+            }
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            coverageLabel
         }
     }
 
@@ -447,49 +457,45 @@ struct SpendingCalendarView: View {
                     .padding(.horizontal, 4)
             }
             WeeklySpendingChart(points: summary.points) { date in selectedDay = SelectedSpendingDay(date: date) }
-            weeklyInsights(summary)
-            weeklyDayList(summary)
+            executiveWeekInsight(summary)
         }
     }
 
     private func weekNavigator(_ summary: SpendingWeekSummary) -> some View {
-        HStack {
+        HStack(spacing: 12) {
             Button { shiftWeek(-1) } label: { Image(systemName: "chevron.left") }
-            Spacer()
-            Button { isDatePickerPresented = true } label: {
-                VStack(spacing: 2) {
-                    Text(summary.start.formatted(.dateTime.day().month(.abbreviated)) + " – " + (analytics.calendar.date(byAdding: .day, value: -1, to: summary.endExclusive) ?? summary.start).formatted(.dateTime.day().month(.abbreviated).year()))
-                        .font(.headline)
-                    Text("Cambiar semana")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                .buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Semana del \(summary.start.formatted(.dateTime.day())) al \((analytics.calendar.date(byAdding: .day, value: -1, to: summary.endExclusive) ?? summary.start).formatted(.dateTime.day().month(.abbreviated).year()))")
+                    .font(.headline)
+                Text("vs promedio histórico").font(.caption).foregroundStyle(.secondary)
             }
-            .buttonStyle(.plain)
             Spacer()
+            Button("Cambiar") { isDatePickerPresented = true }
+                .font(.caption.weight(.semibold))
             Button { shiftWeek(1) } label: { Image(systemName: "chevron.right") }
+                .buttonStyle(.plain)
         }
-        .padding(.horizontal, 10)
+        .padding(.horizontal, 4)
+        .padding(.vertical, 3)
     }
 
     private func weekHero(_ summary: SpendingWeekSummary) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Gasto de la semana")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text(summary.actualTotal, format: .currency(code: "MXN").precision(.fractionLength(0)))
-                .font(.system(.largeTitle, design: .rounded).weight(.bold))
-                .monospacedDigit()
-            HStack(spacing: 10) {
-                SpendingMiniMetric(title: "Promedio diario", value: summary.dailyAverage.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
-                SpendingMiniMetric(title: "Contra histórico", value: comparisonText(summary), color: comparisonColor(summary))
-                SpendingMiniMetric(title: "Movimientos", value: "\(summary.points.reduce(0) { $0 + $1.movementCount })")
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                Text("Resumen semanal").font(.headline)
+                Spacer()
+                Text(summary.comparableDayCount < 7 ? "\(summary.comparableDayCount) días" : "7 días")
+                    .font(.caption).foregroundStyle(.secondary)
             }
-            Text(summary.comparableDayCount < 7 ? "Comparación acumulada para \(summary.comparableDayCount) día(s) transcurridos." : "Comparación contra los mismos siete días del promedio histórico.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                SpendingMetricTile(title: "Total semanal", value: summary.actualTotal.formatted(.currency(code: "MXN").precision(.fractionLength(0))), prominent: true)
+                SpendingMetricTile(title: "Promedio diario", value: summary.dailyAverage.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                SpendingMetricTile(title: "vs histórico", value: comparisonText(summary), color: comparisonColor(summary))
+                SpendingMetricTile(title: "Movimientos", value: "\(summary.points.reduce(0) { $0 + $1.movementCount })")
+            }
         }
-        .marcelitoCard()
+        .marcelitoCard(radius: 20, padding: 14)
         .contentShape(Rectangle())
         .onTapGesture {
             let rows = filteredMovements.filter { $0.date >= summary.start && $0.date < summary.endExclusive }
@@ -500,44 +506,27 @@ struct SpendingCalendarView: View {
             )
         }
         .accessibilityHint("Toca para ver el desglose y los montos más altos de la semana")
+        .accessibilityValue(summary.comparableDayCount < 7 ? "Comparación acumulada para \(summary.comparableDayCount) días transcurridos" : "Comparación contra los mismos siete días del promedio histórico")
         .accessibilityAddTraits(.isButton)
     }
 
-    private func weeklyInsights(_ summary: SpendingWeekSummary) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Lectura de la semana").font(.headline)
-            if let highest = summary.highest {
-                insightRow(symbol: "arrow.up.right", title: "Día de mayor gasto", point: highest)
-            }
-            if let lowest = summary.lowest {
-                insightRow(symbol: "arrow.down.right", title: "Día de menor gasto", point: lowest)
-            }
-            if let top = topBreakdown(in: summary, by: { $0.category }) {
-                LabeledContent("Categoría principal", value: "\(top.name) · \(top.total.formatted(.currency(code: "MXN").precision(.fractionLength(0))))")
-                    .font(.subheadline)
-            }
-            if let top = topBreakdown(in: summary, by: { $0.account }) {
-                LabeledContent("Cuenta principal", value: "\(top.name) · \(top.total.formatted(.currency(code: "MXN").precision(.fractionLength(0))))")
-                    .font(.subheadline)
-            }
-        }
-        .marcelitoCard()
-    }
-
-    private func insightRow(symbol: String, title: String, point: SpendingDayPoint) -> some View {
-        Button { selectedDay = SelectedSpendingDay(date: point.date) } label: {
-            HStack {
-                Image(systemName: symbol).frame(width: 22)
-                VStack(alignment: .leading) {
-                    Text(title).font(.caption).foregroundStyle(.secondary)
-                    Text(point.date.formatted(.dateTime.weekday(.wide))).font(.subheadline.weight(.semibold))
+    private func executiveWeekInsight(_ summary: SpendingWeekSummary) -> some View {
+        Button {
+            guard let highest = summary.highest else { return }
+            selectedDay = SelectedSpendingDay(date: highest.date)
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "sparkles").foregroundStyle(Color.marcelitoAmber)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Lectura automática").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                    Text(weekInsightText(summary)).font(.subheadline.weight(.medium)).multilineTextAlignment(.leading)
                 }
                 Spacer()
-                Text(point.actual, format: .currency(code: "MXN").precision(.fractionLength(0))).monospacedDigit()
                 Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
             }
         }
         .buttonStyle(.plain)
+        .marcelitoCard(fill: Color.marcelitoCreamTint, radius: 18, padding: 12)
     }
 
     private func weeklyDayList(_ summary: SpendingWeekSummary) -> some View {
@@ -568,31 +557,27 @@ struct SpendingCalendarView: View {
 
     private var historyView: some View {
         Group {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("Patrón histórico").font(.headline)
-                HStack(spacing: 10) {
-                    SpendingMiniMetric(title: "Promedio diario", value: analytics.historicalDailyAverage.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
-                    SpendingMiniMetric(title: "Mediana diaria", value: analytics.historicalMedian.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
-                    SpendingMiniMetric(title: "Días cubiertos", value: "\(analytics.historyDays.count)")
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Text("Patrón histórico").font(.headline)
+                    Spacer()
+                    Image(systemName: "info.circle").font(.caption).foregroundStyle(.secondary)
+                        .accessibilityLabel("La mediana representa un día típico sin distorsión por compras extraordinarias")
                 }
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                    SpendingMetricTile(title: "Promedio diario", value: analytics.historicalDailyAverage.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                    SpendingMetricTile(title: "Mediana diaria", value: analytics.historicalMedian.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                    SpendingMetricTile(title: "Cobertura", value: "\(analytics.historyDays.count) días")
+                }
+                Divider().opacity(0.55)
                 if let highest = analytics.highestAverageWeekday {
-                    LabeledContent(
-                        "Día habitualmente más caro",
-                        value: "\(highest.date.formatted(.dateTime.weekday(.wide))) · \(highest.actual.formatted(.currency(code: "MXN").precision(.fractionLength(0))))"
-                    )
-                    .font(.subheadline)
+                    HistoricalDayKPI(title: "Día más caro", day: highest.date, value: highest.actual, color: .marcelitoAmber)
                 }
                 if let lowest = analytics.lowestAverageWeekday {
-                    LabeledContent(
-                        "Día habitualmente más barato",
-                        value: "\(lowest.date.formatted(.dateTime.weekday(.wide))) · \(lowest.actual.formatted(.currency(code: "MXN").precision(.fractionLength(0))))"
-                    )
-                    .font(.subheadline)
+                    HistoricalDayKPI(title: "Día más barato", day: lowest.date, value: lowest.actual, color: .marcelitoSuccess)
                 }
-                Text("La mediana muestra un día típico sin dejar que una compra extraordinaria distorsione la lectura.")
-                    .font(.caption).foregroundStyle(.secondary)
             }
-            .marcelitoCard()
+            .marcelitoCard(radius: 20, padding: 14)
             .contentShape(Rectangle())
             .onTapGesture {
                 selectedPeriod = SelectedSpendingPeriod(
@@ -605,9 +590,21 @@ struct SpendingCalendarView: View {
             .accessibilityAddTraits(.isButton)
             HistoricalWeekdayChart(points: analytics.weekdayAverages)
             HistoricalSpendingHeatmap(days: Array(analytics.historyDays.suffix(84))) { day in selectedDay = SelectedSpendingDay(date: day) }
+            historyExecutiveInsight
             HistoricalWeeklyTrendChart(points: analytics.recentTrend)
             anomalousDayList
         }
+    }
+
+    private var historyExecutiveInsight: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "sparkles").foregroundStyle(Color.marcelitoAmber)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Lectura automática").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+                Text(historyInsightText).font(.subheadline.weight(.medium))
+            }
+        }
+        .marcelitoCard(fill: Color.marcelitoCreamTint, radius: 18, padding: 12)
     }
 
     private var anomalousDayList: some View {
@@ -662,6 +659,30 @@ struct SpendingCalendarView: View {
         return String(format: "%.0f%% %@ del promedio", abs((day.ratio - 1) * 100), day.ratio >= 1 ? "arriba" : "abajo")
     }
 
+    private func weekInsightText(_ summary: SpendingWeekSummary) -> String {
+        guard let highest = summary.highest else { return "Aún no hay suficiente información para interpretar esta semana." }
+        let share = summary.actualTotal > 0
+            ? NSDecimalNumber(decimal: highest.actual / summary.actualTotal).doubleValue * 100
+            : 0
+        let direction: String
+        if let percent = summary.deltaPercent {
+            if percent > 10 { direction = "más alta que el promedio" }
+            else if percent < -10 { direction = "más baja que el promedio" }
+            else { direction = "en línea con el promedio" }
+        } else {
+            direction = "sin suficiente base histórica"
+        }
+        return "Semana \(direction); \(highest.date.formatted(.dateTime.weekday(.wide))) concentró \(String(format: "%.0f", share))% del gasto."
+    }
+
+    private var historyInsightText: String {
+        guard let highest = analytics.highestAverageWeekday,
+              let lowest = analytics.lowestAverageWeekday else {
+            return "Importa más semanas para identificar un patrón diario estable."
+        }
+        return "Tu día históricamente más caro es \(highest.date.formatted(.dateTime.weekday(.wide))) y el más ligero es \(lowest.date.formatted(.dateTime.weekday(.wide)))."
+    }
+
     private func topBreakdown(in summary: SpendingWeekSummary, by key: (Movement) -> String) -> (name: String, total: Decimal)? {
         let rows = filteredMovements.filter { $0.date >= summary.start && $0.date < summary.endExclusive }
         return Dictionary(grouping: rows, by: key)
@@ -706,75 +727,175 @@ private struct SpendingMiniMetric: View {
     }
 }
 
+private struct SpendingMetricTile: View {
+    let title: String
+    let value: String
+    var color: Color = .marcelitoNavy
+    var prominent = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+            Text(value)
+                .font(prominent ? .headline.weight(.bold) : .subheadline.weight(.semibold))
+                .foregroundStyle(color)
+                .monospacedDigit()
+                .minimumScaleFactor(0.68)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, minHeight: 42, alignment: .leading)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(Color.marcelitoNavy.opacity(0.055), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+}
+
+private struct HistoricalDayKPI: View {
+    let title: String
+    let day: Date
+    let value: Decimal
+    let color: Color
+
+    var body: some View {
+        HStack {
+            Circle().fill(color).frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).font(.caption).foregroundStyle(.secondary)
+                Text(day.formatted(.dateTime.weekday(.wide))).font(.subheadline.weight(.semibold))
+            }
+            Spacer()
+            VStack(alignment: .trailing, spacing: 1) {
+                Text(value, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                    .font(.subheadline.weight(.semibold)).monospacedDigit()
+                Text("ticket habitual").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+private func spendingWeekdayLabel(_ date: Date) -> String {
+    switch Calendar(identifier: .iso8601).component(.weekday, from: date) {
+    case 1: return "D"
+    case 2: return "L"
+    case 3: return "M"
+    case 4: return "Mi"
+    case 5: return "J"
+    case 6: return "V"
+    default: return "S"
+    }
+}
+
 private struct WeeklySpendingChart: View {
     let points: [SpendingDayPoint]
     let select: (Date) -> Void
 
+    private var maximumID: Date? { points.max { $0.actual < $1.actual }?.id }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Text("Gasto por día").font(.headline)
                 Spacer()
-                Label("Promedio", systemImage: "minus").font(.caption).foregroundStyle(.secondary)
+                HStack(spacing: 5) {
+                    Capsule().fill(Color.marcelitoNavySoft).frame(width: 14, height: 5)
+                    Text("Real").font(.caption2)
+                    Rectangle().fill(Color.marcelitoAmber).frame(width: 14, height: 1)
+                    Text("Promedio").font(.caption2)
+                }
+                .foregroundStyle(.secondary)
             }
             Chart(points) { point in
                 BarMark(
                     x: .value("Día", point.date, unit: .day),
-                    y: .value("Gasto", point.actualDouble)
+                    y: .value("Gasto", point.actualDouble),
+                    width: .fixed(18)
                 )
-                .foregroundStyle(point.actual > point.historicalAverage ? Color.marcelitoAmber.gradient : Color.marcelitoNavy.gradient)
-                .cornerRadius(5)
-                PointMark(
+                .foregroundStyle(point.id == maximumID ? Color.marcelitoAmber : Color.marcelitoNavySoft.opacity(0.72))
+                .cornerRadius(4)
+                LineMark(
                     x: .value("Día", point.date, unit: .day),
                     y: .value("Promedio", point.averageDouble)
                 )
-                .symbolSize(42)
-                .foregroundStyle(Color.marcelitoNavyDeep)
+                .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
+                .foregroundStyle(Color.marcelitoNavyDeep.opacity(0.62))
             }
             .chartXAxis {
                 AxisMarks(values: points.map(\.date)) { value in
-                    AxisValueLabel(format: .dateTime.weekday(.narrow))
-                }
-            }
-            .chartYAxis { AxisMarks(position: .leading) }
-            .frame(height: 210)
-            HStack(spacing: 4) {
-                ForEach(points) { point in
-                    Button { select(point.date) } label: {
-                        Text(point.date.formatted(.dateTime.weekday(.narrow)))
-                            .font(.caption.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 7)
-                            .background(Color.marcelitoNavy.opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                    AxisValueLabel {
+                        if let date = value.as(Date.self) { Text(spendingWeekdayLabel(date)) }
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("Ver detalle de \(point.date.formatted(.dateTime.weekday(.wide)))")
                 }
             }
+            .chartYAxis {
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 2)) { _ in
+                    AxisGridLine().foregroundStyle(Color.marcelitoLine.opacity(0.5))
+                    AxisValueLabel().font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .chartOverlay { proxy in
+                GeometryReader { geometry in
+                    Rectangle().fill(.clear).contentShape(Rectangle())
+                        .gesture(SpatialTapGesture().onEnded { event in
+                            guard let frame = proxy.plotFrame else { return }
+                            let plot = geometry[frame]
+                            let x = event.location.x - plot.origin.x
+                            guard let tapped: Date = proxy.value(atX: x),
+                                  let nearest = points.min(by: { abs($0.date.timeIntervalSince(tapped)) < abs($1.date.timeIntervalSince(tapped)) }) else { return }
+                            select(nearest.date)
+                        })
+                }
+            }
+            .frame(height: 164)
+            Text("Toca una barra para ver monto, diferencia y movimientos.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
         }
-        .marcelitoCard()
+        .marcelitoCard(radius: 20, padding: 14)
     }
 }
 
 private struct HistoricalWeekdayChart: View {
     let points: [SpendingDayPoint]
 
+    private var maximumID: Date? { points.max { $0.actual < $1.actual }?.id }
+    private var minimumID: Date? { points.min { $0.actual < $1.actual }?.id }
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Promedio por día de la semana").font(.headline)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Promedio por día").font(.headline)
+            Text("Patrón habitual de lunes a domingo").font(.caption).foregroundStyle(.secondary)
             Chart(points) { point in
                 BarMark(
                     x: .value("Día", point.date, unit: .day),
-                    y: .value("Promedio", point.actualDouble)
+                    y: .value("Promedio", point.actualDouble),
+                    width: .fixed(16)
                 )
-                .foregroundStyle(Color.marcelitoNavy.gradient)
-                .cornerRadius(5)
+                .foregroundStyle(
+                    point.id == maximumID ? Color.marcelitoAmber :
+                    point.id == minimumID ? Color.marcelitoSuccess :
+                    Color.marcelitoNavySoft.opacity(0.58)
+                )
+                .cornerRadius(4)
             }
-            .chartXAxis { AxisMarks(values: points.map(\.date)) { _ in AxisValueLabel(format: .dateTime.weekday(.narrow)) } }
-            .chartYAxis { AxisMarks(position: .leading) }
-            .frame(height: 200)
+            .chartXAxis {
+                AxisMarks(values: points.map(\.date)) { value in
+                    AxisValueLabel {
+                        if let date = value.as(Date.self) { Text(spendingWeekdayLabel(date)) }
+                    }
+                }
+            }
+            .chartYAxis {
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 2)) { _ in
+                    AxisGridLine().foregroundStyle(Color.marcelitoLine.opacity(0.45))
+                    AxisValueLabel().font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .frame(height: 154)
         }
-        .marcelitoCard()
+        .marcelitoCard(radius: 20, padding: 14)
     }
 }
 
@@ -803,7 +924,7 @@ private struct HistoricalWeeklyTrendChart: View {
 private struct HistoricalSpendingHeatmap: View {
     let days: [SpendingHistoryDay]
     let select: (Date) -> Void
-    private let columns = Array(repeating: GridItem(.flexible(), spacing: 5), count: 7)
+    private let columns = Array(repeating: GridItem(.flexible(minimum: 22, maximum: 36), spacing: 4), count: 7)
 
     private var maximum: Decimal { days.map(\.total).max() ?? 0 }
     private var leadingBlankCount: Int {
@@ -813,10 +934,11 @@ private struct HistoricalSpendingHeatmap: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("Intensidad de los últimos 84 días").font(.headline)
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Mapa de intensidad").font(.headline)
+            Text("84 días de gasto diario").font(.caption).foregroundStyle(.secondary)
             HStack {
-                ForEach(Array(["L", "M", "M", "J", "V", "S", "D"].enumerated()), id: \.offset) { _, label in
+                ForEach(Array(["L", "M", "Mi", "J", "V", "S", "D"].enumerated()), id: \.offset) { _, label in
                     Text(label).font(.caption2).foregroundStyle(.secondary).frame(maxWidth: .infinity)
                 }
             }
@@ -827,19 +949,25 @@ private struct HistoricalSpendingHeatmap: View {
                         RoundedRectangle(cornerRadius: 4)
                             .fill(heatColor(day.total))
                             .aspectRatio(1, contentMode: .fit)
-                            .overlay(Text(day.date.formatted(.dateTime.day())).font(.system(size: 8, weight: .medium)).foregroundStyle(day.total > maximum / 2 ? .white : Color.marcelitoNavy))
+                            .overlay(Text(day.date.formatted(.dateTime.day())).font(.system(size: 7, weight: .medium)).foregroundStyle(day.total > maximum / 2 ? .white : Color.marcelitoNavy))
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("\(day.date.formatted(date: .long, time: .omitted)), \(day.total.formatted(.currency(code: "MXN")))")
                 }
             }
-            HStack {
-                Text("Menos").font(.caption2).foregroundStyle(.secondary)
+            HStack(spacing: 5) {
+                Text("Bajo").font(.caption2).foregroundStyle(.secondary)
+                ForEach(1...5, id: \.self) { level in
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(Color.marcelitoNavy.opacity(0.10 + Double(level) * 0.16))
+                        .frame(width: 16, height: 7)
+                }
+                Text("Alto").font(.caption2).foregroundStyle(.secondary)
                 Spacer()
-                Text("Más").font(.caption2).foregroundStyle(.secondary)
+                Text("Toca un día para ver detalles").font(.caption2).foregroundStyle(.secondary)
             }
         }
-        .marcelitoCard()
+        .marcelitoCard(radius: 20, padding: 14)
     }
 
     private func heatColor(_ total: Decimal) -> Color {

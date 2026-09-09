@@ -53,3 +53,18 @@ test("cada día abre Top 10 y permite editar el movimiento original", async () =
   assert.match(source, /MovementDetailView\(movement: movement\)/);
   assert.match(source, /private var filteredAllMovements/);
 });
+
+test("Calendario usa una composición compacta y comparaciones ejecutivas", async () => {
+  const source = await readFile(calendarPath, "utf8");
+  assert.match(source, /private var calendarHeader/);
+  assert.match(source, /Resumen semanal/);
+  assert.match(source, /Lectura automática/);
+  assert.match(source, /Mapa de intensidad/);
+  assert.match(source, /84 días de gasto diario/);
+  assert.match(source, /LineMark\(/);
+  assert.match(source, /dash: \[4, 4\]/);
+  assert.match(source, /SpatialTapGesture/);
+  assert.match(source, /width: \.fixed\(18\)/);
+  assert.match(source, /Día más caro/);
+  assert.match(source, /Día más barato/);
+});
