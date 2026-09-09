@@ -22,8 +22,8 @@ enum BankScreenshotSource: String, Codable, CaseIterable, Hashable, Sendable {
     static func identify(_ value: String) -> BankScreenshotSource? {
         let folded = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
         if folded.contains("american express") || folded.contains("platinum credit card") || folded.contains("amex") { return .amex }
-        if folded.contains("santander") || folded.contains("super nomina") { return .santander }
         if folded.contains("bbva") || folded.contains("movimiento bbva") { return .bbva }
+        if folded.contains("santander") || folded.contains("super nomina") { return .santander }
         return nil
     }
 }
@@ -123,7 +123,7 @@ struct BankScreenshotImportReceipt: Identifiable, Sendable {
     let pendingCount: Int
 }
 
-enum BankScreenshotImportError: LocalizedError {
+enum BankScreenshotImportError: LocalizedError, Equatable {
     case unreadableImage
     case unknownSource
     case mixedSources
@@ -183,10 +183,8 @@ enum BankScreenshotReader {
             fingerprints.append(fingerprint)
             let lines = try recognizeLines(in: input.data, imageIndex: imageIndex)
             let joined = lines.map(\.text).joined(separator: "\n")
-            let detected = BankScreenshotSource.identify(joined) ?? hintedSource
-            guard let source = detected else { throw BankScreenshotImportError.unknownSource }
+            let source = try resolveSource(in: joined, hintedSource: hintedSource)
             detectedSources.insert(source)
-            if let hintedSource, hintedSource != source { throw BankScreenshotImportError.mixedSources }
             inferredAccountKey = inferredAccountKey ?? detectAccountKey(in: joined, source: source)
             let rows = parse(lines: lines, source: source, fingerprint: fingerprint, capturedAt: capturedAt)
             if rows.isEmpty { warnings.append("\(input.fileName): no se reconocieron filas completas.") }
@@ -204,6 +202,41 @@ enum BankScreenshotReader {
             movements: parsedMovements,
             warnings: Array(Set(warnings)).sorted()
         )
+    }
+
+    /// The selected account is the primary context. Only app-level markers can
+    /// contradict it; counterparty names such as "SPEI recibido Santander" are
+    /// movement descriptions and must never reclassify a BBVA screenshot.
+    static func resolveSource(
+        in text: String,
+        hintedSource: BankScreenshotSource?
+    ) throws -> BankScreenshotSource {
+        let strongSource = stronglyIdentifiedSource(in: text)
+        if let hintedSource {
+            if let strongSource, strongSource != hintedSource {
+                throw BankScreenshotImportError.mixedSources
+            }
+            return hintedSource
+        }
+        guard let source = strongSource ?? BankScreenshotSource.identify(text) else {
+            throw BankScreenshotImportError.unknownSource
+        }
+        return source
+    }
+
+    private static func stronglyIdentifiedSource(in value: String) -> BankScreenshotSource? {
+        let folded = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+        if folded.contains("american express") || folded.contains("platinum credit card") {
+            return .amex
+        }
+        if folded.contains("movimiento bbva") || (folded.contains("movimientos") && folded.contains("bbva")) {
+            return .bbva
+        }
+        if folded.contains("super nomina")
+            || (folded.contains("saldo actual") && folded.contains("tarjeta asociada")) {
+            return .santander
+        }
+        return nil
     }
 
     static func parseTextForTesting(

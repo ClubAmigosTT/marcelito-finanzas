@@ -31,6 +31,26 @@ final class BankScreenshotReaderTests: XCTestCase {
         XCTAssertEqual(result.movements[2].title, "Spei recibido santander")
     }
 
+    func testBBVACounterpartyNameDoesNotReclassifyScreenshot() throws {
+        let source = try BankScreenshotReader.resolveSource(
+            in: "Movimientos BBVA\nSPEI recibido Santander\nTransferencia interbancaria recibida",
+            hintedSource: .bbva
+        )
+
+        XCTAssertEqual(source, .bbva)
+    }
+
+    func testStrongAppHeaderStillRejectsARealMixedBankBatch() {
+        XCTAssertThrowsError(
+            try BankScreenshotReader.resolveSource(
+                in: "The Platinum Credit Card American Express\nVIVAAEROBUS $3,465.51",
+                hintedSource: .bbva
+            )
+        ) { error in
+            XCTAssertEqual(error as? BankScreenshotImportError, .mixedSources)
+        }
+    }
+
     func testReadsWrappedSantanderRows() throws {
         let result = try BankScreenshotReader.parseTextForTesting([
             "SUPER NOMINA 56**7079",
