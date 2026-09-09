@@ -14,6 +14,21 @@ test("native Accounts screen exposes a visible multi-image screenshot import", (
   assert.match(sections, /BankScreenshotReader\.inspect/);
 });
 
+test("native Accounts keeps official statements and diagnostics visible", () => {
+  assert.match(sections, /Text\("Subir estado bancario"\)/);
+  assert.match(sections, /allowedContentTypes:\s*\[\.pdf\]/);
+  assert.match(sections, /Label\("Diagnóstico", systemImage: "stethoscope"\)/);
+  assert.match(sections, /Label\("Movimientos", systemImage: "slider\.horizontal\.3"\)/);
+});
+
+test("processed captures distinguish OCR completion from reconciliation", () => {
+  assert.match(sections, /Text\("Capturas procesadas"\)/);
+  assert.match(sections, /Leída y guardada/);
+  assert.match(sections, /sin conciliar/);
+  assert.match(sections, /Conciliada con estado oficial/);
+  assert.match(sections, /pendientes en el banco/);
+});
+
 test("native screenshot observations remain outside the canonical movement ledger", () => {
   assert.match(models, /var screenshotCaptures:\s*\[BankScreenshotCapture\]/);
   assert.match(reader, /var canonicalScreenshotMovements/);
