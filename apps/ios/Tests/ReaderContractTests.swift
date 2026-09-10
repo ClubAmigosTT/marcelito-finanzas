@@ -631,6 +631,27 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.period, "15/07/2026 - 14/08/2026")
     }
 
+    func testBBVAPeriodHandlesSplitHeaderAndSpacedDates() {
+        for text in [
+            "Periodo\nDEL\n15 / 07 / 2026\nAL\n14 / 08 / 2026",
+            "Periodo DEL AL\n15/07/2026\n14/08/2026",
+            "Periodo: 15/JUL/2026 AL 14/AGO/2026"
+        ] {
+            XCTAssertEqual(FinanceStore.bbvaPrintedPeriod(from: text), "15/07/2026 - 14/08/2026")
+        }
+    }
+
+    func testBBVAPeriodRejectsUnrelatedOrConflictingDates() {
+        for text in [
+            "Periodo Fecha de corte No. de cuenta 14/08/2026 1234567890",
+            "Movimientos 15/07/2026 14/08/2026",
+            "Periodo DEL 15/08/2026 AL 14/07/2026",
+            "Periodo DEL 15/07/2026 AL 14/08/2026\nPeriodo DEL 15/08/2026 AL 14/09/2026"
+        ] {
+            XCTAssertNil(FinanceStore.bbvaPrintedPeriod(from: text))
+        }
+    }
+
     func testAmexSectionTotalsDoNotUseTheCutoffDayAsAmount() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
             text: """
