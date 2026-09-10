@@ -9549,34 +9549,55 @@ final class FinanceStore {
             "periodo\\s*:?\\s*del?\\s+al\\s*(\(token))\\s*(\(token))",
             "periodo\\s*:?\\s*(\(token))\\s*(?:al|a|[-–])\\s*(\(token))"
         ]
+        func date(_ value: Substring) -> Date? {
+            let clean = String(value).replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+            for format in ["dd/MM/yyyy", "dd-MM-yyyy", "dd.MM.yyyy", "dd/MMM/yyyy", "dd-MMM-yyyy"] {
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "es_MX")
+                formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                formatter.dateFormat = format
+                formatter.isLenient = false
+                if let parsed = formatter.date(from: clean) { return parsed }
+            }
+            return nil
+        }
+        func label(start: Date, end: Date) -> String {
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "en_US_POSIX")
+            formatter.timeZone = TimeZone(secondsFromGMT: 0)
+            formatter.dateFormat = "dd/MM/yyyy"
+            return "\(formatter.string(from: start)) - \(formatter.string(from: end))"
+        }
         var candidates = Set<String>()
         for pattern in patterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
             for match in regex.matches(in: normalized, range: NSRange(normalized.startIndex..., in: normalized)) {
                 guard let a = Range(match.range(at: 1), in: normalized),
                       let b = Range(match.range(at: 2), in: normalized) else { continue }
-                func date(_ value: Substring) -> Date? {
-                    let clean = String(value).replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
-                    for format in ["dd/MM/yyyy", "dd-MM-yyyy", "dd.MM.yyyy", "dd/MMM/yyyy", "dd-MMM-yyyy"] {
-                        let formatter = DateFormatter()
-                        formatter.locale = Locale(identifier: "es_MX")
-                        formatter.timeZone = TimeZone(secondsFromGMT: 0)
-                        formatter.dateFormat = format
-                        formatter.isLenient = false
-                        if let parsed = formatter.date(from: clean) { return parsed }
-                    }
-                    return nil
-                }
                 guard let start = date(normalized[a]), let end = date(normalized[b]),
                       end >= start, end.timeIntervalSince(start) <= 62 * 86400 else { continue }
-                let formatter = DateFormatter()
-                formatter.locale = Locale(identifier: "en_US_POSIX")
-                formatter.timeZone = TimeZone(secondsFromGMT: 0)
-                formatter.dateFormat = "dd/MM/yyyy"
-                candidates.insert("\(formatter.string(from: start)) - \(formatter.string(from: end))")
+                candidates.insert(label(start: start, end: end))
             }
         }
-        return candidates.count == 1 ? candidates.first : nil
+        if candidates.count == 1 { return candidates.first }
+        if candidates.count > 1 { return nil }
+
+        // Some BBVA PDFs expose only the official cutoff in their selectable
+        // layer. For a monthly account, the period starts one day after the
+        // same cutoff in the preceding calendar month.
+        let cutoffPattern = "fecha\\s*(?:de\\s*)?corte\\s*[:\\-]?\\s*(\(token))"
+        guard let cutoffRegex = try? NSRegularExpression(pattern: cutoffPattern) else { return nil }
+        let cutoffs = cutoffRegex.matches(in: normalized, range: NSRange(normalized.startIndex..., in: normalized)).compactMap { match -> Date? in
+            guard let valueRange = Range(match.range(at: 1), in: normalized) else { return nil }
+            return date(normalized[valueRange])
+        }
+        let uniqueCutoffs = Set(cutoffs.map { $0.timeIntervalSinceReferenceDate })
+        guard uniqueCutoffs.count == 1, let end = cutoffs.first else { return nil }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        guard let priorCutoff = calendar.date(byAdding: .month, value: -1, to: end),
+              let start = calendar.date(byAdding: .day, value: 1, to: priorCutoff) else { return nil }
+        return label(start: start, end: end)
     }
 
     /// Refresh only period metadata from saved PDFs; preserve row identities

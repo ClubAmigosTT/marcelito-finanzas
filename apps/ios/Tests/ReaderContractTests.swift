@@ -652,6 +652,19 @@ final class ReaderContractTests: XCTestCase {
         }
     }
 
+    func testBBVAPeriodFallsBackToOfficialCutoff() {
+        for text in [
+            "BBVA México\nFecha de Corte 14/08/2026",
+            "FECHA CORTE:\n14 / 08 / 2026"
+        ] {
+            XCTAssertEqual(FinanceStore.bbvaPrintedPeriod(from: text), "15/07/2026 - 14/08/2026")
+        }
+    }
+
+    func testBBVAPeriodRejectsConflictingCutoffs() {
+        XCTAssertNil(FinanceStore.bbvaPrintedPeriod(from: "Fecha de corte 14/08/2026\nFecha de corte 14/09/2026"))
+    }
+
     func testAmexSectionTotalsDoNotUseTheCutoffDayAsAmount() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
             text: """
