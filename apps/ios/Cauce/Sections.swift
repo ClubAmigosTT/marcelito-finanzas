@@ -273,6 +273,9 @@ struct MovementsView: View {
     }
 
     private func statementLabel(for movement: Movement) -> String {
+        if store.isProvisionalScreenshotMovement(movement) {
+            return "Captura provisional"
+        }
         guard let statementId = movement.statementId,
               let statement = store.statements.first(where: { $0.id == statementId }) else {
             return "Manual"
@@ -385,6 +388,11 @@ struct MovementDetailView: View {
             if let statement = movement.statementId.flatMap({ id in store.statements.first(where: { $0.id == id }) }) {
                 LabeledContent("Estado", value: "\(statement.source) · \(conciseStatementPeriod(statement))")
                 LabeledContent("Archivo", value: statement.fileName)
+            } else if store.isProvisionalScreenshotMovement(currentMovement) {
+                LabeledContent("Estado", value: "Captura provisional")
+                Label("Ya está incluido en las métricas y se sustituirá al conciliarse con el estado oficial.", systemImage: "clock.badge.checkmark")
+                    .font(.caption)
+                    .foregroundStyle(Color.marcelitoAmber)
             } else {
                 LabeledContent("Estado", value: "Movimiento manual")
             }
@@ -1271,7 +1279,7 @@ struct AccountsView: View {
         .foregroundStyle(.white)
         .background(Color.marcelitoNavy, in: RoundedRectangle(cornerRadius: 17, style: .continuous))
         .disabled(isImportingScreenshots)
-        .accessibilityHint("Selecciona pantallas de movimientos; quedan provisionales hasta conciliarlas con un estado oficial")
+        .accessibilityHint("Selecciona pantallas de movimientos; aparecen de inmediato como provisionales y se sustituyen al conciliarlas")
     }
 
     @ViewBuilder
@@ -1280,7 +1288,7 @@ struct AccountsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Capturas procesadas")
                     .font(.headline)
-                Text("Leídas y guardadas; permanecen provisionales hasta coincidir con un estado oficial.")
+                Text("Ya alimentan las métricas como provisionales; el estado oficial las confirma y sustituye sin duplicarlas.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -1544,7 +1552,7 @@ private struct ScreenshotCaptureRow: View {
 
     private var statusText: String {
         if isFullyConfirmed { return "Conciliada con estado oficial" }
-        return "Leída y guardada · \(capture.unconfirmedCount) sin conciliar"
+        return "En métricas · \(capture.unconfirmedCount) provisional\(capture.unconfirmedCount == 1 ? "" : "es")"
     }
 
     private var detailText: String {
@@ -1562,7 +1570,7 @@ private struct ScreenshotCaptureRow: View {
                     .font(.subheadline.weight(.semibold))
                 Text(statusText)
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(isFullyConfirmed ? Color.green : Color.marcelitoNavyMid)
+                    .foregroundStyle(isFullyConfirmed ? Color.green : Color.marcelitoAmber)
                 Text(detailText)
                     .font(.caption)
                     .foregroundStyle(.secondary)

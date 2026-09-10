@@ -23,17 +23,21 @@ test("native Accounts keeps official statements and diagnostics visible", () => 
 
 test("processed captures distinguish OCR completion from reconciliation", () => {
   assert.match(sections, /Text\("Capturas procesadas"\)/);
-  assert.match(sections, /Leída y guardada/);
-  assert.match(sections, /sin conciliar/);
+  assert.match(sections, /En métricas/);
+  assert.match(sections, /provisional/);
   assert.match(sections, /Conciliada con estado oficial/);
   assert.match(sections, /pendientes en el banco/);
 });
 
-test("native screenshot observations remain outside the canonical movement ledger", () => {
+test("native screenshot observations feed a reversible provisional live ledger", () => {
   assert.match(models, /var screenshotCaptures:\s*\[BankScreenshotCapture\]/);
   assert.match(reader, /var canonicalScreenshotMovements/);
-  assert.doesNotMatch(reader, /movements\.insert/);
+  assert.match(models, /func synchronizeProvisionalScreenshotLedger\(\)/);
+  assert.match(models, /row\.duplicateOf == nil && row\.matchedOfficialMovementID == nil/);
+  assert.match(models, /extractionEvidence:\s*row\.evidence/);
+  assert.match(models, /persist\(markingChange: true\)/);
   assert.match(reader, /reconcileBankScreenshotsAgainstOfficialLedger/);
+  assert.match(reader, /synchronizeProvisionalScreenshotLedger\(\)/);
 });
 
 test("native reader includes issuer-specific parsing and duplicate protection", () => {
@@ -43,4 +47,20 @@ test("native reader includes issuer-specific parsing and duplicate protection", 
   assert.match(reader, /existingFingerprints/);
   assert.match(reader, /duplicateOf/);
   assert.match(reader, /matchedOfficialMovementID/);
+});
+
+test("each suspected duplicate requires an explicit same-or-keep-both decision", () => {
+  assert.match(reader, /struct BankScreenshotDuplicateConflict/);
+  assert.match(reader, /Text\("Posibles repetidos"\)/);
+  assert.match(reader, /Interruptor apagado: es el mismo movimiento/);
+  assert.match(reader, /Encendido: conservar ambos cargos/);
+  assert.match(reader, /resolveScreenshotDuplicates\(captureID:/);
+  assert.match(reader, /duplicateOf = nil/);
+});
+
+test("provisional screenshot rows are visible and identified across the product", () => {
+  assert.match(models, /if isProvisionalScreenshotMovement\(movement\) \{ return true \}/);
+  assert.match(sections, /return "Captura provisional"/);
+  assert.match(sections, /Ya está incluido en las métricas/);
+  assert.match(reader, /Reflejados ahora/);
 });
