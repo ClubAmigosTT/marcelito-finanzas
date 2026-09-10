@@ -1767,12 +1767,14 @@ final class FinanceStore {
     /// audits, but it must not inflate the current-month view.
     var currentPeriodExpenseMovements: [Movement] {
         eligibleMovements.filter { movement in
+            if isProvisionalScreenshotMovement(movement) { return true }
             guard let currentPeriodKey else { return true }
             return movementPeriodKey(movement) == currentPeriodKey
         }.filter(isSpend)
     }
     var currentPeriodIncomeMovements: [Movement] {
         eligibleMovements.filter { movement in
+            if isProvisionalScreenshotMovement(movement) { return true }
             guard let currentPeriodKey else { return true }
             return movementPeriodKey(movement) == currentPeriodKey
         }.filter(isRealIncome)
@@ -1835,6 +1837,7 @@ final class FinanceStore {
     var monthlyIncome: Decimal {
         eligibleMovements
             .filter { movement in
+                if isProvisionalScreenshotMovement(movement) { return isRealIncome(movement) }
                 guard let currentPeriodKey else { return isRealIncome(movement) }
                 return movementPeriodKey(movement) == currentPeriodKey && isRealIncome(movement)
             }
@@ -2943,6 +2946,16 @@ final class FinanceStore {
                 message: "Matcher de transferencias actualizado; \(added) lado(s) nuevos identificados."
             )
         }
+        // One-time projection for captures saved by builds where screenshots
+        // were visible only inside Accounts. Existing user edits are retained
+        // because synchronization reuses rows with the same screenshot UUID.
+        let activeScreenshotIDs = Set(screenshotCaptures.flatMap(\.movements).filter {
+            $0.duplicateOf == nil && $0.matchedOfficialMovementID == nil
+        }.map(\.id))
+        let projectedScreenshotIDs = Set(movements.filter(isProvisionalScreenshotMovement).map(\.id))
+        if activeScreenshotIDs != projectedScreenshotIDs {
+            synchronizeProvisionalScreenshotLedger()
+        }
         // The active envelope is already normalized at every successful
         // commit. Re-running the complete dedupe/matching pass synchronously
         // on every cold start made opening the app compete with SwiftUI for
@@ -3155,6 +3168,51 @@ final class FinanceStore {
             ),
             at: 0
         )
+        persist(markingChange: true)
+    }
+
+    func isProvisionalScreenshotMovement(_ movement: Movement) -> Bool {
+        movement.extractionEvidence?.method == "screenshot-vision"
+    }
+
+    /// Mirrors every unresolved, user-approved screenshot row into the live
+    /// ledger. The row keeps the screenshot UUID, so later reconciliation can
+    /// remove it atomically when the official statement supplies the same
+    /// transaction instead of ever counting both copies.
+    func synchronizeProvisionalScreenshotLedger() {
+        let existing = Dictionary(
+            uniqueKeysWithValues: movements
+                .filter(isProvisionalScreenshotMovement)
+                .map { ($0.id, $0) }
+        )
+        movements.removeAll(where: isProvisionalScreenshotMovement)
+
+        for capture in screenshotCaptures {
+            for row in capture.movements where row.duplicateOf == nil && row.matchedOfficialMovementID == nil {
+                if let retained = existing[row.id] {
+                    movements.append(retained)
+                    continue
+                }
+                let flow: FlowKind = row.normalizedAmount > 0 ? .income : .expense
+                let category = Self.category(for: row.title, flow: flow)
+                var movement = Movement(
+                    id: row.id,
+                    date: row.date,
+                    title: row.title,
+                    account: capture.source.rawValue,
+                    category: category,
+                    amount: row.normalizedAmount,
+                    flow: flow,
+                    statementId: nil,
+                    classificationTags: Self.categoryTags(for: row.title, category: category),
+                    extractionEvidence: row.evidence
+                )
+                movement.kind = movementKind(movement)
+                movement.travelRelated = movement.classificationTags.contains("viaje")
+                movements.append(movement)
+            }
+        }
+        reconcileStoredMovements()
         persist(markingChange: true)
     }
 

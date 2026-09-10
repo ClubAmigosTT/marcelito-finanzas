@@ -115,12 +115,23 @@ struct BankScreenshotImportResult: @unchecked Sendable {
 
 struct BankScreenshotImportReceipt: Identifiable, Sendable {
     let id = UUID()
+    let captureID: UUID
     let source: BankScreenshotSource
     let imageCount: Int
     let movementCount: Int
     let duplicateCount: Int
     let confirmedCount: Int
     let pendingCount: Int
+    let provisionalCount: Int
+    let duplicateConflicts: [BankScreenshotDuplicateConflict]
+}
+
+struct BankScreenshotDuplicateConflict: Identifiable, Sendable {
+    let id: UUID
+    let title: String
+    let amount: Decimal
+    let date: Date
+    let existingTitle: String
 }
 
 enum BankScreenshotImportError: LocalizedError, Equatable {
@@ -542,6 +553,7 @@ extension FinanceStore {
         var rows = result.movements.filter { newFingerprints.contains($0.imageFingerprint) }
         var knownRows = canonicalScreenshotMovements
         var duplicateCount = 0
+        var duplicateConflicts: [BankScreenshotDuplicateConflict] = []
         for index in rows.indices {
             if let duplicate = knownRows.first(where: {
                 $0.imageFingerprint != rows[index].imageFingerprint
@@ -549,6 +561,13 @@ extension FinanceStore {
             }) {
                 rows[index].duplicateOf = duplicate.id
                 duplicateCount += 1
+                duplicateConflicts.append(BankScreenshotDuplicateConflict(
+                    id: rows[index].id,
+                    title: rows[index].title,
+                    amount: rows[index].displayedAmount,
+                    date: rows[index].date,
+                    existingTitle: duplicate.title
+                ))
             } else {
                 knownRows.append(rows[index])
             }
@@ -575,12 +594,15 @@ extension FinanceStore {
             message: "\(capture.source.rawValue): \(capture.uniqueMovements.count) observación(es), \(duplicateCount) solapada(s), \(capture.confirmedCount) confirmada(s)."
         )
         return BankScreenshotImportReceipt(
+            captureID: capture.id,
             source: capture.source,
             imageCount: capture.imageFingerprints.count,
             movementCount: capture.uniqueMovements.count,
             duplicateCount: duplicateCount,
             confirmedCount: capture.confirmedCount,
-            pendingCount: capture.pendingCount
+            pendingCount: capture.pendingCount,
+            provisionalCount: capture.unconfirmedCount,
+            duplicateConflicts: duplicateConflicts
         )
     }
 
@@ -590,7 +612,19 @@ extension FinanceStore {
             let safeName = URL(fileURLWithPath: name).lastPathComponent
             try? FileManager.default.removeItem(at: bankScreenshotFilesDirectoryURL.appendingPathComponent(safeName))
         }
+        synchronizeProvisionalScreenshotLedger()
         persistBankScreenshotCaptures()
+    }
+
+    func resolveScreenshotDuplicates(captureID: UUID, keepBoth rowIDs: Set<UUID>) {
+        guard let captureIndex = screenshotCaptures.firstIndex(where: { $0.id == captureID }) else { return }
+        for rowIndex in screenshotCaptures[captureIndex].movements.indices {
+            guard screenshotCaptures[captureIndex].movements[rowIndex].duplicateOf != nil else { continue }
+            if rowIDs.contains(screenshotCaptures[captureIndex].movements[rowIndex].id) {
+                screenshotCaptures[captureIndex].movements[rowIndex].duplicateOf = nil
+            }
+        }
+        reconcileBankScreenshotsAgainstOfficialLedger()
     }
 
     func reconcileBankScreenshotsAgainstOfficialLedger() {
@@ -629,10 +663,9 @@ extension FinanceStore {
                 if let match { usedOfficialIDs.insert(match) }
             }
         }
-        if next != screenshotCaptures {
-            screenshotCaptures = next
-            persistBankScreenshotCaptures()
-        }
+        screenshotCaptures = next
+        synchronizeProvisionalScreenshotLedger()
+        persistBankScreenshotCaptures()
     }
 
     private func persistBankScreenshotCaptures() {
@@ -661,8 +694,10 @@ extension FinanceStore {
 }
 
 struct BankScreenshotImportReceiptView: View {
+    @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     let receipt: BankScreenshotImportReceipt
+    @State private var keepBoth = Set<UUID>()
 
     var body: some View {
         NavigationStack {
@@ -674,9 +709,37 @@ struct BankScreenshotImportReceiptView: View {
                     LabeledContent("Solapamientos", value: "\(receipt.duplicateCount)")
                     LabeledContent("Pendientes del banco", value: "\(receipt.pendingCount)")
                     LabeledContent("Confirmados por estado", value: "\(receipt.confirmedCount)")
+                    LabeledContent("Reflejados ahora", value: "\(receipt.provisionalCount)")
+                }
+                if !receipt.duplicateConflicts.isEmpty {
+                    Section {
+                        ForEach(receipt.duplicateConflicts) { conflict in
+                            Toggle(isOn: Binding(
+                                get: { keepBoth.contains(conflict.id) },
+                                set: { shouldKeep in
+                                    if shouldKeep { keepBoth.insert(conflict.id) }
+                                    else { keepBoth.remove(conflict.id) }
+                                }
+                            )) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(conflict.title)
+                                        .font(.subheadline.weight(.semibold))
+                                    Text(conflict.amount, format: .currency(code: "MXN"))
+                                        .font(.caption)
+                                    Text("Coincide con: \(conflict.existingTitle)")
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    } header: {
+                        Text("Posibles repetidos")
+                    } footer: {
+                        Text("Interruptor apagado: es el mismo movimiento. Encendido: conservar ambos cargos.")
+                    }
                 }
                 Section {
-                    Text("Las capturas quedan separadas del libro financiero. Un estado de cuenta oficial confirma o corrige esas observaciones sin duplicar tus movimientos ni alterar los KPI antes de tiempo.")
+                    Text("Los movimientos no repetidos ya aparecen como provisionales en Movimientos, Gastos, Calendario y Resumen. Al llegar el estado oficial se sustituyen automáticamente, sin duplicar importes.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -685,7 +748,10 @@ struct BankScreenshotImportReceiptView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Listo") { dismiss() }
+                    Button(receipt.duplicateConflicts.isEmpty ? "Listo" : "Aplicar") {
+                        store.resolveScreenshotDuplicates(captureID: receipt.captureID, keepBoth: keepBoth)
+                        dismiss()
+                    }
                 }
             }
         }
