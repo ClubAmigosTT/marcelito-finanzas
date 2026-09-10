@@ -9623,13 +9623,30 @@ final class FinanceStore {
         if changed { persist(markingChange: true) }
     }
 
-    private static func bbvaDocumentPeriod(_ document: PDFDocument) -> String? {
+    static func bbvaDocumentPeriod(_ document: PDFDocument) -> String? {
         if let period = bbvaPrintedPeriod(from: document.string ?? "") { return period }
-        // The official period appears on the first page. Limit visual recovery
-        // to that page, using the same local Vision pipeline as the reader.
-        guard let page = document.page(at: 0), let copy = page.copy() as? PDFPage else { return nil }
+        // BBVA can prepend a fiscal notice. Recover each page's header in
+        // visual row order: PDFKit may emit all labels before their values.
+        for index in 0..<document.pageCount {
+            guard let page = document.page(at: index) else { continue }
+            let bounds = page.bounds(for: .mediaBox)
+            let header = CGRect(x: bounds.minX + bounds.width * 0.48,
+                                y: bounds.minY + bounds.height * 0.80,
+                                width: bounds.width * 0.52, height: bounds.height * 0.20)
+            let lines = page.selection(for: header)?.selectionsByLine() ?? []
+            let ordered = lines.sorted {
+                let a = $0.bounds(for: page), b = $1.bounds(for: page)
+                if abs(a.midY - b.midY) > 3 { return a.midY > b.midY }
+                return a.minX < b.minX
+            }.compactMap(\.string).joined(separator: "\n")
+            if let period = bbvaPrintedPeriod(from: ordered) { return period }
+        }
+        // Include the pages after the cover for scanned/image-only headers.
         let headerDocument = PDFDocument()
-        headerDocument.insert(copy, at: 0)
+        for index in 0..<min(document.pageCount, 3) {
+            guard let copy = document.page(at: index)?.copy() as? PDFPage else { continue }
+            headerDocument.insert(copy, at: headerDocument.pageCount)
+        }
         return bbvaPrintedPeriod(from: ocrText(from: ocrObservations(from: headerDocument)))
     }
 
