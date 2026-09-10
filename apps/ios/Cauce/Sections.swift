@@ -1400,7 +1400,7 @@ struct AccountsView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(conciseStatementPeriod(statement))
                                 .font(.subheadline.weight(.semibold))
-                            Text("Saldos, pagos, crédito y MSI")
+                            Text(statement.kind == .bank ? "Periodo, saldos, abonos y cargos" : "Saldos, pagos, crédito y MSI")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -1452,7 +1452,7 @@ struct AccountsView: View {
                 .font(.headline)
             statementTiles
 
-            Text("Editar cifras del corte")
+            Text("Cifras detectadas y relectura")
                 .font(.headline)
             statementEditors
         }
@@ -1870,30 +1870,48 @@ private struct StatementSummaryEditor: View {
         _statementKind = State(initialValue: statement.kind ?? (statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank))
     }
 
-    private func decimalBinding(_ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>) -> Binding<String> {
-        Binding(
-            get: { summary[keyPath: keyPath].map { String(describing: $0) } ?? "" },
-            set: { value in
-                let cleaned = value.replacingOccurrences(of: "$", with: "").replacingOccurrences(of: ",", with: "")
-                summary[keyPath: keyPath] = Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX"))
-            }
-        )
-    }
-
-    private var installmentBinding: Binding<String> {
-        Binding(
-            get: { summary.msiInstallments.map { String($0) } ?? "" },
-            set: { summary.msiInstallments = Int($0) }
-        )
-    }
-
     private func decimalField(_ title: String, _ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>) -> some View {
-        TextField(title, text: decimalBinding(keyPath))
-            .keyboardType(.decimalPad)
+        LabeledContent(title) {
+            Text(summary[keyPath: keyPath]?.formatted(.currency(code: "MXN")) ?? "No detectado")
+                .foregroundStyle(summary[keyPath: keyPath] == nil ? Color.secondary : Color.marcelitoNavy)
+                .monospacedDigit()
+        }
+    }
+
+    private var reconciliationText: String {
+        switch statement.reconciliation?.status {
+        case .valid: "Conciliado al centavo"
+        case .invalid: "No conciliado"
+        case .pending: "Pendiente de conciliación"
+        case nil: statement.requiresReview ? "Requiere revisión" : "Sin diagnóstico"
+        }
+    }
+
+    private var reconciliationColor: Color {
+        statement.reconciliation?.status == .valid ? Color.marcelitoSuccess : Color.marcelitoAmber
     }
 
     var body: some View {
         Form {
+            Section("Estado detectado") {
+                LabeledContent("Periodo", value: conciseStatementPeriod(statement))
+                LabeledContent("Movimientos", value: "\(statement.transactionCount)")
+                LabeledContent("Conciliación") {
+                    Label(
+                        reconciliationText,
+                        systemImage: statement.reconciliation?.status == .valid
+                            ? "checkmark.seal.fill"
+                            : "exclamationmark.triangle.fill"
+                    )
+                    .foregroundStyle(reconciliationColor)
+                }
+                if let reason = statement.reconciliation?.reason,
+                   statement.reconciliation?.status != .valid {
+                    Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
             Section("Origen") {
                 TextField("Banco o tarjeta", text: $source)
                     .textInputAutocapitalization(.words)
@@ -1906,19 +1924,19 @@ private struct StatementSummaryEditor: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
-            Section("Resumen del corte") {
-                decimalField("Saldo anterior", \.previousBalance)
-                decimalField("Nuevas transacciones", \.newTransactions)
-                decimalField("Pagos realizados", \.payments)
-                decimalField("Créditos / abonos contables", \.credits)
-                decimalField("Nuevos cargos", \.newCharges)
-                decimalField("Intereses", \.interest)
-                decimalField("Comisiones", \.fees)
-                decimalField("Saldo al corte", \.statementBalance)
-                decimalField("Pago mínimo", \.minimumPayment)
-                decimalField("Pago para no generar intereses", \.paymentForNoInterest)
-            }
             if statementKind == .card {
+                Section("Resumen del corte") {
+                    decimalField("Saldo anterior", \.previousBalance)
+                    decimalField("Nuevas transacciones", \.newTransactions)
+                    decimalField("Pagos realizados", \.payments)
+                    decimalField("Créditos", \.credits)
+                    decimalField("Nuevos cargos", \.newCharges)
+                    decimalField("Intereses", \.interest)
+                    decimalField("Comisiones", \.fees)
+                    decimalField("Saldo al corte", \.statementBalance)
+                    decimalField("Pago mínimo", \.minimumPayment)
+                    decimalField("Pago para no generar intereses", \.paymentForNoInterest)
+                }
                 Section("Crédito y MSI") {
                     decimalField("Límite de crédito", \.creditLimit)
                     decimalField("Crédito disponible", \.creditAvailable)
@@ -1926,15 +1944,27 @@ private struct StatementSummaryEditor: View {
                     decimalField("Saldo revolvente", \.revolvingBalance)
                     decimalField("MSI pendientes", \.msiPending)
                     decimalField("MSI original diferido", \.msiOriginalDeferred)
-                    TextField("Mensualidades MSI activas", text: installmentBinding)
-                        .keyboardType(.numberPad)
+                    LabeledContent(
+                        "Mensualidades MSI activas",
+                        value: summary.msiInstallments.map(String.init) ?? "No detectado"
+                    )
                     decimalField("Carga mensual MSI", \.msiMonthlyLoad)
                 }
             } else {
-                Section("Banco") {
-                    decimalField("Efectivo disponible", \.cashBalance)
+                Section("Resumen del periodo bancario") {
+                    decimalField("Saldo inicial", \.previousBalance)
                     decimalField("Depósitos / abonos", \.depositTotal)
+                    if let count = summary.depositCount {
+                        LabeledContent("Movimientos de abono", value: "\(count)")
+                    }
                     decimalField("Retiros / cargos", \.withdrawalTotal)
+                    if let count = summary.withdrawalCount {
+                        LabeledContent("Movimientos de cargo", value: "\(count)")
+                    }
+                    decimalField("Saldo final", \.cashBalance)
+                    Text("Estas cifras pertenecen al estado oficial. Las capturas más recientes se muestran aparte como movimientos provisionales hasta que un PDF las concilie.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             }
             if let localURL = store.statementFileURL(for: statement) {
