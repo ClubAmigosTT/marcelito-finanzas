@@ -667,6 +667,9 @@ struct LedgerQualityBanner: View {
                 Text(percentText)
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
+                if isWarning || store.ledgerQuality.reviewMovementCount > 0 {
+                    LedgerBlockerDetailsButton().environment(store)
+                }
                 Text("\(Int(store.ledgerQuality.reviewPercent.rounded()))% por revisar en el libro canónico · \(store.ledgerQuality.reviewMovementCount) movimientos · \(money(store.ledgerQuality.reviewAmount))")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(store.ledgerQuality.reviewMovementCount > 0 ? Color.marcelitoAmber : .secondary)
@@ -724,6 +727,7 @@ struct HistoricalDashboardBlockedCard: View {
         VStack(alignment: .leading, spacing: 8) {
             Label(title, systemImage: "lock.fill")
                 .font(.subheadline.weight(.semibold))
+            LedgerBlockerDetailsButton().environment(store)
             Text(explanation)
                 .font(.caption)
                 .foregroundStyle(.secondary)

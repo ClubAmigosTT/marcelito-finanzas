@@ -1824,7 +1824,7 @@ private struct StatementDocumentTile: View {
     }
 }
 
-private struct StatementDocumentView: View {
+struct StatementDocumentView: View {
     @Environment(FinanceStore.self) private var store
     let statement: StatementRecord
 
@@ -1870,7 +1870,7 @@ private struct PDFDocumentRepresentable: UIViewRepresentable {
     }
 }
 
-private struct StatementSummaryEditor: View {
+struct StatementSummaryEditor: View {
     @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     let statement: StatementRecord
@@ -1911,6 +1911,11 @@ private struct StatementSummaryEditor: View {
     var body: some View {
         Form {
             Section("Estado detectado") {
+                if !store.statementBlockingReasons(statement).isEmpty {
+                    NavigationLink("Ver motivo y filas por revisar") {
+                        LedgerBlockerDetailsView(statementID: statement.id)
+                    }
+                }
                 LabeledContent("Periodo", value: conciseStatementPeriod(statement))
                 LabeledContent("Movimientos", value: "\(statement.transactionCount)")
                 LabeledContent("Conciliación") {

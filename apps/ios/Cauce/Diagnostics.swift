@@ -174,6 +174,9 @@ struct DiagnosticsView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     ForEach(store.statements) { statement in
+                        NavigationLink("Revisar bloqueos de \(statement.source) · \(conciseStatementPeriod(statement))") {
+                            LedgerBlockerDetailsView(statementID: statement.id)
+                        }
                         VStack(alignment: .leading, spacing: 3) {
                             HStack {
                                 Text("\(statement.source) · \(conciseStatementPeriod(statement))")

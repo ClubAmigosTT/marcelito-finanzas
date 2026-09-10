@@ -1303,14 +1303,7 @@ final class FinanceStore {
             guard movement.statementId != nil else { return false }
             return movement.extractionEvidence?.method != "manual"
         }
-        let missingEvidenceCount = evidenceRows.filter { movement in
-            guard let evidence = movement.extractionEvidence else { return true }
-            return evidence.method.isEmpty
-                || !evidence.confidence.isFinite
-                || evidence.page == nil
-                || (evidence.page ?? 0) < 1
-                || evidence.sourceText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
-        }.count
+        let missingEvidenceCount = evidenceRows.filter(Self.hasMissingImportEvidence).count
         let evidencePercent = evidenceRows.isEmpty
             ? 100
             : Double(evidenceRows.count - missingEvidenceCount) / Double(evidenceRows.count) * 100
@@ -1932,6 +1925,46 @@ final class FinanceStore {
             && evidence.confidence.isFinite
             && evidence.confidence >= 0.99
             && hasTextEvidence
+    }
+
+    static func hasMissingImportEvidence(_ movement: Movement) -> Bool {
+        guard movement.statementId != nil, movement.extractionEvidence?.method != "manual" else { return false }
+        guard let evidence = movement.extractionEvidence else { return true }
+        return evidence.method.isEmpty || !evidence.confidence.isFinite
+            || (evidence.page ?? 0) < 1
+            || evidence.sourceText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+    }
+
+    func movementBlockingReasons(_ movement: Movement) -> [String] {
+        var reasons: [String] = []
+        if abs(movement.amount) >= 10_000_000 || !isValidStoredMovement(movement) {
+            reasons.append("Importe o datos del movimiento fuera del rango admitido.")
+        }
+        if Self.hasMissingImportEvidence(movement) {
+            reasons.append("Falta evidencia de importación: página, texto de origen o confianza de lectura. Relee el PDF de origen.")
+        }
+        return reasons
+    }
+
+    var blockingMovements: [Movement] { movements.filter { !movementBlockingReasons($0).isEmpty } }
+
+    var blockingStatements: [StatementRecord] { statements.filter { !isEligibleStatement($0) } }
+
+    func statementBlockingReasons(_ statement: StatementRecord) -> [String] {
+        var reasons: [String] = []
+        if canonicalRebuildPending { reasons.append("La reconstrucción del libro está pendiente.") }
+        if !isCurrentReader(statement) { reasons.append("Este estado fue leído con una versión anterior. Relee el PDF con el lector actual.") }
+        if statement.reconciliation?.status != .valid {
+            reasons.append(statement.reconciliation?.reason ?? "El estado todavía no tiene una conciliación válida contra los totales del banco.")
+        }
+        if !hasVerifiedSourceEvidence(statement) || statement.kind == .unknown
+            || statement.source.caseInsensitiveCompare("Desconocido") == .orderedSame {
+            reasons.append("El banco o el tipo de documento no están identificados con evidencia suficiente.")
+        }
+        if statement.ocrColumnsCalibrated == false { reasons.append("No se identificaron con seguridad las columnas de cargos, abonos y saldo.") }
+        if !hasSufficientOCRQuality(statement) { reasons.append("La lectura visual tiene confianza insuficiente; revisa la legibilidad del PDF.") }
+        if statement.requiresReview { reasons.append("El lector marcó este estado para revisión de su evidencia.") }
+        return reasons
     }
 
     private func isEligibleStatement(_ statement: StatementRecord) -> Bool {
