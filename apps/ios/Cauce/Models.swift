@@ -9486,6 +9486,9 @@ final class FinanceStore {
     }
 
     private static func periodLabel(from text: String, fileName: String) -> String {
+        if sourceDetection(from: text, fileName: "").source == "BBVA" {
+            return bbvaPrintedPeriod(from: text) ?? "Periodo no identificado"
+        }
         let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
         // BBVA prints the authoritative range as Periodo DEL dd/mm/yyyy AL
@@ -9532,6 +9535,70 @@ final class FinanceStore {
         // uncertainty explicit instead of presenting the upload name as if it
         // were a verified date range.
         return "Periodo no identificado"
+    }
+
+    /// Only dates anchored to the period header are authoritative. Never use
+    /// transaction dates, upload names or a nearby account number as a cutoff.
+    static func bbvaPrintedPeriod(from text: String) -> String? {
+        let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX")).lowercased()
+        let token = #"\d{1,2}\s*[/.-]\s*(?:\d{1,2}|[a-z]{3,10})\s*[/.-]\s*\d{4}"#
+        let patterns = [
+            "periodo\\s*:?\\s*del?\\s*(\(token))\\s*al\\s*(\(token))",
+            "periodo\\s*:?\\s*del?\\s+al\\s*(\(token))\\s*(\(token))",
+            "periodo\\s*:?\\s*(\(token))\\s*(?:al|a|[-–])\\s*(\(token))"
+        ]
+        var candidates = Set<String>()
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: normalized, range: NSRange(normalized.startIndex..., in: normalized)) {
+                guard let a = Range(match.range(at: 1), in: normalized),
+                      let b = Range(match.range(at: 2), in: normalized) else { continue }
+                func date(_ value: Substring) -> Date? {
+                    let clean = String(value).replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+                    for format in ["dd/MM/yyyy", "dd-MM-yyyy", "dd.MM.yyyy", "dd/MMM/yyyy", "dd-MMM-yyyy"] {
+                        let formatter = DateFormatter()
+                        formatter.locale = Locale(identifier: "es_MX")
+                        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                        formatter.dateFormat = format
+                        formatter.isLenient = false
+                        if let parsed = formatter.date(from: clean) { return parsed }
+                    }
+                    return nil
+                }
+                guard let start = date(normalized[a]), let end = date(normalized[b]),
+                      end >= start, end.timeIntervalSince(start) <= 62 * 86400 else { continue }
+                let formatter = DateFormatter()
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                formatter.timeZone = TimeZone(secondsFromGMT: 0)
+                formatter.dateFormat = "dd/MM/yyyy"
+                candidates.insert("\(formatter.string(from: start)) - \(formatter.string(from: end))")
+            }
+        }
+        return candidates.count == 1 ? candidates.first : nil
+    }
+
+    /// Refresh only period metadata from saved PDFs; preserve row identities
+    /// and every manual classification. PDFKit runs away from the UI thread.
+    @MainActor func repairBBVAPeriods() async {
+        let sources = statements.filter { $0.source == "BBVA" }.compactMap { statement -> (UUID, URL)? in
+            guard let url = statementFileURL(for: statement) else { return nil }
+            return (statement.id, url)
+        }
+        let updates = await Task.detached(priority: .utility) {
+            sources.compactMap { id, url -> (UUID, String)? in
+                guard let document = PDFDocument(url: url),
+                      let text = document.string,
+                      let period = FinanceStore.bbvaPrintedPeriod(from: text) else { return nil }
+                return (id, period)
+            }
+        }.value
+        var changed = false
+        for (id, period) in updates {
+            guard let index = statements.firstIndex(where: { $0.id == id }), statements[index].period != period else { continue }
+            statements[index].period = period
+            changed = true
+        }
+        if changed { persist(markingChange: true) }
     }
 
     private static func statementKind(from text: String, source: String) -> StatementKind {

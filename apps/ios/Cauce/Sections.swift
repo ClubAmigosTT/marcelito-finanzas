@@ -14,6 +14,22 @@ private let expenseCategoryOptions = [
 private let movementCategoryOptions = ["Ingresos", "Transferencia"] + expenseCategoryOptions
 
 func conciseStatementPeriod(_ statement: StatementRecord) -> String {
+    if statement.source == "BBVA" {
+        let parts = statement.period.components(separatedBy: " - ")
+        let parser = DateFormatter()
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.dateFormat = "dd/MM/yyyy"
+        parser.isLenient = false
+        if parts.count == 2, let start = parser.date(from: parts[0]), let end = parser.date(from: parts[1]) {
+            let display = DateFormatter()
+            display.locale = Locale(identifier: "es_MX")
+            display.dateFormat = Calendar.current.component(.year, from: start) == Calendar.current.component(.year, from: end)
+                ? "d MMM" : "d MMM yyyy"
+            let first = display.string(from: start)
+            display.dateFormat = "d MMM yyyy"
+            return "\(first) – \(display.string(from: end))"
+        }
+    }
     let monthNames: [(token: String, label: String)] = [
         ("enero", "Enero"), ("ene", "Enero"),
         ("febrero", "Febrero"), ("feb", "Febrero"),
@@ -1495,6 +1511,7 @@ struct AccountsView: View {
             .foregroundStyle(Color.marcelitoNavy)
             .background(MarcelitoAmbientBackground())
             .onAppear(perform: ensureValidSelection)
+            .task { await store.repairBBVAPeriods() }
             .onChange(of: displayedAccounts.map(\.id)) { _, _ in
                 ensureValidSelection()
             }
