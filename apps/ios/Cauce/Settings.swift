@@ -28,6 +28,7 @@ struct SettingsView: View {
                 }
 
                 Section("Calidad actual") {
+                    NavigationLink("Ver detalle del bloqueo y pendientes") { LedgerBlockerDetailsView() }
                     LabeledContent("Estados conciliados", value: "\(quality.validatedStatementCount)/\(quality.statementCount)")
                     LabeledContent("Calidad de conciliación", value: "\(Int(quality.reconciledPercent.rounded()))%")
                     LabeledContent("Evidencia de filas", value: "\(Int(quality.evidencePercent.rounded()))%")

@@ -4,6 +4,32 @@ import UIKit
 @testable import Marcelito
 
 final class ReaderContractTests: XCTestCase {
+    func testBlockingEvidenceIdentifiesImportedRowsButNotManualEntries() {
+        var movement = Movement(date: .now, title: "Compra de prueba", account: "BBVA", category: "Otros / Por revisar", amount: -100, flow: .expense)
+        XCTAssertFalse(FinanceStore.hasMissingImportEvidence(movement))
+        movement.statementId = UUID()
+        XCTAssertTrue(FinanceStore.hasMissingImportEvidence(movement))
+        movement.extractionEvidence = MovementExtractionEvidence(method: "pdfkit", page: 2, confidence: 1, sourceText: "Compra de prueba 100.00")
+        XCTAssertFalse(FinanceStore.hasMissingImportEvidence(movement))
+        movement.extractionEvidence?.page = 0
+        XCTAssertTrue(FinanceStore.hasMissingImportEvidence(movement))
+        movement.extractionEvidence?.page = 2
+        movement.extractionEvidence?.sourceText = "  "
+        XCTAssertTrue(FinanceStore.hasMissingImportEvidence(movement))
+        movement.extractionEvidence?.method = "manual"
+        XCTAssertFalse(FinanceStore.hasMissingImportEvidence(movement))
+    }
+
+    func testBlockerDetailRetainsMovementIdentityAndDoesNotBlockUnclassifiedManualExpense() {
+        let store = FinanceStore()
+        var movement = Movement(date: .now, title: "Compra de prueba", account: "BBVA", category: "Otros / Por revisar", amount: -100, flow: .expense)
+        XCTAssertTrue(store.movementBlockingReasons(movement).isEmpty)
+        movement.statementId = UUID()
+        XCTAssertEqual(store.movementBlockingReasons(movement).count, 1)
+        movement.amount = -10_000_000
+        XCTAssertEqual(store.movementBlockingReasons(movement).count, 2)
+    }
+
     func testBBVAPeriodOCRSkipsImageOnlyFiscalCover() throws {
         let size = CGSize(width: 1224, height: 1584)
         let image = UIGraphicsImageRenderer(size: size).image { context in
