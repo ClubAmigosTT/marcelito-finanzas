@@ -4,6 +4,26 @@ import UIKit
 @testable import Marcelito
 
 final class ReaderContractTests: XCTestCase {
+    func testScreenshotMerchantAndRFCConceptsDoNotBecomeAdministrativeBlockers() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        for (title, amount) in [("TOTAL PASS SAPI Mexico City 1234567", Decimal(-740)), ("TOTAL PASS SAPI Mexico City...", Decimal(string: "-704.50")!), ("1234567 RFC ABC010101AB1 0,", Decimal(-12000))] {
+            var movement = Movement(date: .now, title: title, account: "Santander", category: "Otros / Por revisar", amount: amount, flow: .expense,
+                extractionEvidence: MovementExtractionEvidence(method: "screenshot-vision", page: 2, confidence: 0.95, sourceText: "\(title) \(amount) MXN", selectedAmount: amount))
+            XCTAssertTrue(store.movementBlockingReasons(movement).isEmpty, title)
+            movement.extractionEvidence?.method = "pdfkit"
+            XCTAssertFalse(store.movementBlockingReasons(movement).isEmpty, "A PDF header must not inherit the screenshot exception")
+            movement.extractionEvidence?.method = "screenshot-vision"
+            movement.extractionEvidence?.selectedAmount = -1
+            XCTAssertFalse(store.movementBlockingReasons(movement).isEmpty, "The retained amount must agree")
+        }
+        for title in ["TOTAL IMPORTE CARGOS", "SALDO DISPONIBLE", "RFC ABC010101AB1"] {
+            let movement = Movement(date: .now, title: title, account: "Santander", category: "Otros / Por revisar", amount: -100, flow: .expense,
+                extractionEvidence: MovementExtractionEvidence(method: "screenshot-vision", page: 2, confidence: 0.95, sourceText: "\(title) -100.00 MXN", selectedAmount: -100))
+            XCTAssertFalse(store.movementBlockingReasons(movement).isEmpty, title)
+        }
+    }
+
     func testBlockingEvidenceIdentifiesImportedRowsButNotManualEntries() {
         var movement = Movement(date: .now, title: "Compra de prueba", account: "BBVA", category: "Otros / Por revisar", amount: -100, flow: .expense)
         XCTAssertFalse(FinanceStore.hasMissingImportEvidence(movement))

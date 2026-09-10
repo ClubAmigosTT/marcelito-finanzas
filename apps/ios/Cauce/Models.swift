@@ -1937,8 +1937,9 @@ final class FinanceStore {
 
     func movementBlockingReasons(_ movement: Movement) -> [String] {
         var reasons: [String] = []
-        if abs(movement.amount) >= 10_000_000 || !isValidStoredMovement(movement) {
-            reasons.append("Importe o datos del movimiento fuera del rango admitido.")
+        if abs(movement.amount) >= 10_000_000 { reasons.append("El importe alcanza o supera el límite de 10 millones.") }
+        if !isValidStoredMovement(movement) {
+            reasons.append("La fecha, el signo o el concepto no superaron la validación del movimiento; el concepto puede haberse confundido con un encabezado.")
         }
         if Self.hasMissingImportEvidence(movement) {
             reasons.append("Falta evidencia de importación: página, texto de origen o confianza de lectura. Relee el PDF de origen.")
@@ -2636,7 +2637,7 @@ final class FinanceStore {
         guard movement.amount != 0,
               movement.title.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3,
               movement.title.rangeOfCharacter(from: .letters) != nil,
-              !Self.isAdministrativeTitle(movement.title) else { return false }
+              (!Self.isAdministrativeTitle(movement.title) || Self.isSupportedScreenshotDescriptor(movement)) else { return false }
         switch movement.flow {
         case .income:
             guard movement.amount > 0 else { return false }
@@ -2647,6 +2648,21 @@ final class FinanceStore {
         }
         let year = Calendar(identifier: .gregorian).component(.year, from: movement.date)
         return (1900...2_200).contains(year)
+    }
+
+    /// Mobile rows may show a merchant named TOTAL PASS or a reference plus
+    /// RFC as their entire concept. Only relax these two header collisions
+    /// when the screenshot reader retained a matching visible amount.
+    static func isSupportedScreenshotDescriptor(_ movement: Movement) -> Bool {
+        guard let evidence = movement.extractionEvidence,
+              evidence.method == "screenshot-vision", evidence.confidence.isFinite,
+              (evidence.page ?? 0) > 0,
+              evidence.sourceText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+              let visibleAmount = evidence.selectedAmount,
+              abs(visibleAmount) == abs(movement.amount) else { return false }
+        let title = movement.title.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "es_MX"))
+        return title.range(of: #"(?i)^\s*TOTAL\s*PASS\b"#, options: .regularExpression) != nil
+            || title.range(of: #"(?i)^\s*\d{3,}\s+RFC\s+[A-Z&Ñ]{3,4}\d{6}[A-Z0-9]{3}(?:\s|[,.;]|$)"#, options: .regularExpression) != nil
     }
 
     private func reconcileStoredMovements() {
