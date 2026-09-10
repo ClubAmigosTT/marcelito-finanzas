@@ -4202,7 +4202,9 @@ final class FinanceStore {
             }
             return corrected
         }
-        let period = Self.periodLabel(from: text, fileName: fileName)
+        let period = source == "BBVA"
+            ? (Self.bbvaDocumentPeriod(document) ?? "Periodo no identificado")
+            : Self.periodLabel(from: text, fileName: fileName)
         let ocrRejectedRowsNeedReview = usedOCR && rowDiagnostics.contains { !$0.accepted }
         let ocrFallbackNeedsReview = usedOCR && (
             ocrRejectedRowsNeedReview
@@ -9587,8 +9589,7 @@ final class FinanceStore {
         let updates = await Task.detached(priority: .utility) {
             sources.compactMap { id, url -> (UUID, String)? in
                 guard let document = PDFDocument(url: url),
-                      let text = document.string,
-                      let period = FinanceStore.bbvaPrintedPeriod(from: text) else { return nil }
+                      let period = FinanceStore.bbvaDocumentPeriod(document) else { return nil }
                 return (id, period)
             }
         }.value
@@ -9599,6 +9600,16 @@ final class FinanceStore {
             changed = true
         }
         if changed { persist(markingChange: true) }
+    }
+
+    private static func bbvaDocumentPeriod(_ document: PDFDocument) -> String? {
+        if let period = bbvaPrintedPeriod(from: document.string ?? "") { return period }
+        // The official period appears on the first page. Limit visual recovery
+        // to that page, using the same local Vision pipeline as the reader.
+        guard let page = document.page(at: 0), let copy = page.copy() as? PDFPage else { return nil }
+        let headerDocument = PDFDocument()
+        headerDocument.insert(copy, at: 0)
+        return bbvaPrintedPeriod(from: ocrText(from: ocrObservations(from: headerDocument)))
     }
 
     private static func statementKind(from text: String, source: String) -> StatementKind {
