@@ -1,7 +1,50 @@
 import XCTest
+import PDFKit
+import UIKit
 @testable import Marcelito
 
 final class ReaderContractTests: XCTestCase {
+    func testBBVAPeriodOCRSkipsImageOnlyFiscalCover() throws {
+        let size = CGSize(width: 1224, height: 1584)
+        let image = UIGraphicsImageRenderer(size: size).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            ("BBVA\nPeriodo DEL 15/06/2026 AL 14/07/2026\nFecha de Corte 14/07/2026" as NSString)
+                .draw(in: CGRect(x: 80, y: 80, width: 1060, height: 250),
+                      withAttributes: [.font: UIFont.systemFont(ofSize: 30), .foregroundColor: UIColor.black])
+        }
+        let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792))
+        let data = renderer.pdfData { context in
+            context.beginPage()
+            ("BBVA - Aviso fiscal" as NSString).draw(at: CGPoint(x: 40, y: 80), withAttributes: nil)
+            context.beginPage()
+            image.draw(in: CGRect(x: 0, y: 0, width: 612, height: 792))
+        }
+        let document = try XCTUnwrap(PDFDocument(data: data))
+        XCTAssertNil(FinanceStore.bbvaPrintedPeriod(from: document.string ?? ""))
+        XCTAssertEqual(FinanceStore.bbvaDocumentPeriod(document), "15/06/2026 - 14/07/2026")
+    }
+
+    func testBBVAPeriodAfterFiscalCoverWithColumnOrderedHeader() throws {
+        for (start, end) in [("15/06/2026", "14/07/2026"), ("15/05/2026", "14/06/2026")] {
+            let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792))
+            let data = renderer.pdfData { context in
+                context.beginPage()
+                ("BBVA - Aviso de datos fiscales" as NSString).draw(at: CGPoint(x: 40, y: 80), withAttributes: nil)
+                context.beginPage()
+                // Emit the label column before the value column, as PDF
+                // extraction can do for the bank's two-column header.
+                ("Periodo" as NSString).draw(at: CGPoint(x: 315, y: 50), withAttributes: nil)
+                ("Fecha de Corte" as NSString).draw(at: CGPoint(x: 315, y: 70), withAttributes: nil)
+                ("No. de Cuenta" as NSString).draw(at: CGPoint(x: 315, y: 90), withAttributes: nil)
+                ("DEL \(start) AL \(end)" as NSString).draw(at: CGPoint(x: 410, y: 50), withAttributes: [.font: UIFont.systemFont(ofSize: 9)])
+                (end as NSString).draw(at: CGPoint(x: 490, y: 70), withAttributes: nil)
+            }
+            let document = try XCTUnwrap(PDFDocument(data: data))
+            XCTAssertEqual(FinanceStore.bbvaDocumentPeriod(document), "\(start) - \(end)")
+        }
+    }
+
     func testRejectedStatementRowsNeverEnterOperationalLedger() {
         XCTAssertFalse(FinanceStore.shouldPersistCanonicalRowsForTesting(
             reconciliation: .invalid,
