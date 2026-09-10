@@ -70,13 +70,20 @@ struct LedgerBlockerDetailsView: View {
                             ForEach(store.movementBlockingReasons(movement), id: \.self) { reason in
                                 Text(reason).font(.caption).foregroundStyle(Color.marcelitoDanger)
                             }
-                            if let page = movement.extractionEvidence?.page { Text("Página \(page)").font(.caption) }
+                            if let page = movement.extractionEvidence?.page {
+                                Text(store.isProvisionalScreenshotMovement(movement) ? "Imagen \(page)" : "Página \(page)").font(.caption)
+                            }
                             if let text = movement.extractionEvidence?.sourceText, !text.isEmpty {
                                 Text(text).font(.caption).textSelection(.enabled)
                             }
                             if let statement = store.statements.first(where: { $0.id == movement.statementId }) {
                                 NavigationLink("\(statement.source) · \(conciseStatementPeriod(statement))") {
                                     StatementSummaryEditor(statement: statement)
+                                }
+                            } else if store.isProvisionalScreenshotMovement(movement) {
+                                Text("Origen: captura bancaria · provisional hasta conciliar con un estado oficial").font(.caption)
+                                if let capture = store.screenshotCaptures.first(where: { $0.movements.contains(where: { $0.id == movement.id }) }) {
+                                    Text("\(capture.source.rawValue) · \(capture.coverageLabel)").font(.caption)
                                 }
                             } else {
                                 Text(movement.statementId == nil ? "Origen: movimiento manual" : "El estado de origen ya no está disponible.").font(.caption)
