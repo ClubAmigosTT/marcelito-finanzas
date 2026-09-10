@@ -1400,7 +1400,7 @@ struct AccountsView: View {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(conciseStatementPeriod(statement))
                                 .font(.subheadline.weight(.semibold))
-                            Text(account.kind == .bank ? "Periodo, saldos, abonos y cargos" : "Saldos, pagos, crédito y MSI")
+                            Text(statement.kind == .bank ? "Periodo, saldos, abonos y cargos" : "Saldos, pagos, crédito y MSI")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
