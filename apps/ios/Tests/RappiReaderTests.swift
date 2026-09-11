@@ -67,6 +67,53 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: rows).status, .invalid)
     }
 
+    func testSeparateOperationAndPostingDateLinesKeepEveryMovement() {
+        let text = fixture.replacingOccurrences(
+            of: #"(\d{4}-\d{2}-\d{2}) (\d{4}-\d{2}-\d{2}) "#,
+            with: "$1\n$2\n", options: .regularExpression)
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "example.pdf")
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .cardPayment }.count, 1)
+        XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements).status, .valid)
+    }
+
+    func testProductionImportRecoversTwoColumnCoverAndMovementPages() throws {
+        let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792))
+        let data = renderer.pdfData { context in
+            func draw(_ text: String, _ x: CGFloat, _ y: CGFloat) {
+                (text as NSString).draw(at: CGPoint(x: x, y: y), withAttributes: [.font: UIFont.systemFont(ofSize: 9)])
+            }
+            context.beginPage()
+            draw("Tarjeta de crédito RappiCard", 30, 30)
+            let rows = [
+                ("Adeudo del periodo anterior =", "$100.00", "Periodo", "22-jul-2026 al 21-ago-2026"),
+                ("Cargos regulares (no a meses) +", "$100.00", "Saldo deudor total11", "$150.00"),
+                ("Pagos y abonos -", "$50.00", "Saldo cargos a meses:", "$0.00"),
+                ("Cargos compras a meses (capital)7 +", "$0.00", "Pago mínimo4", "$20.00")
+            ]
+            for (index, row) in rows.enumerated() {
+                let y = CGFloat(100 + index * 25)
+                // Deliberately interleave the two panels in content order.
+                draw(row.0, 30, y); draw(row.2, 320, y)
+                draw(row.1, 245, y); draw(row.3, 460, y)
+            }
+            context.beginPage()
+            let lines = ["CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+                         "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
+                         "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
+                         "2026-08-02 2026-08-02 PAGO POR SPEI -$40.00",
+                         "2026-08-03 2026-08-03 BONIFICACIÓN CON CASHBACK -$10.00",
+                         "Total de cargos +$100.00", "Total de abonos -$50.00"]
+            for (index, line) in lines.enumerated() { draw(line, 30, CGFloat(40 + index * 25)) }
+        }
+        let snapshot = try FinanceStore.readerPDFSnapshotForTesting(data: data)
+        XCTAssertEqual(snapshot.source, "Rappi")
+        XCTAssertEqual(snapshot.period, "22/07/2026 - 21/08/2026")
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertEqual(snapshot.movements.first?.extractionEvidence?.page, 2)
+        XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements).status, .valid)
+    }
+
     func testSPEIPaymentSpacingAndCaseDoNotBecomeIncome() throws {
         for label in ["PAGO POR SPEI", "Pago por Spei", "PAGO   POR\nSPEI"] {
             let text = fixture.replacingOccurrences(of: "PAGO POR SPEI", with: label)

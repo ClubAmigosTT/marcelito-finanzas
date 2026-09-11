@@ -9,7 +9,7 @@ enum SelectablePDFLayout {
         let bounds: CGRect
     }
 
-    static func orderedText(_ fragments: [Fragment]) -> String {
+    static func orderedText(_ fragments: [Fragment], lineTolerance: CGFloat? = nil) -> String {
         let fragments = fragments.filter {
             !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                 && !$0.bounds.isEmpty && !$0.bounds.isInfinite && !$0.bounds.isNull
@@ -21,7 +21,7 @@ enum SelectablePDFLayout {
         var lines: [[Fragment]] = []
         for fragment in fragments {
             if let anchor = lines.last?.first,
-               abs(anchor.bounds.midY - fragment.bounds.midY) <= min(2.2, min(anchor.bounds.height, fragment.bounds.height) * 0.3) {
+               abs(anchor.bounds.midY - fragment.bounds.midY) <= (lineTolerance ?? min(2.2, min(anchor.bounds.height, fragment.bounds.height) * 0.3)) {
                 lines[lines.count - 1].append(fragment)
             } else {
                 lines.append([fragment])
@@ -34,7 +34,7 @@ enum SelectablePDFLayout {
         }.joined(separator: "\n")
     }
 
-    static func text(from document: PDFDocument) -> String {
+    static func text(from document: PDFDocument, rappiColumns: Bool = false) -> String {
         guard let tokens = try? NSRegularExpression(pattern: #"\S+"#) else { return "" }
         return (0..<document.pageCount).compactMap { index -> String? in
             autoreleasepool {
@@ -49,7 +49,17 @@ enum SelectablePDFLayout {
                     guard let selection = page.selection(for: match.range) else { return nil }
                     return Fragment(text: original.substring(with: match.range), bounds: selection.bounds(for: page))
                 }
-                let text = orderedText(fragments)
+                let text: String
+                if rappiColumns && index == 0 {
+                    // Rappi's cover has two independent financial panels.
+                    let middle = page.bounds(for: .mediaBox).midX
+                    let left = fragments.filter { $0.bounds.midX < middle }
+                    let right = fragments.filter { $0.bounds.midX >= middle }
+                    // Include superscript footnotes in their label's line.
+                    text = [left, right].map { orderedText($0, lineTolerance: 4.5) }.joined(separator: "\n")
+                } else {
+                    text = orderedText(fragments)
+                }
                 guard !text.isEmpty else { return nil }
                 return "__PDF_PAGE_\(index + 1)__\n\(text)"
             }
