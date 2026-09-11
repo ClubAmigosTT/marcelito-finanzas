@@ -9434,7 +9434,10 @@ final class FinanceStore {
                   amount != 0,
                   let body = rappiCapture(#"^\d{4}-\d{2}-\d{2}\s+\d{4}-\d{2}-\d{2}\s+(.+?)\s*(?:[+-]\s*\$|compra en el extranjero)"#, in: pending) else { return }
             let title = body.trimmingCharacters(in: .whitespacesAndNewlines)
-            let payment = title.hasPrefix("pago por spei")
+            // PDF extraction may split the payment label across lines or
+            // insert repeated spaces. Match whole words, not a prefix that
+            // would also accept an unrelated merchant such as SPEIStore.
+            let payment = title.range(of: #"^pago\s+por\s+spei\b"#, options: .regularExpression) != nil
             // Card convention: positive printed charge -> negative expense;
             // negative printed abono -> positive credit/payment.
             let kind: MovementKind = payment ? .cardPayment : amount < 0 ? .refund : .purchase

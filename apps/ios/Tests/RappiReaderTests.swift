@@ -1,4 +1,6 @@
 import XCTest
+import PDFKit
+import UIKit
 @testable import Marcelito
 
 final class RappiReaderTests: XCTestCase {
@@ -63,6 +65,37 @@ final class RappiReaderTests: XCTestCase {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(text: fixture, fileName: "example.pdf")
         let rows = snapshot.movements.filter { $0.kind != .refund }
         XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: rows).status, .invalid)
+    }
+
+    func testSPEIPaymentSpacingAndCaseDoNotBecomeIncome() throws {
+        for label in ["PAGO POR SPEI", "Pago por Spei", "PAGO   POR\nSPEI"] {
+            let text = fixture.replacingOccurrences(of: "PAGO POR SPEI", with: label)
+            let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "example.pdf")
+            let payment = try XCTUnwrap(snapshot.movements.first { $0.amount == 40 })
+            XCTAssertEqual(payment.kind, .cardPayment, label)
+            XCTAssertEqual(payment.flow, .transfer, label)
+            XCTAssertEqual(snapshot.movements.first { $0.amount == 10 }?.kind, .refund)
+        }
+    }
+
+    func testPDFKitRoundTripKeepsPeriodRowsAndReconciliation() throws {
+        let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792))
+        let data = renderer.pdfData { context in
+            context.beginPage()
+            var y: CGFloat = 30
+            for line in fixture.components(separatedBy: .newlines) {
+                if line.hasPrefix("__PDF_PAGE_") { continue }
+                (line as NSString).draw(at: CGPoint(x: 25, y: y), withAttributes: [.font: UIFont.systemFont(ofSize: 10)])
+                y += 20
+            }
+        }
+        let document = try XCTUnwrap(PDFDocument(data: data))
+        let text = SelectablePDFLayout.text(from: document)
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "example.pdf")
+        XCTAssertEqual(snapshot.period, "22/07/2026 - 21/08/2026")
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .cardPayment }.count, 1)
+        XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements).status, .valid)
     }
 
     func testUnsupportedInstallmentLayoutDoesNotCertify() {

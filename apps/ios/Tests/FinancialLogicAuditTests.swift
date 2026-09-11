@@ -143,6 +143,32 @@ final class FinancialLogicAuditTests: XCTestCase {
         }
     }
 
+    func testRappiReviewSurvivesReplacementStatementAndMovementIDs() {
+        withStore { store in
+            let original = statement("Rappi", key: "rappi:1234", kind: .card)
+            let date = Date(timeIntervalSince1970: 1785715200)
+            var movement = row(-100, date: date, title: "COMERCIO EJEMPLO")
+            movement.account = "Rappi"
+            movement.statementId = original.id
+            store.statements = [original]
+            store.movements = [movement]
+            store.updateClassification(for: movement, kind: .purchase, travelRelated: true)
+            store.updateCategory(for: movement, to: "Salud")
+
+            let replacement = statement("Rappi", key: "rappi:1234", kind: .card)
+            var reread = row(-100, date: date, title: "COMERCIO EJEMPLO")
+            reread.account = "Rappi"
+            reread.statementId = replacement.id
+            store.statements = [replacement]
+            store.movements = [reread]
+            store.normalizeFinanceForTesting()
+            XCTAssertEqual(store.movements.count, 1)
+            XCTAssertEqual(store.movements.first?.category, "Salud")
+            XCTAssertEqual(store.movements.first?.travelRelated, true)
+            XCTAssertEqual(store.movements.first?.manuallyReviewed, true)
+        }
+    }
+
     private func capture(_ source: BankScreenshotSource, key: String?, title: String, amount: Decimal, fingerprint: String) -> BankScreenshotImportResult {
         let evidence = MovementExtractionEvidence(method: "screenshot-vision", page: 1, confidence: 0.99,
             sourceText: "\(title) \(amount)", selectedAmount: amount)
