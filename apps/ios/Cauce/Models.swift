@@ -715,7 +715,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.11.9"
+    static let readerVersion = "ios-reader-deterministic-2026.09.11.10"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -858,6 +858,16 @@ final class FinanceStore {
             movements: movements,
             summary: summary
         )
+    }
+
+    /// Exercise production PDFKit extraction, layout recovery and issuer
+    /// parsing together, without caching or changing the user's ledger.
+    static func readerPDFSnapshotForTesting(data: Data) throws -> ReaderParseSnapshot {
+        let result = try extractPDF(data: data, fileName: "fixture.pdf", allowOCR: false,
+                                    sourceOverride: nil, kindOverride: nil, learnedRules: [:])
+        return ReaderParseSnapshot(sourceDetection: result.sourceDetection,
+            source: result.source, accountKey: result.accountKey, kind: result.kind,
+            period: result.period, movements: result.candidates, summary: result.summary)
     }
 
     /// Proves a selectable PDF text layer against the same issuer controls
@@ -3993,7 +4003,7 @@ final class FinanceStore {
                 extractedPaymentTotal: kind == .card ? payments : nil,
                 extractedMovementCount: movementCount,
                 expectedMovementCount: expectedMovementCount,
-                reason: "El PDF no expone un resumen financiero verificable."
+                reason: "El lector no logró extraer los controles financieros necesarios para conciliar. Esto no significa que falten en el PDF."
             )
         }
 
@@ -4265,7 +4275,8 @@ final class FinanceStore {
         // Only adopt the reconstructed layout when the unchanged accounting
         // controls accept it; sorting is never itself proof of correctness.
         if !textLayerReconciles {
-            let layoutText = SelectablePDFLayout.text(from: document)
+            let isRappi = Self.sourceDetection(from: extractedText, fileName: fileName).source == "Rappi"
+            let layoutText = SelectablePDFLayout.text(from: document, rappiColumns: isRappi)
             if !layoutText.isEmpty, layoutText != extractedText,
                Self.textLayerReconciles(text: layoutText, fileName: fileName,
                                        sourceOverride: cleanedSourceOverride, kindOverride: kindOverride) {
@@ -9461,7 +9472,13 @@ final class FinanceStore {
                 || lower.hasPrefix("compras y cargos diferidos") { flush(); table = false; continue }
             guard table else { continue }
             if lower.range(of: #"^\d{4}-\d{2}-\d{2}\b"#, options: .regularExpression) != nil {
-                flush(); pending = line; rowPage = page
+                // PDFKit may put the operation and posting dates on separate
+                // lines; the second date belongs to the pending movement.
+                if pending.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil {
+                    pending += " " + line
+                } else {
+                    flush(); pending = line; rowPage = page
+                }
             } else if !pending.isEmpty,
                       !lower.hasPrefix("numero de cuenta"), !lower.hasPrefix("pagina"),
                       !lower.hasPrefix("ver notas"), !lower.hasPrefix("tarjeta"),
