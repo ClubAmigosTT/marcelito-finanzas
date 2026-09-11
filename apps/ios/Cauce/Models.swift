@@ -715,7 +715,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.07.8"
+    static let readerVersion = "ios-reader-deterministic-2026.09.11.9"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -9363,6 +9363,60 @@ final class FinanceStore {
         return String(value[range])
     }
 
+    /// Rappi's PDF text layer is not stable across exports. Depending on the
+    /// iOS PDFKit version, the period can arrive with an accent, line breaks,
+    /// non-breaking spaces, or a separate token around each hyphen (for
+    /// example `22 - jun - 2026`). Normalize only the period header before
+    /// matching it; movement text must remain untouched because it is the
+    /// accounting evidence used by the reconciliation gate.
+    private static func rappiPeriodLabel(from text: String) -> String {
+        var normalized = text.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: Locale(identifier: "es_MX")
+        )
+        normalized = normalized
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: "\u{00AD}", with: "-")
+        for dash in ["\u{2010}", "\u{2011}", "\u{2012}", "\u{2013}", "\u{2014}", "\u{2212}"] {
+            normalized = normalized.replacingOccurrences(of: dash, with: "-")
+        }
+        normalized = normalized
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Collapse spaces around both numeric and Spanish-month separators.
+        // The replacement is deliberately scoped to a date-shaped token so a
+        // merchant description such as `Pago - SPEI` cannot be rewritten.
+        normalized = normalized.replacingOccurrences(
+            of: #"(\d{1,2})\s*[-/]\s*([a-z]{3,12}|\d{1,2})\s*[-/]\s*(\d{2,4})"#,
+            with: "$1-$2-$3",
+            options: .regularExpression
+        )
+
+        let dateToken = #"\d{1,2}-(?:[a-z]{3,12}|\d{1,2})-\d{2,4}"#
+        let patterns = [
+            #"(?is)\bperiodo\b\s*[:\-]?\s*(?:del?\s+)?("# + dateToken + #")\s*(?:al|a|[-–])\s*("# + dateToken + #")"#,
+            // Some PDF exports omit the connector or place a line label
+            // between the two dates. Keep the fallback bounded so a date in
+            // the payment deadline cannot be paired with the cutoff date.
+            #"(?is)\bperiodo\b[^0-9]{0,24}("# + dateToken + #")[^0-9]{0,24}("# + dateToken + #")"#
+        ]
+        let searchRange = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        for pattern in patterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern),
+                  let match = regex.firstMatch(in: normalized, range: searchRange),
+                  let firstRange = Range(match.range(at: 1), in: normalized),
+                  let secondRange = Range(match.range(at: 2), in: normalized),
+                  let first = parseDate(String(normalized[firstRange])),
+                  let second = parseDate(String(normalized[secondRange])) else { continue }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "es_MX")
+            formatter.calendar = Calendar(identifier: .gregorian)
+            formatter.dateFormat = "dd/MM/yyyy"
+            return [first, second].map { formatter.string(from: $0) }.joined(separator: " - ")
+        }
+        return "Periodo no identificado"
+    }
+
     /// Deliberately confined to the regular transaction table. The claims,
     /// cashback rewards and fiscal pages are not additional ledger movements.
     private static func parseRappiText(_ text: String) -> [Movement] {
@@ -9782,14 +9836,14 @@ final class FinanceStore {
     }
 
     private static func periodLabel(from text: String, fileName: String) -> String {
-        if sourceDetection(from: text, fileName: "").source == "Rappi" {
-            guard let period = rappiCapture(#"\bperiodo\s+(\d{2}-[a-z]{3}-\d{4}\s+al\s+\d{2}-[a-z]{3}-\d{4})"#, in: text) else { return "Periodo no identificado" }
-            let dates = period.components(separatedBy: " al ").compactMap { parseDate($0) }
-            guard dates.count == 2 else { return "Periodo no identificado" }
-            let formatter = DateFormatter()
-            formatter.locale = Locale(identifier: "es_MX")
-            formatter.dateFormat = "dd/MM/yyyy"
-            return dates.map { formatter.string(from: $0) }.joined(separator: " - ")
+        let normalizedForRappi = text.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: Locale(identifier: "es_MX")
+        )
+        let isRappi = sourceDetection(from: text, fileName: "").source == "Rappi"
+            || (normalizedForRappi.contains("rappicard") && normalizedForRappi.contains("periodo"))
+        if isRappi {
+            return rappiPeriodLabel(from: text)
         }
         if sourceDetection(from: text, fileName: "").source == "BBVA" {
             return bbvaPrintedPeriod(from: text) ?? "Periodo no identificado"
@@ -10043,7 +10097,7 @@ final class FinanceStore {
             || header.contains("bba830831lj2")
             || header.range(of: #"bbva\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple"#, options: .regularExpression) != nil
         let sourceFromHeader: String? = {
-            if header.contains("tarjeta de credito rappicard") { return "Rappi" }
+            if header.contains("rappicard") && header.contains("tarjeta de credito") { return "Rappi" }
             // A legal issuer marker beats a bare counterparty mention. If two
             // legal markers genuinely conflict, return nil and keep the
             // statement in review instead of guessing by regex order.

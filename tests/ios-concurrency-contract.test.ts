@@ -180,7 +180,7 @@ test("Amex queda aislado en el parser nativo y no cae a Vision", async () => {
 
 test("RappiCard usa tabla dedicada y concilia abonos además de cargos", async () => {
   const source = await readFile(modelsPath, "utf8");
-  assert.match(source, /if header.contains\("tarjeta de credito rappicard"\) \{ return "Rappi" \}/);
+  assert.match(source, /if header.contains\("rappicard"\) && header.contains\("tarjeta de credito"\) \{ return "Rappi" \}/);
   assert.match(source, /parsedCandidates = Self\.parseRappiText\(text\)/);
   assert.match(source, /compare\("pagos y abonos", extracted: payments \+ credits/);
   assert.match(source, /opening \+ charges - payments - credits/);

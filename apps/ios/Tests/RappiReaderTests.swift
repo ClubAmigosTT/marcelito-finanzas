@@ -44,6 +44,21 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements).status, .valid)
     }
 
+    func testPeriodSurvivesPDFKitSpacingAndDashVariants() {
+        let variants = [
+            "Período\n22 - jun - 2026\nal\n21 - ago - 2026",
+            "Periodo 22–jun–2026 al 21–ago–2026",
+            "Periodo 22/jun/2026 al 21/ago/2026",
+            "Periodo 22-junio-2026 al 21-agosto-2026"
+        ]
+
+        for period in variants {
+            let text = fixture.replacingOccurrences(of: "Periodo 22-jul-2026 al 21-ago-2026", with: period)
+            let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "rappicard.pdf")
+            XCTAssertEqual(snapshot.period, "22/06/2026 - 21/08/2026", period)
+        }
+    }
+
     func testMissingCreditFailsEvenWhenChargesMatch() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(text: fixture, fileName: "example.pdf")
         let rows = snapshot.movements.filter { $0.kind != .refund }
