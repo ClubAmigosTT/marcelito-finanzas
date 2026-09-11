@@ -677,7 +677,7 @@ struct LedgerQualityBanner: View {
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(store.ledgerQuality.quarantinedMovementCount > 0 ? Color.marcelitoAmber : .secondary)
                 if store.dashboardIsProvisional {
-                    Text("Desbloqueo manual activo · KPI provisionales")
+                    Text("\(store.provisionalMovementCount) movimientos provisionales · gasto neto \(store.provisionalSpend.formatted(.currency(code: "MXN")))")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(Color.marcelitoAmber)
                 }
@@ -697,7 +697,7 @@ struct LedgerQualityBanner: View {
             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
         )
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Calidad de datos \(percentText)\(store.dashboardIsProvisional ? ". KPI provisionales por desbloqueo manual" : "")")
+        .accessibilityLabel("Calidad de estados PDF \(percentText)\(store.dashboardIsProvisional ? ". Incluye capturas provisionales" : "")")
     }
 
     private func money(_ value: Decimal) -> String {
@@ -911,10 +911,10 @@ private struct DecisionMetricsView: View {
                 .font(.title3.weight(.bold))
                 .padding(.bottom, 6)
             CalculationLine(label: "Gasto total de tarjeta", value: money(store.totalNewTransactions, operational: true), detail: "Compras nuevas conciliadas")
-            CalculationLine(label: "Promedio mensual", value: money(store.averageMonthlySpend, operational: true), detail: "Compras / periodos conciliados")
+            CalculationLine(label: "Promedio de compras por corte mensual", value: money(store.averageMonthlySpend, operational: true), detail: "Sólo compras de tarjeta / meses con cortes")
             CalculationLine(label: "Abonos reales", value: money(store.totalRealPayments, operational: true), detail: "Pagos, sin créditos contables")
-            CalculationLine(label: "Saldo acumulado", value: money(store.accumulatedBalance, operational: true), detail: "Cargos − abonos − créditos")
-            CalculationLine(label: "Porcentaje pagado", value: percent(store.paidPercent, operational: true), detail: "Abonos / nuevos cargos")
+            CalculationLine(label: "Variación acumulada de deuda", value: money(store.accumulatedBalance, operational: true), detail: "Cargos − abonos − créditos − reembolsos; sin saldo inicial")
+            CalculationLine(label: "Pagos / cargos nuevos", value: percent(store.paidPercent, operational: true), detail: "Puede superar 100% al pagar deuda anterior")
             CalculationLine(label: "Porcentaje pendiente", value: percent(store.pendingPercent, operational: true), detail: "Saldo / nuevos cargos")
             Divider().padding(.vertical, 4)
             CalculationLine(label: "Gasto real consolidado", value: money(store.consolidatedRealSpend, operational: true), detail: "Tarjeta + bancos, sin pagos propios")
@@ -926,7 +926,7 @@ private struct DecisionMetricsView: View {
             CalculationLine(label: "Utilización de crédito", value: percent(store.creditUtilizationRate), detail: store.creditUsed.map { "\(money($0)) utilizado" } ?? "Captura límite y disponible")
             CalculationLine(label: "Carga mensual MSI", value: money(store.latestMsiMonthlyLoad), detail: "Mensualidades activas")
             CalculationLine(label: "Nuevos cargos del corte", value: money(store.cardPeriodMetrics.first?.newCharges), detail: "Compras + MSI + intereses + comisiones")
-            CalculationLine(label: "Pago para no generar intereses", value: money(store.latestPaymentForNoInterest), detail: "Del estado o calculado")
+            CalculationLine(label: "Pago para no generar intereses", value: money(store.latestPaymentForNoInterest), detail: "Suma oficial de tarjetas; pendiente si falta algún importe")
         }
         .foregroundStyle(Color.marcelitoNavy)
         .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 18)
@@ -977,8 +977,8 @@ private struct MetricsStrip: View {
 
     var body: some View {
         LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
-            MetricTile(title: "Efectivo disponible", value: balanceMoney(store.cashAvailable), symbol: "wallet.pass.fill", color: Color.marcelitoNavyMid) { selectedMetric = .cash }
-            MetricTile(title: "Deuda total", value: balanceMoney(store.debtTotal), symbol: "creditcard.fill", color: Color.marcelitoNavy) { selectedMetric = .debt }
+            MetricTile(title: "Efectivo al último corte", value: balanceMoney(store.cashAvailable), symbol: "wallet.pass.fill", color: Color.marcelitoNavyMid) { selectedMetric = .cash }
+            MetricTile(title: "Deuda al último corte", value: balanceMoney(store.debtTotal), symbol: "creditcard.fill", color: Color.marcelitoNavy) { selectedMetric = .debt }
             MetricTile(title: "Gasto del mes", value: operationalMoney(store.monthlyExpense), symbol: "receipt.fill", color: Color.marcelitoAmber) { selectedMetric = .expense }
             MetricTile(title: "Flujo neto", value: operationalMoney(store.monthlyNetFlow), symbol: "chart.line.uptrend.xyaxis", color: Color.marcelitoNavyMid) { selectedMetric = .flow }
         }
@@ -1043,18 +1043,18 @@ struct MetricDetailSheet: View {
         case .debt:
             statementTrend(kind: .card, keyPath: \.debtBalance)
         case .expense:
-            store.cashFlowHistory.suffix(12).map { point in
+            store.cashFlowHistory.filter { Calendar.current.isDate($0.date, equalTo: .now, toGranularity: .month) }.suffix(12).map { point in
                 MetricTrendPoint(id: point.id.description, label: dateLabel(point.date), value: point.expense)
             }
         case .flow:
-            store.cashFlowHistory.suffix(12).map { point in
+            store.cashFlowHistory.filter { Calendar.current.isDate($0.date, equalTo: .now, toGranularity: .month) }.suffix(12).map { point in
                 MetricTrendPoint(id: point.id.description, label: dateLabel(point.date), value: point.net)
             }
         }
     }
 
-    private var supportingMovements: [Movement] {
-        let allRealMovements = store.realExpenseMovements + store.realIncomeMovements
+    private var allSupportingMovements: [Movement] {
+        let allRealMovements = store.netExpenseMovements + store.realIncomeMovements
         let cardStatementIDs = Set(store.statements.compactMap { statement -> UUID? in
             let kind = statement.kind ?? (statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank)
             return kind == .card ? statement.id : nil
@@ -1083,18 +1083,24 @@ struct MetricDetailSheet: View {
             candidates = allRealMovements
         }
 
-        return Array(candidates
-            .sorted { abs($0.amount) > abs($1.amount) }
-            .prefix(10))
+        return candidates.sorted { abs($0.amount) > abs($1.amount) }
+    }
+
+    private var supportingMovements: [Movement] { Array(allSupportingMovements.prefix(10)) }
+
+    private var remainingContribution: Decimal {
+        allSupportingMovements.dropFirst(10).reduce(0) { sum, row in
+            sum + (metric == .expense ? row.expenseContribution : row.amount)
+        }
     }
 
     private var supportingMovementsDescription: String {
         switch metric {
         case .expense: "Egresos reales más altos del periodo actual."
         case .flow: "Ingresos y egresos con mayor impacto en el flujo del periodo."
-        case .debt: "Cargos de tarjeta más altos registrados en los estados conciliados."
-        case .cash: "Movimientos bancarios con mayor importe absoluto."
-        case .patrimony: "Movimientos reales con mayor impacto en efectivo y deuda."
+        case .debt: "Cargos históricos de referencia; no reconstruyen el saldo. El saldo procede de los cortes indicados arriba."
+        case .cash: "Movimientos históricos de referencia; no suman el saldo inicial ni todos los traspasos."
+        case .patrimony: "Movimientos de referencia; patrimonio = saldos bancarios oficiales − deuda oficial."
         }
     }
 
@@ -1103,37 +1109,17 @@ struct MetricDetailSheet: View {
     }
 
     private func statementTrend(kind: StatementKind, keyPath: KeyPath<StatementMetric, Decimal?>) -> [MetricTrendPoint] {
-        var seen = Set<String>()
-        let points = store.periodMetrics.reversed().compactMap { metric -> MetricTrendPoint? in
-            guard metric.kind == kind, seen.insert(metric.period).inserted else { return nil }
-            let values = store.periodMetrics
-                .filter { $0.kind == kind && $0.period == metric.period }
-                .compactMap { $0[keyPath: keyPath] }
-            guard !values.isEmpty else { return nil }
-            let total = values.reduce(Decimal(0), +)
-            return MetricTrendPoint(
-                id: "\(kind.rawValue)-\(metric.period)",
-                label: metric.period,
-                value: NSDecimalNumber(decimal: total).doubleValue
-            )
+        let points = store.balanceHistory.compactMap { snapshot -> MetricTrendPoint? in
+            guard let total = (kind == .bank ? snapshot.cash : snapshot.debt) else { return nil }
+            return MetricTrendPoint(id: snapshot.date.description, label: dateLabel(snapshot.date), value: NSDecimalNumber(decimal: total).doubleValue)
         }
         return Array(points.suffix(8))
     }
 
     private func patrimonyTrend() -> [MetricTrendPoint] {
-        var seen = Set<String>()
-        let points = store.periodMetrics.reversed().compactMap { metric -> MetricTrendPoint? in
-            guard seen.insert(metric.period).inserted else { return nil }
-            let group = store.periodMetrics.filter { $0.period == metric.period }
-            let cash = group.filter { $0.kind == .bank }.compactMap(\.cashBalance).reduce(Decimal(0), +)
-            let debt = group.filter { $0.kind == .card }.compactMap(\.debtBalance).reduce(Decimal(0), +)
-            guard group.contains(where: { $0.kind == .bank && $0.cashBalance != nil }),
-                  group.contains(where: { $0.kind == .card && $0.debtBalance != nil }) else { return nil }
-            return MetricTrendPoint(
-                id: "patrimony-\(metric.period)",
-                label: metric.period,
-                value: NSDecimalNumber(decimal: cash - debt).doubleValue
-            )
+        let points = store.balanceHistory.compactMap { snapshot -> MetricTrendPoint? in
+            guard let total = snapshot.patrimony else { return nil }
+            return MetricTrendPoint(id: snapshot.date.description, label: dateLabel(snapshot.date), value: NSDecimalNumber(decimal: total).doubleValue)
         }
         return Array(points.suffix(8))
     }
@@ -1147,7 +1133,7 @@ struct MetricDetailSheet: View {
                             .font(.headline)
                             .foregroundStyle(metric.color)
                         if store.dashboardIsProvisional {
-                            Label("Valor provisional por desbloqueo manual", systemImage: "exclamationmark.triangle.fill")
+                            Label("Incluye capturas provisionales", systemImage: "exclamationmark.triangle.fill")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(Color.marcelitoAmber)
                         }
@@ -1208,6 +1194,13 @@ struct MetricDetailSheet: View {
                         }
                     }
 
+                    if metric == .cash || metric == .debt || metric == .patrimony {
+                        Text("Saldos oficiales al corte; la tendencia conserva el último saldo conocido por cuenta. No son saldos en tiempo real. Si falta información, el total queda pendiente.\n\n\(store.balanceEvidenceDescription)")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Mes calendario actual · gasto neto = cargos − reembolsos registrados en el mes. Flujo = ingresos − gasto neto. Misma base en cifra, gráfica y detalle.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if !supportingMovements.isEmpty {
                         VStack(alignment: .leading, spacing: 10) {
                             Text("Top 10 de montos")
@@ -1236,7 +1229,7 @@ struct MetricDetailSheet: View {
                                                 .lineLimit(1)
                                         }
                                         Spacer(minLength: 8)
-                                        Text(movement.amount, format: .currency(code: "MXN").precision(.fractionLength(2)))
+                                        Text(metric == .expense ? movement.expenseContribution : movement.amount, format: .currency(code: "MXN").precision(.fractionLength(2)))
                                             .font(.subheadline.monospacedDigit())
                                             .foregroundStyle(movement.amount < 0 ? Color.marcelitoAmber : Color.marcelitoSuccess)
                                             .lineLimit(1)
@@ -1253,6 +1246,20 @@ struct MetricDetailSheet: View {
                                 if movement.id != supportingMovements.last?.id {
                                     Divider().padding(.leading, 31)
                                 }
+                            }
+                            if allSupportingMovements.count > 10 {
+                                Text("Resto: \(allSupportingMovements.count - 10) movimientos\((metric == .expense || metric == .flow) ? " · \(remainingContribution.formatted(.currency(code: "MXN")))" : "")")
+                                    .font(.caption)
+                            }
+                            NavigationLink("Ver todos los movimientos (\(allSupportingMovements.count))") {
+                                List(allSupportingMovements) { movement in
+                                    NavigationLink { MovementDetailView(movement: movement) } label: {
+                                        VStack(alignment: .leading) {
+                                            Text(movement.title)
+                                            Text(metric == .expense ? movement.expenseContribution : movement.amount, format: .currency(code: "MXN"))
+                                        }
+                                    }
+                                }.navigationTitle("Detalle completo")
                             }
                         }
                         .padding(14)

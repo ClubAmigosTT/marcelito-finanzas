@@ -14,6 +14,7 @@ originales se conservan en IndexedDB.
 | BBVA | Encabezado `Movimientos` y texto `Movimiento BBVA` | Acepta fechas completas, conceptos truncados y signos como `$ -9.63`. La leyenda `Transferencia interbancaria ...` es subtítulo, no una segunda fila. |
 | Santander | Producto `SUPER NOMINA`, saldo actual y cuenta enmascarada | El saldo (`44,460.55 MXN`) se guarda como `BalanceSnapshot`, nunca como movimiento. La flecha o signo determina entrada/salida; si OCR no puede probarla, la fila queda en revisión. |
 | American Express | `The Platinum Credit Card American Express` y terminación enmascarada | Una compra visible como `$405.00` se normaliza internamente a `-405`; un pago (`GRACIAS POR SU PAGO EN LINEA`) conserva `kind=cardPayment`; `Pendiente` mantiene el ciclo provisional. |
+| RappiCard | Marca `RappiCard` y la cuenta seleccionada | Lee el importe principal en MXN, excluye la recompensa `+$`, pagos SPEI son pagos de tarjeta, operaciones `Rechazada` quedan fuera y filas tapadas/incompletas requieren revisión. |
 
 Los perfiles comparten una capa de fechas, importe, evidencia OCR, cuenta,
 clasificación determinista y advertencias. No se usa una regla genérica que

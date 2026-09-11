@@ -2016,7 +2016,7 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(store.movements.filter { $0.kind == .cardPayment }.count, 2)
     }
 
-    func testOwnBankTransferMatchesOppositeDirectionalRowsWithoutCounterpartName() {
+    func testOwnBankTransferDoesNotHideDirectionalRowsWithoutIdentityEvidence() {
         let store = FinanceStore()
         defer { store.clearLocalData() }
 
@@ -2090,8 +2090,8 @@ final class ReaderContractTests: XCTestCase {
         ]
         _ = store.runAutomaticAudit(trigger: "own-transfer-test")
 
-        XCTAssertEqual(store.movements.filter { $0.kind == .bankTransfer }.count, 2)
-        XCTAssertTrue(store.movements.allSatisfy { $0.flow == .transfer })
+        XCTAssertEqual(store.movements.filter { $0.kind == .bankTransfer }.count, 0)
+        XCTAssertFalse(store.movements.allSatisfy { $0.flow == .transfer })
     }
 
     func testWeakVerifiedIssuerEvidenceCannotFeedNativeDashboard() {

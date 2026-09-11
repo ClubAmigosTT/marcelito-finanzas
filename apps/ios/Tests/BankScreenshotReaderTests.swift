@@ -136,8 +136,10 @@ final class BankScreenshotReaderTests: XCTestCase {
         let overlap = try store.saveBankScreenshotImport(result(fingerprint: "image-b", byte: 2))
 
         XCTAssertEqual(first.movementCount, 1)
-        XCTAssertEqual(overlap.movementCount, 0)
+        XCTAssertEqual(overlap.movementCount, 1)
         XCTAssertEqual(overlap.duplicateCount, 1)
+        XCTAssertEqual(store.canonicalScreenshotMovements.count, 2)
+        store.resolveScreenshotDuplicates(captureID: overlap.captureID, keepBoth: [])
         XCTAssertEqual(store.canonicalScreenshotMovements.count, 1)
     }
 }

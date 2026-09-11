@@ -36,9 +36,10 @@ test("Gastos resume todo el libro real y conserva las categorías manuales entre
   const expenses = source.slice(expensesStart, expensesEnd);
 
   assert.ok(expensesStart >= 0 && expensesEnd > expensesStart);
-  assert.equal((source.match(/store\.realExpenseMovements/g) ?? []).length, 2);
+  assert.equal((source.match(/store\.netExpenseMovements/g) ?? []).length, 2);
   assert.doesNotMatch(expenses, /currentPeriodExpenseMovements/);
-  assert.match(expenses, /Incluye todo el historial conciliado/);
+  assert.match(expenses, /Gasto neto: cargos menos reembolsos/);
+  assert.match(expenses, /expenseContribution/);
 });
 
 test("Cuentas conserva un acceso superior para asignar y editar movimientos", async () => {

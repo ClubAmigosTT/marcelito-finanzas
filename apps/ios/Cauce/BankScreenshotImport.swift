@@ -16,11 +16,13 @@ enum BankScreenshotSource: String, Codable, CaseIterable, Hashable, Sendable {
     case bbva = "BBVA"
     case santander = "Santander"
     case amex = "Amex"
+    case rappi = "Rappi"
 
-    var kind: StatementKind { self == .amex ? .card : .bank }
+    var kind: StatementKind { self == .amex || self == .rappi ? .card : .bank }
 
     static func identify(_ value: String) -> BankScreenshotSource? {
         let folded = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+        if folded == "rappi" || folded.contains("rappicard") { return .rappi }
         if folded.contains("american express") || folded.contains("platinum credit card") || folded.contains("amex") { return .amex }
         if folded.contains("bbva") || folded.contains("movimiento bbva") { return .bbva }
         if folded.contains("santander") || folded.contains("super nomina") { return .santander }
@@ -42,6 +44,8 @@ struct BankScreenshotMovement: Identifiable, Codable, Equatable, Sendable {
     let evidence: MovementExtractionEvidence
     var duplicateOf: UUID?
     var matchedOfficialMovementID: UUID?
+    var possibleDuplicateOf: UUID? = nil
+    var duplicateReviewed: Bool? = nil
 
     init(
         id: UUID = UUID(),
@@ -146,7 +150,7 @@ enum BankScreenshotImportError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .unreadableImage: "No pudimos abrir una de las capturas. Prueba con la imagen original."
-        case .unknownSource: "No pudimos identificar BBVA, Santander o American Express en las capturas."
+        case .unknownSource: "No pudimos identificar BBVA, Santander, American Express o RappiCard en las capturas."
         case .mixedSources: "Cada lote debe contener capturas de un solo banco o tarjeta."
         case .noRows: "No encontramos movimientos con fecha, concepto e importe. Usa capturas completas y nítidas."
         case .alreadyImported: "Estas capturas ya estaban guardadas; no se duplicó ningún movimiento."
@@ -198,6 +202,9 @@ enum BankScreenshotReader {
             detectedSources.insert(source)
             inferredAccountKey = inferredAccountKey ?? detectAccountKey(in: joined, source: source)
             let rows = parse(lines: lines, source: source, fingerprint: fingerprint, capturedAt: capturedAt)
+            if source == .rappi {
+                warnings.append("RappiCard: revisa los importes contra las capturas; no importamos cashback informativo ni operaciones rechazadas. Las filas tapadas o incompletas requieren una captura nueva.")
+            }
             if rows.isEmpty { warnings.append("\(input.fileName): no se reconocieron filas completas.") }
             parsedMovements.append(contentsOf: rows)
         }
@@ -237,6 +244,7 @@ enum BankScreenshotReader {
 
     private static func stronglyIdentifiedSource(in value: String) -> BankScreenshotSource? {
         let folded = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+        if folded.contains("rappicard") { return .rappi }
         if folded.contains("american express") || folded.contains("platinum credit card") {
             return .amex
         }
@@ -338,6 +346,7 @@ enum BankScreenshotReader {
         fingerprint: String,
         capturedAt: Date
     ) -> [BankScreenshotMovement] {
+        if source == .rappi { return parseRappiScreenshot(lines, fingerprint: fingerprint, capturedAt: capturedAt) }
         var date: Date?
         var titleParts: [String] = []
         var result: [BankScreenshotMovement] = []
@@ -403,6 +412,62 @@ enum BankScreenshotReader {
         return result
     }
 
+    /// Rappi places the merchant before the date, unlike the bank feeds.
+    /// "Titular" closes each row; auxiliary +$ cashback never becomes money.
+    private static func parseRappiScreenshot(_ lines: [BankScreenshotRecognizedLine], fingerprint: String, capturedAt: Date) -> [BankScreenshotMovement] {
+        var buffer: [BankScreenshotRecognizedLine] = []
+        var rows: [BankScreenshotMovement] = []
+        func flush() {
+            defer { buffer.removeAll() }
+            let text = buffer.map(\.text).joined(separator: " ")
+            guard !fold(text).contains("rechazada"),
+                  let dateToken = captures(#"(?i)(\d{1,2}\s+(?:ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)\s+\d{4})"#, in: text)?.first,
+                  let date = parseDate(dateToken, capturedAt: capturedAt),
+                  let amountRegex = try? NSRegularExpression(pattern: #"(?<![+\d])(?<!\+ )-?\$\s*[\d,]+\.\d{2}"#) else { return }
+            let matches = amountRegex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+            guard matches.count == 1, let match = matches.first,
+                  let range = Range(match.range, in: text),
+                  let amount = Decimal(string: text[range].filter { "0123456789.-".contains($0) }, locale: Locale(identifier: "en_US_POSIX")),
+                  let evidenceLine = buffer.first(where: { $0.text.contains(String(text[range])) }) else { return }
+            var title = text.replacingOccurrences(of: String(text[range]), with: "")
+            title = title.components(separatedBy: dateToken).first ?? ""
+            title = title.replacingOccurrences(of: #"\+\s*\$[\d,.]+"#, with: "", options: .regularExpression)
+            title = compact(title)
+            guard title.count >= 3 else { return }
+            rows.append(BankScreenshotMovement(date: date, title: title,
+                displayedAmount: amount, normalizedAmount: -amount,
+                pending: fold(text).contains("pendiente"), confidence: buffer.map(\.confidence).min() ?? 0,
+                imageFingerprint: fingerprint,
+                evidence: MovementExtractionEvidence(method: "screenshot-vision", page: evidenceLine.imageIndex + 1,
+                    confidence: evidenceLine.confidence, sourceText: text,
+                    bounds: MovementExtractionBounds(rect: evidenceLine.bounds),
+                    selectedColumn: "IMPORTE RAPPICARD", selectedAmount: amount,
+                    selectionReason: "Importe principal; excluye recompensa +$ y filas rechazadas")))
+        }
+        for line in lines {
+            let value = fold(compact(line.text))
+            if value.hasPrefix("titular") {
+                if line.text.contains("$") {
+                    buffer.append(BankScreenshotRecognizedLine(
+                        text: line.text.replacingOccurrences(of: "(?i)titular", with: "", options: .regularExpression),
+                        bounds: line.bounds, confidence: line.confidence, imageIndex: line.imageIndex))
+                }
+                flush(); continue
+            }
+            if value == "rechazada" {
+                if buffer.isEmpty, !rows.isEmpty { rows.removeLast() }
+                else { buffer.append(line) }
+                continue
+            }
+            if value == "transacciones" || value == "rappicard"
+                || value.range(of: #"^\d{1,2}:\d{2}(?:\s.*)?$"#, options: .regularExpression) != nil { continue }
+            if line.text.rangeOfCharacter(from: .letters) == nil && !line.text.contains("$") { continue }
+            buffer.append(line)
+        }
+        // A cropped final row without its closing label is intentionally held.
+        return rows
+    }
+
     private static func normalizeAmount(_ displayed: Decimal, title: String, source: BankScreenshotSource) -> Decimal {
         guard source == .amex else { return displayed }
         let foldedTitle = fold(title)
@@ -416,6 +481,10 @@ enum BankScreenshotReader {
 
     private static func parseDate(_ value: String, capturedAt: Date) -> Date? {
         let folded = fold(value)
+        if let tokens = captures(#"(?i)^(\d{1,2})\s+(ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)\s+(\d{4})\b"#, in: folded),
+           let day = Int(tokens[0]), let month = monthNumbers[tokens[1]], let year = Int(tokens[2]) {
+            return calendarDate(day: day, month: month, year: year)
+        }
         let fullPattern = #"\b(\d{1,2})\s+(?:de\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre)\s+(?:de\s+)?(\d{4})\b"#
         if let captures = captures(fullPattern, in: folded), captures.count == 3,
            let day = Int(captures[0]), let month = monthNumbers[captures[1]], let year = Int(captures[2]) {
@@ -551,25 +620,32 @@ extension FinanceStore {
         guard !newIndices.isEmpty else { throw BankScreenshotImportError.alreadyImported }
         let newFingerprints = Set(newIndices.map { result.imageFingerprints[$0] })
         var rows = result.movements.filter { newFingerprints.contains($0.imageFingerprint) }
-        var knownRows = canonicalScreenshotMovements
+        var knownRows = screenshotCaptures.flatMap { capture in
+            capture.uniqueMovements.map { (row: $0, source: capture.source, accountKey: capture.accountKey) }
+        }
         var duplicateCount = 0
         var duplicateConflicts: [BankScreenshotDuplicateConflict] = []
         for index in rows.indices {
             if let duplicate = knownRows.first(where: {
-                $0.imageFingerprint != rows[index].imageFingerprint
-                    && screenshotIdentity($0, source: result.source, accountKey: result.accountKey) == screenshotIdentity(rows[index], source: result.source, accountKey: result.accountKey)
+                $0.row.imageFingerprint != rows[index].imageFingerprint
+                    && $0.source == result.source
+                    && ($0.accountKey == nil || result.accountKey == nil || $0.accountKey == result.accountKey)
+                    && Calendar.current.isDate($0.row.date, inSameDayAs: rows[index].date)
+                    && $0.row.displayedAmount == rows[index].displayedAmount
+                    && normalizedDescription($0.row.title) == normalizedDescription(rows[index].title)
             }) {
-                rows[index].duplicateOf = duplicate.id
+                // Preserve both until the user explicitly resolves the pair.
+                rows[index].possibleDuplicateOf = duplicate.row.id
                 duplicateCount += 1
                 duplicateConflicts.append(BankScreenshotDuplicateConflict(
                     id: rows[index].id,
                     title: rows[index].title,
                     amount: rows[index].displayedAmount,
                     date: rows[index].date,
-                    existingTitle: duplicate.title
+                    existingTitle: "\(duplicate.source.rawValue) · \(duplicate.accountKey ?? "Cuenta sin identificar") · \(duplicate.row.title)"
                 ))
             } else {
-                knownRows.append(rows[index])
+                knownRows.append((row: rows[index], source: result.source, accountKey: result.accountKey))
             }
         }
 
@@ -583,7 +659,8 @@ extension FinanceStore {
         var capture = BankScreenshotCapture(
             id: UUID(), source: result.source, accountKey: result.accountKey, importedAt: result.importedAt,
             imageFingerprints: newIndices.map { result.imageFingerprints[$0] },
-            localImageNames: localNames, movements: rows, warnings: result.warnings
+            localImageNames: localNames, movements: rows,
+            warnings: result.warnings + (result.accountKey == nil ? ["Cuenta no identificada: se conservaron coincidencias entre imágenes. Revisa los movimientos antes de considerar el total definitivo."] : [])
         )
         screenshotCaptures.insert(capture, at: 0)
         reconcileBankScreenshotsAgainstOfficialLedger()
@@ -606,6 +683,18 @@ extension FinanceStore {
         )
     }
 
+    func screenshotReviewReceipt(_ capture: BankScreenshotCapture) -> BankScreenshotImportReceipt {
+        let conflicts = capture.movements.compactMap { row -> BankScreenshotDuplicateConflict? in
+            guard let priorID = row.possibleDuplicateOf else { return nil }
+            let prior = screenshotCaptures.flatMap(\.movements).first { $0.id == priorID }
+            return BankScreenshotDuplicateConflict(id: row.id, title: row.title, amount: row.displayedAmount,
+                date: row.date, existingTitle: prior?.title ?? "Movimiento anterior")
+        }
+        return BankScreenshotImportReceipt(captureID: capture.id, source: capture.source, imageCount: capture.imageFingerprints.count,
+            movementCount: capture.uniqueMovements.count, duplicateCount: conflicts.count, confirmedCount: capture.confirmedCount,
+            pendingCount: capture.pendingCount, provisionalCount: capture.unconfirmedCount, duplicateConflicts: conflicts)
+    }
+
     func deleteBankScreenshotCapture(_ capture: BankScreenshotCapture) {
         screenshotCaptures.removeAll { $0.id == capture.id }
         for name in capture.localImageNames {
@@ -619,10 +708,15 @@ extension FinanceStore {
     func resolveScreenshotDuplicates(captureID: UUID, keepBoth rowIDs: Set<UUID>) {
         guard let captureIndex = screenshotCaptures.firstIndex(where: { $0.id == captureID }) else { return }
         for rowIndex in screenshotCaptures[captureIndex].movements.indices {
-            guard screenshotCaptures[captureIndex].movements[rowIndex].duplicateOf != nil else { continue }
+            guard screenshotCaptures[captureIndex].movements[rowIndex].duplicateOf != nil
+                || screenshotCaptures[captureIndex].movements[rowIndex].possibleDuplicateOf != nil else { continue }
             if rowIDs.contains(screenshotCaptures[captureIndex].movements[rowIndex].id) {
                 screenshotCaptures[captureIndex].movements[rowIndex].duplicateOf = nil
+            } else if let candidate = screenshotCaptures[captureIndex].movements[rowIndex].possibleDuplicateOf {
+                screenshotCaptures[captureIndex].movements[rowIndex].duplicateOf = candidate
             }
+            screenshotCaptures[captureIndex].movements[rowIndex].possibleDuplicateOf = nil
+            screenshotCaptures[captureIndex].movements[rowIndex].duplicateReviewed = true
         }
         reconcileBankScreenshotsAgainstOfficialLedger()
     }
@@ -638,29 +732,53 @@ extension FinanceStore {
         var next = screenshotCaptures
         for captureIndex in next.indices {
             for rowIndex in next[captureIndex].movements.indices {
+                // Reconsider legacy automatic exclusions whose provenance was
+                // lost by the old cross-account identity function.
+                if let priorID = next[captureIndex].movements[rowIndex].duplicateOf,
+                   next[captureIndex].movements[rowIndex].duplicateReviewed != true {
+                    let previous = screenshotCaptures.first { $0.movements.contains { $0.id == priorID } }
+                    if previous?.source != next[captureIndex].source || previous?.accountKey == nil
+                        || previous?.accountKey != next[captureIndex].accountKey {
+                        next[captureIndex].movements[rowIndex].duplicateOf = nil
+                    }
+                }
                 guard next[captureIndex].movements[rowIndex].duplicateOf == nil else {
                     next[captureIndex].movements[rowIndex].matchedOfficialMovementID = nil
                     continue
                 }
                 let row = next[captureIndex].movements[rowIndex]
+                guard row.possibleDuplicateOf == nil else { continue }
                 let candidates = official.compactMap { pair -> (UUID, Int)? in
                     let movement = pair.0
                     let statement = pair.1
                     guard !usedOfficialIDs.contains(movement.id),
                           BankScreenshotSource.identify(statement.source) == next[captureIndex].source else { return nil }
-                    if let captureKey = next[captureIndex].accountKey,
-                       let statementKey = statement.accountKey,
-                       captureKey != statementKey { return nil }
+                    guard let captureKey = next[captureIndex].accountKey,
+                          let statementKey = statement.accountKey,
+                          captureKey == statementKey else { return nil }
                     guard abs(movement.amount - row.normalizedAmount) < Decimal(string: "0.005")! else { return nil }
                     let days = abs(Calendar.current.dateComponents([.day], from: row.date, to: movement.date).day ?? 99)
                     guard days <= 3 else { return nil }
                     let descriptionScore = tokenSimilarity(row.title, movement.title)
+                    guard descriptionScore >= 0.65 else { return nil }
                     let score = 70 + max(0, 18 - days * 6) + Int(descriptionScore * 20)
                     return score >= 82 ? (movement.id, score) : nil
                 }.sorted { $0.1 > $1.1 }
-                let match = candidates.first?.0
+                let unambiguous = candidates.count == 1 || (candidates.count > 1 && candidates[0].1 - candidates[1].1 >= 8)
+                let match = unambiguous ? candidates.first?.0 : nil
                 next[captureIndex].movements[rowIndex].matchedOfficialMovementID = match
-                if let match { usedOfficialIDs.insert(match) }
+                if let match {
+                    usedOfficialIDs.insert(match)
+                    if let original = movements.first(where: { $0.id == row.id && $0.manuallyReviewed }),
+                       let target = movements.firstIndex(where: { $0.id == match }), !movements[target].manuallyReviewed {
+                        movements[target].category = original.category
+                        movements[target].kind = original.kind
+                        movements[target].flow = original.flow
+                        movements[target].travelRelated = original.travelRelated
+                        movements[target].classificationTags = original.classificationTags
+                        movements[target].manuallyReviewed = true
+                    }
+                }
             }
         }
         screenshotCaptures = next
@@ -739,7 +857,7 @@ struct BankScreenshotImportReceiptView: View {
                     }
                 }
                 Section {
-                    Text("Los movimientos no repetidos ya aparecen como provisionales en Movimientos, Gastos, Calendario y Resumen. Al llegar el estado oficial se sustituyen automáticamente, sin duplicar importes.")
+                    Text("Hasta aplicar tu decisión se conservan ambos movimientos. Las coincidencias con el estado oficial sólo se sustituyen si cuenta, importe y concepto son compatibles y no hay ambigüedad. El resto permanece provisional.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
