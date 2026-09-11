@@ -35,7 +35,8 @@ test("Histórico permanece estable al cambiar de semana y muestra tendencia", as
 
 test("los filtros parten del gasto real conciliado y afectan todas las vistas", async () => {
   const source = await readFile(calendarPath, "utf8");
-  assert.match(source, /store\.realExpenseMovements\.filter/);
+  assert.match(source, /store\.netExpenseMovements\.filter/);
+  assert.match(source, /coveredDays: store\.spendingCoveredDays/);
   assert.match(source, /var category: String\?/);
   assert.match(source, /var account: String\?/);
   assert.match(source, /var expenseType: SpendingCalendarExpenseType\?/);

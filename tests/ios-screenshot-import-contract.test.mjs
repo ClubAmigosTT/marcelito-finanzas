@@ -59,7 +59,8 @@ test("each suspected duplicate requires an explicit same-or-keep-both decision",
 });
 
 test("provisional screenshot rows are visible and identified across the product", () => {
-  assert.match(models, /if isProvisionalScreenshotMovement\(movement\) \{ return true \}/);
+  assert.match(models, /var dashboardIsProvisional: Bool \{ eligibleMovements.contains/);
+  assert.doesNotMatch(models, /if isProvisionalScreenshotMovement\(movement\) \{ return true \}/);
   assert.match(sections, /return "Captura provisional"/);
   assert.match(sections, /Ya está incluido en las métricas/);
   assert.match(reader, /Reflejados ahora/);

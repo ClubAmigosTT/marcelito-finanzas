@@ -34,7 +34,8 @@ final class SpendingCalendarTests: XCTestCase {
             movements: rows,
             selectedDate: date(2026, 7, 13),
             now: date(2026, 8, 1),
-            calendar: calendar
+            calendar: calendar,
+            coveredDays: Set((0..<14).map { calendar.date(byAdding: .day, value: $0, to: date(2026, 7, 6))! })
         )
 
         XCTAssertEqual(analytics.summary.points.count, 7)
@@ -79,7 +80,8 @@ final class SpendingCalendarTests: XCTestCase {
             now: date(2026, 8, 1),
             calendar: calendar,
             coverageStart: date(2026, 7, 6),
-            coverageEnd: date(2026, 7, 26)
+            coverageEnd: date(2026, 7, 26),
+            coveredDays: Set((0..<21).map { calendar.date(byAdding: .day, value: $0, to: date(2026, 7, 6))! })
         )
 
         let monday = calendar.component(.weekday, from: date(2026, 7, 13))

@@ -25,7 +25,7 @@ se usa únicamente como clasificador posterior de gastos ya conciliados
 ni decide ingresos o transferencias. Su contrato y configuración segura están
 documentados en [docs/transaction-classifier.md](docs/transaction-classifier.md).
 
-Las capturas de movimientos de BBVA, Santander y American Express también se
+Las capturas de movimientos de BBVA, Santander, American Express y RappiCard también se
 leen localmente con lectores por plantilla. Se guardan como bitácora
 provisional, con deduplicación y reconciliación uno-a-uno contra el PDF oficial;
 no alimentan los KPI por sí solas. Consulta el flujo en

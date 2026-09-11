@@ -57,9 +57,10 @@ test("el matcher nativo compara transferencias propias con puntaje y vínculo au
   assert.match(models, /globallyBestTransferCandidates/);
   assert.match(models, /evidence\.score >= 90/);
   assert.match(models, /matchedMovementId = inflow\.id/);
-  assert.match(models, /contraparte no importada/);
+  assert.match(models, /falta contraparte/);
+  assert.match(models, /ownEvidence && evidence.score >= 90/);
   assert.match(settings, /Transferencias entre mis cuentas/);
   assert.match(settings, /Guardar y volver a comparar/);
   assert.match(sections, /Section\("Conciliación entre cuentas"\)/);
-  assert.match(sections, /LabeledContent\("Confianza"/);
+  assert.match(sections, /LabeledContent\("Puntaje de evidencia"/);
 });

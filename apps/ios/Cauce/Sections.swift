@@ -443,7 +443,7 @@ struct MovementDetailView: View {
             if let confidence = currentMovement.reconciliationConfidence,
                let reason = currentMovement.reconciliationReason {
                 Section("Conciliación entre cuentas") {
-                    LabeledContent("Confianza", value: "\(confidence)%")
+                    LabeledContent("Puntaje de evidencia", value: "\(confidence)/100")
                     Text(reason)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -520,15 +520,15 @@ struct ExpensesView: View {
         // expense dashboard must summarize the complete reconciled spend
         // ledger instead of borrowing one institution's latest cutoff period;
         // BBVA, Santander and Amex do not share the same statement dates.
-        Dictionary(grouping: store.realExpenseMovements, by: { $0.category })
-            .map { (category: $0.key, amount: $0.value.reduce(0) { $0 + abs($1.amount) }) }
+        Dictionary(grouping: store.netExpenseMovements, by: { $0.category })
+            .map { (category: $0.key, amount: $0.value.reduce(0) { $0 + $1.expenseContribution }) }
             .sorted { $0.amount > $1.amount }
     }
 
     private var total: Decimal { groups.reduce(0) { $0 + $1.amount } }
 
     private func expenseShare(for amount: Decimal) -> String {
-        guard total > 0 else { return "0%" }
+        guard total > 0, amount >= 0, amount <= total else { return "—" }
         let percentage = NSDecimalNumber(decimal: (amount / total) * 100).doubleValue
         return "\(Int(percentage.rounded()))%"
     }
@@ -558,7 +558,7 @@ struct ExpensesView: View {
                 Text("\(groups.count) categorías explican")
                 Text(total, format: .currency(code: "MXN").precision(.fractionLength(0)))
                     .font(.headline)
-                Text("Incluye todo el historial conciliado. Puedes corregir el origen o la categoría desde Cuentas > Ajustes.")
+                Text("Gasto neto: cargos menos reembolsos en su fecha de registro. Incluye capturas provisionales. Puedes corregir desde Cuentas > Ajustes.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -660,11 +660,11 @@ private struct ExpenseCategoryDetailView: View {
     @Environment(\.dismiss) private var dismiss
 
     private var movements: [Movement] {
-        store.realExpenseMovements.filter { $0.category == category }
+        store.netExpenseMovements.filter { $0.category == category }
     }
 
     private var total: Decimal {
-        movements.reduce(Decimal(0)) { $0 + abs($1.amount) }
+        movements.reduce(Decimal(0)) { $0 + $1.expenseContribution }
     }
 
     private var points: [ExpenseTrendPoint] {
@@ -672,7 +672,7 @@ private struct ExpenseCategoryDetailView: View {
         var byDay: [Date: Decimal] = [:]
         movements.forEach { movement in
             let day = calendar.startOfDay(for: movement.date)
-            byDay[day, default: 0] += abs(movement.amount)
+            byDay[day, default: 0] += movement.expenseContribution
         }
         return byDay.keys.sorted().map { day in
             ExpenseTrendPoint(
@@ -693,14 +693,14 @@ private struct ExpenseCategoryDetailView: View {
                     id: key,
                     name: existing.name,
                     count: existing.count + 1,
-                    total: existing.total + abs(movement.amount)
+                    total: existing.total + movement.expenseContribution
                 )
             } else {
                 grouped[key] = ExpenseMerchantSummary(
                     id: key,
                     name: display,
                     count: 1,
-                    total: abs(movement.amount)
+                    total: movement.expenseContribution
                 )
             }
         }
@@ -1276,7 +1276,7 @@ struct AccountsView: View {
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Subir capturas")
                         .font(.headline)
-                    Text("BBVA, Santander o American Express")
+                    Text("BBVA, Santander, American Express o RappiCard")
                         .font(.caption)
                         .opacity(0.78)
                 }
@@ -1560,6 +1560,8 @@ struct AccountsView: View {
 }
 
 private struct ScreenshotCaptureRow: View {
+    @Environment(FinanceStore.self) private var store
+    @State private var reviewReceipt: BankScreenshotImportReceipt?
     let capture: BankScreenshotCapture
     let onDelete: () -> Void
 
@@ -1568,6 +1570,8 @@ private struct ScreenshotCaptureRow: View {
     }
 
     private var statusText: String {
+        let unresolved = capture.movements.filter { $0.possibleDuplicateOf != nil }.count
+        if unresolved > 0 { return "\(unresolved) posibles repetidos · revisar" }
         if isFullyConfirmed { return "Conciliada con estado oficial" }
         return "En métricas · \(capture.unconfirmedCount) provisional\(capture.unconfirmedCount == 1 ? "" : "es")"
     }
@@ -1594,6 +1598,7 @@ private struct ScreenshotCaptureRow: View {
             }
             Spacer()
             Menu {
+                Button("Revisar coincidencias") { reviewReceipt = store.screenshotReviewReceipt(capture) }
                 Button("Eliminar capturas", role: .destructive, action: onDelete)
             } label: {
                 Image(systemName: "ellipsis")
@@ -1602,6 +1607,7 @@ private struct ScreenshotCaptureRow: View {
         }
         .padding(14)
         .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 15, style: .continuous))
+        .sheet(item: $reviewReceipt) { receipt in BankScreenshotImportReceiptView(receipt: receipt) }
     }
 }
 

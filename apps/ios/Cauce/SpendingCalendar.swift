@@ -58,17 +58,18 @@ struct SpendingWeekSummary {
     let endExclusive: Date
     let points: [SpendingDayPoint]
     let comparableDayCount: Int
+    var hasCompleteCoverage: Bool = true
 
-    var actualTotal: Decimal { points.reduce(0) { $0 + $1.actual } }
+    var actualTotal: Decimal { points.prefix(comparableDayCount).reduce(0) { $0 + $1.actual } }
     var expectedTotal: Decimal { points.prefix(comparableDayCount).reduce(0) { $0 + $1.historicalAverage } }
     var dailyAverage: Decimal { comparableDayCount > 0 ? actualTotal / Decimal(comparableDayCount) : 0 }
     var delta: Decimal { actualTotal - expectedTotal }
     var deltaPercent: Double? {
-        guard expectedTotal > 0 else { return nil }
+        guard hasCompleteCoverage, expectedTotal > 0 else { return nil }
         return NSDecimalNumber(decimal: delta / expectedTotal).doubleValue * 100
     }
-    var highest: SpendingDayPoint? { points.max { $0.actual < $1.actual } }
-    var lowest: SpendingDayPoint? { points.min { $0.actual < $1.actual } }
+    var highest: SpendingDayPoint? { points.prefix(comparableDayCount).max { $0.actual < $1.actual } }
+    var lowest: SpendingDayPoint? { points.prefix(comparableDayCount).min { $0.actual < $1.actual } }
 }
 
 struct SpendingHistoryDay: Identifiable {
@@ -76,6 +77,7 @@ struct SpendingHistoryDay: Identifiable {
     let total: Decimal
     let expected: Decimal
     let movements: [Movement]
+    var isCovered: Bool = true
 
     var id: Date { date }
     var difference: Decimal { total - expected }
@@ -105,6 +107,7 @@ struct SpendingCalendarAnalytics {
     let calendar: Calendar
     let coverageStartOverride: Date?
     let coverageEndOverride: Date?
+    let coveredDays: Set<Date>?
 
     init(
         movements: [Movement],
@@ -112,7 +115,8 @@ struct SpendingCalendarAnalytics {
         now: Date = .now,
         calendar suppliedCalendar: Calendar? = nil,
         coverageStart: Date? = nil,
-        coverageEnd: Date? = nil
+        coverageEnd: Date? = nil,
+        coveredDays: Set<Date>? = nil
     ) {
         var calendar = suppliedCalendar ?? Calendar(identifier: .iso8601)
         if suppliedCalendar == nil {
@@ -125,6 +129,7 @@ struct SpendingCalendarAnalytics {
         self.calendar = calendar
         coverageStartOverride = coverageStart.map { calendar.startOfDay(for: $0) }
         coverageEndOverride = coverageEnd.map { calendar.startOfDay(for: $0) }
+        self.coveredDays = coveredDays.map { Set($0.map { calendar.startOfDay(for: $0) }) }
     }
 
     var selectedWeekStart: Date {
@@ -135,8 +140,8 @@ struct SpendingCalendarAnalytics {
         calendar.date(byAdding: .day, value: 7, to: selectedWeekStart) ?? selectedWeekStart
     }
 
-    var coverageStart: Date? { coverageStartOverride ?? movements.map(\.date).min().map { calendar.startOfDay(for: $0) } }
-    var coverageEnd: Date? { coverageEndOverride ?? movements.map(\.date).max().map { calendar.startOfDay(for: $0) } }
+    var coverageStart: Date? { coverageStartOverride ?? [movements.map(\.date).min(), coveredDays?.min()].compactMap { $0 }.min().map { calendar.startOfDay(for: $0) } }
+    var coverageEnd: Date? { coverageEndOverride ?? [movements.map(\.date).max(), coveredDays?.max()].compactMap { $0 }.max().map { calendar.startOfDay(for: $0) } }
 
     var dailyMovements: [Date: [Movement]] {
         Dictionary(grouping: movements) { calendar.startOfDay(for: $0.date) }
@@ -149,9 +154,9 @@ struct SpendingCalendarAnalytics {
         var cursor = first
         while cursor <= last {
             let isSelectedWeek = excludingSelectedWeek && cursor >= selectedWeekStart && cursor < selectedWeekEnd
-            if !isSelectedWeek {
+            if !isSelectedWeek && (coveredDays?.contains(cursor) ?? false) {
                 let weekday = calendar.component(.weekday, from: cursor)
-                let total = dailyMovements[cursor, default: []].reduce(Decimal(0)) { $0 + abs($1.amount) }
+                let total = dailyMovements[cursor, default: []].reduce(Decimal(0)) { $0 + $1.expenseContribution }
                 totals[weekday, default: 0] += total
                 counts[weekday, default: 0] += 1
             }
@@ -172,8 +177,7 @@ struct SpendingCalendarAnalytics {
     var historicalBenchmarkByWeekday: [Int: Decimal] { averagesByWeekday(excludingSelectedWeek: false) }
 
     var historySampleDays: Int {
-        guard let first = coverageStart, let last = coverageEnd else { return 0 }
-        return max(0, (calendar.dateComponents([.day], from: first, to: last).day ?? 0) + 1 - 7)
+        (coveredDays ?? []).filter { $0 < selectedWeekStart || $0 >= selectedWeekEnd }.count
     }
 
     var summary: SpendingWeekSummary {
@@ -184,7 +188,7 @@ struct SpendingCalendarAnalytics {
             let weekday = calendar.component(.weekday, from: day)
             return SpendingDayPoint(
                 date: day,
-                actual: rows.reduce(0) { $0 + abs($1.amount) },
+                actual: rows.reduce(0) { $0 + $1.expenseContribution },
                 historicalAverage: benchmark[weekday, default: 0],
                 movementCount: rows.count
             )
@@ -198,7 +202,8 @@ struct SpendingCalendarAnalytics {
         } else {
             comparableDays = 7
         }
-        return SpendingWeekSummary(start: selectedWeekStart, endExclusive: selectedWeekEnd, points: points, comparableDayCount: comparableDays)
+        return SpendingWeekSummary(start: selectedWeekStart, endExclusive: selectedWeekEnd, points: points, comparableDayCount: comparableDays,
+            hasCompleteCoverage: comparableDays > 0 && points.prefix(comparableDays).allSatisfy { coveredDays?.contains($0.date) == true })
     }
 
     func movements(on date: Date) -> [Movement] {
@@ -216,9 +221,10 @@ struct SpendingCalendarAnalytics {
             let weekday = calendar.component(.weekday, from: cursor)
             output.append(SpendingHistoryDay(
                 date: cursor,
-                total: rows.reduce(0) { $0 + abs($1.amount) },
+                total: rows.reduce(0) { $0 + $1.expenseContribution },
                 expected: benchmark[weekday, default: 0],
-                movements: rows.sorted { abs($0.amount) > abs($1.amount) }
+                movements: rows.sorted { abs($0.amount) > abs($1.amount) },
+                isCovered: coveredDays?.contains(cursor) ?? false
             ))
             cursor = calendar.date(byAdding: .day, value: 1, to: cursor) ?? last.addingTimeInterval(1)
         }
@@ -229,6 +235,7 @@ struct SpendingCalendarAnalytics {
         let benchmark = historicalBenchmarkByWeekday
         return (0..<7).compactMap { offset in
             guard let day = calendar.date(byAdding: .day, value: offset, to: selectedWeekStart) else { return nil }
+            guard benchmark[calendar.component(.weekday, from: day)] != nil else { return nil }
             return SpendingDayPoint(
                 date: day,
                 actual: benchmark[calendar.component(.weekday, from: day), default: 0],
@@ -239,19 +246,20 @@ struct SpendingCalendarAnalytics {
     }
 
     var historicalDailyAverage: Decimal {
-        guard !historyDays.isEmpty else { return 0 }
-        return historyDays.reduce(0) { $0 + $1.total } / Decimal(historyDays.count)
+        let known = historyDays.filter(\.isCovered)
+        guard !known.isEmpty else { return 0 }
+        return known.reduce(0) { $0 + $1.total } / Decimal(known.count)
     }
 
     var historicalMedian: Decimal {
-        let values = historyDays.map(\.total).sorted()
+        let values = historyDays.filter(\.isCovered).map(\.total).sorted()
         guard !values.isEmpty else { return 0 }
         let middle = values.count / 2
         return values.count.isMultiple(of: 2) ? (values[middle - 1] + values[middle]) / 2 : values[middle]
     }
 
-    var highestAverageWeekday: SpendingDayPoint? { weekdayAverages.max { $0.actual < $1.actual } }
-    var lowestAverageWeekday: SpendingDayPoint? { weekdayAverages.min { $0.actual < $1.actual } }
+    var highestAverageWeekday: SpendingDayPoint? { historicalBenchmarkByWeekday.isEmpty ? nil : weekdayAverages.max { $0.actual < $1.actual } }
+    var lowestAverageWeekday: SpendingDayPoint? { historicalBenchmarkByWeekday.isEmpty ? nil : weekdayAverages.min { $0.actual < $1.actual } }
 
     var recentTrend: [SpendingWeekTrend] {
         guard let first = coverageStart,
@@ -264,14 +272,14 @@ struct SpendingCalendarAnalytics {
                   let end = calendar.date(byAdding: .day, value: 7, to: start) else { return nil }
             let total = movements
                 .filter { $0.date >= start && $0.date < end }
-                .reduce(Decimal(0)) { $0 + abs($1.amount) }
+                .reduce(Decimal(0)) { $0 + $1.expenseContribution }
             return SpendingWeekTrend(start: start, total: total)
         }
     }
 
     var anomalousDays: [SpendingHistoryDay] {
         Array(historyDays
-            .filter { $0.total > 0 && $0.expected > 0 }
+            .filter { $0.isCovered && $0.total > 0 && $0.expected > 0 }
             .sorted {
                 if $0.ratio != $1.ratio { return $0.ratio > $1.ratio }
                 return $0.total > $1.total
@@ -304,20 +312,19 @@ struct SpendingCalendarView: View {
     @State private var selectedPeriod: SelectedSpendingPeriod?
 
     private var filteredMovements: [Movement] {
-        store.realExpenseMovements.filter { spendingMovement($0, matches: filters) }
+        store.netExpenseMovements.filter { spendingMovement($0, matches: filters) }
     }
 
     private var analytics: SpendingCalendarAnalytics {
         SpendingCalendarAnalytics(
             movements: filteredMovements,
             selectedDate: selectedDate,
-            coverageStart: store.realExpenseMovements.map(\.date).min(),
-            coverageEnd: store.realExpenseMovements.map(\.date).max()
+            coveredDays: store.spendingCoveredDays(account: filters.account)
         )
     }
 
-    private var categories: [String] { Array(Set(store.realExpenseMovements.map(\.category))).sorted() }
-    private var accounts: [String] { Array(Set(store.realExpenseMovements.map(\.account))).sorted() }
+    private var categories: [String] { Array(Set(store.netExpenseMovements.map(\.category))).sorted() }
+    private var accounts: [String] { Array(Set(store.netExpenseMovements.map(\.account))).sorted() }
 
     var body: some View {
         NavigationStack {
@@ -330,7 +337,7 @@ struct SpendingCalendarView: View {
                         }
                         .padding()
                     }
-                } else if store.realExpenseMovements.isEmpty {
+                } else if store.netExpenseMovements.isEmpty {
                     ContentUnavailableView("Sin gastos", systemImage: "calendar", description: Text("Importa estados conciliados para comparar tus semanas."))
                 } else {
                     ScrollView {
@@ -386,7 +393,7 @@ struct SpendingCalendarView: View {
             }
             .onAppear {
                 guard !didSelectInitialDate else { return }
-                selectedDate = store.realExpenseMovements.map(\.date).max() ?? .now
+                selectedDate = store.netExpenseMovements.map(\.date).max() ?? .now
                 didSelectInitialDate = true
             }
         }
@@ -425,8 +432,8 @@ struct SpendingCalendarView: View {
 
     private var coverageLabel: some View {
         Group {
-            if let first = store.realExpenseMovements.map(\.date).min(),
-               let last = store.realExpenseMovements.map(\.date).max() {
+            if let first = store.netExpenseMovements.map(\.date).min(),
+               let last = store.netExpenseMovements.map(\.date).max() {
                 Label(
                     "Gastos reales conciliados · \(first.formatted(.dateTime.day().month(.abbreviated).year())) a \(last.formatted(.dateTime.day().month(.abbreviated).year()))",
                     systemImage: "checkmark.seal"
@@ -450,6 +457,10 @@ struct SpendingCalendarView: View {
         return Group {
             weekNavigator(summary)
             weekHero(summary)
+            if !summary.hasCompleteCoverage {
+                Text("Gasto observado: faltan días o cuentas por cubrir. La desviación porcentual queda pendiente; sin movimientos no significa gasto cero.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
             if analytics.historySampleDays < 21 {
                 Label("La comparación todavía tiene poca historia; mejorará al importar más semanas.", systemImage: "info.circle")
                     .font(.caption)
@@ -565,9 +576,9 @@ struct SpendingCalendarView: View {
                         .accessibilityLabel("La mediana representa un día típico sin distorsión por compras extraordinarias")
                 }
                 LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
-                    SpendingMetricTile(title: "Promedio diario", value: analytics.historicalDailyAverage.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
-                    SpendingMetricTile(title: "Mediana diaria", value: analytics.historicalMedian.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
-                    SpendingMetricTile(title: "Cobertura", value: "\(analytics.historyDays.count) días")
+                    SpendingMetricTile(title: "Promedio diario", value: (analytics.coveredDays?.isEmpty ?? true) ? "Sin cobertura" : analytics.historicalDailyAverage.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                    SpendingMetricTile(title: "Mediana diaria", value: (analytics.coveredDays?.isEmpty ?? true) ? "Sin cobertura" : analytics.historicalMedian.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                    SpendingMetricTile(title: "Cobertura", value: "\(analytics.historyDays.filter(\.isCovered).count) días")
                 }
                 Divider().opacity(0.55)
                 if let highest = analytics.highestAverageWeekday {
@@ -686,7 +697,7 @@ struct SpendingCalendarView: View {
     private func topBreakdown(in summary: SpendingWeekSummary, by key: (Movement) -> String) -> (name: String, total: Decimal)? {
         let rows = filteredMovements.filter { $0.date >= summary.start && $0.date < summary.endExclusive }
         return Dictionary(grouping: rows, by: key)
-            .map { (name: $0.key, total: $0.value.reduce(0) { $0 + abs($1.amount) }) }
+            .map { (name: $0.key, total: $0.value.reduce(0) { $0 + $1.expenseContribution }) }
             .max { $0.total < $1.total }
     }
 }
@@ -947,12 +958,12 @@ private struct HistoricalSpendingHeatmap: View {
                 ForEach(days) { day in
                     Button { select(day.date) } label: {
                         RoundedRectangle(cornerRadius: 4)
-                            .fill(heatColor(day.total))
+                            .fill(day.isCovered ? heatColor(day.total) : Color.marcelitoLine.opacity(0.12))
                             .aspectRatio(1, contentMode: .fit)
                             .overlay(Text(day.date.formatted(.dateTime.day())).font(.system(size: 7, weight: .medium)).foregroundStyle(day.total > maximum / 2 ? .white : Color.marcelitoNavy))
                     }
                     .buttonStyle(.plain)
-                    .accessibilityLabel("\(day.date.formatted(date: .long, time: .omitted)), \(day.total.formatted(.currency(code: "MXN")))")
+                    .accessibilityLabel("\(day.date.formatted(date: .long, time: .omitted)), \(day.isCovered ? day.total.formatted(.currency(code: "MXN")) : "Cobertura incompleta")")
                 }
             }
             HStack(spacing: 5) {
@@ -964,7 +975,7 @@ private struct HistoricalSpendingHeatmap: View {
                 }
                 Text("Alto").font(.caption2).foregroundStyle(.secondary)
                 Spacer()
-                Text("Toca un día para ver detalles").font(.caption2).foregroundStyle(.secondary)
+                Text("Pálido: cobertura incompleta").font(.caption2).foregroundStyle(.secondary)
             }
         }
         .marcelitoCard(radius: 20, padding: 14)
@@ -972,7 +983,7 @@ private struct HistoricalSpendingHeatmap: View {
 
     private func heatColor(_ total: Decimal) -> Color {
         guard maximum > 0 else { return Color.marcelitoLine.opacity(0.35) }
-        let ratio = min(1, NSDecimalNumber(decimal: total / maximum).doubleValue)
+        let ratio = max(0, min(1, NSDecimalNumber(decimal: total / maximum).doubleValue))
         if ratio == 0 { return Color.marcelitoLine.opacity(0.35) }
         return Color.marcelitoNavy.opacity(0.18 + ratio * 0.82)
     }
@@ -1052,20 +1063,20 @@ private struct SpendingPeriodDetailView: View {
 
     private var movements: [Movement] {
         let identifiers = Set(selection.movementIDs)
-        return store.realExpenseMovements
+        return store.netExpenseMovements
             .filter { identifiers.contains($0.id) && spendingMovement($0, matches: filters) }
             .sorted { abs($0.amount) > abs($1.amount) }
     }
 
-    private var total: Decimal { movements.reduce(0) { $0 + abs($1.amount) } }
+    private var total: Decimal { movements.reduce(0) { $0 + $1.expenseContribution } }
     private var categories: [SpendingBreakdown] {
         Dictionary(grouping: movements, by: { $0.category })
-            .map { SpendingBreakdown(name: $0.key, total: $0.value.reduce(0) { $0 + abs($1.amount) }) }
+            .map { SpendingBreakdown(name: $0.key, total: $0.value.reduce(0) { $0 + $1.expenseContribution }) }
             .sorted { $0.total > $1.total }
     }
     private var accounts: [SpendingBreakdown] {
         Dictionary(grouping: movements, by: { $0.account })
-            .map { SpendingBreakdown(name: $0.key, total: $0.value.reduce(0) { $0 + abs($1.amount) }) }
+            .map { SpendingBreakdown(name: $0.key, total: $0.value.reduce(0) { $0 + $1.expenseContribution }) }
             .sorted { $0.total > $1.total }
     }
 
@@ -1102,7 +1113,7 @@ private struct SpendingPeriodDetailView: View {
                                     HStack {
                                         Text(movement.title).lineLimit(1)
                                         Spacer()
-                                        Text(abs(movement.amount), format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
+                                        Text(movement.expenseContribution, format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
                                     }
                                     Text("\(movement.date.formatted(.dateTime.day().month(.abbreviated))) · \(movement.category) · \(movement.account)")
                                         .font(.caption)
@@ -1129,7 +1140,7 @@ private struct SpendingDayDetailView: View {
     let usesStableHistory: Bool
 
     private var filteredAllMovements: [Movement] {
-        store.realExpenseMovements.filter { spendingMovement($0, matches: filters) }
+        store.netExpenseMovements.filter { spendingMovement($0, matches: filters) }
     }
 
     private var movements: [Movement] {
@@ -1143,23 +1154,22 @@ private struct SpendingDayDetailView: View {
         let analytics = SpendingCalendarAnalytics(
             movements: filteredAllMovements,
             selectedDate: date,
-            coverageStart: store.realExpenseMovements.map(\.date).min(),
-            coverageEnd: store.realExpenseMovements.map(\.date).max()
+            coveredDays: store.spendingCoveredDays(account: filters.account)
         )
         let weekday = analytics.calendar.component(.weekday, from: date)
         let benchmark = usesStableHistory ? analytics.historicalBenchmarkByWeekday : analytics.benchmarkByWeekday
         return benchmark[weekday, default: 0]
     }
 
-    private var total: Decimal { movements.reduce(0) { $0 + abs($1.amount) } }
+    private var total: Decimal { movements.reduce(0) { $0 + $1.expenseContribution } }
     private var categoryTotals: [SpendingBreakdown] {
         Dictionary(grouping: movements, by: { $0.category })
-            .map { SpendingBreakdown(name: $0.key, total: $0.value.reduce(0) { $0 + abs($1.amount) }) }
+            .map { SpendingBreakdown(name: $0.key, total: $0.value.reduce(0) { $0 + $1.expenseContribution }) }
             .sorted { $0.total > $1.total }
     }
     private var accountTotals: [SpendingBreakdown] {
         Dictionary(grouping: movements, by: { $0.account })
-            .map { SpendingBreakdown(name: $0.key, total: $0.value.reduce(0) { $0 + abs($1.amount) }) }
+            .map { SpendingBreakdown(name: $0.key, total: $0.value.reduce(0) { $0 + $1.expenseContribution }) }
             .sorted { $0.total > $1.total }
     }
 
@@ -1192,7 +1202,7 @@ private struct SpendingDayDetailView: View {
                                     HStack {
                                         Text(movement.title).lineLimit(1)
                                         Spacer()
-                                        Text(abs(movement.amount), format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
+                                        Text(movement.expenseContribution, format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
                                     }
                                     Text("\(movement.category) · \(movement.account)").font(.caption).foregroundStyle(.secondary)
                                 }
@@ -1208,7 +1218,7 @@ private struct SpendingDayDetailView: View {
                                     HStack {
                                         Text(movement.title).lineLimit(1)
                                         Spacer()
-                                        Text(abs(movement.amount), format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
+                                        Text(movement.expenseContribution, format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
                                     }
                                 }
                             }
