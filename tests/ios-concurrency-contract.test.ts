@@ -119,6 +119,8 @@ test("Rappi repite OCR con foco numérico cuando la fuente pierde dígitos", asy
   assert.match(source, /let numericPasses = \[/);
   assert.match(source, /run\(languages: nil\)/);
   assert.match(source, /numericPasses\.max/);
+  assert.match(source, /func numericComponentEvidenceCount\(_ pageObservations: \[OCRObservation\]\)/);
+  assert.match(source, /if leftScore\.components != rightScore\.components/);
   assert.match(source, /let tokenObservations = numericTokens\(from: recovery\)/);
   assert.match(source, /for token in tokenObservations/);
   assert.match(source, /let recoveryImages = \[numericImage, enhancedImage\(from: numericImage\)\]/);
