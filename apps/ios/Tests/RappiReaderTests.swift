@@ -125,6 +125,40 @@ final class RappiReaderTests: XCTestCase {
         }
     }
 
+    func testVisionFallbackRecoversDigitsRowsAndIndependentControls() throws {
+        let fixtures: [OCRObservationFixture] = [
+            .init(page: 0, text: "Tarjeta de crédito RappiCard", x: 0.05, y: 0.95, width: 0.40, confidence: 0.98),
+            .init(page: 0, text: "Número de cuenta 0019 0001 0000 0000 1234", x: 0.05, y: 0.91, width: 0.55, confidence: 0.97),
+            .init(page: 0, text: "Periodo 22-jul-2026 al 21-ago-2026", x: 0.50, y: 0.87, width: 0.42, confidence: 0.98),
+            .init(page: 0, text: "Adeudo del periodo anterior = $100.00", x: 0.05, y: 0.75, width: 0.42, confidence: 0.97),
+            .init(page: 0, text: "Cargos regulares (no a meses) + $100.00", x: 0.05, y: 0.71, width: 0.46, confidence: 0.97),
+            .init(page: 0, text: "Cargos compras a meses (capital)7 + $0.00", x: 0.05, y: 0.67, width: 0.48, confidence: 0.97),
+            .init(page: 0, text: "Pagos y abonos - $50.00", x: 0.05, y: 0.63, width: 0.35, confidence: 0.97),
+            .init(page: 0, text: "Saldo cargos a meses: $0.00", x: 0.52, y: 0.59, width: 0.36, confidence: 0.97),
+            .init(page: 0, text: "Saldo deudor total11 $150.00", x: 0.52, y: 0.55, width: 0.36, confidence: 0.97),
+            .init(page: 2, text: "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)", x: 0.05, y: 0.95, width: 0.75, confidence: 0.98),
+            .init(page: 2, text: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00", x: 0.05, y: 0.85, width: 0.80, confidence: 0.96),
+            .init(page: 2, text: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00", x: 0.05, y: 0.80, width: 0.80, confidence: 0.96),
+            .init(page: 2, text: "2026-08-02 2026-08-02 PAGO POR SPEI -$40.00", x: 0.05, y: 0.75, width: 0.75, confidence: 0.96),
+            .init(page: 2, text: "2026-08-03 2026-08-03 BONIFICACIÓN CON CASHBACK -$10.00", x: 0.05, y: 0.70, width: 0.85, confidence: 0.96),
+            .init(page: 2, text: "Total de cargos +$100.00", x: 0.05, y: 0.60, width: 0.32, confidence: 0.98),
+            .init(page: 2, text: "Total de abonos -$50.00", x: 0.05, y: 0.56, width: 0.32, confidence: 0.98),
+            .init(page: 3, text: "CARGOS NO RECONOCIDOS", x: 0.05, y: 0.95, width: 0.35, confidence: 0.98),
+            .init(page: 3, text: "2026-08-01 2026-08-02 CARGO EN REVISIÓN +$50.00", x: 0.05, y: 0.85, width: 0.75, confidence: 0.96)
+        ]
+        let snapshot = FinanceStore.rappiOCRSnapshotForTesting(fixtures)
+        XCTAssertEqual(snapshot.source, "Rappi")
+        XCTAssertEqual(snapshot.accountKey, "rappi:1234")
+        XCTAssertEqual(snapshot.period, "22/07/2026 - 21/08/2026")
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertTrue(snapshot.movements.allSatisfy { $0.extractionEvidence?.method == "vision-ocr" })
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .cardPayment }.count, 1)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .refund }.count, 1)
+        XCTAssertEqual(FinanceStore.reconcileStatementForTesting(
+            kind: .card, summary: snapshot.summary, movements: snapshot.movements
+        ).status, .valid)
+    }
+
     func testPDFKitRoundTripKeepsPeriodRowsAndReconciliation() throws {
         let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792))
         let data = renderer.pdfData { context in
