@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.20"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.21"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4468,10 +4468,20 @@ final class FinanceStore {
             summaryText = Self.rebuildAmexSelectableLines(text)
         } else if source.localizedCaseInsensitiveCompare("BBVA") == .orderedSame && kind == .bank {
             summaryText = Self.rebuildBBVASelectableLines(text)
+        } else if source.localizedCaseInsensitiveCompare("Rappi") == .orderedSame {
+            // Rappi exports can expose a trustworthy selectable cover while
+            // Vision is still needed for the movement rows. Preserve both
+            // evidence streams: the cover carries the independent controls,
+            // while OCR may carry the signed row amounts. Put the selectable
+            // layer first so the bounded summary parser prefers the printed
+            // controls over a possibly degraded OCR token.
+            summaryText = [extractedText, text]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: "\n")
         } else {
             summaryText = text
         }
-        let summary = Self.summary(from: summaryText, source: source)
+        var summary = Self.summary(from: summaryText, source: source)
         var movementColumnsCalibrated = true
         var rowDiagnostics: [OCRRowDiagnostic] = []
         let parsedCandidates: [Movement]
@@ -4493,11 +4503,40 @@ final class FinanceStore {
         } else if usedOCR, source == "Rappi" {
             let confidenceByPage = Dictionary(grouping: ocrObservations, by: { $0.page + 1 })
                 .mapValues { $0.map(\.confidence).min() ?? 0 }
-            parsedCandidates = Self.parseRappiText(
+            let ocrCandidates = Self.parseRappiText(
                 text,
                 evidenceMethod: "vision-ocr",
                 confidenceByPage: confidenceByPage
             )
+            // Keep a deterministic text-layer candidate set available even
+            // when the initial probe requested Vision. A PDFKit layer can
+            // fail the first probe because its rows are flattened, yet still
+            // contain a complete, reconcilable Rappi table. Select a source
+            // only when its rows reconcile against an independent summary;
+            // never merge both streams blindly, which could duplicate rows.
+            let selectableCandidates = Self.parseRappiText(extractedText, evidenceMethod: "pdf-text")
+            let selectableSummary = Self.summary(from: extractedText, source: source)
+            let ocrSummary = Self.summary(from: text, source: source)
+            let options: [(candidates: [Movement], summary: StatementSummaryRecord?)] = [
+                (selectableCandidates, selectableSummary),
+                (ocrCandidates, summary),
+                (ocrCandidates, ocrSummary),
+                (selectableCandidates, summary),
+                (selectableCandidates, ocrSummary)
+            ]
+            if let selected = options.first(where: { option in
+                guard !option.candidates.isEmpty, let optionSummary = option.summary else { return false }
+                return FinanceStore(reconciliationOnly: true).reconcileStatement(
+                    kind: kind,
+                    summary: optionSummary,
+                    movements: option.candidates
+                ).status == .valid
+            }) {
+                summary = selected.summary
+                parsedCandidates = selected.candidates
+            } else {
+                parsedCandidates = ocrCandidates
+            }
             rowDiagnostics = Self.rowDiagnostics(
                 for: parsedCandidates,
                 fallbackReason: "RappiCard: importe firmado recuperado visualmente y conciliado con controles independientes"
@@ -4527,9 +4566,14 @@ final class FinanceStore {
             }
             return corrected
         }
+        let periodEvidenceText = source.localizedCaseInsensitiveCompare("Rappi") == .orderedSame
+            ? [extractedText, text]
+                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                .joined(separator: "\n")
+            : text
         let period = source == "BBVA"
             ? (Self.bbvaDocumentPeriod(document) ?? "Periodo no identificado")
-            : Self.periodLabel(from: text, fileName: fileName, sourceHint: source)
+            : Self.periodLabel(from: periodEvidenceText, fileName: fileName, sourceHint: source)
         let ocrRejectedRowsNeedReview = usedOCR && rowDiagnostics.contains { !$0.accepted }
         let ocrFallbackNeedsReview = usedOCR && (
             ocrRejectedRowsNeedReview
@@ -9936,17 +9980,23 @@ final class FinanceStore {
         // still contains two independent controls: the official cutoff date
         // and the number of days in the period. Derive the missing start only
         // from those controls, never from movement dates or the filename.
-        let controlDateToken = #"(?:\d{1,2}-(?:[a-z]{3,12}|\d{1,2})-\d{2,4}|\d{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+\d{2,4})"#
+        let controlDateToken = #"(?:\d{1,2}\s*[-/.]\s*(?:[a-z]{3,12}|\d{1,2})\s*[-/.]\s*\d{2,4}|\d{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+\d{2,4})"#
         let cutoffPattern = #"(?is)fecha\s+de\s+corte[^0-9]{0,32}("# + controlDateToken + #")"#
-        let daysPattern = #"(?is)numero\s+de\s+dias\s+en\s+el\s+periodo[^0-9]{0,20}(\d{1,3})\s*dias?"#
+        let daysPatterns = [
+            #"(?is)numero\s+de\s+dias\s+en\s+el\s+periodo[^0-9]{0,20}(\d{1,3})\s*dias?"#,
+            #"(?is)n(?:o|umero)\.?\s+de\s+dias\s+(?:en\s+el|del?)\s+periodo[^0-9]{0,20}(\d{1,3})\s*dias?"#,
+            #"(?is)dias\s+(?:en\s+el|del?)\s+periodo[^0-9]{0,20}(\d{1,3})\s*dias?"#
+        ]
         if let cutoffRegex = try? NSRegularExpression(pattern: cutoffPattern),
            let cutoffMatch = cutoffRegex.firstMatch(in: cover, range: NSRange(cover.startIndex..<cover.endIndex, in: cover)),
            let cutoffRange = Range(cutoffMatch.range(at: 1), in: cover),
            let cutoff = parseDate(String(cover[cutoffRange])),
-           let daysRegex = try? NSRegularExpression(pattern: daysPattern),
-           let daysMatch = daysRegex.firstMatch(in: cover, range: NSRange(cover.startIndex..<cover.endIndex, in: cover)),
-           let daysRange = Range(daysMatch.range(at: 1), in: cover),
-           let periodDays = Int(String(cover[daysRange])),
+           let periodDays = daysPatterns.lazy.compactMap({ pattern -> Int? in
+               guard let regex = try? NSRegularExpression(pattern: pattern),
+                     let match = regex.firstMatch(in: cover, range: NSRange(cover.startIndex..<cover.endIndex, in: cover)),
+                     let daysRange = Range(match.range(at: 1), in: cover) else { return nil }
+               return Int(String(cover[daysRange]))
+           }).first,
            (25...35).contains(periodDays),
            let start = Calendar(identifier: .gregorian).date(byAdding: .day, value: 0 - periodDays, to: cutoff),
            let derived = formattedCycle(start, cutoff) {
