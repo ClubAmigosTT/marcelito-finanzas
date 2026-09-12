@@ -9592,9 +9592,6 @@ final class FinanceStore {
             defer { pending = "" }
             guard let first = rappiCapture(#"^(\d{4}-\d{2}-\d{2})\s+\d{4}-\d{2}-\d{2}"#, in: pending),
                   let date = parseDate(first),
-                  let money = rappiCapture(#"([+-]?\s*\$\s*[\d,]+\.\d{2})"#, in: pending),
-                  let parsedAmount = Decimal(string: money.filter { "0123456789.-+".contains($0) }, locale: Locale(identifier: "en_US_POSIX")),
-                  parsedAmount != 0,
                   let body = rappiCapture(#"^\d{4}-\d{2}-\d{2}\s+\d{4}-\d{2}-\d{2}\s+(.+?)\s*(?:[+-]?\s*\$|compra en el extranjero)"#, in: pending) else { return }
             let title = body.trimmingCharacters(in: .whitespacesAndNewlines)
             // PDF extraction may split the payment label across lines or
@@ -9603,6 +9600,16 @@ final class FinanceStore {
             let semanticTitle = compactSemanticTitle(title)
             let payment = title.range(of: #"^pago\s+por\s+spei\b"#, options: .regularExpression) != nil
                 || semanticTitle.hasPrefix("pagoporspei")
+            // Foreign purchases print USD and conversion amounts before the
+            // local MXN total. Prefer a signed token anywhere in the row so
+            // those auxiliary amounts can never become the ledger amount.
+            // The only permitted unsigned fallback is the explicit SPEI
+            // payment case, where Vision can drop the minus glyph.
+            let money = rappiCapture(#"([+-]\s*\$\s*[\d,]+\.\d{2})"#, in: pending)
+                ?? (payment ? rappiCapture(#"(\$\s*[\d,]+\.\d{2})"#, in: pending) : nil)
+            guard let money,
+                  let parsedAmount = Decimal(string: money.filter { "0123456789.-+".contains($0) }, locale: Locale(identifier: "en_US_POSIX")),
+                  parsedAmount != 0 else { return }
             let hasExplicitSign = money.trimmingCharacters(in: .whitespacesAndNewlines)
                 .first.map { $0 == "+" || $0 == "-" } ?? false
             // Vision occasionally drops the minus glyph at the right edge of
