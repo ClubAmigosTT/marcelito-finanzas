@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.18"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.19"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -5619,9 +5619,17 @@ final class FinanceStore {
                     let contrastObservations = recognize(contrastImage, page: pageIndex)
                     if meanConfidence(contrastObservations) > meanConfidence(selectedObservations) {
                         selectedObservations = contrastObservations
+                        // Keep the image that produced the selected evidence in
+                        // sync with the observations. Rappi's cover crop below
+                        // must use the same higher-contrast pixels; otherwise a
+                        // weak full-page pass could still lose the period
+                        // digits even though the retry successfully recovered
+                        // them elsewhere on the page.
+                        selectedImage = contrastImage
                     }
                 }
 
+                var coverImage = selectedImage
                 if prioritizeNumericEvidence {
                     // The Rappi statements that use the broken embedded font
                     // can return a confident page made almost entirely of
@@ -5642,6 +5650,13 @@ final class FinanceStore {
                     let shouldRecoverNumeric = pageIndex == 0 || currentNumericCount < 6
                     if shouldRecoverNumeric {
                         let numericImage = render(page, longEdge: 3_200) ?? selectedImage
+                        if pageIndex == 0 {
+                            // The isolated cover pass should use the largest
+                            // available render, not the normal 2,400px pass.
+                            // This is especially important for the small date
+                            // glyphs in Rappi's period panel.
+                            coverImage = numericImage
+                        }
                         let recoveryImages = [numericImage, enhancedImage(from: numericImage)].compactMap { $0 }
                         var recoveredTokens: [OCRObservation] = []
                         var recoveredKeys = Set<String>()
@@ -5681,7 +5696,7 @@ final class FinanceStore {
                     }
                 }
                 if prioritizeNumericEvidence, pageIndex == 0,
-                   let coverObservation = rappiCoverNumericObservation(from: selectedImage, page: pageIndex) {
+                   let coverObservation = rappiCoverNumericObservation(from: coverImage, page: pageIndex) {
                     selectedObservations.append(coverObservation)
                 }
                 observations.append(contentsOf: selectedObservations)
