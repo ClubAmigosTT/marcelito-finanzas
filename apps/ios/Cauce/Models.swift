@@ -5356,19 +5356,37 @@ final class FinanceStore {
                 }
             }
 
-            let preferred: [OCRObservation]?
             if numericFocus {
-                preferred = run(languages: ["en-US"])
-            } else {
-                preferred = run(languages: ["es-MX", "en-US"])
+                // Do not accept the first non-empty language pass here. On
+                // the affected Rappi font, the English language model can
+                // return a confident list of labels while dropping every
+                // amount; the unconstrained pass may recover the digits. Pick
+                // the pass with the most actual date/amount boxes instead of
+                // using confidence or observation count as a proxy.
+                func numericScore(_ pageObservations: [OCRObservation]) -> (boxes: Int, count: Int, confidence: Double) {
+                    let boxes = pageObservations.reduce(0) { total, observation in
+                        total + observation.dateBoxes.count + observation.amountBoxes.count
+                    }
+                    let confidence = pageObservations.map(\.confidence).reduce(0, +)
+                    return (boxes, pageObservations.count, confidence)
+                }
+                let numericPasses = [
+                    run(languages: ["en-US"]),
+                    run(languages: ["en"]),
+                    run(languages: nil),
+                ].compactMap { $0 }.filter { !$0.isEmpty }
+                return numericPasses.max { left, right in
+                    let leftScore = numericScore(left)
+                    let rightScore = numericScore(right)
+                    if leftScore.boxes != rightScore.boxes { return leftScore.boxes < rightScore.boxes }
+                    if leftScore.count != rightScore.count { return leftScore.count < rightScore.count }
+                    return leftScore.confidence < rightScore.confidence
+                } ?? []
             }
+
+            let preferred = run(languages: ["es-MX", "en-US"])
             if let preferred, !preferred.isEmpty { return preferred }
-            let baseLanguages: [OCRObservation]?
-            if numericFocus {
-                baseLanguages = run(languages: ["en"])
-            } else {
-                baseLanguages = run(languages: ["es", "en"])
-            }
+            let baseLanguages = run(languages: ["es", "en"])
             if let baseLanguages, !baseLanguages.isEmpty { return baseLanguages }
             // Only run the unconstrained pass after a language-specific pass
             // failed or produced no text. Blank pages therefore remain cheap,
