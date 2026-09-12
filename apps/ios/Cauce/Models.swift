@@ -452,6 +452,21 @@ struct ReaderParseSnapshot {
     let summary: StatementSummaryRecord?
 }
 
+/// Private, non-persisted metadata for the explicit PDF extraction report.
+/// The report needs to distinguish a selectable-text failure from a Vision
+/// failure without exposing this diagnostic state to the financial ledger.
+struct ReaderPDFDiagnosticSnapshot {
+    let snapshot: ReaderParseSnapshot
+    let usedOCR: Bool
+    let ocrConfidence: Double?
+    let ocrPageConfidences: [Double]?
+    let ocrFallbackNeedsReview: Bool
+    let ocrColumnCalibrationNeedsReview: Bool
+    let ocrConfidenceNeedsReview: Bool
+    let rowDiagnostics: [OCRRowDiagnostic]
+    let reconciliation: StatementReconciliationRecord
+}
+
 /// Small coordinate fixture used by the native reader contract tests. It
 /// mirrors Vision's normalized page coordinates without shipping a user's PDF
 /// or image in the repository.
@@ -715,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.11"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.12"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -868,6 +883,49 @@ final class FinanceStore {
         return ReaderParseSnapshot(sourceDetection: result.sourceDetection,
             source: result.source, accountKey: result.accountKey, kind: result.kind,
             period: result.period, movements: result.candidates, summary: result.summary)
+    }
+
+    /// Runs the complete device reader, including Vision when the selectable
+    /// layer cannot reconcile. This is used only by the explicit private PDF
+    /// diagnostic so that its production probe describes the same path as a
+    /// user import or re-read.
+    static func readerPDFDiagnosticSnapshotForTesting(
+        data: Data,
+        fileName: String
+    ) throws -> ReaderPDFDiagnosticSnapshot {
+        let result = try extractPDF(
+            data: data,
+            fileName: fileName,
+            allowOCR: true,
+            sourceOverride: nil,
+            kindOverride: nil,
+            learnedRules: [:]
+        )
+        let snapshot = ReaderParseSnapshot(
+            sourceDetection: result.sourceDetection,
+            source: result.source,
+            accountKey: result.accountKey,
+            kind: result.kind,
+            period: result.period,
+            movements: result.candidates,
+            summary: result.summary
+        )
+        let reconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
+            kind: result.kind,
+            summary: result.summary,
+            movements: result.candidates
+        )
+        return ReaderPDFDiagnosticSnapshot(
+            snapshot: snapshot,
+            usedOCR: result.usedOCR,
+            ocrConfidence: result.ocrConfidence,
+            ocrPageConfidences: result.ocrPageConfidences,
+            ocrFallbackNeedsReview: result.ocrFallbackNeedsReview,
+            ocrColumnCalibrationNeedsReview: result.ocrColumnCalibrationNeedsReview,
+            ocrConfidenceNeedsReview: result.ocrConfidenceNeedsReview,
+            rowDiagnostics: result.rowDiagnostics,
+            reconciliation: reconciliation
+        )
     }
 
     /// Proves a selectable PDF text layer against the same issuer controls

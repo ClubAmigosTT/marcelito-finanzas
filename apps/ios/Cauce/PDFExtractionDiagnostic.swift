@@ -20,13 +20,37 @@ enum PDFExtractionDiagnostic {
         let rows: Int
         let controls: StatementSummaryRecord?
         let missing: [String]
+        let usedOCR: Bool?
+        let ocrConfidence: Double?
+        let ocrPageConfidences: [Double]?
+        let ocrFallbackNeedsReview: Bool?
+        let ocrColumnCalibrationNeedsReview: Bool?
+        let ocrConfidenceNeedsReview: Bool?
+        let reconciliation: StatementReconciliationRecord?
+        let rowDiagnostics: [OCRRowDiagnostic]?
 
         init(_ snapshot: ReaderParseSnapshot) {
+            self.init(snapshot, metadata: nil)
+        }
+
+        init(_ diagnostic: ReaderPDFDiagnosticSnapshot) {
+            self.init(diagnostic.snapshot, metadata: diagnostic)
+        }
+
+        private init(_ snapshot: ReaderParseSnapshot, metadata: ReaderPDFDiagnosticSnapshot?) {
             source = snapshot.source
             period = snapshot.period
             accountKey = snapshot.accountKey
             rows = snapshot.movements.count
             controls = snapshot.summary
+            usedOCR = metadata?.usedOCR
+            ocrConfidence = metadata?.ocrConfidence
+            ocrPageConfidences = metadata?.ocrPageConfidences
+            ocrFallbackNeedsReview = metadata?.ocrFallbackNeedsReview
+            ocrColumnCalibrationNeedsReview = metadata?.ocrColumnCalibrationNeedsReview
+            ocrConfidenceNeedsReview = metadata?.ocrConfidenceNeedsReview
+            reconciliation = metadata?.reconciliation
+            rowDiagnostics = metadata?.rowDiagnostics
             var missing: [String] = []
             if snapshot.period == "Periodo no identificado" { missing.append("period") }
             if snapshot.accountKey == nil { missing.append("accountKey") }
@@ -37,7 +61,7 @@ enum PDFExtractionDiagnostic {
     }
 
     struct Report: Codable {
-        let schemaVersion = 1
+        let schemaVersion = 2
         let readerVersion: String
         let appVersion: String
         let build: String
@@ -79,7 +103,10 @@ enum PDFExtractionDiagnostic {
         var production: Probe?
         var error: String?
         do {
-            production = Probe(try FinanceStore.readerPDFSnapshotForTesting(data: data))
+            production = Probe(try FinanceStore.readerPDFDiagnosticSnapshotForTesting(
+                data: data,
+                fileName: "diagnostic.pdf"
+            ))
         } catch let failure {
             error = failure.localizedDescription
         }
