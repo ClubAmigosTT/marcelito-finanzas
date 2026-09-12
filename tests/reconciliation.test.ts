@@ -962,6 +962,22 @@ test("marcadores legales conflictivos en el pie tampoco usan el nombre del archi
   assert.match(detection.evidence[0] ?? "", /conflictivos/);
 });
 
+test("RappiCard conserva Rappi aunque el estado mencione a Banorte como emisor legal", () => {
+  const text = [
+    "Estado de cuenta Tarjeta de crédito RappiCard",
+    "RappiCard Número de cuenta 00190001000002279040",
+    "Banco Mercantil del Norte, S.A., Institución de Banca Múltiple, Grupo Financiero Banorte",
+    "Periodo 22-jun-2026 al 21-jul-2026",
+    "Detalle de Movimientos",
+    "2026-07-01 2026-07-01 COMPRA DE PRUEBA +$100.00",
+  ].join("\n");
+
+  const detection = detectSourceEvidence(text, "estado-rappi.pdf");
+  assert.equal(detection.source, "Rappi");
+  assert.equal(detection.status, "verified");
+  assert.equal(detectPeriod(text, "estado-rappi.pdf"), "22-jun-2026 al 21-jul-2026");
+});
+
 test("un prefijo numérico del comercio no se convierte en año", () => {
   const [row] = extractTransactions("20 de Junio 125TH FINEST DELI INC 101.77", "Amex", "sample-card-period-2.pdf", "card");
   assert.equal(row.date, "20 jun 2026");
