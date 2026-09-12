@@ -10308,8 +10308,12 @@ final class FinanceStore {
             || header.contains("bba830831lj2")
             || header.range(of: #"bbva\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple"#, options: .regularExpression) != nil
         let sourceFromHeader: String? = {
-            if header.contains("rappicard")
-                && (header.contains("tarjeta de credito") || compactHeader.contains("tarjetadecredito")) {
+            // Keep the normal PDFKit text-layer contract explicit, then add a
+            // second branch for Vision's collapsed `Tarjetadecredito` output.
+            // This preserves the deterministic issuer rule while tolerating
+            // the spacing loss seen in Rappi's scanned pages.
+            if header.contains("rappicard") && header.contains("tarjeta de credito") { return "Rappi" }
+            if header.contains("rappicard") && compactHeader.contains("tarjetadecredito") {
                 return "Rappi"
             }
             // A legal issuer marker beats a bare counterparty mention. If two
