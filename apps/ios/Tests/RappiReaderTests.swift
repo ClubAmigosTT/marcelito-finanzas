@@ -61,6 +61,22 @@ final class RappiReaderTests: XCTestCase {
         }
     }
 
+    func testPeriodRecoversWhenVisionDropsConnectorOrPeriodAnchor() {
+        let variants = [
+            "Periodo 22 jun 2026 21 jul 2026",
+            "Periodo\n22-jun-2026\n21-jul-2026",
+            "Resumen del estado 22 jun 2026 21 jul 2026"
+        ]
+
+        for period in variants {
+            let text = fixture
+                .replacingOccurrences(of: "Periodo 22-jul-2026 al 21-ago-2026", with: period)
+                .replacingOccurrences(of: "21-jul-2026", with: "21-jul-2026\nFecha limite de pago 10-ago-2026")
+            let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "rappicard.pdf")
+            XCTAssertEqual(snapshot.period, "22/06/2026 - 21/07/2026", period)
+        }
+    }
+
     func testMissingCreditFailsEvenWhenChargesMatch() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(text: fixture, fileName: "example.pdf")
         let rows = snapshot.movements.filter { $0.kind != .refund }
