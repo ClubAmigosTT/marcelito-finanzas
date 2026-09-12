@@ -130,6 +130,9 @@ test("Rappi repite OCR con foco numérico cuando la fuente pierde dígitos", asy
   assert.match(source, /isNumericPart \|\| isMonth \|\| isConnector \|\| isCurrencyOrSign/);
   assert.match(source, /currentNumericCount < 6/);
   assert.match(source, /let currentNumericCount = numericEvidenceCount\(selectedObservations\)/);
+  assert.match(source, /func rappiCoverNumericObservation\(from image: CGImage, page: Int\)/);
+  assert.match(source, /let rawCrop = CGRect\(/);
+  assert.match(source, /rappiCoverNumericObservation\(from: selectedImage, page: pageIndex\)/);
 });
 
 test("Rappi recupera periodos cuando Vision pierde separadores o el conector", async () => {

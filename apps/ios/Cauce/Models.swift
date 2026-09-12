@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.17"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.18"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -5518,6 +5518,77 @@ final class FinanceStore {
             return ciContext.createCGImage(output, from: output.extent)
         }
 
+        /// The Rappi cover keeps the period in a small, dense panel at the
+        /// upper-right of page one. When its embedded font is broken, a full
+        /// page Vision pass can preserve the labels but discard every date
+        /// digit. Give that panel a second, isolated pass so nearby address,
+        /// account and marketing text cannot compete for the recognizer's
+        /// attention. The combined observation is deliberately limited to
+        /// period-shaped tokens; it is supplemental evidence and never
+        /// bypasses Rappi's financial reconciliation gate.
+        func rappiCoverNumericObservation(from image: CGImage, page: Int) -> OCRObservation? {
+            let imageWidth = CGFloat(image.width)
+            let imageHeight = CGFloat(image.height)
+            guard imageWidth > 0, imageHeight > 0 else { return nil }
+            let rawCrop = CGRect(
+                x: imageWidth * 0.44,
+                y: imageHeight * 0.045,
+                width: imageWidth * 0.54,
+                height: imageHeight * 0.27
+            ).integral
+            guard rawCrop.width > 0, rawCrop.height > 0,
+                  let crop = image.cropping(to: rawCrop) else { return nil }
+
+            let monthWords = [
+                "ene", "enero", "feb", "febrero", "mar", "marzo", "abr", "abril",
+                "may", "mayo", "jun", "junio", "jul", "julio", "ago", "agosto",
+                "sep", "sept", "septiembre", "set", "oct", "octubre", "nov",
+                "noviembre", "dic", "diciembre"
+            ]
+            func isPeriodToken(_ value: String) -> Bool {
+                let normalized = value
+                    .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                    .lowercased()
+                let stripped = normalized.trimmingCharacters(in: .punctuationCharacters)
+                if stripped == "periodo" || stripped == "al" || stripped == "a" {
+                    return true
+                }
+                if monthWords.contains(stripped) {
+                    return true
+                }
+                return stripped.range(of: #"^[0-9OBI]{1,4}$"#, options: .regularExpression) != nil
+                    || stripped.range(of: #"(?<![A-Za-z0-9])(?:[0-9OBI]{1,4}\s*[-/]\s*[A-Za-z]{3,12}\s*[-/]\s*[0-9]{2,4}|[0-9OBI]{1,4}\s+[A-Za-z]{3,12}\s+[0-9]{2,4})(?![A-Za-z0-9])"#, options: .regularExpression) != nil
+            }
+
+            let variants = [crop, enhancedImage(from: crop)].compactMap { $0 }
+            var best: [OCRObservation] = []
+            for variant in variants {
+                let observations = recognize(variant, page: page, numericFocus: true)
+                    .filter { isPeriodToken($0.text) }
+                if observations.count > best.count {
+                    best = observations
+                }
+            }
+            guard !best.isEmpty else { return nil }
+            let combined = best
+                .sorted {
+                    if abs($0.centerY - $1.centerY) > 0.012 { return $0.centerY > $1.centerY }
+                    return $0.centerX < $1.centerX
+                }
+                .map(\.text)
+                .joined(separator: " ")
+            guard !combined.isEmpty else { return nil }
+            return OCRObservation(
+                page: page,
+                text: combined,
+                // Vision coordinates use a bottom-left origin; this box is
+                // only an ordering anchor for `ocrLines`, not a financial
+                // column selection.
+                boundingBox: CGRect(x: 0.44, y: 0.68, width: 0.54, height: 0.27),
+                confidence: best.map(\.confidence).min() ?? 0
+            )
+        }
+
         for pageIndex in 0..<document.pageCount {
             if let pageIndexes, !pageIndexes.contains(pageIndex) { continue }
             autoreleasepool {
@@ -5608,6 +5679,10 @@ final class FinanceStore {
                             selectedObservations = completeRecovery
                         }
                     }
+                }
+                if prioritizeNumericEvidence, pageIndex == 0,
+                   let coverObservation = rappiCoverNumericObservation(from: selectedImage, page: pageIndex) {
+                    selectedObservations.append(coverObservation)
                 }
                 observations.append(contentsOf: selectedObservations)
             }
