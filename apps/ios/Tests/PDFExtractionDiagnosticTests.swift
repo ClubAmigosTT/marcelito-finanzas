@@ -17,6 +17,11 @@ final class PDFExtractionDiagnosticTests: XCTestCase {
         XCTAssertEqual(report.pages[1].characterCount, 0)
         XCTAssertEqual(report.nativeProbe.rows, 0)
         XCTAssertTrue(report.nativeProbe.missing.contains("financialControls"))
+        // The production probe must run the same Vision-enabled path as a
+        // manual re-read and expose its reconciliation decision. A text-only
+        // probe would silently reproduce the old Rappi false negative.
+        XCTAssertNotNil(report.productionProbe)
+        XCTAssertNotNil(report.productionProbe?.reconciliation)
         XCTAssertTrue(report.orderedText.contains("EVIDENCIA"))
         let encoded = try JSONEncoder().encode(report)
         let decoded = try JSONDecoder().decode(PDFExtractionDiagnostic.Report.self, from: encoded)
