@@ -23,9 +23,12 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
   assert.match(rootTab, /await store\.rebuildCanonicalLedgerIfNeededAsync\s*\{/);
   assert.doesNotMatch(rootTab, /try store\.importPDF\(/);
   assert.doesNotMatch(rootTab, /store\.rebuildCanonicalLedgerIfNeeded\s*\{/);
-  // Opening Resumen must hydrate the persisted envelope only. A full PDF
-  // rebuild is an explicit action, never a view-appearance side effect.
-  assert.doesNotMatch(rootTab, /\.task\s*\{\s*await rebuildPendingLedgerIfNeeded\(\)/);
+  // Opening Resumen may start a pending reader migration, but it must do so
+  // through the asynchronous single-flight path rather than blocking the
+  // first frame or requiring a hidden manual action.
+  assert.match(rootTab, /\.task\(id: store\.hasCanonicalRebuildPending\)/);
+  assert.match(rootTab, /guard store\.hasCanonicalRebuildPending else \{ return \}/);
+  assert.match(rootTab, /await rebuildPendingLedgerIfNeeded\(\)/);
   assert.match(rootTab, /PendingLedgerRefreshCard/);
   assert.match(rootTab, /TabView\(selection: \$selectedTab\)/);
   assert.match(rootTab, /private struct DeferredTab<Content: View>/);

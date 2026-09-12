@@ -156,6 +156,14 @@ struct HomeView: View {
                     accountMenu
                 }
             }
+            // A reader migration must become visible without requiring the
+            // user to discover a secondary menu. The rebuild itself remains
+            // asynchronous and single-flight; this task only starts it when
+            // an older persisted statement is actually present.
+            .task(id: store.hasCanonicalRebuildPending) {
+                guard store.hasCanonicalRebuildPending else { return }
+                await rebuildPendingLedgerIfNeeded()
+            }
             .fileImporter(
                 isPresented: $isImporterPresented,
                 allowedContentTypes: [.pdf],
