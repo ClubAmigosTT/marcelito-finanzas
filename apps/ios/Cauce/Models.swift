@@ -9926,6 +9926,12 @@ final class FinanceStore {
             return ([first, second].map { formatter.string(from: $0) }.joined(separator: " - "), abs(days - 30))
         }
 
+        let movementMarker = [
+            "cargos, abonos y compras regulares",
+            "desglose de movimientos"
+        ].compactMap { normalized.range(of: $0)?.lowerBound }.min() ?? normalized.endIndex
+        let cover = String(normalized[..<movementMarker])
+
         // If OCR keeps only one side of the period range, the printed cover
         // still contains two independent controls: the official cutoff date
         // and the number of days in the period. Derive the missing start only
@@ -9942,7 +9948,7 @@ final class FinanceStore {
            let daysRange = Range(daysMatch.range(at: 1), in: cover),
            let periodDays = Int(String(cover[daysRange])),
            (25...35).contains(periodDays),
-           let start = Calendar(identifier: .gregorian).date(byAdding: .day, value: -periodDays, to: cutoff),
+           let start = Calendar(identifier: .gregorian).date(byAdding: .day, value: 0 - periodDays, to: cutoff),
            let derived = formattedCycle(start, cutoff) {
             return derived.0
         }
@@ -9956,12 +9962,6 @@ final class FinanceStore {
                 return parseDate(String(value[valueRange]))
             }
         }
-
-        let movementMarker = [
-            "cargos, abonos y compras regulares",
-            "desglose de movimientos"
-        ].compactMap { normalized.range(of: $0)?.lowerBound }.min() ?? normalized.endIndex
-        let cover = String(normalized[..<movementMarker])
 
         func bestCycle(in value: String) -> String? {
             let candidates = dates(in: value)
