@@ -77,6 +77,26 @@ final class RappiReaderTests: XCTestCase {
         }
     }
 
+    func testPeriodRebuildsFromSplitVisionNumericComponents() {
+        let fixtures: [OCRObservationFixture] = [
+            .init(page: 0, text: "Tarjeta de crédito RappiCard", x: 0.05, y: 0.95, width: 0.45, confidence: 0.98),
+            .init(page: 0, text: "Periodo", x: 0.05, y: 0.86, width: 0.12, confidence: 0.97),
+            .init(page: 0, text: "22", x: 0.20, y: 0.86, width: 0.04, confidence: 0.96),
+            .init(page: 0, text: "jun", x: 0.25, y: 0.86, width: 0.05, confidence: 0.96),
+            .init(page: 0, text: "2026", x: 0.32, y: 0.86, width: 0.08, confidence: 0.96),
+            .init(page: 0, text: "al", x: 0.43, y: 0.86, width: 0.04, confidence: 0.96),
+            .init(page: 0, text: "21", x: 0.49, y: 0.86, width: 0.04, confidence: 0.96),
+            .init(page: 0, text: "jul", x: 0.54, y: 0.86, width: 0.05, confidence: 0.96),
+            .init(page: 0, text: "2026", x: 0.61, y: 0.86, width: 0.08, confidence: 0.96),
+            .init(page: 0, text: "Resumen de cargos y abonos del periodo", x: 0.05, y: 0.74, width: 0.60, confidence: 0.97),
+            .init(page: 2, text: "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)", x: 0.05, y: 0.95, width: 0.75, confidence: 0.98)
+        ]
+
+        let snapshot = FinanceStore.rappiOCRSnapshotForTesting(fixtures)
+        XCTAssertEqual(snapshot.source, "Rappi")
+        XCTAssertEqual(snapshot.period, "22/06/2026 - 21/07/2026")
+    }
+
     func testMissingCreditFailsEvenWhenChargesMatch() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(text: fixture, fileName: "example.pdf")
         let rows = snapshot.movements.filter { $0.kind != .refund }

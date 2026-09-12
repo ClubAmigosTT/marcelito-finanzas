@@ -5361,14 +5361,42 @@ final class FinanceStore {
                 // the affected Rappi font, the English language model can
                 // return a confident list of labels while dropping every
                 // amount; the unconstrained pass may recover the digits. Pick
-                // the pass with the most actual date/amount boxes instead of
-                // using confidence or observation count as a proxy.
-                func numericScore(_ pageObservations: [OCRObservation]) -> (boxes: Int, count: Int, confidence: Double) {
+                // the pass with the most actual numeric evidence instead of
+                // using confidence or observation count as a proxy. A broken
+                // embedded font can split a date/amount into separate
+                // observations (`22`, `jun`, `2026`, `$`, `13,432.11`) with
+                // no substring boxes, so count those components as a second
+                // evidence channel when all passes lose their boxes.
+                func numericComponentEvidenceCount(_ pageObservations: [OCRObservation]) -> Int {
+                    let months = Set([
+                        "ene", "enero", "feb", "febrero", "mar", "marzo", "abr", "abril",
+                        "may", "mayo", "jun", "junio", "jul", "julio", "ago", "agosto",
+                        "sep", "sept", "septiembre", "oct", "octubre", "nov", "noviembre",
+                        "dic", "diciembre"
+                    ])
+                    return pageObservations.reduce(0) { total, observation in
+                        guard observation.dateBoxes.isEmpty, observation.amountBoxes.isEmpty else { return total }
+                        let raw = observation.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        guard !raw.isEmpty else { return total }
+                        let normalized = raw
+                            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                            .lowercased()
+                        let stripped = normalized.trimmingCharacters(in: .punctuationCharacters)
+                        let numeric = stripped.range(of: #"^[0-9OBI]{1,4}$"#, options: .regularExpression) != nil
+                        let month = months.contains(stripped)
+                        let connector = stripped == "al" || stripped == "a" || stripped == "de"
+                        let sign = ["$", "+", "-", "−"].contains(raw)
+                        return total + (numeric || month || connector || sign ? 1 : 0)
+                    }
+                }
+
+                func numericScore(_ pageObservations: [OCRObservation]) -> (boxes: Int, components: Int, count: Int, confidence: Double) {
                     let boxes = pageObservations.reduce(0) { total, observation in
                         total + observation.dateBoxes.count + observation.amountBoxes.count
                     }
+                    let components = numericComponentEvidenceCount(pageObservations)
                     let confidence = pageObservations.map(\.confidence).reduce(0, +)
-                    return (boxes, pageObservations.count, confidence)
+                    return (boxes, components, pageObservations.count, confidence)
                 }
                 let numericPasses = [
                     run(languages: ["en-US"]),
@@ -5379,6 +5407,7 @@ final class FinanceStore {
                     let leftScore = numericScore(left)
                     let rightScore = numericScore(right)
                     if leftScore.boxes != rightScore.boxes { return leftScore.boxes < rightScore.boxes }
+                    if leftScore.components != rightScore.components { return leftScore.components < rightScore.components }
                     if leftScore.count != rightScore.count { return leftScore.count < rightScore.count }
                     return leftScore.confidence < rightScore.confidence
                 } ?? []
@@ -5464,11 +5493,15 @@ final class FinanceStore {
                 let isNumericPart = stripped.range(of: #"^[0-9OBI]{1,4}$"#, options: .regularExpression) != nil
                 let isMonth = months.contains(stripped)
                 let isConnector = stripped == "al" || stripped == "a" || stripped == "de"
-                let isCurrencyOrSign = raw == "$" || raw == "+" || raw == "-"
+                let normalizedSign = raw
+                    .replacingOccurrences(of: "−", with: "-")
+                    .replacingOccurrences(of: "–", with: "-")
+                    .replacingOccurrences(of: "—", with: "-")
+                let isCurrencyOrSign = normalizedSign == "$" || normalizedSign == "+" || normalizedSign == "-"
                 guard isNumericPart || isMonth || isConnector || isCurrencyOrSign else { return nil }
                 return OCRObservation(
                     page: observation.page,
-                    text: raw,
+                    text: isCurrencyOrSign ? normalizedSign : raw,
                     boundingBox: observation.boundingBox,
                     confidence: observation.confidence
                 )
