@@ -148,6 +148,61 @@ test("goldens Amex concilian nuevas transacciones y distinguen pagos, moneda ext
   assert.ok(latest.transactions.some((row) => row.foreignCurrency));
 });
 
+test("golden RappiCard conserva el emisor Banorte como evidencia legal y concilia cargos, abonos y pagos", () => {
+  const text = [
+    "Estado de cuenta",
+    "Tarjeta de crédito RappiCard",
+    "Número de cuenta 00190001000002279040",
+    "Periodo 22-jun-2026 al 21-jul-2026",
+    "Pago para no generar intereses $13,432.11",
+    "Resumen de cargos y abonos del periodo",
+    "Adeudo del periodo anterior = $13,378.56",
+    "Cargos regulares (no a meses) + $28,494.66",
+    "Cargos compras a meses (capital) + $0.00",
+    "Pagos y abonos - $28,441.11",
+    "Saldo deudor total $13,432.11",
+    "Límite de crédito $16,000.00",
+    "Crédito disponible $2,567.89",
+    "Banco Mercantil del Norte, S.A., Institución de Banca Múltiple, Grupo Financiero Banorte",
+    "__PDF_PAGE_3__",
+    "DESGLOSE DE MOVIMIENTOS",
+    "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+    "Fecha de la operación Fecha cargo Descripción del movimiento Monto",
+    "2026-06-21 2026-06-23 MTA*LIRR STATION TIX",
+    "Compra en el extranjero",
+    "USD $27 +$470.11",
+    "2026-06-27 2026-06-28 APPLE.COM/BILL +$129.00",
+    "2026-06-29 2026-07-01 MTA*NYCT PAYGO Compra en el extranjero USD $8.75 +$153.62",
+    "2026-06-30 2026-07-01 PASE RECUR MXN +$7,999.00",
+    "2026-06-30 2026-06-30 IVA BONIFICACIÓN CON CASHBACK -$7.25",
+    "2026-06-30 2026-07-01 VIVAAEROBUS WEB +$14,140.58",
+    "2026-06-30 2026-06-30 PAGO POR SPEI -$15,000.00",
+    "2026-06-30 2026-06-30 BONIFICACIÓN CON CASHBACK -$45.33",
+    "2026-06-30 2026-06-30 PAGO POR SPEI -$10,000.00",
+    "2026-07-02 2026-07-03 SWAPPEDCOM FEE +$300.00",
+    "2026-07-05 2026-07-06 SWAPPEDCOM 069223D8 +$300.00",
+    "2026-07-06 2026-07-07 APPLE.COM/BILL +$215.00",
+    "2026-07-07 2026-07-08 PAYU GOOGLE CLOUD +$389.76",
+    "2026-07-07 2026-07-07 BONIFICACIÓN CON CASHBACK -$334.94",
+    "2026-07-07 2026-07-07 IVA BONIFICACIÓN CON CASHBACK -$53.59",
+    "2026-07-07 2026-07-08 FLIGHTS ON BOOKING.COM +$4,397.59",
+    "2026-07-07 2026-07-07 PAGO POR SPEI -$3,000.00",
+    "Total de cargos +$28,494.66",
+    "Total de abonos -$28,441.11",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({ source: "Rappi", fileName: "Rappi-julio.pdf", mode: "text", text });
+  assert.equal(parsed.parserId, "rappicard-operations-v1");
+  assert.equal(parsed.summary.newTransactions, 28_494.66);
+  assert.equal(parsed.summary.paymentsCredits, 28_441.11);
+  assert.equal(parsed.transactions.length, 17);
+  assert.equal(parsed.reconciliation.status, "valid", parsed.reconciliation.reason);
+  assert.equal(parsed.reconciliation.extractedChargeTotal, 28_494.66);
+  assert.equal(parsed.reconciliation.extractedPaymentTotal, 28_000);
+  assert.equal(parsed.reconciliation.extractedCreditTotal, 441.11);
+  assert.ok(parsed.transactions.some((row) => row.kind === "cardPayment"));
+  assert.ok(parsed.transactions.some((row) => row.foreignCurrency));
+});
+
 test("ningún parser acepta números globales ni filas fuera de su sección", () => {
   const parsed = parseDeterministicStatement({
     source: "BBVA",

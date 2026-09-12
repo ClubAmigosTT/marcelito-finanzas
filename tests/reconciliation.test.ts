@@ -964,6 +964,8 @@ test("marcadores legales conflictivos en el pie tampoco usan el nombre del archi
 
 test("RappiCard conserva Rappi aunque el estado mencione a Banorte como emisor legal", () => {
   const text = [
+    "TU PAGO REQUERIDO ESTE PERIODO",
+    "ADOLFO PRIETO #725 Periodo 22-jun-2026 al 21-jul-2026",
     "Estado de cuenta Tarjeta de crédito RappiCard",
     "RappiCard Número de cuenta 00190001000002279040",
     "Banco Mercantil del Norte, S.A., Institución de Banca Múltiple, Grupo Financiero Banorte",

@@ -17,7 +17,7 @@ const OCR_MIN_PAGE_CONFIDENCE = 0.78;
  * older build, so every KPI boundary must re-check the same thresholds.
  */
 export function hasSufficientOcrQuality(statement: Statement) {
-  if (["santander-checking-v1", "bbva-movements-v1", "amex-operations-v1"].includes(statement.parserId ?? "")) {
+  if (["santander-checking-v1", "bbva-movements-v1", "amex-operations-v1", "rappicard-operations-v1"].includes(statement.parserId ?? "")) {
     return true;
   }
   // Treat malformed/legacy runtime data as unsafe instead of assuming that a
