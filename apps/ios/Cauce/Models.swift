@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.22"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.23"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4426,6 +4426,31 @@ final class FinanceStore {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw FinanceImportError.emptyDocument
         }
+
+        // A Rappi PDF can have a perfectly reconcilable movement table while
+        // PDFKit still loses the digits in the cover's period controls. In
+        // that case the normal OCR gate is correctly skipped for rows, but
+        // the period would otherwise remain unknown forever. Read only page
+        // one as a supplemental cover pass; its result is used exclusively
+        // for period metadata and never changes the selected movement rows.
+        let coverPeriodOCRText: String = {
+            guard allowOCR,
+                  selectableSource.localizedCaseInsensitiveCompare("Rappi") == .orderedSame else {
+                return ""
+            }
+            let primary = Self.rappiPeriodLabelFromEvidence(
+                selectableText: extractedText,
+                recognizedText: usedOCR ? text : "",
+                fileName: fileName
+            )
+            guard primary == "Periodo no identificado" else { return "" }
+            let coverObservations = Self.ocrObservations(
+                from: document,
+                pageIndexes: Set([0]),
+                prioritizeNumericEvidence: true
+            )
+            return Self.ocrText(from: coverObservations)
+        }()
         let ocrPageConfidences: [Double]? = {
             guard usedOCR else { return nil }
             let grouped = Dictionary(grouping: ocrObservations, by: \.page)
@@ -4586,11 +4611,22 @@ final class FinanceStore {
         if source == "BBVA" {
             period = Self.bbvaDocumentPeriod(document) ?? "Periodo no identificado"
         } else if source.localizedCaseInsensitiveCompare("Rappi") == .orderedSame {
-            period = Self.rappiPeriodLabelFromEvidence(
+            let primary = Self.rappiPeriodLabelFromEvidence(
                 selectableText: extractedText,
                 recognizedText: text,
                 fileName: fileName
             )
+            if primary != "Periodo no identificado" {
+                period = primary
+            } else if !coverPeriodOCRText.isEmpty {
+                period = Self.rappiPeriodLabelFromEvidence(
+                    selectableText: "",
+                    recognizedText: coverPeriodOCRText,
+                    fileName: fileName
+                )
+            } else {
+                period = primary
+            }
         } else {
             period = Self.periodLabel(from: text, fileName: fileName, sourceHint: source)
         }
