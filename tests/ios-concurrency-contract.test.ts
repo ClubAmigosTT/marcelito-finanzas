@@ -155,6 +155,15 @@ test("Rappi recupera periodos cuando Vision pierde separadores o el conector", a
   assert.match(source, /bestCycle\(in: String\(tail\.prefix\(260\)\)\)/);
 });
 
+test("Rappi relee la portada aunque la tabla seleccionable ya concilie", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /let coverPeriodOCRText: String = \{/);
+  assert.match(source, /pageIndexes: Set\(\[0\]\)/);
+  assert.match(source, /period metadata and never changes the selected movement rows/i);
+  assert.match(source, /guard primary == "Periodo no identificado" else \{ return "" \}/);
+  assert.match(source, /recognizedText: usedOCR \? text : ""/);
+});
+
 test("una capa de texto no conciliada fuerza una recuperación visual", async () => {
   const source = await readFile(modelsPath, "utf8");
   // A malformed or administrative text layer can contain enough dates and
