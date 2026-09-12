@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.12"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.13"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4395,7 +4395,11 @@ final class FinanceStore {
         // but never invoke Vision for a selectable American Express PDF.
         let rappiPages = selectableSource == "Rappi" ? Self.rappiOCRPageIndexes(in: document) : nil
         let ocrObservations = shouldAttemptOCR && !selectableAmex
-            ? Self.ocrObservations(from: document, pageIndexes: rappiPages)
+            ? Self.ocrObservations(
+                from: document,
+                pageIndexes: rappiPages,
+                prioritizeNumericEvidence: selectableSource == "Rappi"
+            )
             : []
         let ocrText = Self.ocrText(from: ocrObservations)
         let usedOCR = shouldAttemptOCR && !ocrObservations.isEmpty
@@ -5216,7 +5220,8 @@ final class FinanceStore {
 
     private static func ocrObservations(
         from document: PDFDocument,
-        pageIndexes: Set<Int>? = nil
+        pageIndexes: Set<Int>? = nil,
+        prioritizeNumericEvidence: Bool = false
     ) -> [OCRObservation] {
         var observations: [OCRObservation] = []
         let ciContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -5248,7 +5253,11 @@ final class FinanceStore {
             return image.cgImage
         }
 
-        func recognize(_ cgImage: CGImage, page: Int) -> [OCRObservation] {
+        func recognize(
+            _ cgImage: CGImage,
+            page: Int,
+            numericFocus: Bool = false
+        ) -> [OCRObservation] {
             // Some iOS revisions expose only the base language identifiers
             // ("es"/"en") even though the regional BCP-47 tags are accepted
             // on newer devices. A rejected language list used to make Vision
@@ -5262,20 +5271,33 @@ final class FinanceStore {
                 if let languages {
                     request.recognitionLanguages = languages
                 }
-                // Keep a small, issuer-specific vocabulary so Vision prefers
-                // the labels that anchor bank columns and issuer detection.
-                // Numeric tokens are intentionally absent: amounts must come
-                // from the visual candidate and reconciliation rules, never a
-                // dictionary.
-                request.customWords = [
-                    "SANTANDER", "BBVA", "BANCOMER", "AMERICAN EXPRESS", "AMEX",
-                    "RAPPICARD", "RAPPI", "PAGO POR SPEI", "BONIFICACIÓN CON CASHBACK",
-                    "DEPÓSITOS", "RETIROS", "CARGOS", "ABONOS", "SALDO",
-                    "DESCRIPCIÓN", "DETALLE", "MOVIMIENTOS", "FECHA",
-                    "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE",
-                    "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
-                ]
-                request.usesLanguageCorrection = true
+                if numericFocus {
+                    // Rappi's embedded font can be perfectly legible when
+                    // rendered but Vision's language model may discard the
+                    // numeric glyphs while preserving the surrounding words.
+                    // A second, dictionary-free pass recovers dates, signs and
+                    // amounts without allowing a language model to rewrite
+                    // the financial evidence. The parser still requires the
+                    // issuer controls and exact reconciliation below.
+                    request.customWords = []
+                    request.usesLanguageCorrection = false
+                    request.minimumTextHeight = 0.004
+                } else {
+                    // Keep a small, issuer-specific vocabulary so Vision
+                    // prefers the labels that anchor bank columns and issuer
+                    // detection. Numeric tokens are intentionally absent:
+                    // amounts must come from the visual candidate and
+                    // reconciliation rules, never a dictionary.
+                    request.customWords = [
+                        "SANTANDER", "BBVA", "BANCOMER", "AMERICAN EXPRESS", "AMEX",
+                        "RAPPICARD", "RAPPI", "PAGO POR SPEI", "BONIFICACIÓN CON CASHBACK",
+                        "DEPÓSITOS", "RETIROS", "CARGOS", "ABONOS", "SALDO",
+                        "DESCRIPCIÓN", "DETALLE", "MOVIMIENTOS", "FECHA",
+                        "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE",
+                        "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+                    ]
+                    request.usesLanguageCorrection = true
+                }
 
                 do {
                     try VNImageRequestHandler(cgImage: cgImage, options: [:]).perform([request])
@@ -5334,9 +5356,19 @@ final class FinanceStore {
                 }
             }
 
-            let preferred = run(languages: ["es-MX", "en-US"])
+            let preferred: [OCRObservation]?
+            if numericFocus {
+                preferred = run(languages: ["en-US"])
+            } else {
+                preferred = run(languages: ["es-MX", "en-US"])
+            }
             if let preferred, !preferred.isEmpty { return preferred }
-            let baseLanguages = run(languages: ["es", "en"])
+            let baseLanguages: [OCRObservation]?
+            if numericFocus {
+                baseLanguages = run(languages: ["en"])
+            } else {
+                baseLanguages = run(languages: ["es", "en"])
+            }
             if let baseLanguages, !baseLanguages.isEmpty { return baseLanguages }
             // Only run the unconstrained pass after a language-specific pass
             // failed or produced no text. Blank pages therefore remain cheap,
@@ -5348,6 +5380,44 @@ final class FinanceStore {
         func meanConfidence(_ pageObservations: [OCRObservation]) -> Double {
             guard !pageObservations.isEmpty else { return 0 }
             return pageObservations.map(\.confidence).reduce(0, +) / Double(pageObservations.count)
+        }
+
+        let numericPattern = try? NSRegularExpression(
+            pattern: #"(?i)(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])|(?<!\d)[0-9OBI]{1,3}\s*[\/\-.]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*\d{2,4})?(?![A-Za-z])"#
+        )
+
+        func numericEvidenceCount(_ pageObservations: [OCRObservation]) -> Int {
+            guard let numericPattern else { return 0 }
+            return pageObservations.reduce(0) { total, observation in
+                let range = NSRange(observation.text.startIndex..<observation.text.endIndex, in: observation.text)
+                return total + numericPattern.numberOfMatches(in: observation.text, range: range)
+            }
+        }
+
+        /// Keep only numeric substrings from the recovery pass. The normal
+        /// pass supplies merchant labels; these token boxes are merged by
+        /// `ocrLines` using their real y/x coordinates. This avoids duplicating
+        /// a complete merchant line while restoring a missing date or amount.
+        func numericTokens(from pageObservations: [OCRObservation]) -> [OCRObservation] {
+            pageObservations.flatMap { observation in
+                observation.dateBoxes.map { box in
+                    OCRObservation(
+                        page: observation.page,
+                        text: box.text,
+                        boundingBox: box.boundingBox,
+                        confidence: observation.confidence,
+                        dateBoxes: [box]
+                    )
+                } + observation.amountBoxes.map { box in
+                    OCRObservation(
+                        page: observation.page,
+                        text: box.text,
+                        boundingBox: box.boundingBox,
+                        confidence: observation.confidence,
+                        amountBoxes: [box]
+                    )
+                }
+            }
         }
 
         func enhancedImage(from cgImage: CGImage) -> CGImage? {
@@ -5390,6 +5460,56 @@ final class FinanceStore {
                     let contrastObservations = recognize(contrastImage, page: pageIndex)
                     if meanConfidence(contrastObservations) > meanConfidence(selectedObservations) {
                         selectedObservations = contrastObservations
+                    }
+                }
+
+                if prioritizeNumericEvidence {
+                    // The Rappi statements that use the broken embedded font
+                    // can return a confident page made almost entirely of
+                    // words, or recover only one or two values while still
+                    // losing the period controls. Confidence alone is
+                    // therefore insufficient to decide whether OCR succeeded.
+                    // Re-run whenever the selected page has sparse numeric
+                    // evidence; a normal movement page contains substantially
+                    // more than this threshold, so the extra pass stays
+                    // bounded to pages that need it.
+                    let currentNumericCount = numericEvidenceCount(selectedObservations)
+                    if currentNumericCount < 6 {
+                        let numericImage = render(page, longEdge: 3_200) ?? selectedImage
+                        let recoveryImages = [numericImage, enhancedImage(from: numericImage)].compactMap { $0 }
+                        var recoveredTokens: [OCRObservation] = []
+                        var recoveredKeys = Set<String>()
+                        var existingKeys = Set<String>()
+                        for observation in selectedObservations {
+                            for box in observation.dateBoxes + observation.amountBoxes {
+                                let key = "\(box.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current))|\(Int((box.centerX * 1_000).rounded()))|\(Int((box.boundingBox.midY * 1_000).rounded()))"
+                                existingKeys.insert(key)
+                            }
+                        }
+                        var completeRecovery: [OCRObservation] = []
+                        for recoveryImage in recoveryImages {
+                            let recovery = recognize(recoveryImage, page: pageIndex, numericFocus: true)
+                            if completeRecovery.isEmpty, !recovery.isEmpty {
+                                completeRecovery = recovery
+                            }
+                            for token in numericTokens(from: recovery) {
+                                let key = "\(token.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current))|\(Int((token.centerX * 1_000).rounded()))|\(Int((token.centerY * 1_000).rounded()))"
+                                if !existingKeys.contains(key), recoveredKeys.insert(key).inserted {
+                                    recoveredTokens.append(token)
+                                }
+                            }
+                            if numericEvidenceCount(recovery) >= 2 {
+                                break
+                            }
+                        }
+                        if !recoveredTokens.isEmpty {
+                            selectedObservations.append(contentsOf: recoveredTokens)
+                        } else if selectedObservations.isEmpty, !completeRecovery.isEmpty {
+                            // Preserve a complete recovery line as a last
+                            // resort; the issuer parser and reconciliation gate
+                            // still reject any unsupported or partial result.
+                            selectedObservations = completeRecovery
+                        }
                     }
                 }
                 observations.append(contentsOf: selectedObservations)

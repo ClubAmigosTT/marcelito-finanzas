@@ -110,6 +110,18 @@ test("Vision escala el render por página sin desbordar memoria", async () => {
   assert.match(source, /var selectedImage = cgImage/);
 });
 
+test("Rappi repite OCR con foco numérico cuando la fuente pierde dígitos", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /prioritizeNumericEvidence: selectableSource == "Rappi"/);
+  assert.match(source, /numericFocus: Bool = false/);
+  assert.match(source, /request\.usesLanguageCorrection = false/);
+  assert.match(source, /request\.minimumTextHeight = 0\.004/);
+  assert.match(source, /for token in numericTokens\(from: recovery\)/);
+  assert.match(source, /let recoveryImages = \[numericImage, enhancedImage\(from: numericImage\)\]/);
+  assert.match(source, /currentNumericCount < 6/);
+  assert.match(source, /let currentNumericCount = numericEvidenceCount\(selectedObservations\)/);
+});
+
 test("una capa de texto no conciliada fuerza una recuperación visual", async () => {
   const source = await readFile(modelsPath, "utf8");
   // A malformed or administrative text layer can contain enough dates and
