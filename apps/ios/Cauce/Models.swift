@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.19"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.20"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -9924,6 +9924,27 @@ final class FinanceStore {
             formatter.calendar = calendar
             formatter.dateFormat = "dd/MM/yyyy"
             return ([first, second].map { formatter.string(from: $0) }.joined(separator: " - "), abs(days - 30))
+        }
+
+        // If OCR keeps only one side of the period range, the printed cover
+        // still contains two independent controls: the official cutoff date
+        // and the number of days in the period. Derive the missing start only
+        // from those controls, never from movement dates or the filename.
+        let controlDateToken = #"(?:\d{1,2}-(?:[a-z]{3,12}|\d{1,2})-\d{2,4}|\d{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+\d{2,4})"#
+        let cutoffPattern = #"(?is)fecha\s+de\s+corte[^0-9]{0,32}("# + controlDateToken + #")"#
+        let daysPattern = #"(?is)numero\s+de\s+dias\s+en\s+el\s+periodo[^0-9]{0,20}(\d{1,3})\s*dias?"#
+        if let cutoffRegex = try? NSRegularExpression(pattern: cutoffPattern),
+           let cutoffMatch = cutoffRegex.firstMatch(in: cover, range: NSRange(cover.startIndex..<cover.endIndex, in: cover)),
+           let cutoffRange = Range(cutoffMatch.range(at: 1), in: cover),
+           let cutoff = parseDate(String(cover[cutoffRange])),
+           let daysRegex = try? NSRegularExpression(pattern: daysPattern),
+           let daysMatch = daysRegex.firstMatch(in: cover, range: NSRange(cover.startIndex..<cover.endIndex, in: cover)),
+           let daysRange = Range(daysMatch.range(at: 1), in: cover),
+           let periodDays = Int(String(cover[daysRange])),
+           (25...35).contains(periodDays),
+           let start = Calendar(identifier: .gregorian).date(byAdding: .day, value: -periodDays, to: cutoff),
+           let derived = formattedCycle(start, cutoff) {
+            return derived.0
         }
 
         let broadDatePattern = #"(?i)(?<!\d)(?:\d{1,2}\s*[-/]\s*(?:[a-z]{3,12}|\d{1,2})\s*[-/]\s*\d{2,4}|\d{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+\d{2,4}|\d{4}\s*[-/]\s*\d{1,2}\s*[-/]\s*\d{1,2})(?!\d)"#
