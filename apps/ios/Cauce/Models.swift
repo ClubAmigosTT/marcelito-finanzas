@@ -9582,41 +9582,75 @@ final class FinanceStore {
         var page: Int? = nil
         var rowPage: Int? = nil
         var pending = ""
+        func compactSemanticTitle(_ value: String) -> String {
+            value
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+        }
         func flush() {
             defer { pending = "" }
             guard let first = rappiCapture(#"^(\d{4}-\d{2}-\d{2})\s+\d{4}-\d{2}-\d{2}"#, in: pending),
                   let date = parseDate(first),
-                  let money = rappiCapture(#"([+-]\s*\$\s*[\d,]+\.\d{2})"#, in: pending),
-                  let amount = Decimal(string: money.filter { "0123456789.-+".contains($0) }, locale: Locale(identifier: "en_US_POSIX")),
-                  amount != 0,
-                  let body = rappiCapture(#"^\d{4}-\d{2}-\d{2}\s+\d{4}-\d{2}-\d{2}\s+(.+?)\s*(?:[+-]\s*\$|compra en el extranjero)"#, in: pending) else { return }
+                  let body = rappiCapture(#"^\d{4}-\d{2}-\d{2}\s+\d{4}-\d{2}-\d{2}\s+(.+?)\s*(?:[+-]?\s*\$|compra en el extranjero)"#, in: pending) else { return }
             let title = body.trimmingCharacters(in: .whitespacesAndNewlines)
             // PDF extraction may split the payment label across lines or
             // insert repeated spaces. Match whole words, not a prefix that
             // would also accept an unrelated merchant such as SPEIStore.
+            let semanticTitle = compactSemanticTitle(title)
             let payment = title.range(of: #"^pago\s+por\s+spei\b"#, options: .regularExpression) != nil
+                || semanticTitle.hasPrefix("pagoporspei")
+            // Foreign purchases print USD and conversion amounts before the
+            // local MXN total. Prefer a signed token anywhere in the row so
+            // those auxiliary amounts can never become the ledger amount.
+            // The only permitted unsigned fallback is the explicit SPEI
+            // payment case, where Vision can drop the minus glyph.
+            let money = rappiCapture(#"([+-]\s*\$\s*[\d,]+\.\d{2})"#, in: pending)
+                ?? (payment ? rappiCapture(#"(\$\s*[\d,]+\.\d{2})"#, in: pending) : nil)
+            guard let money,
+                  let parsedAmount = Decimal(string: money.filter { "0123456789.-+".contains($0) }, locale: Locale(identifier: "en_US_POSIX")),
+                  parsedAmount != 0 else { return }
+            let hasExplicitSign = money.trimmingCharacters(in: .whitespacesAndNewlines)
+                .first.map { $0 == "+" || $0 == "-" } ?? false
+            // Vision occasionally drops the minus glyph at the right edge of
+            // a Rappi payment row (for example `PAGO POR SPEI $3,000.00`).
+            // Recover that one issuer-semantic case only; every other
+            // unsigned amount remains rejected so OCR cannot invent a flow.
+            guard hasExplicitSign || payment else { return }
+            let amount = hasExplicitSign ? parsedAmount : -abs(parsedAmount)
             // Card convention: positive printed charge -> negative expense;
             // negative printed abono -> positive credit/payment.
             let kind: MovementKind = payment ? .cardPayment : amount < 0 ? .refund : .purchase
             let flow: FlowKind = payment ? .transfer : amount < 0 ? .income : .expense
+            let signReason = hasExplicitSign
+                ? "importe firmado"
+                : "signo ausente recuperado únicamente por etiqueta PAGO POR SPEI"
             rows.append(Movement(date: date, title: title, account: "Rappi",
                 category: category(for: title, flow: flow), amount: -amount, flow: flow,
                 kind: kind, foreignCurrency: pending.localizedCaseInsensitiveContains("compra en el extranjero"),
                 extractionEvidence: MovementExtractionEvidence(method: evidenceMethod, page: rowPage,
                     confidence: evidenceMethod == "vision-ocr" ? (confidenceByPage[rowPage ?? 0] ?? 0) : 1,
                     sourceText: pending, selectedColumn: "MONTO MXN",
-                    selectedAmount: abs(amount), selectionReason: "RappiCard: importe firmado; fechas operación y cargo conservadas en evidencia")))
+                    selectedAmount: abs(amount), selectionReason: "RappiCard: \(signReason); fechas operación y cargo conservadas en evidencia")))
         }
         for raw in text.components(separatedBy: .newlines) {
             let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             let lower = line.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+            let compactLower = lower.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
             if lower.hasPrefix("__pdf_page_") {
                 flush(); page = Int(lower.filter(\.isNumber)); continue
             }
-            if lower.contains("cargos, abonos y compras regulares") { flush(); table = true; continue }
-            if lower.hasPrefix("total de cargos") || lower.hasPrefix("cargos no reconocidos")
-                || lower.hasPrefix("atencion de quejas") || lower.hasPrefix("notas aclaratorias")
-                || lower.hasPrefix("compras y cargos diferidos") { flush(); table = false; continue }
+            if lower.contains("cargos, abonos y compras regulares")
+                || compactLower.contains("cargosabonosycomprasregulares") {
+                flush(); table = true; continue
+            }
+            if lower.hasPrefix("total de cargos") || compactLower.hasPrefix("totaldecargos")
+                || lower.hasPrefix("cargos no reconocidos") || compactLower.hasPrefix("cargosnoreconocidos")
+                || lower.hasPrefix("atencion de quejas") || compactLower.hasPrefix("atenciondequejas")
+                || lower.hasPrefix("notas aclaratorias") || compactLower.hasPrefix("notasaclaratorias")
+                || lower.hasPrefix("compras y cargos diferidos") || compactLower.hasPrefix("comprasycargosdiferidos") {
+                flush(); table = false; continue
+            }
             guard table else { continue }
             if lower.range(of: #"^\d{4}-\d{2}-\d{2}\b"#, options: .regularExpression) != nil {
                 // PDFKit may put the operation and posting dates on separate
@@ -9627,7 +9661,7 @@ final class FinanceStore {
                     flush(); pending = line; rowPage = page
                 }
             } else if !pending.isEmpty,
-                      !lower.hasPrefix("numero de cuenta"), !lower.hasPrefix("pagina"),
+                      !lower.hasPrefix("numero de cuenta"), !compactLower.hasPrefix("numerodecuenta"), !lower.hasPrefix("pagina"),
                       !lower.hasPrefix("ver notas"), !lower.hasPrefix("tarjeta"),
                       !lower.hasPrefix("fecha"), !lower.hasPrefix("operacion fecha") {
                 pending += " " + line
@@ -9641,7 +9675,23 @@ final class FinanceStore {
         // The first-page summary has independent charge and credit totals.
         // Never derive an expected total from the parsed rows themselves.
         func money(_ label: String) -> Decimal? {
-            guard let raw = rappiCapture(label + #"\s*\d{0,2}\s*[:=+\-]?\s*\$\s*([\d,]+\.\d{2})"#, in: text) else { return nil }
+            let normalizedLabel = label
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+            let tokens = normalizedLabel
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .filter { !$0.isEmpty }
+            guard !tokens.isEmpty else { return nil }
+            // Vision and PDFKit can either preserve spaces (`Pagos y abonos`)
+            // or collapse the whole label (`Pagosyabonos`). Match both forms,
+            // while keeping the search bounded before the first currency token
+            // so a neighbouring summary column cannot supply the value.
+            let labelPattern = tokens
+                .map { NSRegularExpression.escapedPattern(for: $0) }
+                .joined(separator: #"[^a-z0-9]{0,3}"#)
+            let pattern = "(?is)" + labelPattern
+                + #"[^$]{0,120}\$\s*([\d,]+\.\d{2})"#
+            guard let raw = rappiCapture(pattern, in: text) else { return nil }
             return Decimal(string: raw.replacingOccurrences(of: ",", with: ""), locale: Locale(identifier: "en_US_POSIX"))
         }
         var result = StatementSummaryRecord()
@@ -9652,7 +9702,7 @@ final class FinanceStore {
         result.paymentsAndCredits = money("pagos y abonos")
         result.paymentForNoInterest = money("pago para no generar intereses")
         result.minimumPayment = money("pago minimo")
-        result.minimumPlusMsi = money(#"pago minimo \+ compras y cargos\s+diferidos a meses"#)
+        result.minimumPlusMsi = money("pago minimo + compras y cargos diferidos a meses")
         result.creditLimit = money("limite de credito")
         result.creditAvailable = money("credito disponible")
         result.msiPending = money("saldo cargos a meses")
@@ -10250,6 +10300,7 @@ final class FinanceStore {
         let normalizedText = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
         let normalizedFileName = fileName.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
         let header = institutionalHeader(from: text)
+        let compactHeader = header.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
         let sourceFromFile: String? = {
             if normalizedFileName.range(of: #"\bbbva\b|bancomer"#, options: .regularExpression) != nil { return "BBVA" }
             if normalizedFileName.range(of: #"american\s+express|\bamex\b"#, options: .regularExpression) != nil { return "Amex" }
@@ -10264,7 +10315,14 @@ final class FinanceStore {
             || header.contains("bba830831lj2")
             || header.range(of: #"bbva\s+m[eé]xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple"#, options: .regularExpression) != nil
         let sourceFromHeader: String? = {
+            // Keep the normal PDFKit text-layer contract explicit, then add a
+            // second branch for Vision's collapsed `Tarjetadecredito` output.
+            // This preserves the deterministic issuer rule while tolerating
+            // the spacing loss seen in Rappi's scanned pages.
             if header.contains("rappicard") && header.contains("tarjeta de credito") { return "Rappi" }
+            if header.contains("rappicard") && compactHeader.contains("tarjetadecredito") {
+                return "Rappi"
+            }
             // A legal issuer marker beats a bare counterparty mention. If two
             // legal markers genuinely conflict, return nil and keep the
             // statement in review instead of guessing by regex order.
@@ -10385,7 +10443,7 @@ final class FinanceStore {
     /// become an identity.
     private static func maskedAccountKey(from text: String, source: String) -> String? {
         if source == "Rappi",
-           let raw = rappiCapture(#"numero de cuenta\s*:?\s*([0-9][0-9\s-]{18,30})"#, in: text) {
+           let raw = rappiCapture(#"numero\s*de\s*cuenta\s*:?\s*([0-9][0-9\s-]{18,30})"#, in: text) {
             let digits = raw.filter(\.isNumber)
             if digits.count == 20 { return "rappi:\(digits.suffix(4))" }
         }

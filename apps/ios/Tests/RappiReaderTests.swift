@@ -125,6 +125,25 @@ final class RappiReaderTests: XCTestCase {
         }
     }
 
+    func testRappiOCRRepairsCollapsedLabelsAndMissingSPEISign() throws {
+        let text = fixture
+            .replacingOccurrences(of: "Número de cuenta", with: "Numerodecuenta")
+            .replacingOccurrences(of: "Adeudo del periodo anterior", with: "Adeudodelperiodoanterior")
+            .replacingOccurrences(of: "Cargos regulares (no a meses)", with: "Cargosregulares(noameses)")
+            .replacingOccurrences(of: "Pagos y abonos", with: "Pagosyabonos")
+            .replacingOccurrences(of: "Saldo deudor total", with: "Saldodeudortotal")
+            .replacingOccurrences(of: "PAGO POR SPEI -$40.00", with: "PAGOPORSPEI $40.00")
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "example.pdf")
+        XCTAssertEqual(snapshot.accountKey, "rappi:1234")
+        XCTAssertEqual(snapshot.movements.count, 4)
+        let payment = try XCTUnwrap(snapshot.movements.first { $0.kind == .cardPayment })
+        XCTAssertEqual(payment.amount, 40)
+        XCTAssertTrue(payment.extractionEvidence?.selectionReason?.contains("signo ausente") == true)
+        XCTAssertEqual(FinanceStore.reconcileStatementForTesting(
+            kind: .card, summary: snapshot.summary, movements: snapshot.movements
+        ).status, .valid)
+    }
+
     func testVisionFallbackRecoversDigitsRowsAndIndependentControls() throws {
         let fixtures: [OCRObservationFixture] = [
             .init(page: 0, text: "Tarjeta de crédito RappiCard", x: 0.05, y: 0.95, width: 0.40, confidence: 0.98),
