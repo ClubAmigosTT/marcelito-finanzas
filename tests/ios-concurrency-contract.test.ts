@@ -121,8 +121,18 @@ test("Rappi repite OCR con foco numérico cuando la fuente pierde dígitos", asy
   assert.match(source, /numericPasses\.max/);
   assert.match(source, /for token in numericTokens\(from: recovery\)/);
   assert.match(source, /let recoveryImages = \[numericImage, enhancedImage\(from: numericImage\)\]/);
+  assert.match(source, /let shouldRecoverNumeric = pageIndex == 0 \|\| currentNumericCount < 6/);
   assert.match(source, /currentNumericCount < 6/);
   assert.match(source, /let currentNumericCount = numericEvidenceCount\(selectedObservations\)/);
+});
+
+test("Rappi recupera periodos cuando Vision pierde separadores o el conector", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /let broadDatePattern =/);
+  assert.match(source, /func formattedCycle\(_ first: Date, _ second: Date\)/);
+  assert.match(source, /let movementMarker = \[/);
+  assert.match(source, /if let periodRange = cover\.range\(of: "periodo"\)/);
+  assert.match(source, /bestCycle\(in: String\(tail\.prefix\(260\)\)\)/);
 });
 
 test("una capa de texto no conciliada fuerza una recuperación visual", async () => {

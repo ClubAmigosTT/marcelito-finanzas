@@ -11,7 +11,7 @@ const settingsPath = new URL("../apps/ios/Cauce/Settings.swift", import.meta.url
 test("el lector nativo separa diagnóstico de libro operativo", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /var rowDiagnostics: \[OCRRowDiagnostic\]\? = nil/);
-  assert.match(source, /static let readerVersion = "ios-reader-deterministic-2026\.09\.12\.13"/);
+  assert.match(source, /static let readerVersion = "ios-reader-deterministic-2026\.09\.12\.14"/);
   assert.match(source, /let canonicalFresh = Self\.shouldPersistCanonicalRowsForTesting/);
   assert.match(source, /movements\.insert\(contentsOf: canonicalFresh\.reversed\(\), at: 0\)/);
   assert.match(source, /rowDiagnostics: extraction\.rowDiagnostics/);

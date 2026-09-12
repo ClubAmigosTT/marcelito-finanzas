@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.13"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.14"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -5492,7 +5492,14 @@ final class FinanceStore {
                     // more than this threshold, so the extra pass stays
                     // bounded to pages that need it.
                     let currentNumericCount = numericEvidenceCount(selectedObservations)
-                    if currentNumericCount < 6 {
+                    // The cover page is the authoritative source for the
+                    // period and financial controls. It can contain plenty
+                    // of unrelated numbers (account, CAT, payment examples)
+                    // while still losing the two dates that identify the
+                    // statement. Always run the numeric pass on page 0;
+                    // movement pages keep the cheaper sparse-evidence gate.
+                    let shouldRecoverNumeric = pageIndex == 0 || currentNumericCount < 6
+                    if shouldRecoverNumeric {
                         let numericImage = render(page, longEdge: 3_200) ?? selectedImage
                         let recoveryImages = [numericImage, enhancedImage(from: numericImage)].compactMap { $0 }
                         var recoveredTokens: [OCRObservation] = []
@@ -9737,6 +9744,68 @@ final class FinanceStore {
             formatter.calendar = Calendar(identifier: .gregorian)
             formatter.dateFormat = "dd/MM/yyyy"
             return [first, second].map { formatter.string(from: $0) }.joined(separator: " - ")
+        }
+
+        // Vision can preserve the word “Periodo” but drop the connector
+        // (“al”), or preserve the two dates as separate tokens. It can also
+        // return the dates with spaces (`22 jun 2026`) instead of hyphens.
+        // Recover only a pair that looks like a statement cycle and only
+        // from the cover, before the movement table. This avoids pairing the
+        // cutoff date with the payment deadline or a transaction date.
+        func formattedCycle(_ first: Date, _ second: Date) -> (String, Int)? {
+            guard first <= second else { return nil }
+            let calendar = Calendar(identifier: .gregorian)
+            let days = calendar.dateComponents([.day], from: first, to: second).day ?? 0
+            guard (25...35).contains(days) else { return nil }
+            let formatter = DateFormatter()
+            formatter.locale = Locale(identifier: "es_MX")
+            formatter.calendar = calendar
+            formatter.dateFormat = "dd/MM/yyyy"
+            return ([first, second].map { formatter.string(from: $0) }.joined(separator: " - "), abs(days - 30))
+        }
+
+        let broadDatePattern = #"(?i)(?<!\d)(?:\d{1,2}\s*[-/]\s*(?:[a-z]{3,12}|\d{1,2})\s*[-/]\s*\d{2,4}|\d{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+\d{2,4}|\d{4}\s*[-/]\s*\d{1,2}\s*[-/]\s*\d{1,2})(?!\d)"#
+        func dates(in value: String) -> [Date] {
+            guard let regex = try? NSRegularExpression(pattern: broadDatePattern) else { return [] }
+            let range = NSRange(value.startIndex..<value.endIndex, in: value)
+            return regex.matches(in: value, range: range).compactMap { match in
+                guard let valueRange = Range(match.range, in: value) else { return nil }
+                return parseDate(String(value[valueRange]))
+            }
+        }
+
+        let movementMarker = [
+            "cargos, abonos y compras regulares",
+            "desglose de movimientos"
+        ].compactMap { normalized.range(of: $0)?.lowerBound }.min() ?? normalized.endIndex
+        let cover = String(normalized[..<movementMarker])
+
+        func bestCycle(in value: String) -> String? {
+            let candidates = dates(in: value)
+            guard candidates.count >= 2 else { return nil }
+            var best: (label: String, score: Int)?
+            for firstIndex in 0..<(candidates.count - 1) {
+                for secondIndex in (firstIndex + 1)..<candidates.count {
+                    guard let cycle = formattedCycle(candidates[firstIndex], candidates[secondIndex]) else { continue }
+                    if best == nil || cycle.1 < best!.score {
+                        best = (cycle.0, cycle.1)
+                    }
+                }
+            }
+            return best?.label
+        }
+
+        // Prefer dates close to the explicit “Periodo” anchor. This handles
+        // an OCR result such as `Periodo 22 jun 2026 21 jul 2026` while
+        // keeping the fallback bounded to the same cover-page block.
+        if let periodRange = cover.range(of: "periodo") {
+            let tail = String(cover[periodRange.upperBound...])
+            if let inferred = bestCycle(in: String(tail.prefix(260))) {
+                return inferred
+            }
+        }
+        if let inferred = bestCycle(in: cover) {
+            return inferred
         }
         return "Periodo no identificado"
     }
