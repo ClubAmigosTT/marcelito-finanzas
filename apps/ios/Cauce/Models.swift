@@ -715,7 +715,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.11.10"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.11"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -1076,6 +1076,39 @@ final class FinanceStore {
             )
         }
         return parseBBVAOCRResult(observations, fileName: fileName).columnsCalibrated
+    }
+
+    /// Runs Rappi's production OCR-text reconstruction and issuer parser
+    /// against Vision-like observations. Printed signs and independent
+    /// statement controls remain the acceptance proof.
+    static func rappiOCRSnapshotForTesting(
+        _ fixtures: [OCRObservationFixture],
+        fileName: String = "rappi.pdf"
+    ) -> ReaderParseSnapshot {
+        let observations = fixtures.map { fixture in
+            OCRObservation(
+                page: fixture.page,
+                text: fixture.text,
+                boundingBox: CGRect(x: fixture.x, y: fixture.y,
+                                    width: fixture.width, height: fixture.height),
+                confidence: fixture.confidence
+            )
+        }
+        let text = ocrText(from: observations)
+        let detection = sourceDetection(from: text, fileName: fileName)
+        let source = detection.source
+        let confidenceByPage = Dictionary(grouping: observations, by: { $0.page + 1 })
+            .mapValues { $0.map(\.confidence).min() ?? 0 }
+        return ReaderParseSnapshot(
+            sourceDetection: detection,
+            source: source,
+            accountKey: maskedAccountKey(from: text, source: source),
+            kind: statementKind(from: text, source: source),
+            period: periodLabel(from: text, fileName: fileName),
+            movements: parseRappiText(text, evidenceMethod: "vision-ocr",
+                                      confidenceByPage: confidenceByPage),
+            summary: summary(from: text, source: source)
+        )
     }
 
     /// Runs the Amex visual row reader against normalized Vision-like
@@ -4302,8 +4335,9 @@ final class FinanceStore {
         let shouldAttemptOCR = allowOCR && !textLayerReconciles
         // Keep the legacy quality-gate variable intact for bank recovery,
         // but never invoke Vision for a selectable American Express PDF.
-        let ocrObservations = shouldAttemptOCR && !selectableAmex && selectableSource != "Rappi"
-            ? Self.ocrObservations(from: document)
+        let rappiPages = selectableSource == "Rappi" ? Self.rappiOCRPageIndexes(in: document) : nil
+        let ocrObservations = shouldAttemptOCR && !selectableAmex
+            ? Self.ocrObservations(from: document, pageIndexes: rappiPages)
             : []
         let ocrText = Self.ocrText(from: ocrObservations)
         let usedOCR = shouldAttemptOCR && !ocrObservations.isEmpty
@@ -4344,7 +4378,16 @@ final class FinanceStore {
             pages.reduce(0, +) / Double(pages.count)
         }
 
-        let detectedSourceEvidence = Self.sourceDetection(from: text, fileName: fileName)
+        let ocrSourceEvidence = Self.sourceDetection(from: text, fileName: fileName)
+        // Rappi's embedded font can erase every digit from PDFKit while its
+        // issuer header remains trustworthy. If Vision recovers the financial
+        // pages but misses the logo wording, retain the verified issuer from
+        // the selectable header; amounts still require exact reconciliation.
+        let selectableSourceEvidence = Self.sourceDetection(from: extractedText, fileName: fileName)
+        let detectedSourceEvidence = ocrSourceEvidence.status == .verified
+            ? ocrSourceEvidence
+            : (usedOCR && selectableSourceEvidence.status == .verified
+                ? selectableSourceEvidence : ocrSourceEvidence)
         // Issuer and statement kind are document facts. User overrides are
         // intentionally ignored so they cannot unlock a rejected import.
         _ = cleanedSourceOverride
@@ -4385,6 +4428,18 @@ final class FinanceStore {
             movementColumnsCalibrated = bbvaResult.columnsCalibrated
             rowDiagnostics = bbvaResult.diagnostics
             parsedCandidates = bbvaResult.movements
+        } else if usedOCR, source == "Rappi" {
+            let confidenceByPage = Dictionary(grouping: ocrObservations, by: { $0.page + 1 })
+                .mapValues { $0.map(\.confidence).min() ?? 0 }
+            parsedCandidates = Self.parseRappiText(
+                text,
+                evidenceMethod: "vision-ocr",
+                confidenceByPage: confidenceByPage
+            )
+            rowDiagnostics = Self.rowDiagnostics(
+                for: parsedCandidates,
+                fallbackReason: "RappiCard: importe firmado recuperado visualmente y conciliado con controles independientes"
+            )
         } else if usedOCR {
             parsedCandidates = []
         } else if source == "Rappi" {
@@ -5077,7 +5132,34 @@ final class FinanceStore {
         }
     }
 
-    private static func ocrObservations(from document: PDFDocument) -> [OCRObservation] {
+    private static func rappiOCRPageIndexes(in document: PDFDocument) -> Set<Int> {
+        var result: Set<Int> = document.pageCount > 0 ? [0] : []
+        var insideRegularMovements = false
+        for index in 0..<document.pageCount {
+            let text = (document.page(at: index)?.string ?? "")
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+            if text.contains("cargos, abonos y compras regulares") {
+                insideRegularMovements = true
+            }
+            if insideRegularMovements { result.insert(index) }
+            if insideRegularMovements && (
+                text.contains("total de cargos")
+                    || text.contains("cargos no reconocidos")
+                    || text.contains("atencion de quejas")
+            ) {
+                insideRegularMovements = false
+            }
+        }
+        // If the damaged text layer lost the table marker too, OCR all pages.
+        // The issuer-specific parser still confines rows to the regular table.
+        return result.count > 1 ? result : Set(0..<document.pageCount)
+    }
+
+    private static func ocrObservations(
+        from document: PDFDocument,
+        pageIndexes: Set<Int>? = nil
+    ) -> [OCRObservation] {
         var observations: [OCRObservation] = []
         let ciContext = CIContext(options: [.useSoftwareRenderer: false])
 
@@ -5129,6 +5211,7 @@ final class FinanceStore {
                 // dictionary.
                 request.customWords = [
                     "SANTANDER", "BBVA", "BANCOMER", "AMERICAN EXPRESS", "AMEX",
+                    "RAPPICARD", "RAPPI", "PAGO POR SPEI", "BONIFICACIÓN CON CASHBACK",
                     "DEPÓSITOS", "RETIROS", "CARGOS", "ABONOS", "SALDO",
                     "DESCRIPCIÓN", "DETALLE", "MOVIMIENTOS", "FECHA",
                     "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE",
@@ -5220,6 +5303,7 @@ final class FinanceStore {
         }
 
         for pageIndex in 0..<document.pageCount {
+            if let pageIndexes, !pageIndexes.contains(pageIndex) { continue }
             autoreleasepool {
                 guard let page = document.page(at: pageIndex) else { return }
                 guard let cgImage = render(page, longEdge: 2_400) else { return }
@@ -9430,7 +9514,11 @@ final class FinanceStore {
 
     /// Deliberately confined to the regular transaction table. The claims,
     /// cashback rewards and fiscal pages are not additional ledger movements.
-    private static func parseRappiText(_ text: String) -> [Movement] {
+    private static func parseRappiText(
+        _ text: String,
+        evidenceMethod: String = "pdf-text",
+        confidenceByPage: [Int: Double] = [:]
+    ) -> [Movement] {
         var rows: [Movement] = []
         var table = false
         var page: Int? = nil
@@ -9456,8 +9544,9 @@ final class FinanceStore {
             rows.append(Movement(date: date, title: title, account: "Rappi",
                 category: category(for: title, flow: flow), amount: -amount, flow: flow,
                 kind: kind, foreignCurrency: pending.localizedCaseInsensitiveContains("compra en el extranjero"),
-                extractionEvidence: MovementExtractionEvidence(method: "pdf-text", page: rowPage,
-                    confidence: 1, sourceText: pending, selectedColumn: "MONTO MXN",
+                extractionEvidence: MovementExtractionEvidence(method: evidenceMethod, page: rowPage,
+                    confidence: evidenceMethod == "vision-ocr" ? (confidenceByPage[rowPage ?? 0] ?? 0) : 1,
+                    sourceText: pending, selectedColumn: "MONTO MXN",
                     selectedAmount: abs(amount), selectionReason: "RappiCard: importe firmado; fechas operación y cargo conservadas en evidencia")))
         }
         for raw in text.components(separatedBy: .newlines) {
@@ -10238,8 +10327,9 @@ final class FinanceStore {
     /// become an identity.
     private static func maskedAccountKey(from text: String, source: String) -> String? {
         if source == "Rappi",
-           let digits = rappiCapture(#"numero de cuenta\s*:?\s*(\d{20})\b"#, in: text) {
-            return "rappi:\(digits.suffix(4))"
+           let raw = rappiCapture(#"numero de cuenta\s*:?\s*([0-9][0-9\s-]{18,30})"#, in: text) {
+            let digits = raw.filter(\.isNumber)
+            if digits.count == 20 { return "rappi:\(digits.suffix(4))" }
         }
         let normalized = text.folding(
             options: [.diacriticInsensitive, .caseInsensitive],

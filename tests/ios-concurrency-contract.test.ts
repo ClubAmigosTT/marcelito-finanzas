@@ -174,7 +174,7 @@ test("Amex queda aislado en el parser nativo y no cae a Vision", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /private static func parseAmexText\(_ text: String, fileName: String, diagnosticSink:/);
   assert.match(source, /let selectableAmex = selectableSource\.localizedCaseInsensitiveCompare\("Amex"\)/);
-  assert.match(source, /let ocrObservations = shouldAttemptOCR && !selectableAmex && selectableSource != "Rappi"\s*\?/);
+  assert.match(source, /let ocrObservations = shouldAttemptOCR && !selectableAmex\s*\?/);
   assert.match(source, /parsedCandidates = Self\.parseAmexText\(text, fileName: fileName, diagnosticSink:/);
 });
 
@@ -185,6 +185,9 @@ test("RappiCard usa tabla dedicada y concilia abonos además de cargos", async (
   assert.match(source, /compare\("pagos y abonos", extracted: payments \+ credits/);
   assert.match(source, /opening \+ charges - payments - credits/);
   assert.match(source, /result\.msiMonthlyLoad == 0, result\.msiPending == 0/);
+  assert.match(source, /let rappiPages = selectableSource == "Rappi" \? Self\.rappiOCRPageIndexes/);
+  assert.match(source, /else if usedOCR, source == "Rappi"/);
+  assert.match(source, /evidenceMethod: "vision-ocr"/);
 });
 
 test("Santander usa rectángulo y columnas fijas de la tabla", async () => {
