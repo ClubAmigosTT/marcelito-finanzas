@@ -144,6 +144,21 @@ final class RappiReaderTests: XCTestCase {
         ).status, .valid)
     }
 
+    func testRappiOCRNormalizesRepeatedThousandsSeparatorsInControls() throws {
+        let text = fixture
+            .replacingOccurrences(of: "COMERCIO EJEMPLO +$50.00", with: "COMERCIO EJEMPLO +$500.00")
+            .replacingOccurrences(of: "Cargos regulares (no a meses) + $100.00", with: "Cargos regulares (no a meses) + $1.000.00")
+            .replacingOccurrences(of: "Saldo deudor total11 $150.00", with: "Saldo deudor total11 $1.050.00")
+            .replacingOccurrences(of: "Total de cargos +$100.00", with: "Total de cargos +$1.000.00")
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "rappi-ocr.pdf")
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .purchase }.map(\.amount), [-500, -500])
+        XCTAssertEqual(snapshot.summary?.newCharges, 1_000)
+        XCTAssertEqual(snapshot.summary?.statementBalance, 1_050)
+        XCTAssertEqual(FinanceStore.reconcileStatementForTesting(
+            kind: .card, summary: snapshot.summary, movements: snapshot.movements
+        ).status, .valid)
+    }
+
     func testVisionFallbackRecoversDigitsRowsAndIndependentControls() throws {
         let fixtures: [OCRObservationFixture] = [
             .init(page: 0, text: "Tarjeta de crédito RappiCard", x: 0.05, y: 0.95, width: 0.40, confidence: 0.98),

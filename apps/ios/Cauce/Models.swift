@@ -9344,6 +9344,39 @@ final class FinanceStore {
         return Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX"))
     }
 
+    /// Rappi's OCR sometimes changes a thousands comma into a decimal point,
+    /// yielding values such as `2.886.76` instead of `2,886.76`.  The issuer
+    /// prints currency with exactly two final decimals, so normalize only the
+    /// last separator and discard earlier grouping separators.  This helper
+    /// is intentionally scoped to Rappi and never guesses a value without a
+    /// two-digit fractional part.
+    private static func parseRappiMoney(_ value: String) -> Decimal? {
+        var cleaned = value
+            .replacingOccurrences(of: "$", with: "")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+            .replacingOccurrences(of: " ", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let sign: String
+        if cleaned.first == "+" || cleaned.first == "-" {
+            sign = String(cleaned.removeFirst())
+        } else {
+            sign = ""
+        }
+        guard let separator = cleaned.lastIndex(where: { $0 == "." || $0 == "," }) else {
+            return Decimal(string: sign + cleaned, locale: Locale(identifier: "en_US_POSIX"))
+        }
+        let fraction = cleaned[cleaned.index(after: separator)...].filter(\.isNumber)
+        guard fraction.count == 2 else {
+            return parseAmount(sign + cleaned)
+        }
+        let integer = cleaned[..<separator].filter(\.isNumber)
+        guard !integer.isEmpty else { return nil }
+        return Decimal(
+            string: sign + String(integer) + "." + String(fraction),
+            locale: Locale(identifier: "en_US_POSIX")
+        )
+    }
+
     private static func cleanMerchantTitle(_ value: String) -> String {
         value
             .replacingOccurrences(
@@ -9605,10 +9638,10 @@ final class FinanceStore {
             // those auxiliary amounts can never become the ledger amount.
             // The only permitted unsigned fallback is the explicit SPEI
             // payment case, where Vision can drop the minus glyph.
-            let money = rappiCapture(#"([+-]\s*\$\s*[\d,]+\.\d{2})"#, in: pending)
-                ?? (payment ? rappiCapture(#"(\$\s*[\d,]+\.\d{2})"#, in: pending) : nil)
+            let money = rappiCapture(#"([+-]\s*\$\s*[\d,.\s]+[.,]\d{2})"#, in: pending)
+                ?? (payment ? rappiCapture(#"(\$\s*[\d,.\s]+[.,]\d{2})"#, in: pending) : nil)
             guard let money,
-                  let parsedAmount = Decimal(string: money.filter { "0123456789.-+".contains($0) }, locale: Locale(identifier: "en_US_POSIX")),
+                  let parsedAmount = parseRappiMoney(money),
                   parsedAmount != 0 else { return }
             let hasExplicitSign = money.trimmingCharacters(in: .whitespacesAndNewlines)
                 .first.map { $0 == "+" || $0 == "-" } ?? false
@@ -9690,9 +9723,9 @@ final class FinanceStore {
                 .map { NSRegularExpression.escapedPattern(for: $0) }
                 .joined(separator: #"[^a-z0-9]{0,3}"#)
             let pattern = "(?is)" + labelPattern
-                + #"[^$]{0,120}\$\s*([\d,]+\.\d{2})"#
+                + #"[^$]{0,120}\$\s*([\d,.\s]+[.,]\d{2})"#
             guard let raw = rappiCapture(pattern, in: text) else { return nil }
-            return Decimal(string: raw.replacingOccurrences(of: ",", with: ""), locale: Locale(identifier: "en_US_POSIX"))
+            return parseRappiMoney(raw)
         }
         var result = StatementSummaryRecord()
         result.previousBalance = money("adeudo del periodo anterior")
