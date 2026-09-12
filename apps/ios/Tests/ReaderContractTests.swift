@@ -732,6 +732,30 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.period, "22/07/2026 - 21/08/2026")
     }
 
+    func testRappiPeriodRecoveryChecksOCRCoverAfterSelectableMovementMarker() {
+        // PDFKit may expose the selectable movement table before the OCR
+        // stream is appended. The cover fallback must still see the OCR
+        // cutoff and day-count controls instead of stopping at that earlier
+        // movement marker.
+        let period = FinanceStore.rappiPeriodLabelFromEvidenceForTesting(
+            selectableText: """
+            Estado de cuenta Tarjeta de crédito RappiCard
+            DESGLOSE DE MOVIMIENTOS
+            CARGOS, ABONOS Y COMPRAS REGULARES
+            """,
+            recognizedText: """
+            RappiCard
+            TU PAGO REQUERIDO ESTE PERIODO
+            Fecha de corte 21-jul-2026
+            Número de días en el periodo 29 días
+            DESGLOSE DE MOVIMIENTOS
+            """,
+            fileName: "Rappi Julio .pdf"
+        )
+
+        XCTAssertEqual(period, "22/06/2026 - 21/07/2026")
+    }
+
     func testBBVAPeriodUsesPrintedPeriodInsteadOfFilenameFallback() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
             text: """
