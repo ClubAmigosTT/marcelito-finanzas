@@ -863,7 +863,7 @@ final class FinanceStore {
             summaryText = text
         }
         let summary = summary(from: summaryText, source: source)
-        let period = periodLabel(from: text, fileName: fileName)
+        let period = periodLabel(from: text, fileName: fileName, sourceHint: source)
         return ReaderParseSnapshot(
             sourceDetection: detection,
             source: source,
@@ -1162,7 +1162,7 @@ final class FinanceStore {
             source: source,
             accountKey: maskedAccountKey(from: text, source: source),
             kind: statementKind(from: text, source: source),
-            period: periodLabel(from: text, fileName: fileName),
+            period: periodLabel(from: text, fileName: fileName, sourceHint: source),
             movements: parseRappiText(text, evidenceMethod: "vision-ocr",
                                       confidenceByPage: confidenceByPage),
             summary: summary(from: text, source: source)
@@ -4529,7 +4529,7 @@ final class FinanceStore {
         }
         let period = source == "BBVA"
             ? (Self.bbvaDocumentPeriod(document) ?? "Periodo no identificado")
-            : Self.periodLabel(from: text, fileName: fileName)
+            : Self.periodLabel(from: text, fileName: fileName, sourceHint: source)
         let ocrRejectedRowsNeedReview = usedOCR && rowDiagnostics.contains { !$0.accepted }
         let ocrFallbackNeedsReview = usedOCR && (
             ocrRejectedRowsNeedReview
@@ -10364,12 +10364,17 @@ final class FinanceStore {
         return hasValue ? summary : nil
     }
 
-    private static func periodLabel(from text: String, fileName: String) -> String {
+    private static func periodLabel(from text: String, fileName: String, sourceHint: String? = nil) -> String {
         let normalizedForRappi = text.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
             locale: Locale(identifier: "es_MX")
         )
-        let isRappi = sourceDetection(from: text, fileName: "").source == "Rappi"
+        // The OCR pass can lose the issuer logo while the selectable header
+        // still proves the document is Rappi. Production already carries
+        // that verified issuer forward; use the same hint here so period
+        // extraction does not silently fall through to a generic parser.
+        let detectedSource = sourceHint ?? sourceDetection(from: text, fileName: fileName).source
+        let isRappi = detectedSource == "Rappi"
             || (normalizedForRappi.contains("rappicard") && normalizedForRappi.contains("periodo"))
         if isRappi {
             return rappiPeriodLabel(from: text)

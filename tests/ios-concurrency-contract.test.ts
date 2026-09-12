@@ -134,6 +134,8 @@ test("Rappi repite OCR con foco numérico cuando la fuente pierde dígitos", asy
 
 test("Rappi recupera periodos cuando Vision pierde separadores o el conector", async () => {
   const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /sourceHint: String\? = nil/);
+  assert.match(source, /let detectedSource = sourceHint \?\? sourceDetection\(from: text, fileName: fileName\)\.source/);
   assert.match(source, /let broadDatePattern =/);
   assert.match(source, /func formattedCycle\(_ first: Date, _ second: Date\)/);
   assert.match(source, /let movementMarker = \[/);

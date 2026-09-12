@@ -97,6 +97,19 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(snapshot.period, "22/06/2026 - 21/07/2026")
     }
 
+    func testPeriodUsesVerifiedIssuerHintWhenVisionDropsRappiHeader() {
+        let text = fixture
+            .replacingOccurrences(of: "Tarjeta de crédito RappiCard", with: "Estado de cuenta")
+            .replacingOccurrences(of: "Banco Mercantil del Norte Grupo Financiero Banorte", with: "Resumen de cargos")
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "estado-importado.pdf",
+            sourceHint: "Rappi"
+        )
+        XCTAssertEqual(snapshot.source, "Rappi")
+        XCTAssertEqual(snapshot.period, "22/07/2026 - 21/08/2026")
+    }
+
     func testMissingCreditFailsEvenWhenChargesMatch() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(text: fixture, fileName: "example.pdf")
         let rows = snapshot.movements.filter { $0.kind != .refund }
