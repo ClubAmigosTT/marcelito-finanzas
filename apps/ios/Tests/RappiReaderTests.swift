@@ -116,6 +116,29 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: rows).status, .invalid)
     }
 
+    func testRepeatedOCRAmountFragmentsDoNotConcatenateControls() {
+        let text = fixture
+            .replacingOccurrences(of: "Cargos regulares (no a meses) + $100.00", with: "Cargos regulares (no a meses) + $100.00 100.00")
+            .replacingOccurrences(of: "Crédito disponible $850.00", with: "Crédito disponible $850.00 850.00")
+            .replacingOccurrences(of: "COMERCIO EJEMPLO +$50.00", with: "COMERCIO EJEMPLO +$50.00 50.00")
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "example.pdf")
+        XCTAssertEqual(snapshot.summary?.newCharges, 100)
+        XCTAssertEqual(snapshot.summary?.creditAvailable, 850)
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements).status, .valid)
+    }
+
+    func testMerchantRFCDoesNotRemovePurchasesFromReconciliation() {
+        let text = fixture.replacingOccurrences(of: "COMERCIO EJEMPLO", with: "COMERCIO EJEMPLO; RFC: AAA010101AA1")
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "example.pdf")
+        XCTAssertEqual(snapshot.movements.filter { $0.title == "comercio ejemplo" }.count, 2)
+        XCTAssertTrue(snapshot.movements.first?.extractionEvidence?.sourceText?.contains("RFC:") == true)
+        let result = FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements)
+        XCTAssertEqual(result.extractedMovementCount, 4)
+        XCTAssertEqual(result.extractedChargeTotal, 100)
+        XCTAssertEqual(result.status, .valid)
+    }
+
     func testSeparateOperationAndPostingDateLinesKeepEveryMovement() {
         let text = fixture.replacingOccurrences(
             of: #"(\d{4}-\d{2}-\d{2}) (\d{4}-\d{2}-\d{2}) "#,
