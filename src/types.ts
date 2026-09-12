@@ -248,7 +248,7 @@ export type ImportResult = {
   /** Exact reader revision that produced this extraction. */
   readerVersion?: string;
   /** Issuer-specific deterministic parser used for the import. */
-  parserId?: "santander-checking-v1" | "bbva-movements-v1" | "amex-operations-v1";
+  parserId?: "santander-checking-v1" | "bbva-movements-v1" | "amex-operations-v1" | "rappicard-operations-v1";
   /** Exact statement section from which movement rows were accepted. */
   sourceSection?: string;
   /** Proveedor de extracción; `multimodal` solo identifica una importación legacy. */

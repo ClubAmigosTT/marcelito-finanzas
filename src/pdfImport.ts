@@ -6,7 +6,7 @@ import { parseDeterministicStatement, reconcileExactly } from "./issuerParsers/i
 import type { DocumentLayout, DocumentLayoutLine, DocumentLayoutPage } from "./issuerParsers/types.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-deterministic-2026.09.07.1";
+export const PDF_READER_VERSION = "web-reader-deterministic-2026.09.12.2";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
@@ -150,6 +150,15 @@ export function detectSourceEvidence(text: string, fileName: string): SourceDete
   // marker can win; otherwise leave the document for manual review.
   const santanderInstitutional = /grupo\s+financiero\s+santander|banco\s+santander\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple|santander\.com/.test(institutional);
   const bbvaInstitutional = /grupo\s+financiero\s+bbva|bbva\.mx|bba830831lj2|bbva\s+m(?:e|é)xico[^\n]{0,140}institucion\s+de\s+banca\s+multiple/.test(institutional);
+  // RappiCard statements are issued by Banco Mercantil del Norte (Banorte),
+  // so the legal issuer name is expected to coexist with the product name.
+  // The product marker is the account identity the app must preserve; letting
+  // the generic bank list win here sends the statement through the wrong
+  // account/parser path and loses the Rappi period and card semantics.
+  const rappiCardInstitutional = /rappi\s*card|tarjeta\s+de\s+credito\s+rappi/.test(institutional);
+  if (rappiCardInstitutional) {
+    return result("Rappi", 0.998, ["encabezado institucional RappiCard"]);
+  }
   // Two competing legal issuer markers are not evidence for either bank.
   // Keep the document unknown instead of allowing the later standalone-brand
   // fallback to guess BBVA (or Santander) and select the wrong parser.
@@ -287,11 +296,18 @@ export function detectPeriod(text: string, fileName = "") {
   // filename. BBVA prints "Periodo DEL dd/mm/yyyy AL dd/mm/yyyy" while Amex
   // uses a written month. A bounded range also prevents the following
   // "Fecha de corte" field from leaking into the period label.
+  // RappiCard prints named months with hyphens (22-jun-2026 al 21-jul-2026).
+  // Match this before the broad fallback: PDF.js can place an earlier
+  // marketing/header occurrence of “PERIODO” on the preceding visual line,
+  // and a whitespace-greedy fallback would otherwise return the address in
+  // front of the real date range.
+  const namedHyphenRange = normalized.match(/period(?:o|os)\s*(?:de\s+facturacion)?\s*[:-]?\s*((?:del\s+)?\d{1,2}[./-][a-z]{3,12}[./-]20\d{2}\s+(?:al|a|-)\s+\d{1,2}[./-][a-z]{3,12}[./-]20\d{2})/i);
+  if (namedHyphenRange?.[1]) return namedHyphenRange[1].replace(/^del\s+/i, "").replace(/\s+/g, " ").trim();
   const numericRange = normalized.match(/period(?:o|os)\s*(?:de\s+facturacion)?\s*[:-]?\s*((?:del\s+)?\d{1,2}[./-]\d{1,2}[./-]20\d{2}\s+(?:al|a|-)\s+\d{1,2}[./-]\d{1,2}[./-]20\d{2})/i);
   if (numericRange?.[1]) return numericRange[1].replace(/^del\s+/i, "").replace(/\s+/g, " ").trim();
   const writtenRange = normalized.match(/period(?:o|os)\s*(?:de\s+facturacion)?\s*[:-]?\s*((?:del\s+)?\d{1,2}\s+de\s+[a-z]+\s+(?:de\s+)?(?:20\d{2}\s+)?(?:al|a|-)\s+\d{1,2}\s+de\s+[a-z]+\s+(?:de\s+)?20\d{2})/i);
   if (writtenRange?.[1]) return writtenRange[1].replace(/^del\s+/i, "").replace(/\s+/g, " ").trim();
-  const periodMatch = normalized.match(/period(?:o|os)\s*(?:de\s+facturacion)?\s*[:-]?\s*([^\n]{8,80})/i);
+  const periodMatch = normalized.match(/period(?:o|os)[ \t]*(?:de[ \t]+facturacion)?[ \t]*[:-]?[ \t]*([^\n]{8,80})/i);
   if (periodMatch?.[1]) return periodMatch[1]
     .replace(/\s+(?:fecha\s+de\s+corte|dias\s+del\s+periodo).*$/i, "")
     .replace(/^del\s+/i, "")
@@ -1500,7 +1516,7 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   const kind = detectStatementKind(text, source);
   onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
-  const deterministic = source === "Santander" || source === "BBVA" || source === "Amex"
+  const deterministic = source === "Santander" || source === "BBVA" || source === "Amex" || source === "Rappi"
     ? parseDeterministicStatement({ source, fileName: file.name, mode, text, layout })
     : undefined;
   const parsed = deterministic?.transactions ?? [];

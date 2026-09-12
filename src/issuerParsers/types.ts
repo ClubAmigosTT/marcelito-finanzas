@@ -21,7 +21,7 @@ export type DocumentLayout = {
   pages: DocumentLayoutPage[];
 };
 
-export type DeterministicParserId = "santander-checking-v1" | "bbva-movements-v1" | "amex-operations-v1";
+export type DeterministicParserId = "santander-checking-v1" | "bbva-movements-v1" | "amex-operations-v1" | "rappicard-operations-v1";
 
 export type DeterministicParseInput = {
   source: StatementSource;
