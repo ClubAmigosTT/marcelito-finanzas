@@ -4,6 +4,9 @@ import SwiftUI
 struct LedgerBlockerDetailsView: View {
     @Environment(FinanceStore.self) private var store
     var statementID: UUID? = nil
+    @State private var diagnosingID: UUID?
+    @State private var diagnosticURLs: [UUID: URL] = [:]
+    @State private var diagnosticError: String?
 
     private var statements: [StatementRecord] {
         store.blockingStatements.filter { statementID == nil || $0.id == statementID }
@@ -57,6 +60,27 @@ struct LedgerBlockerDetailsView: View {
                     NavigationLink("Revisar cifras y releer") { StatementSummaryEditor(statement: statement) }
                     if store.statementFileURL(for: statement) != nil {
                         NavigationLink("Abrir PDF de origen") { StatementDocumentView(statement: statement) }
+                        Button {
+                            guard let url = store.statementFileURL(for: statement) else { return }
+                            diagnosingID = statement.id
+                            diagnosticURLs[statement.id] = nil
+                            Task {
+                                defer { diagnosingID = nil }
+                                do { diagnosticURLs[statement.id] = try await PDFExtractionDiagnostic.export(from: url) }
+                                catch { diagnosticError = error.localizedDescription }
+                            }
+                        } label: {
+                            HStack {
+                                Text(diagnosingID == statement.id ? "Preparando diagnóstico…" : "Diagnosticar este PDF")
+                                if diagnosingID == statement.id { ProgressView() }
+                            }
+                        }
+                        .disabled(diagnosingID != nil)
+                        if let url = diagnosticURLs[statement.id] {
+                            Text("Incluye el texto del PDF y datos financieros. Se guarda localmente; compártelo solo para revisar este problema.")
+                                .font(.caption).foregroundStyle(.secondary)
+                            ShareLink("Compartir diagnóstico de extracción", item: url)
+                        }
                     } else {
                         Text("El PDF original no está disponible en este dispositivo.").font(.caption)
                     }
@@ -112,6 +136,9 @@ struct LedgerBlockerDetailsView: View {
         }
         .navigationTitle("Detalle del bloqueo")
         .navigationBarTitleDisplayMode(.inline)
+        .alert("No se pudo generar el diagnóstico", isPresented: Binding(
+            get: { diagnosticError != nil }, set: { if !$0 { diagnosticError = nil } }
+        )) { Button("Aceptar") { diagnosticError = nil } } message: { Text(diagnosticError ?? "") }
     }
 
     private func movementLabel(_ movement: Movement) -> some View {
