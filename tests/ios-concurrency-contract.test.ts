@@ -144,6 +144,9 @@ test("Rappi recupera periodos cuando Vision pierde separadores o el conector", a
   assert.match(source, /let detectedSource = sourceHint \?\? sourceDetection\(from: text, fileName: fileName\)\.source/);
   assert.match(source, /let broadDatePattern =/);
   assert.match(source, /func formattedCycle\(_ first: Date, _ second: Date\)/);
+  assert.match(source, /let cutoffPattern =/);
+  assert.match(source, /let daysPattern =/);
+  assert.match(source, /let periodDays = Int\(String\(cover\[daysRange\]\)\)/);
   assert.match(source, /let movementMarker = \[/);
   assert.match(source, /if let periodRange = cover\.range\(of: "periodo"\)/);
   assert.match(source, /bestCycle\(in: String\(tail\.prefix\(260\)\)\)/);
