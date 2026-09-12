@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.14"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.15"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -5307,7 +5307,7 @@ final class FinanceStore {
 
                 let substringPatterns = (
                     date: try? NSRegularExpression(
-                        pattern: #"(?i)(?<!\d)[0-9OBI]{1,3}\s*[\/\-.]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*\d{2,4})?(?![A-Za-z])"#
+                        pattern: #"(?i)(?<!\d)[0-9OBI]{1,3}(?:\s*[\/\-.]\s*|\s+)(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:(?:\s*[\/\-.]\s*|\s+)\d{2,4})?(?![A-Za-z])"#
                     ),
                     amount: try? NSRegularExpression(
                         pattern: #"(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
@@ -5401,7 +5401,7 @@ final class FinanceStore {
         }
 
         let numericPattern = try? NSRegularExpression(
-            pattern: #"(?i)(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])|(?<!\d)[0-9OBI]{1,3}\s*[\/\-.]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*\d{2,4})?(?![A-Za-z])"#
+            pattern: #"(?i)(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])|(?<!\d)[0-9OBI]{1,3}(?:\s*[\/\-.]\s*|\s+)(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:(?:\s*[\/\-.]\s*|\s+)\d{2,4})?(?![A-Za-z])"#
         )
 
         func numericEvidenceCount(_ pageObservations: [OCRObservation]) -> Int {
