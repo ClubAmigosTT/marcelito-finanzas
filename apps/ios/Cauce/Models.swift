@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.15"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.16"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -5438,6 +5438,43 @@ final class FinanceStore {
             }
         }
 
+        /// A damaged embedded font can make Vision return the components of
+        /// a numeric line as separate observations (`22`, `jun`, `2026`,
+        /// `$`, `13,432.11`) instead of one observation with a date/amount
+        /// substring box. Keep only those small, unambiguous components on
+        /// the Rappi cover so `ocrLines` can rebuild the visual line. The
+        /// issuer parser and reconciliation gate still decide whether the
+        /// reconstructed evidence is acceptable; page numbers and account
+        /// fragments cannot become movements by themselves.
+        func numericComponents(from pageObservations: [OCRObservation]) -> [OCRObservation] {
+            let months = Set([
+                "ene", "enero", "feb", "febrero", "mar", "marzo", "abr", "abril",
+                "may", "mayo", "jun", "junio", "jul", "julio", "ago", "agosto",
+                "sep", "sept", "septiembre", "oct", "octubre", "nov", "noviembre",
+                "dic", "diciembre"
+            ])
+            return pageObservations.compactMap { observation in
+                guard observation.dateBoxes.isEmpty, observation.amountBoxes.isEmpty else { return nil }
+                let raw = observation.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !raw.isEmpty else { return nil }
+                let normalized = raw
+                    .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                    .lowercased()
+                let stripped = normalized.trimmingCharacters(in: .punctuationCharacters)
+                let isNumericPart = stripped.range(of: #"^[0-9OBI]{1,4}$"#, options: .regularExpression) != nil
+                let isMonth = months.contains(stripped)
+                let isConnector = stripped == "al" || stripped == "a" || stripped == "de"
+                let isCurrencyOrSign = raw == "$" || raw == "+" || raw == "-"
+                guard isNumericPart || isMonth || isConnector || isCurrencyOrSign else { return nil }
+                return OCRObservation(
+                    page: observation.page,
+                    text: raw,
+                    boundingBox: observation.boundingBox,
+                    confidence: observation.confidence
+                )
+            }
+        }
+
         func enhancedImage(from cgImage: CGImage) -> CGImage? {
             let input = CIImage(cgImage: cgImage)
             guard let filter = CIFilter(name: "CIColorControls") else { return nil }
@@ -5517,7 +5554,9 @@ final class FinanceStore {
                             if completeRecovery.isEmpty, !recovery.isEmpty {
                                 completeRecovery = recovery
                             }
-                            for token in numericTokens(from: recovery) {
+                            let tokenObservations = numericTokens(from: recovery)
+                                + (pageIndex == 0 ? numericComponents(from: recovery) : [])
+                            for token in tokenObservations {
                                 let key = "\(token.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current))|\(Int((token.centerX * 1_000).rounded()))|\(Int((token.centerY * 1_000).rounded()))"
                                 if !existingKeys.contains(key), recoveredKeys.insert(key).inserted {
                                     recoveredTokens.append(token)
