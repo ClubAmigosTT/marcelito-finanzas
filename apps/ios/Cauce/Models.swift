@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.23"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.24"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -10143,7 +10143,12 @@ final class FinanceStore {
             guard let first = rappiCapture(#"^(\d{4}-\d{2}-\d{2})\s+\d{4}-\d{2}-\d{2}"#, in: pending),
                   let date = parseDate(first),
                   let body = rappiCapture(#"^\d{4}-\d{2}-\d{2}\s+\d{4}-\d{2}-\d{2}\s+(.+?)\s*(?:[+-]?\s*\$|compra en el extranjero)"#, in: pending) else { return }
-            let title = body.trimmingCharacters(in: .whitespacesAndNewlines)
+            // RFC is merchant metadata in this issuer's regular table, not
+            // an administrative row. Keep it in sourceText for inspection.
+            let title = body.replacingOccurrences(
+                of: #"(?i);?\s*\bRFC\s*:\s*[A-Z0-9&Ñ]+"#,
+                with: "", options: .regularExpression
+            ).trimmingCharacters(in: .whitespacesAndNewlines)
             // PDF extraction may split the payment label across lines or
             // insert repeated spaces. Match whole words, not a prefix that
             // would also accept an unrelated merchant such as SPEIStore.
@@ -10155,8 +10160,8 @@ final class FinanceStore {
             // those auxiliary amounts can never become the ledger amount.
             // The only permitted unsigned fallback is the explicit SPEI
             // payment case, where Vision can drop the minus glyph.
-            let money = rappiCapture(#"([+-]\s*\$\s*[\d,.\s]+[.,]\d{2})"#, in: pending)
-                ?? (payment ? rappiCapture(#"(\$\s*[\d,.\s]+[.,]\d{2})"#, in: pending) : nil)
+            let money = rappiCapture(#"([+-]\s*\$\s*"# + rappiMoneyToken + ")", in: pending)
+                ?? (payment ? rappiCapture(#"(\$\s*"# + rappiMoneyToken + ")", in: pending) : nil)
             guard let money,
                   let parsedAmount = parseRappiMoney(money),
                   parsedAmount != 0 else { return }
@@ -10221,6 +10226,10 @@ final class FinanceStore {
         return rows
     }
 
+    // One complete amount only. OCR can repeat a substring after the cents;
+    // consuming arbitrary whitespace/digits joined both readings into billions.
+    private static let rappiMoneyToken = #"(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?!\d)"#
+
     private static func rappiSummary(_ text: String) -> StatementSummaryRecord? {
         // The first-page summary has independent charge and credit totals.
         // Never derive an expected total from the parsed rows themselves.
@@ -10240,7 +10249,7 @@ final class FinanceStore {
                 .map { NSRegularExpression.escapedPattern(for: $0) }
                 .joined(separator: #"[^a-z0-9]{0,3}"#)
             let pattern = "(?is)" + labelPattern
-                + #"[^$]{0,120}\$\s*([\d,.\s]+[.,]\d{2})"#
+                + #"[^$]{0,120}\$\s*("# + rappiMoneyToken + ")"
             guard let raw = rappiCapture(pattern, in: text) else { return nil }
             return parseRappiMoney(raw)
         }
