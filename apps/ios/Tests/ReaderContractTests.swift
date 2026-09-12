@@ -703,6 +703,35 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.period, "del 28 de julio al 27 de agosto de 2026")
     }
 
+    func testRappiPeriodDerivesMissingStartFromPrintedCoverControls() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            Estado de cuenta Tarjeta de crédito RappiCard
+            TU PAGO REQUERIDO ESTE PERIODO
+            Fecha de corte 21-jul-2026
+            Número de días en el periodo 29 días
+            Cargos, abonos y compras regulares
+            """,
+            fileName: "rappi-export.pdf"
+        )
+
+        XCTAssertEqual(snapshot.period, "22/06/2026 - 21/07/2026")
+    }
+
+    func testRappiPeriodFallbackAcceptsSlashDatesAndNoAbbreviation() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            RappiCard
+            Fecha de corte: 21/08/2026
+            No. de días del periodo 30 días
+            Desglose de movimientos
+            """,
+            fileName: "rappi-agosto.pdf"
+        )
+
+        XCTAssertEqual(snapshot.period, "22/07/2026 - 21/08/2026")
+    }
+
     func testBBVAPeriodUsesPrintedPeriodInsteadOfFilenameFallback() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
             text: """
