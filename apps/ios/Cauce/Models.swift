@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.21"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.22"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -1166,6 +1166,22 @@ final class FinanceStore {
             movements: parseRappiText(text, evidenceMethod: "vision-ocr",
                                       confidenceByPage: confidenceByPage),
             summary: summary(from: text, source: source)
+        )
+    }
+
+    /// Exercises the production period-evidence ordering without opening a
+    /// PDF or invoking Vision. Rappi can expose its selectable movement table
+    /// before the OCR cover in the combined evidence string, so the recovery
+    /// must inspect the OCR stream as an independent cover first.
+    static func rappiPeriodLabelFromEvidenceForTesting(
+        selectableText: String,
+        recognizedText: String,
+        fileName: String = "rappi.pdf"
+    ) -> String {
+        rappiPeriodLabelFromEvidence(
+            selectableText: selectableText,
+            recognizedText: recognizedText,
+            fileName: fileName
         )
     }
 
@@ -4566,14 +4582,18 @@ final class FinanceStore {
             }
             return corrected
         }
-        let periodEvidenceText = source.localizedCaseInsensitiveCompare("Rappi") == .orderedSame
-            ? [extractedText, text]
-                .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
-                .joined(separator: "\n")
-            : text
-        let period = source == "BBVA"
-            ? (Self.bbvaDocumentPeriod(document) ?? "Periodo no identificado")
-            : Self.periodLabel(from: periodEvidenceText, fileName: fileName, sourceHint: source)
+        let period: String
+        if source == "BBVA" {
+            period = Self.bbvaDocumentPeriod(document) ?? "Periodo no identificado"
+        } else if source.localizedCaseInsensitiveCompare("Rappi") == .orderedSame {
+            period = Self.rappiPeriodLabelFromEvidence(
+                selectableText: extractedText,
+                recognizedText: text,
+                fileName: fileName
+            )
+        } else {
+            period = Self.periodLabel(from: text, fileName: fileName, sourceHint: source)
+        }
         let ocrRejectedRowsNeedReview = usedOCR && rowDiagnostics.contains { !$0.accepted }
         let ocrFallbackNeedsReview = usedOCR && (
             ocrRejectedRowsNeedReview
@@ -9898,6 +9918,27 @@ final class FinanceStore {
               let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
               let range = Range(match.range(at: 1), in: value) else { return nil }
         return String(value[range])
+    }
+
+    /// Selects the strongest period evidence for a Rappi extraction. The
+    /// selectable layer remains first because it carries the PDF's exact
+    /// printed controls, while OCR gets its own independent cover fallback.
+    /// This matters when PDFKit's movement marker appears before the OCR cover
+    /// in the combined string: a cover-only cutoff/date control must not be
+    /// hidden behind that earlier marker.
+    private static func rappiPeriodLabelFromEvidence(
+        selectableText: String,
+        recognizedText: String,
+        fileName: String
+    ) -> String {
+        let combined = [selectableText, recognizedText]
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .joined(separator: "\n")
+        let candidates = [selectableText, recognizedText, combined]
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .map { Self.periodLabel(from: $0, fileName: fileName, sourceHint: "Rappi") }
+        return candidates.first(where: { $0 != "Periodo no identificado" })
+            ?? "Periodo no identificado"
     }
 
     /// Rappi's PDF text layer is not stable across exports. Depending on the
