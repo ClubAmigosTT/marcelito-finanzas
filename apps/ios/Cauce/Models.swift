@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.16"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.17"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
