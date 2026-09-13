@@ -15,9 +15,16 @@ final class FinancialLogicAuditTests: XCTestCase {
             flow: amount > 0 ? .income : .expense, kind: kind)
     }
 
-    private func statement(_ source: String, key: String, kind: StatementKind, summary: StatementSummaryRecord = .init()) -> StatementRecord {
-        StatementRecord(id: UUID(), source: source, accountKey: key, period: "01/08/2026 - 31/08/2026",
-            fileName: "fixture.pdf", importedAt: .now, transactionCount: 0, requiresReview: false, kind: kind,
+    private func statement(
+        _ source: String,
+        key: String?,
+        kind: StatementKind,
+        period: String = "01/08/2026 - 31/08/2026",
+        importedAt: Date = .now,
+        summary: StatementSummaryRecord = .init()
+    ) -> StatementRecord {
+        StatementRecord(id: UUID(), source: source, accountKey: key, period: period,
+            fileName: "fixture.pdf", importedAt: importedAt, transactionCount: 0, requiresReview: false, kind: kind,
             summary: summary, reconciliation: StatementReconciliationRecord(status: .valid, tolerance: 0),
             sourceDetection: SourceDetectionEvidence(source: source, confidence: 0.999, status: .verified,
                 evidence: ["encabezado verificado"], ignoredBodyMentions: []), readerVersion: FinanceStore.readerVersion)
@@ -130,6 +137,115 @@ final class FinancialLogicAuditTests: XCTestCase {
             store.normalizeFinanceForTesting()
             XCTAssertEqual(store.movements.count, 2)
         }
+    }
+
+    func testMissingBBVAIdentityJoinsOnlyKnownAccountAndReplacesRepeatedPeriod() {
+        withStore { store in
+            let known = statement("BBVA", key: "bbva:4922", kind: .bank, period: "15/03/2026 - 14/04/2026")
+            let firstJuly = statement("BBVA", key: nil, kind: .bank, period: "15/07/2026 - 14/08/2026",
+                importedAt: Date(timeIntervalSince1970: 1_786_000_000))
+            let replacementJuly = statement("BBVA", key: nil, kind: .bank, period: "15/07/2026 - 14/08/2026",
+                importedAt: Date(timeIntervalSince1970: 1_787_000_000))
+            store.statements = [known, firstJuly, replacementJuly]
+            var oldRow = row(-100, date: Date(timeIntervalSince1970: 1_786_500_000), title: "COMPRA REPETIDA")
+            oldRow.statementId = firstJuly.id
+            var replacementRow = oldRow
+            replacementRow.id = UUID()
+            replacementRow.statementId = replacementJuly.id
+            store.movements = [oldRow, replacementRow]
+
+            store.normalizeFinanceForTesting()
+
+            XCTAssertEqual(store.statements.count, 2)
+            XCTAssertTrue(store.statements.allSatisfy { $0.accountKey == "bbva:4922" })
+            XCTAssertTrue(store.statements.contains { $0.id == replacementJuly.id })
+            XCTAssertFalse(store.statements.contains { $0.id == firstJuly.id })
+            XCTAssertEqual(store.movements.count, 1)
+            XCTAssertEqual(store.movements.first?.statementId, replacementJuly.id)
+        }
+    }
+
+    func testMissingIdentityIsNotGuessedWhenIssuerHasTwoKnownAccounts() {
+        withStore { store in
+            store.statements = [
+                statement("BBVA", key: "bbva:1111", kind: .bank, period: "15/01/2026 - 14/02/2026"),
+                statement("BBVA", key: "bbva:2222", kind: .bank, period: "15/02/2026 - 14/03/2026"),
+                statement("BBVA", key: nil, kind: .bank, period: "15/03/2026 - 14/04/2026")
+            ]
+
+            store.normalizeFinanceForTesting()
+
+            XCTAssertEqual(store.statements.count, 3)
+            XCTAssertEqual(store.statements.filter { $0.accountKey == nil }.count, 1)
+        }
+    }
+
+    func testBBVAAccountNumberCanAppearAfterLongCoverPage() {
+        let cover = Array(repeating: "Aviso legal del estado", count: 180).joined(separator: "\n")
+        let text = "BBVA MEXICO\n\(cover)\nNo. de Cuenta 1575694922\nDetalle de Movimientos Realizados"
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "bbva.pdf", sourceHint: "BBVA")
+
+        XCTAssertEqual(snapshot.accountKey, "bbva:4922")
+    }
+
+    func testBBVAForeignChargeWithoutPrintedBalanceKeepsAuthorizationEvidence() {
+        let text = """
+        BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE
+        Periodo DEL 15/11/2025 AL 14/12/2025
+        No. de Cuenta 1575694922
+        Saldo Anterior 1,222.92
+        Depósitos / Abonos (+) 0 0.00
+        Retiros / Cargos (-) 2 99.89
+        Saldo Final 1,123.03
+        Detalle de Movimientos Realizados
+        18/NOV 16/NOV FACEBK *UG4FT6ZNY2 40.89
+        USD 2.22TC018.4189AUT: 057867 Referencia ******1945
+        18/NOV 18/NOV Google One 59.00 1,123.03 1,123.03
+        Total de Movimientos
+        TOTAL IMPORTE CARGOS 99.89 TOTAL MOVIMIENTOS CARGOS 2
+        TOTAL IMPORTE ABONOS 0.00 TOTAL MOVIMIENTOS ABONOS 0
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "Diciembre BBVA 25.pdf",
+            sourceHint: "BBVA"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 2)
+        XCTAssertEqual(snapshot.movements.reduce(Decimal.zero) { $0 + abs($1.amount) }, Decimal(string: "99.89"))
+        XCTAssertTrue(snapshot.movements.allSatisfy { $0.amount < 0 })
+        XCTAssertEqual(snapshot.movements.first?.extractionEvidence?.selectedColumn, "CARGOS (USD/TC/AUT)")
+    }
+
+    func testBBVARunningBalanceOverridesMisleadingPaymentDescriptionInDepositColumn() {
+        let text = """
+        BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE
+        Periodo DEL 15/03/2026 AL 14/04/2026
+        No. de Cuenta 1575694922
+        Saldo Anterior 66.87
+        Depósitos / Abonos (+) 2 4,000.00
+        Retiros / Cargos (-) 1 2,000.00
+        Saldo Final 2,066.87
+        Detalle de Movimientos Realizados
+        27/MAR 27/MAR SPEI RECIBIDOSANTANDER 2,000.00
+        27/MAR 27/MAR PAGO CUENTA DE TERCERO 2,000.00
+        27/MAR 27/MAR PAGO CUENTA DE TERCERO 2,000.00 2,066.87 2,066.87
+        Total de Movimientos
+        TOTAL IMPORTE CARGOS 2,000.00 TOTAL MOVIMIENTOS CARGOS 1
+        TOTAL IMPORTE ABONOS 4,000.00 TOTAL MOVIMIENTOS ABONOS 2
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "Abril BBVA.pdf",
+            sourceHint: "BBVA"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 3)
+        XCTAssertEqual(snapshot.movements.map(\.amount), [2_000, -2_000, 2_000])
+        XCTAssertEqual(snapshot.movements.last?.extractionEvidence?.selectedColumn, "ABONOS (saldo corrido)")
     }
 
     func testManualReviewSurvivesNormalization() {
