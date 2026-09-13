@@ -731,6 +731,9 @@ final class FinanceStore {
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
     static let readerVersion = "ios-reader-deterministic-2026.09.12.27"
+    /// Advances when only administrative account identity changes. Keeping
+    /// this separate avoids forcing a full ledger rebuild for a cache fix.
+    private static let accountIdentityParserVersion = "masked-header-v2"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -2312,6 +2315,21 @@ final class FinanceStore {
         return String(format: "%04d-%02d", year, month)
     }
 
+    private func statementPeriodIdentity(_ value: String) -> String {
+        if let range = statementRange(from: value) {
+            let calendar = Calendar(identifier: .gregorian)
+            func day(_ date: Date) -> String {
+                let parts = calendar.dateComponents([.year, .month, .day], from: date)
+                return String(format: "%04d-%02d-%02d", parts.year ?? 0, parts.month ?? 0, parts.day ?? 0)
+            }
+            return "\(day(range.lowerBound))|\(day(range.upperBound))"
+        }
+        return value
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+    }
+
     /// Resolves the end/cutoff date encoded in a period label. It accepts
     /// numeric and Spanish month-name dates, plus month/year-only labels.
     private func periodDate(from value: String) -> Date? {
@@ -2733,6 +2751,7 @@ final class FinanceStore {
     /// statement remain separate (two genuine purchases can be identical),
     /// while an occurrence from another statement is treated as overlap.
     private func normalizeStoredLedger() {
+        _ = repairStatementAccountIdentitiesAndDuplicatePeriods()
         // Drop malformed legacy rows before any aggregate can see them. This
         // is especially important for builds that previously stored PDF
         // headings or running balances as if they were transactions.
@@ -2802,6 +2821,79 @@ final class FinanceStore {
             _ = reclassifyPendingCategoriesIfNeeded(force: true)
         }
         invalidateDerivedProjections()
+    }
+
+    /// Repairs an issuer account that was split because some PDFs did not
+    /// expose their masked number to the reader. We only infer a missing key
+    /// when every identified statement for the same issuer and document kind
+    /// agrees on exactly one account. If two real accounts are present, the
+    /// unidentified records remain separate instead of being guessed.
+    ///
+    /// Once identity is stable, a second PDF for the exact same account and
+    /// cutoff period replaces the older record. A fully reconciled/current
+    /// statement always wins over a provisional one; otherwise the most
+    /// recently imported document wins. Loser rows are removed with their
+    /// statement so they can never be counted twice.
+    @discardableResult
+    private func repairStatementAccountIdentitiesAndDuplicatePeriods() -> Bool {
+        guard !statements.isEmpty else { return false }
+
+        func sourceScope(_ statement: StatementRecord) -> String {
+            let source = statement.source
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .lowercased()
+                .components(separatedBy: CharacterSet.alphanumerics.inverted)
+                .joined()
+            return "\(source)|\(statementKind(statement).rawValue)"
+        }
+
+        let identifiedByScope = Dictionary(grouping: statements.filter { $0.accountKey != nil }, by: sourceScope)
+            .mapValues { Set($0.compactMap(\.accountKey)) }
+        var changed = false
+        for index in statements.indices where statements[index].accountKey == nil {
+            let scope = sourceScope(statements[index])
+            guard statementKind(statements[index]) != .unknown,
+                  let candidates = identifiedByScope[scope],
+                  candidates.count == 1,
+                  let resolved = candidates.first else { continue }
+            statements[index].accountKey = resolved
+            changed = true
+        }
+
+        // Do not collapse unidentified statements. Two genuine accounts from
+        // the same issuer can share a cutoff period; a verified masked key is
+        // required before replacement is safe.
+        let identified = statements.filter { $0.accountKey != nil }
+        let groups = Dictionary(grouping: identified) { statement in
+            "\(sourceScope(statement))|\(statement.accountKey!)|\(statementPeriodIdentity(statement.period))"
+        }
+        var discardedStatementIDs = Set<UUID>()
+        for group in groups.values where group.count > 1 {
+            let winner = group.max { left, right in
+                func isWorse(_ candidate: StatementRecord, than other: StatementRecord) -> Bool {
+                    let candidateValid = candidate.reconciliation?.status == .valid
+                    let otherValid = other.reconciliation?.status == .valid
+                    if candidateValid != otherValid { return !candidateValid }
+                    let candidateCurrent = isCurrentReader(candidate)
+                    let otherCurrent = isCurrentReader(other)
+                    if candidateCurrent != otherCurrent { return !candidateCurrent }
+                    if candidate.requiresReview != other.requiresReview { return candidate.requiresReview }
+                    if candidate.importedAt != other.importedAt { return candidate.importedAt < other.importedAt }
+                    return candidate.id.uuidString < other.id.uuidString
+                }
+                return isWorse(left, than: right)
+            }
+            guard let winner else { continue }
+            discardedStatementIDs.formUnion(group.lazy.map(\.id).filter { $0 != winner.id })
+        }
+        if !discardedStatementIDs.isEmpty {
+            statements.removeAll { discardedStatementIDs.contains($0.id) }
+            movements.removeAll { movement in
+                movement.statementId.map(discardedStatementIDs.contains) ?? false
+            }
+            changed = true
+        }
+        return changed
     }
 
     /// Applies the deterministic taxonomy to rows that were imported before
@@ -3194,6 +3286,23 @@ final class FinanceStore {
             ?? []
         lastAuditRun = defaults.data(forKey: auditRunKey).flatMap { try? JSONDecoder().decode(LedgerAuditRun.self, from: $0) }
         lastImportedFile = defaults.string(forKey: importKey)
+        // A prior reader could miss the masked account number when BBVA put
+        // its administrative header on page two. Repair that split eagerly so
+        // the Accounts carousel and every aggregate see one canonical account
+        // immediately after installing the update. This is intentionally
+        // lightweight and only runs the full normalization when all stored
+        // statements already belong to the current deterministic reader.
+        if repairStatementAccountIdentitiesAndDuplicatePeriods() {
+            if statements.allSatisfy(isCurrentReader) {
+                normalizeStoredLedger()
+                reconcileBankScreenshotsAgainstOfficialLedger()
+            }
+            persist(markingChange: true)
+            DiagnosticsRecorder.record(
+                stage: "accounts.identity.repair",
+                message: "Se unificaron estados con identidad de cuenta incompleta y se retiraron periodos duplicados."
+            )
+        }
         // Upgrade the former broad taxonomy in memory without changing any
         // amount, date, account or movement identity. The next canonical
         // persist writes the new primary category names.
@@ -4896,6 +5005,7 @@ final class FinanceStore {
         let fingerprint = pdfFingerprint(data)
         let keyData = try JSONSerialization.data(withJSONObject: [
             "reader": readerVersion, "fingerprint": fingerprint, "fileName": fileName,
+            "accountIdentity": accountIdentityParserVersion,
             "allowOCR": allowOCR, "source": sourceOverride ?? "",
             "kind": kindOverride?.rawValue ?? "", "rules": learnedRules,
         ], options: [.sortedKeys])
@@ -10981,7 +11091,11 @@ final class FinanceStore {
             locale: .current
         ).lowercased()
         var header: [String] = []
-        for line in normalized.components(separatedBy: .newlines).prefix(120) {
+        // Some BBVA exports start their selectable text on PDF page two after
+        // a long cover/legal page. Keep the search bounded by the first
+        // movement-table marker, but allow enough administrative lines to
+        // reach `No. de Cuenta` in those layouts.
+        for line in normalized.components(separatedBy: .newlines).prefix(400) {
             let compact = line.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if let markerRange = compact.range(
@@ -11158,7 +11272,7 @@ final class FinanceStore {
             locale: .current
         )
         var headerLines: [String] = []
-        for line in normalized.components(separatedBy: .newlines).prefix(120) {
+        for line in normalized.components(separatedBy: .newlines).prefix(400) {
             let compact = line.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
             if let markerRange = compact.range(of: "detalle de movimientos|movimientos realizados|fecha (?:folio )?descripcion|fecha y detalle", options: .regularExpression) {
                 let prefix = String(compact[..<markerRange.lowerBound])

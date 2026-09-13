@@ -15,9 +15,16 @@ final class FinancialLogicAuditTests: XCTestCase {
             flow: amount > 0 ? .income : .expense, kind: kind)
     }
 
-    private func statement(_ source: String, key: String, kind: StatementKind, summary: StatementSummaryRecord = .init()) -> StatementRecord {
-        StatementRecord(id: UUID(), source: source, accountKey: key, period: "01/08/2026 - 31/08/2026",
-            fileName: "fixture.pdf", importedAt: .now, transactionCount: 0, requiresReview: false, kind: kind,
+    private func statement(
+        _ source: String,
+        key: String?,
+        kind: StatementKind,
+        period: String = "01/08/2026 - 31/08/2026",
+        importedAt: Date = .now,
+        summary: StatementSummaryRecord = .init()
+    ) -> StatementRecord {
+        StatementRecord(id: UUID(), source: source, accountKey: key, period: period,
+            fileName: "fixture.pdf", importedAt: importedAt, transactionCount: 0, requiresReview: false, kind: kind,
             summary: summary, reconciliation: StatementReconciliationRecord(status: .valid, tolerance: 0),
             sourceDetection: SourceDetectionEvidence(source: source, confidence: 0.999, status: .verified,
                 evidence: ["encabezado verificado"], ignoredBodyMentions: []), readerVersion: FinanceStore.readerVersion)
@@ -130,6 +137,56 @@ final class FinancialLogicAuditTests: XCTestCase {
             store.normalizeFinanceForTesting()
             XCTAssertEqual(store.movements.count, 2)
         }
+    }
+
+    func testMissingBBVAIdentityJoinsOnlyKnownAccountAndReplacesRepeatedPeriod() {
+        withStore { store in
+            let known = statement("BBVA", key: "bbva:4922", kind: .bank, period: "15/03/2026 - 14/04/2026")
+            let firstJuly = statement("BBVA", key: nil, kind: .bank, period: "15/07/2026 - 14/08/2026",
+                importedAt: Date(timeIntervalSince1970: 1_786_000_000))
+            let replacementJuly = statement("BBVA", key: nil, kind: .bank, period: "15/07/2026 - 14/08/2026",
+                importedAt: Date(timeIntervalSince1970: 1_787_000_000))
+            store.statements = [known, firstJuly, replacementJuly]
+            var oldRow = row(-100, date: Date(timeIntervalSince1970: 1_786_500_000), title: "COMPRA REPETIDA")
+            oldRow.statementId = firstJuly.id
+            var replacementRow = oldRow
+            replacementRow.id = UUID()
+            replacementRow.statementId = replacementJuly.id
+            store.movements = [oldRow, replacementRow]
+
+            store.normalizeFinanceForTesting()
+
+            XCTAssertEqual(store.statements.count, 2)
+            XCTAssertTrue(store.statements.allSatisfy { $0.accountKey == "bbva:4922" })
+            XCTAssertTrue(store.statements.contains { $0.id == replacementJuly.id })
+            XCTAssertFalse(store.statements.contains { $0.id == firstJuly.id })
+            XCTAssertEqual(store.movements.count, 1)
+            XCTAssertEqual(store.movements.first?.statementId, replacementJuly.id)
+        }
+    }
+
+    func testMissingIdentityIsNotGuessedWhenIssuerHasTwoKnownAccounts() {
+        withStore { store in
+            store.statements = [
+                statement("BBVA", key: "bbva:1111", kind: .bank, period: "15/01/2026 - 14/02/2026"),
+                statement("BBVA", key: "bbva:2222", kind: .bank, period: "15/02/2026 - 14/03/2026"),
+                statement("BBVA", key: nil, kind: .bank, period: "15/03/2026 - 14/04/2026")
+            ]
+
+            store.normalizeFinanceForTesting()
+
+            XCTAssertEqual(store.statements.count, 3)
+            XCTAssertEqual(store.statements.filter { $0.accountKey == nil }.count, 1)
+        }
+    }
+
+    func testBBVAAccountNumberCanAppearAfterLongCoverPage() {
+        let cover = Array(repeating: "Aviso legal del estado", count: 180).joined(separator: "\n")
+        let text = "BBVA MEXICO\n\(cover)\nNo. de Cuenta 1575694922\nDetalle de Movimientos Realizados"
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "bbva.pdf", sourceHint: "BBVA")
+
+        XCTAssertEqual(snapshot.accountKey, "bbva:4922")
     }
 
     func testManualReviewSurvivesNormalization() {
