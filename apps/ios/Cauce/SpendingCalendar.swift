@@ -3,10 +3,79 @@ import Foundation
 import SwiftUI
 
 enum SpendingCalendarMode: String, CaseIterable, Identifiable {
+    case day = "Día"
     case week = "Semana"
-    case history = "Histórico"
+    case month = "Mes"
 
     var id: String { rawValue }
+}
+
+struct SpendingPeriodRange: Identifiable {
+    let start: Date
+    let endExclusive: Date
+    let title: String
+    let subtitle: String
+    var id: Date { start }
+}
+
+struct SpendingCategoryShare: Identifiable {
+    let name: String
+    let total: Decimal
+    let share: Double
+    let movementCount: Int
+    var id: String { name }
+}
+
+struct SpendingExplanation: Identifiable {
+    let category: String
+    let actual: Decimal
+    let expected: Decimal
+    var id: String { category }
+    var delta: Decimal { actual - expected }
+}
+
+struct SpendingPeriodAnalysis {
+    let mode: SpendingCalendarMode
+    let start: Date
+    let endExclusive: Date
+    let observedEndExclusive: Date
+    let movements: [Movement]
+    let evolution: [SpendingDayPoint]
+    let expectedTotal: Decimal?
+    let comparisonLabel: String
+    let secondaryExpectedTotal: Decimal?
+    let secondaryComparisonLabel: String?
+    let expectedCategoryTotals: [String: Decimal]
+    let hasCompleteCoverage: Bool
+
+    var total: Decimal { movements.reduce(0) { $0 + $1.expenseContribution } }
+    var movementCount: Int { movements.count }
+    var observedDayCount: Int { evolution.count }
+    var dailyAverage: Decimal { observedDayCount > 0 ? total / Decimal(observedDayCount) : 0 }
+    var ticketAverage: Decimal { movementCount > 0 ? total / Decimal(movementCount) : 0 }
+    var delta: Decimal? { expectedTotal.map { total - $0 } }
+    var deltaPercent: Double? {
+        guard hasCompleteCoverage, let expectedTotal, expectedTotal > 0 else { return nil }
+        return NSDecimalNumber(decimal: (total - expectedTotal) / expectedTotal).doubleValue * 100
+    }
+    var categories: [SpendingCategoryShare] {
+        Dictionary(grouping: movements, by: \.category)
+            .map { name, rows in
+                let value = rows.reduce(Decimal(0)) { $0 + $1.expenseContribution }
+                let share = total > 0 ? NSDecimalNumber(decimal: value / total).doubleValue : 0
+                return SpendingCategoryShare(name: name, total: value, share: share, movementCount: rows.count)
+            }
+            .filter { $0.total > 0 }
+            .sorted { $0.total > $1.total }
+    }
+    var explanations: [SpendingExplanation] {
+        let actual = Dictionary(grouping: movements, by: \.category)
+            .mapValues { $0.reduce(Decimal(0)) { $0 + $1.expenseContribution } }
+        return Set(actual.keys).union(expectedCategoryTotals.keys)
+            .map { SpendingExplanation(category: $0, actual: actual[$0, default: 0], expected: expectedCategoryTotals[$0, default: 0]) }
+            .filter { $0.delta != 0 }
+            .sorted { abs($0.delta) > abs($1.delta) }
+    }
 }
 
 enum SpendingCalendarExpenseType: String, CaseIterable, Identifiable {
@@ -145,6 +214,153 @@ struct SpendingCalendarAnalytics {
 
     var dailyMovements: [Date: [Movement]] {
         Dictionary(grouping: movements) { calendar.startOfDay(for: $0.date) }
+    }
+
+    func periodAnalysis(for mode: SpendingCalendarMode) -> SpendingPeriodAnalysis {
+        let range = periodRange(for: mode, containing: selectedDate)
+        let today = calendar.startOfDay(for: now)
+        let observedEnd: Date
+        if range.start > today {
+            observedEnd = range.start
+        } else if today >= range.start && today < range.endExclusive {
+            observedEnd = min(range.endExclusive, calendar.date(byAdding: .day, value: 1, to: today) ?? range.endExclusive)
+        } else {
+            observedEnd = range.endExclusive
+        }
+        let actualRows = movements(in: range.start, end: observedEnd)
+        let dayCount = max(0, calendar.dateComponents([.day], from: range.start, to: observedEnd).day ?? 0)
+        let samples = comparisonSamples(for: mode, range: range, observedDayCount: dayCount)
+        let historical = mode == .month ? historicalMonthSamples(before: range.start, observedDayCount: dayCount) : []
+        let points = days(from: range.start, to: observedEnd).map { day in
+            let rows = dailyMovements[day, default: []]
+            return SpendingDayPoint(date: day, actual: rows.reduce(0) { $0 + $1.expenseContribution }, historicalAverage: 0, movementCount: rows.count)
+        }
+        return SpendingPeriodAnalysis(
+            mode: mode,
+            start: range.start,
+            endExclusive: range.endExclusive,
+            observedEndExclusive: observedEnd,
+            movements: actualRows,
+            evolution: points,
+            expectedTotal: averageTotal(samples),
+            comparisonLabel: comparisonLabel(for: mode),
+            secondaryExpectedTotal: averageTotal(historical),
+            secondaryComparisonLabel: historical.isEmpty ? nil : "promedio mensual histórico comparable",
+            expectedCategoryTotals: averageCategories(samples),
+            hasCompleteCoverage: dayCount > 0 && points.allSatisfy { coveredDays?.contains($0.date) == true }
+        )
+    }
+
+    func childRanges(for mode: SpendingCalendarMode) -> [SpendingPeriodRange] {
+        let range = periodRange(for: mode, containing: selectedDate)
+        switch mode {
+        case .month:
+            var output: [SpendingPeriodRange] = []
+            var cursor = range.start
+            while cursor < range.endExclusive {
+                let calendarWeekEnd = calendar.dateInterval(of: .weekOfYear, for: cursor)?.end ?? range.endExclusive
+                let end = min(range.endExclusive, calendarWeekEnd)
+                output.append(SpendingPeriodRange(start: cursor, endExclusive: end,
+                    title: "Semana del \(cursor.formatted(.dateTime.day())) al \((calendar.date(byAdding: .day, value: -1, to: end) ?? cursor).formatted(.dateTime.day().month(.abbreviated)))",
+                    subtitle: "Ver sus días"))
+                cursor = end
+            }
+            return output
+        case .week:
+            return days(from: range.start, to: range.endExclusive).map { day in
+                SpendingPeriodRange(start: day, endExclusive: calendar.date(byAdding: .day, value: 1, to: day) ?? day,
+                    title: day.formatted(.dateTime.weekday(.wide).day().month(.abbreviated)), subtitle: "Ver movimientos")
+            }
+        case .day:
+            return []
+        }
+    }
+
+    func periodRange(for mode: SpendingCalendarMode, containing date: Date) -> (start: Date, endExclusive: Date) {
+        switch mode {
+        case .day:
+            let start = calendar.startOfDay(for: date)
+            return (start, calendar.date(byAdding: .day, value: 1, to: start) ?? start)
+        case .week:
+            let start = calendar.dateInterval(of: .weekOfYear, for: date)?.start ?? calendar.startOfDay(for: date)
+            return (start, calendar.date(byAdding: .day, value: 7, to: start) ?? start)
+        case .month:
+            let interval = calendar.dateInterval(of: .month, for: date)
+            let start = interval?.start ?? calendar.startOfDay(for: date)
+            return (start, interval?.end ?? start)
+        }
+    }
+
+    private func comparisonSamples(for mode: SpendingCalendarMode, range: (start: Date, endExclusive: Date), observedDayCount: Int) -> [[Movement]] {
+        guard observedDayCount > 0 else { return [] }
+        switch mode {
+        case .day:
+            guard let first = coverageStart else { return [] }
+            return days(from: first, to: range.start).filter { coveredDays?.contains($0) == true }.map { dailyMovements[$0, default: []] }
+        case .week:
+            return (1...8).compactMap { offset -> [Movement]? in
+                guard let start = calendar.date(byAdding: .weekOfYear, value: -offset, to: range.start),
+                      let end = calendar.date(byAdding: .day, value: observedDayCount, to: start),
+                      days(from: start, to: end).allSatisfy({ coveredDays?.contains($0) == true }) else { return nil }
+                return movements(in: start, end: end)
+            }
+        case .month:
+            guard let start = calendar.date(byAdding: .month, value: -1, to: range.start),
+                  let monthEnd = calendar.date(byAdding: .month, value: 1, to: start),
+                  let proposed = calendar.date(byAdding: .day, value: observedDayCount, to: start) else { return [] }
+            let end = min(monthEnd, proposed)
+            guard days(from: start, to: end).count == observedDayCount,
+                  days(from: start, to: end).allSatisfy({ coveredDays?.contains($0) == true }) else { return [] }
+            return [movements(in: start, end: end)]
+        }
+    }
+
+    private func historicalMonthSamples(before selectedMonth: Date, observedDayCount: Int) -> [[Movement]] {
+        guard observedDayCount > 0 else { return [] }
+        return (2...13).compactMap { offset -> [Movement]? in
+            guard let start = calendar.date(byAdding: .month, value: -offset, to: selectedMonth),
+                  let monthEnd = calendar.date(byAdding: .month, value: 1, to: start),
+                  let proposed = calendar.date(byAdding: .day, value: observedDayCount, to: start) else { return nil }
+            let end = min(monthEnd, proposed)
+            guard days(from: start, to: end).count == observedDayCount,
+                  days(from: start, to: end).allSatisfy({ coveredDays?.contains($0) == true }) else { return nil }
+            return movements(in: start, end: end)
+        }
+    }
+
+    private func movements(in start: Date, end: Date) -> [Movement] {
+        movements.filter { $0.date >= start && $0.date < end }
+    }
+
+    private func days(from start: Date, to end: Date) -> [Date] {
+        guard start < end else { return [] }
+        var output: [Date] = []
+        var cursor = calendar.startOfDay(for: start)
+        while cursor < end {
+            output.append(cursor)
+            cursor = calendar.date(byAdding: .day, value: 1, to: cursor) ?? end
+        }
+        return output
+    }
+
+    private func averageTotal(_ samples: [[Movement]]) -> Decimal? {
+        guard !samples.isEmpty else { return nil }
+        return samples.reduce(Decimal(0)) { result, rows in result + rows.reduce(0) { $0 + $1.expenseContribution } } / Decimal(samples.count)
+    }
+
+    private func averageCategories(_ samples: [[Movement]]) -> [String: Decimal] {
+        guard !samples.isEmpty else { return [:] }
+        var totals: [String: Decimal] = [:]
+        for rows in samples { for movement in rows { totals[movement.category, default: 0] += movement.expenseContribution } }
+        return totals.mapValues { $0 / Decimal(samples.count) }
+    }
+
+    private func comparisonLabel(for mode: SpendingCalendarMode) -> String {
+        switch mode {
+        case .day: return "promedio diario histórico"
+        case .week: return "promedio de las últimas semanas comparables"
+        case .month: return "mismos días del mes anterior"
+        }
     }
 
     private func averagesByWeekday(excludingSelectedWeek: Bool) -> [Int: Decimal] {
@@ -349,10 +565,8 @@ struct SpendingCalendarView: View {
                             filterSummary
                             if filteredMovements.isEmpty {
                                 ContentUnavailableView("Sin coincidencias", systemImage: "line.3.horizontal.decrease.circle", description: Text("Cambia o limpia los filtros para ver gastos."))
-                            } else if mode == .week {
-                                weekView
                             } else {
-                                historyView
+                                unifiedPeriodView
                             }
                         }
                         .padding(.horizontal)
@@ -378,14 +592,14 @@ struct SpendingCalendarView: View {
                 SpendingCalendarFilterView(filters: $filters, categories: categories, accounts: accounts)
             }
             .sheet(isPresented: $isDatePickerPresented) {
-                SpendingWeekPickerView(date: $selectedDate)
+                SpendingPeriodPickerView(date: $selectedDate, mode: mode)
             }
             .sheet(item: $selectedDay) { selection in
                 SpendingDayDetailView(
                     date: selection.date,
                     movementIDs: analytics.movements(on: selection.date).map(\.id),
                     filters: filters,
-                    usesStableHistory: mode == .history
+                    usesStableHistory: true
                 )
             }
             .sheet(item: $selectedPeriod) { selection in
@@ -450,6 +664,210 @@ struct SpendingCalendarView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 6)
             .background(Color.marcelitoNavy.opacity(0.09), in: Capsule())
+    }
+
+    private var currentAnalysis: SpendingPeriodAnalysis { analytics.periodAnalysis(for: mode) }
+
+    private var unifiedPeriodView: some View {
+        let analysis = currentAnalysis
+        return Group {
+            periodNavigator(analysis)
+            periodSummary(analysis)
+            comparisonCard(analysis)
+            categoryCard(analysis)
+            SpendingEvolutionChart(analysis: analysis) { date in
+                selectedDate = date
+                mode = .day
+            }
+            explanationCard(analysis)
+            drillDownCard(analysis)
+        }
+    }
+
+    private func periodNavigator(_ analysis: SpendingPeriodAnalysis) -> some View {
+        HStack(spacing: 12) {
+            Button { shiftPeriod(-1) } label: { Image(systemName: "chevron.left") }.buttonStyle(.plain)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(periodTitle(analysis)).font(.headline)
+                Text(periodSubtitle(analysis)).font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button("Cambiar") { isDatePickerPresented = true }.font(.caption.weight(.semibold))
+            Button { shiftPeriod(1) } label: { Image(systemName: "chevron.right") }.buttonStyle(.plain)
+        }
+        .padding(.horizontal, 4)
+    }
+
+    private func periodSummary(_ analysis: SpendingPeriodAnalysis) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(summarySentence(analysis))
+                .font(.system(.title2, design: .rounded).weight(.bold))
+                .minimumScaleFactor(0.72)
+            Text("Consumo real del periodo; no incluye transferencias entre tus cuentas ni pagos de tarjetas.")
+                .font(.caption).foregroundStyle(.secondary)
+            LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
+                SpendingMetricTile(title: "Promedio diario", value: analysis.dailyAverage.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                SpendingMetricTile(title: "Movimientos", value: "\(analysis.movementCount)")
+                SpendingMetricTile(title: "Ticket promedio", value: analysis.ticketAverage.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+            }
+        }
+        .marcelitoCard(radius: 20, padding: 14)
+    }
+
+    private func comparisonCard(_ analysis: SpendingPeriodAnalysis) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Cómo se compara").font(.headline)
+            if let expected = analysis.expectedTotal, analysis.hasCompleteCoverage {
+                comparisonRow(total: analysis.total, expected: expected, label: analysis.comparisonLabel)
+                if let secondary = analysis.secondaryExpectedTotal, let label = analysis.secondaryComparisonLabel {
+                    Divider().opacity(0.55)
+                    comparisonRow(total: analysis.total, expected: secondary, label: label)
+                }
+            } else {
+                Label("Falta cobertura histórica comparable; no mostramos una variación engañosa.", systemImage: "info.circle")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            }
+        }
+        .marcelitoCard(radius: 20, padding: 14)
+    }
+
+    private func comparisonRow(total: Decimal, expected: Decimal, label: String) -> some View {
+        let delta = total - expected
+        let percent = expected > 0 ? NSDecimalNumber(decimal: delta / expected).doubleValue * 100 : nil
+        return VStack(alignment: .leading, spacing: 3) {
+            Text(percent.map { "Gastaste \(String(format: "%.0f%%", abs($0))) \($0 >= 0 ? "más" : "menos") que tu \(label)." } ?? "No existe una base distinta de cero para calcular porcentaje.")
+                .font(.subheadline.weight(.semibold))
+            Text("\(delta >= 0 ? "+" : "−")\(abs(delta).formatted(.currency(code: "MXN").precision(.fractionLength(0)))) · referencia: \(expected.formatted(.currency(code: "MXN").precision(.fractionLength(0))))")
+                .font(.caption).foregroundStyle(delta > 0 ? Color.marcelitoDanger : Color.marcelitoSuccess)
+        }
+    }
+
+    private func categoryCard(_ analysis: SpendingPeriodAnalysis) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("En qué gastaste").font(.headline)
+            if analysis.categories.isEmpty {
+                Text("No hay consumo clasificado en este periodo.").font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                ForEach(Array(analysis.categories.prefix(6))) { category in
+                    Button {
+                        let rows = analysis.movements.filter { $0.category == category.name }
+                        selectedPeriod = SelectedSpendingPeriod(title: category.name, subtitle: periodTitle(analysis), movementIDs: rows.map(\.id))
+                    } label: {
+                        VStack(spacing: 5) {
+                            HStack {
+                                Text(category.name).font(.subheadline.weight(.medium)).lineLimit(1)
+                                Spacer()
+                                Text(category.total, format: .currency(code: "MXN").precision(.fractionLength(0))).monospacedDigit()
+                                Text(String(format: "%.0f%%", category.share * 100)).font(.caption).foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+                            }
+                            ProgressView(value: max(0, min(1, category.share))).tint(Color.marcelitoNavySoft)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .marcelitoCard(radius: 20, padding: 14)
+    }
+
+    private func explanationCard(_ analysis: SpendingPeriodAnalysis) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Qué explica tu gasto").font(.headline)
+            if analysis.expectedTotal == nil || !analysis.hasCompleteCoverage {
+                Text("Necesitamos un periodo comparable cubierto para separar las diferencias por categoría.")
+                    .font(.subheadline).foregroundStyle(.secondary)
+            } else if analysis.explanations.isEmpty {
+                Text("No hay diferencias observables frente al periodo de comparación.").font(.subheadline).foregroundStyle(.secondary)
+            } else {
+                Text(explanationSentence(analysis)).font(.subheadline.weight(.medium))
+                ForEach(Array(analysis.explanations.prefix(3))) { item in
+                    HStack {
+                        Text(item.category).lineLimit(1)
+                        Spacer()
+                        Text(item.delta >= 0 ? "+" : "−") + Text(abs(item.delta), format: .currency(code: "MXN").precision(.fractionLength(0)))
+                    }
+                    .font(.caption)
+                    .foregroundStyle(item.delta > 0 ? Color.marcelitoDanger : Color.marcelitoSuccess)
+                }
+                Text("Diferencias calculadas únicamente con movimientos observados por categoría.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .marcelitoCard(fill: Color.marcelitoCreamTint, radius: 18, padding: 12)
+    }
+
+    @ViewBuilder
+    private func drillDownCard(_ analysis: SpendingPeriodAnalysis) -> some View {
+        if mode == .day {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Movimientos del día").font(.headline)
+                ForEach(analysis.movements.sorted { abs($0.expenseContribution) > abs($1.expenseContribution) }) { movement in
+                    NavigationLink { MovementDetailView(movement: movement) } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(movement.title).lineLimit(1)
+                                Text("\(movement.category) · \(movement.account)").font(.caption).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text(movement.expenseContribution, format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
+                            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }.buttonStyle(.plain)
+                    if movement.id != analysis.movements.last?.id { Divider() }
+                }
+            }.marcelitoCard()
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                Text(mode == .month ? "Semanas del mes" : "Días de la semana").font(.headline)
+                ForEach(analytics.childRanges(for: mode)) { range in
+                    let total = filteredMovements.filter { $0.date >= range.start && $0.date < range.endExclusive }.reduce(Decimal(0)) { $0 + $1.expenseContribution }
+                    Button {
+                        selectedDate = range.start
+                        mode = mode == .month ? .week : .day
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) { Text(range.title).font(.subheadline.weight(.medium)); Text(range.subtitle).font(.caption).foregroundStyle(.secondary) }
+                            Spacer()
+                            Text(total, format: .currency(code: "MXN").precision(.fractionLength(0))).monospacedDigit()
+                            Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
+                        }.padding(.vertical, 3)
+                    }.buttonStyle(.plain)
+                }
+            }.marcelitoCard()
+        }
+    }
+
+    private func periodTitle(_ analysis: SpendingPeriodAnalysis) -> String {
+        switch analysis.mode {
+        case .day: return analysis.start.formatted(.dateTime.weekday(.wide).day().month(.wide).year())
+        case .week:
+            let end = analytics.calendar.date(byAdding: .day, value: -1, to: analysis.endExclusive) ?? analysis.start
+            return "Semana del \(analysis.start.formatted(.dateTime.day())) al \(end.formatted(.dateTime.day().month(.abbreviated).year()))"
+        case .month: return analysis.start.formatted(.dateTime.month(.wide).year())
+        }
+    }
+
+    private func periodSubtitle(_ analysis: SpendingPeriodAnalysis) -> String {
+        analysis.observedDayCount < max(1, analytics.calendar.dateComponents([.day], from: analysis.start, to: analysis.endExclusive).day ?? 1)
+            ? "Periodo en curso · \(analysis.observedDayCount) días observados"
+            : "Periodo completo"
+    }
+
+    private func summarySentence(_ analysis: SpendingPeriodAnalysis) -> String {
+        let period = analysis.mode == .day ? "Este día" : analysis.mode == .week ? "Esta semana" : "Este mes"
+        return "\(period) gastaste \(analysis.total.formatted(.currency(code: "MXN").precision(.fractionLength(0))))"
+    }
+
+    private func explanationSentence(_ analysis: SpendingPeriodAnalysis) -> String {
+        guard let delta = analysis.delta else { return "Sin comparación disponible." }
+        let direction = delta >= 0 ? "más" : "menos"
+        let items = analysis.explanations.prefix(3).map { "\($0.category) \($0.delta >= 0 ? "+" : "−")\(abs($0.delta).formatted(.currency(code: "MXN").precision(.fractionLength(0))))" }.joined(separator: ", ")
+        return "Gastaste \(abs(delta).formatted(.currency(code: "MXN").precision(.fractionLength(0)))) \(direction) de lo comparable. Las mayores diferencias son: \(items)."
+    }
+
+    private func shiftPeriod(_ amount: Int) {
+        let component: Calendar.Component = mode == .day ? .day : mode == .week ? .weekOfYear : .month
+        selectedDate = analytics.calendar.date(byAdding: component, value: amount, to: selectedDate) ?? selectedDate
     }
 
     private var weekView: some View {
@@ -799,6 +1217,78 @@ private func spendingWeekdayLabel(_ date: Date) -> String {
     }
 }
 
+private struct SpendingMovementEvolutionPoint: Identifiable {
+    let index: Int
+    let movement: Movement
+    var id: UUID { movement.id }
+    var value: Double { NSDecimalNumber(decimal: movement.expenseContribution).doubleValue }
+}
+
+private struct SpendingEvolutionChart: View {
+    let analysis: SpendingPeriodAnalysis
+    let selectDay: (Date) -> Void
+
+    private var movementPoints: [SpendingMovementEvolutionPoint] {
+        analysis.movements.sorted { $0.date < $1.date }.enumerated().map { SpendingMovementEvolutionPoint(index: $0.offset + 1, movement: $0.element) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Evolución del gasto").font(.headline)
+            Text(chartSubtitle).font(.caption).foregroundStyle(.secondary)
+            if analysis.mode == .day {
+                Chart(movementPoints) { point in
+                    BarMark(x: .value("Movimiento", point.index), y: .value("Gasto", point.value), width: .fixed(12))
+                        .foregroundStyle(Color.marcelitoNavySoft)
+                        .cornerRadius(3)
+                }
+                .chartXAxis { AxisMarks(values: .automatic(desiredCount: min(6, max(2, movementPoints.count)))) }
+                .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) }
+                .frame(height: 154)
+            } else {
+                Chart(analysis.evolution) { point in
+                    BarMark(x: .value("Día", point.date, unit: .day), y: .value("Gasto", point.actualDouble), width: .fixed(analysis.mode == .week ? 18 : 8))
+                        .foregroundStyle(Color.marcelitoNavySoft.opacity(0.78))
+                        .cornerRadius(3)
+                }
+                .chartXAxis {
+                    if analysis.mode == .week {
+                        AxisMarks(values: analysis.evolution.map(\.date)) { value in
+                            AxisValueLabel { if let date = value.as(Date.self) { Text(spendingWeekdayLabel(date)) } }
+                        }
+                    } else {
+                        AxisMarks(values: .stride(by: .day, count: 7)) { _ in AxisValueLabel(format: .dateTime.day()) }
+                    }
+                }
+                .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) }
+                .chartOverlay { proxy in
+                    GeometryReader { geometry in
+                        Rectangle().fill(.clear).contentShape(Rectangle())
+                            .gesture(SpatialTapGesture().onEnded { event in
+                                guard let frame = proxy.plotFrame else { return }
+                                let x = event.location.x - geometry[frame].origin.x
+                                guard let date: Date = proxy.value(atX: x),
+                                      let nearest = analysis.evolution.min(by: { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }) else { return }
+                                selectDay(nearest.date)
+                            })
+                    }
+                }
+                .frame(height: 164)
+                Text("Toca un día para abrir su detalle.").font(.caption2).foregroundStyle(.secondary)
+            }
+        }
+        .marcelitoCard(radius: 20, padding: 14)
+    }
+
+    private var chartSubtitle: String {
+        switch analysis.mode {
+        case .day: return "Distribución de los movimientos del día"
+        case .week: return "Gasto real de cada uno de los siete días"
+        case .month: return "Gasto real acumulado día por día"
+        }
+    }
+}
+
 private struct WeeklySpendingChart: View {
     let points: [SpendingDayPoint]
     let select: (Date) -> Void
@@ -1038,16 +1528,17 @@ private struct SpendingCalendarFilterView: View {
     }
 }
 
-private struct SpendingWeekPickerView: View {
+private struct SpendingPeriodPickerView: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var date: Date
+    let mode: SpendingCalendarMode
 
     var body: some View {
         NavigationStack {
-            DatePicker("Semana", selection: $date, displayedComponents: .date)
+            DatePicker(mode.rawValue, selection: $date, displayedComponents: .date)
                 .datePickerStyle(.graphical)
                 .padding()
-                .navigationTitle("Elegir semana")
+                .navigationTitle("Elegir \(mode.rawValue.lowercased())")
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Listo") { dismiss() } } }
         }

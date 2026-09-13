@@ -69,3 +69,26 @@ test("Calendario usa una composición compacta y comparaciones ejecutivas", asyn
   assert.match(source, /Día más caro/);
   assert.match(source, /Día más barato/);
 });
+
+test("Calendario comparte una jerarquía Día Semana Mes con comparación equivalente", async () => {
+  const source = await readFile(calendarPath, "utf8");
+  assert.match(source, /case day = "Día"/);
+  assert.match(source, /case week = "Semana"/);
+  assert.match(source, /case month = "Mes"/);
+  assert.match(source, /private var unifiedPeriodView/);
+  assert.match(source, /mismos días del mes anterior/);
+  assert.match(source, /promedio mensual histórico comparable/);
+  assert.match(source, /observedDayCount/);
+});
+
+test("cada periodo explica consumo real y permite bajar hasta movimientos", async () => {
+  const source = await readFile(calendarPath, "utf8");
+  assert.match(source, /En qué gastaste/);
+  assert.match(source, /Qué explica tu gasto/);
+  assert.match(source, /Diferencias calculadas únicamente con movimientos observados por categoría/);
+  assert.match(source, /Semanas del mes/);
+  assert.match(source, /Días de la semana/);
+  assert.match(source, /Movimientos del día/);
+  assert.match(source, /MovementDetailView\(movement: movement\)/);
+  assert.match(source, /no incluye transferencias entre tus cuentas ni pagos de tarjetas/);
+});
