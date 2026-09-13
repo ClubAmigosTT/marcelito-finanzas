@@ -24,6 +24,18 @@ final class SpendingCalendarTests: XCTestCase {
         )
     }
 
+    private func refund(_ day: Date, amount: Decimal, category: String) -> Movement {
+        Movement(
+            date: day,
+            title: "Devolución",
+            account: "BBVA",
+            category: category,
+            amount: abs(amount),
+            flow: .income,
+            kind: .refund
+        )
+    }
+
     func testSelectedWeekUsesSevenCalendarDaysIncludingZeroSpendDays() {
         let rows = [
             expense(date(2026, 7, 6), amount: 70),
@@ -181,5 +193,55 @@ final class SpendingCalendarTests: XCTestCase {
         XCTAssertEqual(monthChildren.last?.endExclusive, date(2026, 10, 1))
         XCTAssertEqual(analytics.childRanges(for: .week).count, 7)
         XCTAssertTrue(analytics.childRanges(for: .day).isEmpty)
+    }
+
+    func testTicketAverageUsesPurchasesAndNotNetRefundMovements() {
+        let selected = date(2026, 9, 4)
+        let analytics = SpendingCalendarAnalytics(
+            movements: [expense(selected, amount: 100), refund(selected, amount: 40, category: "Tiendita")],
+            selectedDate: selected,
+            now: date(2026, 9, 13),
+            calendar: calendar,
+            coveredDays: [selected]
+        )
+
+        let result = analytics.periodAnalysis(for: .day)
+        XCTAssertEqual(result.total, 60)
+        XCTAssertEqual(result.movementCount, 2)
+        XCTAssertEqual(result.ticketAverage, 100)
+    }
+
+    func testNetRefundCategoryRemainsVisibleAndSignedSharesReconcile() {
+        let selected = date(2026, 9, 4)
+        let analytics = SpendingCalendarAnalytics(
+            movements: [expense(selected, amount: 100, category: "Restaurantes"), refund(selected, amount: 40, category: "Devoluciones")],
+            selectedDate: selected,
+            now: date(2026, 9, 13),
+            calendar: calendar,
+            coveredDays: [selected]
+        )
+
+        let result = analytics.periodAnalysis(for: .day)
+        XCTAssertEqual(result.categories.reduce(Decimal(0)) { $0 + $1.total }, result.total)
+        XCTAssertEqual(result.categories.reduce(0.0) { $0 + $1.share }, 1, accuracy: 0.000_001)
+        XCTAssertEqual(result.categories.first(where: { $0.name == "Devoluciones" })?.total, -40)
+        XCTAssertEqual(result.categories.first(where: { $0.name == "Devoluciones" })?.isNetRefund, true)
+    }
+
+    func testHistoricalMonthAverageIncludesImmediatelyPreviousMonth() {
+        let july = date(2026, 7, 1)
+        let august = date(2026, 8, 1)
+        let september = date(2026, 9, 1)
+        let analytics = SpendingCalendarAnalytics(
+            movements: [expense(july, amount: 100), expense(august, amount: 300), expense(september, amount: 500)],
+            selectedDate: september,
+            now: date(2026, 9, 1),
+            calendar: calendar,
+            coveredDays: [july, august, september]
+        )
+
+        let result = analytics.periodAnalysis(for: .month)
+        XCTAssertEqual(result.expectedTotal, 300)
+        XCTAssertEqual(result.secondaryExpectedTotal, 200)
     }
 }

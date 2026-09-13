@@ -24,6 +24,7 @@ struct SpendingCategoryShare: Identifiable {
     let share: Double
     let movementCount: Int
     var id: String { name }
+    var isNetRefund: Bool { total < 0 }
 }
 
 struct SpendingExplanation: Identifiable {
@@ -52,7 +53,11 @@ struct SpendingPeriodAnalysis {
     var movementCount: Int { movements.count }
     var observedDayCount: Int { evolution.count }
     var dailyAverage: Decimal { observedDayCount > 0 ? total / Decimal(observedDayCount) : 0 }
-    var ticketAverage: Decimal { movementCount > 0 ? total / Decimal(movementCount) : 0 }
+    var purchaseMovements: [Movement] { movements.filter { $0.expenseContribution > 0 } }
+    var ticketAverage: Decimal {
+        guard !purchaseMovements.isEmpty else { return 0 }
+        return purchaseMovements.reduce(0) { $0 + $1.expenseContribution } / Decimal(purchaseMovements.count)
+    }
     var delta: Decimal? { expectedTotal.map { total - $0 } }
     var deltaPercent: Double? {
         guard hasCompleteCoverage, let expectedTotal, expectedTotal > 0 else { return nil }
@@ -65,8 +70,11 @@ struct SpendingPeriodAnalysis {
                 let share = total > 0 ? NSDecimalNumber(decimal: value / total).doubleValue : 0
                 return SpendingCategoryShare(name: name, total: value, share: share, movementCount: rows.count)
             }
-            .filter { $0.total > 0 }
-            .sorted { $0.total > $1.total }
+            .filter { $0.total != 0 }
+            .sorted {
+                if $0.isNetRefund != $1.isNetRefund { return !$0.isNetRefund }
+                return abs($0.total) > abs($1.total)
+            }
     }
     var explanations: [SpendingExplanation] {
         let actual = Dictionary(grouping: movements, by: \.category)
@@ -317,7 +325,7 @@ struct SpendingCalendarAnalytics {
 
     private func historicalMonthSamples(before selectedMonth: Date, observedDayCount: Int) -> [[Movement]] {
         guard observedDayCount > 0 else { return [] }
-        return (2...13).compactMap { offset -> [Movement]? in
+        return (1...12).compactMap { offset -> [Movement]? in
             guard let start = calendar.date(byAdding: .month, value: -offset, to: selectedMonth),
                   let monthEnd = calendar.date(byAdding: .month, value: 1, to: start),
                   let proposed = calendar.date(byAdding: .day, value: observedDayCount, to: start) else { return nil }
@@ -703,7 +711,7 @@ struct SpendingCalendarView: View {
             Text(summarySentence(analysis))
                 .font(.system(.title2, design: .rounded).weight(.bold))
                 .minimumScaleFactor(0.72)
-            Text("Consumo real del periodo; no incluye transferencias entre tus cuentas ni pagos de tarjetas.")
+            Text("Consumo real: excluye transferencias propias y pagos de tarjetas. El ticket promedio usa solo cargos.")
                 .font(.caption).foregroundStyle(.secondary)
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())], spacing: 8) {
                 SpendingMetricTile(title: "Promedio diario", value: analysis.dailyAverage.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
@@ -758,12 +766,20 @@ struct SpendingCalendarView: View {
                                 Text(category.name).font(.subheadline.weight(.medium)).lineLimit(1)
                                 Spacer()
                                 Text(category.total, format: .currency(code: "MXN").precision(.fractionLength(0))).monospacedDigit()
-                                Text(String(format: "%.0f%%", category.share * 100)).font(.caption).foregroundStyle(.secondary).frame(width: 40, alignment: .trailing)
+                                Text(category.isNetRefund ? String(format: "%.0f%% · devolución", category.share * 100) : String(format: "%.0f%%", category.share * 100))
+                                    .font(.caption)
+                                    .foregroundStyle(category.isNetRefund ? Color.marcelitoSuccess : .secondary)
+                                    .frame(width: category.isNetRefund ? 112 : 40, alignment: .trailing)
                             }
-                            ProgressView(value: max(0, min(1, category.share))).tint(Color.marcelitoNavySoft)
+                            ProgressView(value: max(0, min(1, category.share)))
+                                .tint(category.isNetRefund ? Color.marcelitoSuccess : Color.marcelitoNavySoft)
                         }
                     }
                     .buttonStyle(.plain)
+                }
+                if analysis.categories.contains(where: \.isNetRefund) {
+                    Text("Las devoluciones se muestran con signo negativo. Por eso una categoría de consumo puede superar 100%, pero todos los porcentajes firmados reconcilian al total neto.")
+                        .font(.caption2).foregroundStyle(.secondary)
                 }
             }
         }
