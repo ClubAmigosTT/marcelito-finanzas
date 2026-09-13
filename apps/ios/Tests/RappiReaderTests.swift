@@ -190,7 +190,7 @@ final class RappiReaderTests: XCTestCase {
 
     func testHybridRecoveryPrefersOrderedSelectableMerchantRows() {
         let collapsedOCR = fixture.replacingOccurrences(
-            of: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00\n    2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
+            of: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00\n2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
             with: "2026-08-01 2026-08-02 50.00 +$50.00 50.00 +$50.00"
         )
         let snapshot = FinanceStore.rappiHybridSelectionForTesting(
@@ -213,7 +213,7 @@ final class RappiReaderTests: XCTestCase {
 
     func testEvidenceBackedFallbackKeepsNumericOnlyRowsWhenTotalsProveThem() {
         let collapsedOCR = fixture.replacingOccurrences(
-            of: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00\n    2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
+            of: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00\n2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
             with: "2026-08-01 2026-08-02 50.00 +$50.00 50.00 +$50.00"
         )
         let snapshot = FinanceStore.rappiHybridSelectionForTesting(
