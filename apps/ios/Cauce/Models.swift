@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.13.28"
+    static let readerVersion = "ios-reader-deterministic-2026.09.13.29"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -4444,7 +4444,14 @@ final class FinanceStore {
             && kind == .card
             && (normalized.contains("fecha y detalle de las operaciones")
                 || layoutNormalized.contains("fecha y detalle de las operaciones"))
-        let structuredText = isAmexLayout ? Self.rebuildAmexSelectableLines(text) : text
+        let structuredText: String
+        if isAmexLayout {
+            structuredText = Self.rebuildAmexSelectableLines(text)
+        } else if source == "Rappi" {
+            structuredText = Self.rebuildRappiSelectableLines(text)
+        } else {
+            structuredText = text
+        }
         let controls = summary(from: structuredText, source: source)
         let candidates: [Movement]
         if source == "BBVA", kind == .bank {
@@ -4535,7 +4542,7 @@ final class FinanceStore {
             // the combined set is still accepted only when the independent
             // printed controls reconcile exactly later in this method.
             if isRappi {
-                rappiSupplementalLayoutText = layoutText
+                rappiSupplementalLayoutText = Self.rebuildRappiSelectableLines(layoutText)
             }
             if !layoutText.isEmpty, layoutText != extractedText,
                Self.textLayerReconciles(text: layoutText, fileName: fileName,
@@ -6093,6 +6100,89 @@ final class FinanceStore {
             rebuilt += original.substring(from: cursor)
         }
         return rebuilt
+    }
+
+    /// PDFKit can flatten RappiCard's multi-page movement table into one
+    /// content-stream line. Recreate row boundaries from the printed date
+    /// pairs before parsing. The second date in an operation/posting pair is
+    /// deliberately kept on the same row; a newline is inserted only when
+    /// non-date content appears between two date tokens. This is structural
+    /// repair only: amounts and text remain byte-for-byte unchanged and the
+    /// issuer controls still decide whether the result is accepted.
+    private static func rebuildRappiSelectableLines(_ text: String) -> String {
+        let normalized = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+            .replacingOccurrences(of: "\u{00A0}", with: " ")
+        guard let marker = normalized.range(
+            of: #"(?i)cargos\s*,\s*abonos\s+y\s+compras\s+regulares\s*\(\s*no\s+a\s+meses\s*\)"#,
+            options: .regularExpression
+        ) else { return normalized }
+
+        let prefix = String(normalized[..<marker.lowerBound])
+        let body = String(normalized[marker.lowerBound...])
+        let original = body as NSString
+        let originalRange = NSRange(location: 0, length: original.length)
+        // Accept the selectable PDF's ISO dates and the Spanish localized
+        // dates emitted by Vision when the text layer is absent or damaged.
+        let datePattern = #"(?i)(?<![A-Za-z0-9.,])(?:\d{4}\s*[/.\-]\s*\d{1,2}\s*[/.\-]\s*\d{1,2}|\d{1,2}\s*[/.\-]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[/.\-]\s*(?:20)?\d{2}|\d{1,2}\s+(?:de\s+)?[A-Za-zÁÉÍÓÚáéíóú]{3,12}\s+(?:de\s+)?\d{2,4})(?![A-Za-z0-9.,])"#
+        guard let dateRegex = try? NSRegularExpression(pattern: datePattern) else { return normalized }
+        let matches = dateRegex.matches(in: body, range: originalRange)
+        guard !matches.isEmpty else { return normalized }
+
+        var positions = Set<Int>()
+        var previousDateEnd: Int?
+        for match in matches {
+            guard let previousEnd = previousDateEnd else {
+                positions.insert(match.range.location)
+                previousDateEnd = NSMaxRange(match.range)
+                continue
+            }
+            guard match.range.location >= previousEnd else { continue }
+            let gap = original.substring(
+                with: NSRange(location: previousEnd, length: match.range.location - previousEnd)
+            )
+            // Whitespace-only gaps are the two dates of one operation. Any
+            // merchant/amount/page-marker content means the next row begins.
+            if !gap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                positions.insert(match.range.location)
+            }
+            previousDateEnd = max(previousEnd, NSMaxRange(match.range))
+        }
+        // A flattened stream can also join the last movement to the printed
+        // section totals. Keep those controls at the beginning of their own
+        // line so a total can never be mistaken for the movement's amount.
+        let boundaryPatterns = [
+            #"(?i)__pdf_page_\d+__"#,
+            #"(?i)cargos\s*,\s*abonos\s+y\s+compras\s+regulares\s*\(\s*no\s+a\s+meses\s*\)"#,
+            #"(?i)total\s+de\s+(?:cargos|abonos)\b"#,
+            #"(?i)cargos\s+no\s+reconocidos\b"#,
+            #"(?i)atenci[oó]n\s+de\s+quejas\b"#,
+            #"(?i)notas\s+aclaratorias\b"#,
+        ]
+        for pattern in boundaryPatterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: body, range: originalRange) {
+                positions.insert(match.range.location)
+            }
+        }
+        guard !positions.isEmpty else { return normalized }
+
+        var rebuilt = String()
+        var cursor = 0
+        for position in positions.sorted() {
+            guard position >= cursor, position <= original.length else { continue }
+            if position > cursor {
+                rebuilt += original.substring(with: NSRange(location: cursor, length: position - cursor))
+            }
+            if position > 0 {
+                let previous = original.substring(with: NSRange(location: position - 1, length: 1))
+                if previous != "\n" && !rebuilt.hasSuffix("\n") { rebuilt.append("\n") }
+            }
+            cursor = position
+        }
+        if cursor < original.length { rebuilt += original.substring(from: cursor) }
+        return prefix + (prefix.isEmpty || prefix.hasSuffix("\n") ? "" : "\n") + rebuilt
     }
 
     /// PDFKit sometimes returns BBVA's entire movement table as one visual
@@ -10349,6 +10439,10 @@ final class FinanceStore {
         evidenceMethod: String = "pdf-text",
         confidenceByPage: [Int: Double] = [:]
     ) -> [Movement] {
+        // Keep the parser independent from PDFKit's content-stream ordering:
+        // real Rappi statements often flatten several continuation pages into
+        // one line even though every row is visibly date-anchored.
+        let structuredText = rebuildRappiSelectableLines(text)
         var rows: [Movement] = []
         var table = false
         var page: Int? = nil
@@ -10462,7 +10556,7 @@ final class FinanceStore {
                         selectedAmount: abs(amount), selectionReason: "RappiCard: \(signReason); fechas operación y cargo conservadas en evidencia")))
             }
         }
-        for raw in text.components(separatedBy: .newlines) {
+        for raw in structuredText.components(separatedBy: .newlines) {
             let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
             let lower = line.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
             let compactLower = lower.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)

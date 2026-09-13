@@ -203,6 +203,34 @@ test("golden RappiCard conserva el emisor Banorte como evidencia legal y concili
   assert.ok(parsed.transactions.some((row) => row.foreignCurrency));
 });
 
+test("RappiCard conserva la tabla cuando los movimientos cruzan un salto de página", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Número de cuenta 00190001000002279040",
+    "Periodo 22-ago-2026 al 21-sep-2026",
+    "Adeudo del periodo anterior = $100.00",
+    "Cargos regulares (no a meses) + $100.00",
+    "Cargos compras a meses (capital) + $0.00",
+    "Pagos y abonos - $50.00",
+    "Saldo deudor total $150.00",
+    "__PDF_PAGE_3__",
+    "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+    "2026-08-01 2026-08-02 COMERCIO UNO +$50.00",
+    "__PDF_PAGE_4__",
+    "2026-08-01 2026-08-02 COMERCIO DOS +$50.00",
+    "2026-08-02 2026-08-02 PAGO POR SPEI -$40.00",
+    "2026-08-03 2026-08-03 BONIFICACIÓN CON CASHBACK -$10.00",
+    "Total de cargos +$100.00",
+    "Total de abonos -$50.00",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({ source: "Rappi", fileName: "rappi-continuacion.pdf", mode: "text", text });
+  assert.equal(parsed.transactions.length, 4);
+  assert.equal(parsed.reconciliation.status, "valid", parsed.reconciliation.reason);
+  assert.equal(parsed.reconciliation.extractedChargeTotal, 100);
+  assert.equal(parsed.reconciliation.extractedPaymentTotal, 40);
+  assert.equal(parsed.reconciliation.extractedCreditTotal, 10);
+});
+
 test("ningún parser acepta números globales ni filas fuera de su sección", () => {
   const parsed = parseDeterministicStatement({
     source: "BBVA",
