@@ -6267,7 +6267,6 @@ final class FinanceStore {
         }
         return output.joined(separator: "\n")
     }
-
     /// PDFKit sometimes returns BBVA's entire movement table as one visual
     /// line. Recreate only the row boundaries from date tokens before the
     /// column-aware parser runs. This changes no text or amount; it merely
