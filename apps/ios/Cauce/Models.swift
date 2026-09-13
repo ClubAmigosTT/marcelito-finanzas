@@ -6149,6 +6149,23 @@ final class FinanceStore {
             }
             previousDateEnd = max(previousEnd, NSMaxRange(match.range))
         }
+        // A flattened stream can also join the last movement to the printed
+        // section totals. Keep those controls at the beginning of their own
+        // line so a total can never be mistaken for the movement's amount.
+        let boundaryPatterns = [
+            #"(?i)__pdf_page_\d+__"#,
+            #"(?i)cargos\s*,\s*abonos\s+y\s+compras\s+regulares\s*\(\s*no\s+a\s+meses\s*\)"#,
+            #"(?i)total\s+de\s+(?:cargos|abonos)\b"#,
+            #"(?i)cargos\s+no\s+reconocidos\b"#,
+            #"(?i)atenci[oó]n\s+de\s+quejas\b"#,
+            #"(?i)notas\s+aclaratorias\b"#,
+        ]
+        for pattern in boundaryPatterns {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            for match in regex.matches(in: body, range: originalRange) {
+                positions.insert(match.range.location)
+            }
+        }
         guard !positions.isEmpty else { return normalized }
 
         var rebuilt = String()
