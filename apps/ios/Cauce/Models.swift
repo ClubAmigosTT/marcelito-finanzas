@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.25"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.26"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -10151,7 +10151,11 @@ final class FinanceStore {
         }
         let rowDateToken = #"(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[a-z]{3,12})\s*[-/.]\s*[0-9OBI]{2,4}|[0-9OBI]{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+[0-9OBI]{2,4})"#
         let rowPrefixRegex = try? NSRegularExpression(
-            pattern: #"^("# + rowDateToken + #")\s+("# + rowDateToken + #")\s+(.+)$"#,
+            // Vision may lose the posting date on a small row. Keep the
+            // operation date as the row's date in that case; it is still
+            // explicit visual evidence and is safer than dropping a real
+            // charge from reconciliation.
+            pattern: #"^("# + rowDateToken + #")(?:\s+("# + rowDateToken + #"))?\s+(.+)$"#,
             options: [.caseInsensitive, .dotMatchesLineSeparators]
         )
         let rowDatePrefixRegex = try? NSRegularExpression(
@@ -10176,54 +10180,76 @@ final class FinanceStore {
             // depending on the page. The old ISO-only gate silently dropped
             // every row on otherwise legible pages such as Rappi June.
             let body = String(pending[bodyRange])
-            // RFC is merchant metadata in this issuer's regular table, not
-            // an administrative row. Keep it in sourceText for inspection.
-            let titleBody = rappiCapture(
-                #"^(.+?)\s*(?:[+-]?\s*\$|compra en el extranjero)"#,
-                in: body
-            ) ?? body
-            let title = titleBody.replacingOccurrences(
-                of: #"(?i);?\s*\bRFC\s*:\s*[A-Z0-9&Ñ]+"#,
-                with: "", options: .regularExpression
-            ).trimmingCharacters(in: .whitespacesAndNewlines)
-            // PDF extraction may split the payment label across lines or
-            // insert repeated spaces. Match whole words, not a prefix that
-            // would also accept an unrelated merchant such as SPEIStore.
-            let semanticTitle = compactSemanticTitle(title)
-            let payment = title.range(of: #"^pago\s+por\s+spei\b"#, options: .regularExpression) != nil
-                || semanticTitle.hasPrefix("pagoporspei")
-            // Foreign purchases print USD and conversion amounts before the
-            // local MXN total. Prefer a signed token anywhere in the row so
-            // those auxiliary amounts can never become the ledger amount.
-            // The only permitted unsigned fallback is the explicit SPEI
-            // payment case, where Vision can drop the minus glyph.
-            let money = rappiCapture(#"([+-]\s*\$\s*"# + rappiMoneyToken + ")", in: body)
-                ?? (payment ? rappiCapture(#"(\$\s*"# + rappiMoneyToken + ")", in: body) : nil)
-            guard let money,
-                  let parsedAmount = parseRappiMoney(money),
-                  parsedAmount != 0 else { return }
-            let hasExplicitSign = money.trimmingCharacters(in: .whitespacesAndNewlines)
-                .first.map { $0 == "+" || $0 == "-" } ?? false
-            // Vision occasionally drops the minus glyph at the right edge of
-            // a Rappi payment row (for example `PAGO POR SPEI $3,000.00`).
-            // Recover that one issuer-semantic case only; every other
-            // unsigned amount remains rejected so OCR cannot invent a flow.
-            guard hasExplicitSign || payment else { return }
-            let amount = hasExplicitSign ? parsedAmount : -abs(parsedAmount)
-            // Card convention: positive printed charge -> negative expense;
-            // negative printed abono -> positive credit/payment.
-            let kind: MovementKind = payment ? .cardPayment : amount < 0 ? .refund : .purchase
-            let flow: FlowKind = payment ? .transfer : amount < 0 ? .income : .expense
-            let signReason = hasExplicitSign
-                ? "importe firmado"
-                : "signo ausente recuperado únicamente por etiqueta PAGO POR SPEI"
-            rows.append(Movement(date: date, title: title, account: "Rappi",
-                category: category(for: title, flow: flow), amount: -amount, flow: flow,
-                kind: kind, foreignCurrency: pending.localizedCaseInsensitiveContains("compra en el extranjero"),
-                extractionEvidence: MovementExtractionEvidence(method: evidenceMethod, page: rowPage,
-                    confidence: evidenceMethod == "vision-ocr" ? (confidenceByPage[rowPage ?? 0] ?? 0) : 1,
-                    sourceText: pending, selectedColumn: "MONTO MXN",
-                    selectedAmount: abs(amount), selectionReason: "RappiCard: \(signReason); fechas operación y cargo conservadas en evidencia")))
+            // OCR sometimes concatenates adjacent Rappi rows while retaining
+            // their merchant text and signed amounts. Split every signed MXN
+            // token into its own row instead of keeping only the first/last
+            // amount; this is what was dropping several page-5 movements.
+            let moneyRegex = try? NSRegularExpression(
+                pattern: #"[+-]\s*\$\s*"# + rappiMoneyToken,
+                options: [.caseInsensitive]
+            )
+            let bodyRangeNS = NSRange(body.startIndex..<body.endIndex, in: body)
+            let moneyMatches = moneyRegex?.matches(in: body, range: bodyRangeNS) ?? []
+            let ranges = moneyMatches.compactMap { match -> (range: Range<String.Index>, text: String)? in
+                guard let stringRange = Range(match.range, in: body) else { return nil }
+                return (stringRange, String(body[stringRange]))
+            }
+            let candidateRanges: [(range: Range<String.Index>?, text: String)] = ranges.isEmpty
+                ? [(nil, "")]
+                : ranges
+            for (index, candidate) in candidateRanges.enumerated() {
+                let segmentStart: String.Index = index == 0
+                    ? body.startIndex
+                    : ranges[index - 1].range.upperBound
+                let segmentEnd: String.Index = candidate.range?.lowerBound ?? body.endIndex
+                let segment = String(body[segmentStart..<segmentEnd])
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let money = candidate.range.map { String(body[$0]) }
+                    ?? rappiCapture(#"(\$\s*"# + rappiMoneyToken + ")", in: segment)
+                guard let money,
+                      let parsedAmount = parseRappiMoney(money),
+                      parsedAmount != 0 else { continue }
+                // RFC is merchant metadata in this issuer's regular table,
+                // not an administrative row. Keep it in sourceText.
+                let titleBody = rappiCapture(
+                    #"^(.+?)\s*(?:[+-]?\s*\$|compra en el extranjero)"#,
+                    in: segment
+                ) ?? segment
+                let title = titleBody
+                    .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                    .replacingOccurrences(
+                    of: #"(?i);?\s*\bRFC\s*:\s*[A-Z0-9&Ñ]+"#,
+                    with: "", options: .regularExpression
+                    )
+                    .replacingOccurrences(of: #"[;,:]+\s*$"#, with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !title.isEmpty else { continue }
+                // PDF extraction may split the payment label across lines or
+                // insert repeated spaces. Match whole words, not a prefix that
+                // would also accept an unrelated merchant such as SPEIStore.
+                let semanticTitle = compactSemanticTitle(title)
+                let payment = title.range(of: #"^pago\s+por\s+spei\b"#, options: .regularExpression) != nil
+                    || semanticTitle.hasPrefix("pagoporspei")
+                let hasExplicitSign = money.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .first.map { $0 == "+" || $0 == "-" } ?? false
+                // Vision occasionally drops the minus glyph at the right edge
+                // of a Rappi payment row. Recover that one issuer-semantic
+                // case only; every other unsigned amount remains rejected.
+                guard hasExplicitSign || payment else { continue }
+                let amount = hasExplicitSign ? parsedAmount : -abs(parsedAmount)
+                let kind: MovementKind = payment ? .cardPayment : amount < 0 ? .refund : .purchase
+                let flow: FlowKind = payment ? .transfer : amount < 0 ? .income : .expense
+                let signReason = hasExplicitSign
+                    ? "importe firmado"
+                    : "signo ausente recuperado únicamente por etiqueta PAGO POR SPEI"
+                rows.append(Movement(date: date, title: title, account: "Rappi",
+                    category: category(for: title, flow: flow), amount: -amount, flow: flow,
+                    kind: kind, foreignCurrency: pending.localizedCaseInsensitiveContains("compra en el extranjero"),
+                    extractionEvidence: MovementExtractionEvidence(method: evidenceMethod, page: rowPage,
+                        confidence: evidenceMethod == "vision-ocr" ? (confidenceByPage[rowPage ?? 0] ?? 0) : 1,
+                        sourceText: pending, selectedColumn: "MONTO MXN",
+                        selectedAmount: abs(amount), selectionReason: "RappiCard: \(signReason); fechas operación y cargo conservadas en evidencia")))
+            }
         }
         for raw in text.components(separatedBy: .newlines) {
             let line = raw.trimmingCharacters(in: .whitespacesAndNewlines)
