@@ -188,6 +188,54 @@ final class RappiReaderTests: XCTestCase {
         )
     }
 
+    func testHybridRecoveryPrefersOrderedSelectableMerchantRows() {
+        let collapsedOCR = fixture.replacingOccurrences(
+            of: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00\n    2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
+            with: "2026-08-01 2026-08-02 50.00 +$50.00 50.00 +$50.00"
+        )
+        let snapshot = FinanceStore.rappiHybridSelectionForTesting(
+            ocrText: collapsedOCR,
+            selectableText: "",
+            layoutText: fixture,
+            summaryText: fixture
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertEqual(snapshot.movements.filter { $0.title == "comercio ejemplo" }.count, 2)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .cardPayment }.count, 1)
+        XCTAssertEqual(
+            FinanceStore.reconcileStatementForTesting(
+                kind: .card, summary: snapshot.summary, movements: snapshot.movements
+            ).status,
+            .valid
+        )
+    }
+
+    func testEvidenceBackedFallbackKeepsNumericOnlyRowsWhenTotalsProveThem() {
+        let collapsedOCR = fixture.replacingOccurrences(
+            of: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00\n    2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
+            with: "2026-08-01 2026-08-02 50.00 +$50.00 50.00 +$50.00"
+        )
+        let snapshot = FinanceStore.rappiHybridSelectionForTesting(
+            ocrText: collapsedOCR,
+            selectableText: "",
+            layoutText: "",
+            summaryText: fixture
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertEqual(
+            snapshot.movements.filter { $0.title.hasPrefix("Movimiento Rappi sin concepto") }.count,
+            2
+        )
+        let result = FinanceStore.reconcileStatementForTesting(
+            kind: .card, summary: snapshot.summary, movements: snapshot.movements
+        )
+        XCTAssertEqual(result.extractedMovementCount, 4)
+        XCTAssertEqual(result.extractedChargeTotal, 100)
+        XCTAssertEqual(result.status, .valid)
+    }
+
     func testProductionImportRecoversTwoColumnCoverAndMovementPages() throws {
         let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792))
         let data = renderer.pdfData { context in

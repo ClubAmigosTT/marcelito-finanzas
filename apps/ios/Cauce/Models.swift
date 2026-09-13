@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.26"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.27"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -1166,6 +1166,35 @@ final class FinanceStore {
             movements: parseRappiText(text, evidenceMethod: "vision-ocr",
                                       confidenceByPage: confidenceByPage),
             summary: summary(from: text, source: source)
+        )
+    }
+
+    /// Exercises the same evidence-stream selection used after a Rappi
+    /// Vision recovery without requiring a private PDF in the test target.
+    static func rappiHybridSelectionForTesting(
+        ocrText: String,
+        selectableText: String,
+        layoutText: String,
+        summaryText: String
+    ) -> ReaderParseSnapshot {
+        let statementSummary = summary(from: summaryText, source: "Rappi")
+        let ocrCandidates = parseRappiText(ocrText, evidenceMethod: "vision-ocr")
+        let selectableCandidates = parseRappiText(selectableText, evidenceMethod: "pdf-text")
+        let layoutCandidates = parseRappiText(layoutText, evidenceMethod: "pdf-text")
+        let repairedOCRCandidates = rappiEvidenceBackedFallbackCandidates(ocrCandidates)
+        let selected = reconciledRappiSelection(
+            candidateSets: [layoutCandidates, selectableCandidates, ocrCandidates, repairedOCRCandidates],
+            summaries: [statementSummary],
+            kind: .card
+        )
+        return ReaderParseSnapshot(
+            sourceDetection: sourceDetection(from: summaryText, fileName: "rappi.pdf"),
+            source: "Rappi",
+            accountKey: maskedAccountKey(from: summaryText, source: "Rappi"),
+            kind: .card,
+            period: periodLabel(from: summaryText, fileName: "rappi.pdf", sourceHint: "Rappi"),
+            movements: selected?.candidates ?? ocrCandidates,
+            summary: selected?.summary ?? statementSummary
         )
     }
 
@@ -4381,9 +4410,18 @@ final class FinanceStore {
         // PDFKit's plain string can return columns in content-stream order.
         // Only adopt the reconstructed layout when the unchanged accounting
         // controls accept it; sorting is never itself proof of correctness.
+        var rappiSupplementalLayoutText = ""
         if !textLayerReconciles {
             let isRappi = Self.sourceDetection(from: extractedText, fileName: fileName).source == "Rappi"
             let layoutText = SelectablePDFLayout.text(from: document, rappiColumns: isRappi)
+            // Keep Rappi's visually ordered selectable layer even when its
+            // cover alone cannot prove reconciliation.  Vision can recover
+            // the signed amounts while this layer retains merchant names;
+            // the combined set is still accepted only when the independent
+            // printed controls reconcile exactly later in this method.
+            if isRappi {
+                rappiSupplementalLayoutText = layoutText
+            }
             if !layoutText.isEmpty, layoutText != extractedText,
                Self.textLayerReconciles(text: layoutText, fileName: fileName,
                                        sourceOverride: cleanedSourceOverride, kindOverride: kindOverride) {
@@ -4556,23 +4594,20 @@ final class FinanceStore {
             // only when its rows reconcile against an independent summary;
             // never merge both streams blindly, which could duplicate rows.
             let selectableCandidates = Self.parseRappiText(extractedText, evidenceMethod: "pdf-text")
+            let layoutCandidates = rappiSupplementalLayoutText.isEmpty
+                ? []
+                : Self.parseRappiText(rappiSupplementalLayoutText, evidenceMethod: "pdf-text")
             let selectableSummary = Self.summary(from: extractedText, source: source)
+            let layoutSummary = rappiSupplementalLayoutText.isEmpty
+                ? nil
+                : Self.summary(from: rappiSupplementalLayoutText, source: source)
             let ocrSummary = Self.summary(from: text, source: source)
-            let options: [(candidates: [Movement], summary: StatementSummaryRecord?)] = [
-                (selectableCandidates, selectableSummary),
-                (ocrCandidates, summary),
-                (ocrCandidates, ocrSummary),
-                (selectableCandidates, summary),
-                (selectableCandidates, ocrSummary)
-            ]
-            if let selected = options.first(where: { option in
-                guard !option.candidates.isEmpty, let optionSummary = option.summary else { return false }
-                return FinanceStore(reconciliationOnly: true).reconcileStatement(
-                    kind: kind,
-                    summary: optionSummary,
-                    movements: option.candidates
-                ).status == .valid
-            }) {
+            let evidenceBackedOCRCandidates = Self.rappiEvidenceBackedFallbackCandidates(ocrCandidates)
+            if let selected = Self.reconciledRappiSelection(
+                candidateSets: [layoutCandidates, selectableCandidates, ocrCandidates, evidenceBackedOCRCandidates],
+                summaries: [summary, layoutSummary, selectableSummary, ocrSummary],
+                kind: kind
+            ) {
                 summary = selected.summary
                 parsedCandidates = selected.candidates
             } else {
@@ -10294,6 +10329,43 @@ final class FinanceStore {
         }
         flush()
         return rows
+    }
+
+    /// Pick one complete Rappi evidence stream. Candidate streams are never
+    /// merged: doing so would double-count rows shared by PDFKit and Vision.
+    /// A stream wins only when its rows reconcile exactly with controls read
+    /// independently from the statement cover.
+    private static func reconciledRappiSelection(
+        candidateSets: [[Movement]],
+        summaries: [StatementSummaryRecord?],
+        kind: StatementKind
+    ) -> (candidates: [Movement], summary: StatementSummaryRecord)? {
+        let verifier = FinanceStore(reconciliationOnly: true)
+        for candidates in candidateSets where !candidates.isEmpty {
+            for case let summary? in summaries {
+                if verifier.reconcileStatement(kind: kind, summary: summary, movements: candidates).status == .valid {
+                    return (candidates, summary)
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Numeric-priority Vision can preserve a complete signed row while
+    /// losing its merchant glyphs. Those rows previously appeared in the
+    /// forensic diagnostics but `isValidStoredMovement` removed them before
+    /// reconciliation, creating a false statement-level mismatch. Give only
+    /// those rows an explicit review label; this fallback can be selected
+    /// solely when the whole stream balances to the printed controls.
+    private static func rappiEvidenceBackedFallbackCandidates(_ candidates: [Movement]) -> [Movement] {
+        candidates.enumerated().map { index, candidate in
+            guard candidate.title.rangeOfCharacter(from: .letters) == nil else { return candidate }
+            var repaired = candidate
+            let page = candidate.extractionEvidence?.page.map { String($0) } ?? "?"
+            repaired.title = "Movimiento Rappi sin concepto p\(page)-\(index + 1)"
+            repaired.category = category(for: repaired.title, flow: repaired.flow)
+            return repaired
+        }
     }
 
     // One complete amount only. OCR can repeat a substring after the cents;
