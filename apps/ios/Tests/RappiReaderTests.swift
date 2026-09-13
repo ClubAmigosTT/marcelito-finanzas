@@ -149,6 +149,24 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements).status, .valid)
     }
 
+    func testRowsAcceptLocalizedOCRDateFormats() {
+        let text = fixture
+            .replacingOccurrences(
+                of: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
+                with: "01/08/2026 02/08/2026 COMERCIO EJEMPLO +$50.00"
+            )
+            .replacingOccurrences(
+                of: "2026-08-02 2026-08-02 PAGO POR SPEI",
+                with: "02-AGO-2026 02-AGO-2026 PAGO POR SPEI"
+            )
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "rappi-localized-dates.pdf")
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .cardPayment }.count, 1)
+        XCTAssertEqual(FinanceStore.reconcileStatementForTesting(
+            kind: .card, summary: snapshot.summary, movements: snapshot.movements
+        ).status, .valid)
+    }
+
     func testProductionImportRecoversTwoColumnCoverAndMovementPages() throws {
         let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792))
         let data = renderer.pdfData { context in

@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.24"
+    static let readerVersion = "ios-reader-deterministic-2026.09.12.25"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4460,7 +4460,7 @@ final class FinanceStore {
                     options: [.diacriticInsensitive, .caseInsensitive],
                     locale: .current
                 )
-                let hasDate = pageText.range(of: #"(?i)(?:\b\d{1,2}\s*[/-]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,})|\b\d{1,2}\s+(?:de\s+)?[A-Za-zÁÉÍÓÚáéíóú]{3,})"#, options: .regularExpression) != nil
+                let hasDate = pageText.range(of: #"(?i)(?:\b\d{4}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{1,2}|\b\d{1,2}\s*[/-]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,})|\b\d{1,2}\s+(?:de\s+)?[A-Za-zÁÉÍÓÚáéíóú]{3,})"#, options: .regularExpression) != nil
                 let hasAmount = pageText.range(of: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#, options: .regularExpression) != nil
                 let hasTableMarker = ["movimientos", "deposito", "depositos", "retiro", "retiros", "cargos", "abonos", "saldo", "descripcion", "detalle"]
                     .contains { normalizedPageText.contains($0) }
@@ -5407,7 +5407,7 @@ final class FinanceStore {
 
                 let substringPatterns = (
                     date: try? NSRegularExpression(
-                        pattern: #"(?i)(?<!\d)[0-9OBI]{1,3}(?:\s*[\/\-.]\s*|\s+)(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:(?:\s*[\/\-.]\s*|\s+)\d{2,4})?(?![A-Za-z])"#
+                        pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[\/\-.]\s*[0-9OBI]{1,2}\s*[\/\-.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,3}(?:\s*[\/\-.]\s*|\s+)(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:(?:\s*[\/\-.]\s*|\s+)\d{2,4})?)(?![A-Za-z])"#
                     ),
                     amount: try? NSRegularExpression(
                         pattern: #"(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
@@ -5530,7 +5530,7 @@ final class FinanceStore {
         }
 
         let numericPattern = try? NSRegularExpression(
-            pattern: #"(?i)(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])|(?<!\d)[0-9OBI]{1,3}(?:\s*[\/\-.]\s*|\s+)(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:(?:\s*[\/\-.]\s*|\s+)\d{2,4})?(?![A-Za-z])"#
+            pattern: #"(?i)(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])|(?<!\d)(?:[0-9OBI]{4}\s*[\/\-.]\s*[0-9OBI]{1,2}\s*[\/\-.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,3}(?:\s*[\/\-.]\s*|\s+)(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:(?:\s*[\/\-.]\s*|\s+)\d{2,4})?)(?![A-Za-z])"#
         )
 
         func numericEvidenceCount(_ pageObservations: [OCRObservation]) -> Int {
@@ -5741,13 +5741,24 @@ final class FinanceStore {
                     // more than this threshold, so the extra pass stays
                     // bounded to pages that need it.
                     let currentNumericCount = numericEvidenceCount(selectedObservations)
+                    let currentDateCount = selectedObservations.reduce(0) { total, observation in
+                        total + observation.dateBoxes.count
+                    }
                     // The cover page is the authoritative source for the
                     // period and financial controls. It can contain plenty
                     // of unrelated numbers (account, CAT, payment examples)
                     // while still losing the two dates that identify the
                     // statement. Always run the numeric pass on page 0;
                     // movement pages keep the cheaper sparse-evidence gate.
-                    let shouldRecoverNumeric = pageIndex == 0 || currentNumericCount < 6
+                    // A page can contain dozens of correctly recognized
+                    // amounts while every date is missing (the failure mode
+                    // seen on Rappi's first digital-card page). A raw numeric
+                    // count would incorrectly skip the recovery pass, so the
+                    // page must also carry several date boxes before it is
+                    // considered structurally complete.
+                    let shouldRecoverNumeric = pageIndex == 0
+                        || currentNumericCount < 6
+                        || currentDateCount < 4
                     if shouldRecoverNumeric {
                         let numericImage = render(page, longEdge: 3_200) ?? selectedImage
                         if pageIndex == 0 {
@@ -10138,14 +10149,40 @@ final class FinanceStore {
                 .lowercased()
                 .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
         }
+        let rowDateToken = #"(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[a-z]{3,12})\s*[-/.]\s*[0-9OBI]{2,4}|[0-9OBI]{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+[0-9OBI]{2,4})"#
+        let rowPrefixRegex = try? NSRegularExpression(
+            pattern: #"^("# + rowDateToken + #")\s+("# + rowDateToken + #")\s+(.+)$"#,
+            options: [.caseInsensitive, .dotMatchesLineSeparators]
+        )
+        let rowDatePrefixRegex = try? NSRegularExpression(
+            pattern: #"^("# + rowDateToken + #")\s+("# + rowDateToken + #")\b"#,
+            options: [.caseInsensitive]
+        )
+        let singleDateRegex = try? NSRegularExpression(
+            pattern: #"^("# + rowDateToken + #")$"#,
+            options: [.caseInsensitive]
+        )
         func flush() {
             defer { pending = "" }
-            guard let first = rappiCapture(#"^(\d{4}-\d{2}-\d{2})\s+\d{4}-\d{2}-\d{2}"#, in: pending),
-                  let date = parseDate(first),
-                  let body = rappiCapture(#"^\d{4}-\d{2}-\d{2}\s+\d{4}-\d{2}-\d{2}\s+(.+?)\s*(?:[+-]?\s*\$|compra en el extranjero)"#, in: pending) else { return }
+            guard let rowPrefixRegex,
+                  let match = rowPrefixRegex.firstMatch(
+                    in: pending,
+                    range: NSRange(pending.startIndex..<pending.endIndex, in: pending)
+                  ),
+                  let firstRange = Range(match.range(at: 1), in: pending),
+                  let bodyRange = Range(match.range(at: 3), in: pending),
+                  let date = parseDate(String(pending[firstRange])) else { return }
+            // Vision may emit ISO dates, slash dates, or Spanish month names
+            // depending on the page. The old ISO-only gate silently dropped
+            // every row on otherwise legible pages such as Rappi June.
+            let body = String(pending[bodyRange])
             // RFC is merchant metadata in this issuer's regular table, not
             // an administrative row. Keep it in sourceText for inspection.
-            let title = body.replacingOccurrences(
+            let titleBody = rappiCapture(
+                #"^(.+?)\s*(?:[+-]?\s*\$|compra en el extranjero)"#,
+                in: body
+            ) ?? body
+            let title = titleBody.replacingOccurrences(
                 of: #"(?i);?\s*\bRFC\s*:\s*[A-Z0-9&Ñ]+"#,
                 with: "", options: .regularExpression
             ).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -10160,8 +10197,8 @@ final class FinanceStore {
             // those auxiliary amounts can never become the ledger amount.
             // The only permitted unsigned fallback is the explicit SPEI
             // payment case, where Vision can drop the minus glyph.
-            let money = rappiCapture(#"([+-]\s*\$\s*"# + rappiMoneyToken + ")", in: pending)
-                ?? (payment ? rappiCapture(#"(\$\s*"# + rappiMoneyToken + ")", in: pending) : nil)
+            let money = rappiCapture(#"([+-]\s*\$\s*"# + rappiMoneyToken + ")", in: body)
+                ?? (payment ? rappiCapture(#"(\$\s*"# + rappiMoneyToken + ")", in: body) : nil)
             guard let money,
                   let parsedAmount = parseRappiMoney(money),
                   parsedAmount != 0 else { return }
@@ -10207,10 +10244,17 @@ final class FinanceStore {
                 flush(); table = false; continue
             }
             guard table else { continue }
-            if lower.range(of: #"^\d{4}-\d{2}-\d{2}\b"#, options: .regularExpression) != nil {
+            let lineRange = NSRange(line.startIndex..<line.endIndex, in: line)
+            let startsRow = (rowPrefixRegex?.firstMatch(in: line, range: lineRange) != nil)
+                || (rowDatePrefixRegex?.firstMatch(in: line, range: lineRange) != nil)
+                || (singleDateRegex?.firstMatch(in: line, range: lineRange) != nil)
+            if startsRow {
                 // PDFKit may put the operation and posting dates on separate
                 // lines; the second date belongs to the pending movement.
-                if pending.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil {
+                let pendingRange = NSRange(pending.startIndex..<pending.endIndex, in: pending)
+                let pendingIsSingleDate = singleDateRegex?.firstMatch(in: pending, range: pendingRange) != nil
+                let lineIsSingleDate = singleDateRegex?.firstMatch(in: line, range: lineRange) != nil
+                if pendingIsSingleDate && lineIsSingleDate {
                     pending += " " + line
                 } else {
                     flush(); pending = line; rowPage = page
