@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.13.29"
+    static let readerVersion = "ios-reader-deterministic-2026.09.13.30"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -4533,8 +4533,15 @@ final class FinanceStore {
         // Only adopt the reconstructed layout when the unchanged accounting
         // controls accept it; sorting is never itself proof of correctness.
         var rappiSupplementalLayoutText = ""
+        var rappiPageWiseSelectableText = ""
         if !textLayerReconciles {
             let isRappi = Self.sourceDetection(from: extractedText, fileName: fileName).source == "Rappi"
+            if isRappi {
+                // Preserve page boundaries before any OCR is attempted. This
+                // is especially important for Rappi continuation pages whose
+                // PDF text layer omits the repeated table heading.
+                rappiPageWiseSelectableText = Self.rappiPageWiseSelectableText(from: document)
+            }
             let layoutText = SelectablePDFLayout.text(from: document, rappiColumns: isRappi)
             // Keep Rappi's visually ordered selectable layer even when its
             // cover alone cannot prove reconciliation.  Vision can recover
@@ -4719,15 +4726,21 @@ final class FinanceStore {
             let layoutCandidates = rappiSupplementalLayoutText.isEmpty
                 ? []
                 : Self.parseRappiText(rappiSupplementalLayoutText, evidenceMethod: "pdf-text")
+            let pageWiseCandidates = rappiPageWiseSelectableText.isEmpty
+                ? []
+                : Self.parseRappiText(rappiPageWiseSelectableText, evidenceMethod: "pdf-text")
             let selectableSummary = Self.summary(from: extractedText, source: source)
             let layoutSummary = rappiSupplementalLayoutText.isEmpty
                 ? nil
                 : Self.summary(from: rappiSupplementalLayoutText, source: source)
+            let pageWiseSummary = rappiPageWiseSelectableText.isEmpty
+                ? nil
+                : Self.summary(from: rappiPageWiseSelectableText, source: source)
             let ocrSummary = Self.summary(from: text, source: source)
             let evidenceBackedOCRCandidates = Self.rappiEvidenceBackedFallbackCandidates(ocrCandidates)
             if let selected = Self.reconciledRappiSelection(
-                candidateSets: [layoutCandidates, selectableCandidates, ocrCandidates, evidenceBackedOCRCandidates],
-                summaries: [summary, layoutSummary, selectableSummary, ocrSummary],
+                candidateSets: [pageWiseCandidates, layoutCandidates, selectableCandidates, ocrCandidates, evidenceBackedOCRCandidates],
+                summaries: [pageWiseSummary, layoutSummary, selectableSummary, summary, ocrSummary],
                 kind: kind
             ) {
                 summary = selected.summary
@@ -5460,25 +5473,41 @@ final class FinanceStore {
     private static func rappiOCRPageIndexes(in document: PDFDocument) -> Set<Int> {
         var result: Set<Int> = document.pageCount > 0 ? [0] : []
         var insideRegularMovements = false
+        var foundMovementTable = false
         for index in 0..<document.pageCount {
             let text = (document.page(at: index)?.string ?? "")
                 .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
                 .lowercased()
-            if text.contains("cargos, abonos y compras regulares") {
+            let compact = text.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+            let startsMovementTable = text.contains("cargos, abonos y compras regulares")
+                || compact.contains("cargosabonosycomprasregulares")
+            if startsMovementTable {
                 insideRegularMovements = true
+                foundMovementTable = true
+            }
+
+            // “Total de cargos” is a footer of the movement table, not its
+            // end. On Rappi's multi-page exports it may be repeated by the
+            // PDF content stream before a continuation page, which used to
+            // select only the first and last movement pages. Stop only at a
+            // section that is unambiguously outside regular movements.
+            let terminalSection = text.contains("notas aclaratorias")
+                || compact.contains("notasaclaratorias")
+                || text.contains("glosario de terminos")
+                || compact.contains("glosariodeterminos")
+                || text.contains("informacion del comprobante")
+                || compact.contains("informaciondelcomprobante")
+            if insideRegularMovements && terminalSection && !startsMovementTable {
+                insideRegularMovements = false
+                continue
             }
             if insideRegularMovements { result.insert(index) }
-            if insideRegularMovements && (
-                text.contains("total de cargos")
-                    || text.contains("cargos no reconocidos")
-                    || text.contains("atencion de quejas")
-            ) {
-                insideRegularMovements = false
-            }
         }
         // If the damaged text layer lost the table marker too, OCR all pages.
         // The issuer-specific parser still confines rows to the regular table.
-        return result.count > 1 ? result : Set(0..<document.pageCount)
+        // A marker found on one page is enough to preserve all continuation
+        // pages, even when their text layer is sparse.
+        return foundMovementTable && result.count > 1 ? result : Set(0..<document.pageCount)
     }
 
     private static func ocrObservations(
@@ -5912,7 +5941,13 @@ final class FinanceStore {
                     // of unrelated numbers (account, CAT, payment examples)
                     // while still losing the two dates that identify the
                     // statement. Always run the numeric pass on page 0;
-                    // movement pages keep the cheaper sparse-evidence gate.
+                    // Movement pages are deliberately re-read as well. A
+                    // confident full-page pass can still omit an entire
+                    // continuation column; waiting for a sparse-evidence
+                    // signal would make that loss invisible. The selected
+                    // page set is already bounded to the Rappi statement's
+                    // movement section, so the extra pass is deterministic
+                    // and does not OCR legal/marketing pages in normal PDFs.
                     // A page can contain dozens of correctly recognized
                     // amounts while every date is missing (the failure mode
                     // seen on Rappi's first digital-card page). A raw numeric
@@ -5920,6 +5955,7 @@ final class FinanceStore {
                     // page must also carry several date boxes before it is
                     // considered structurally complete.
                     let shouldRecoverNumeric = pageIndex == 0
+                        || prioritizeNumericEvidence
                         || currentNumericCount < 6
                         || currentDateCount < 4
                     if shouldRecoverNumeric {
@@ -6109,18 +6145,29 @@ final class FinanceStore {
     /// non-date content appears between two date tokens. This is structural
     /// repair only: amounts and text remain byte-for-byte unchanged and the
     /// issuer controls still decide whether the result is accepted.
-    private static func rebuildRappiSelectableLines(_ text: String) -> String {
+    private static func rebuildRappiSelectableLines(
+        _ text: String,
+        assumeMovementTable: Bool = false
+    ) -> String {
         let normalized = text
             .replacingOccurrences(of: "\r\n", with: "\n")
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "\u{00A0}", with: " ")
-        guard let marker = normalized.range(
+        let marker = normalized.range(
             of: #"(?i)cargos\s*,\s*abonos\s+y\s+compras\s+regulares\s*\(\s*no\s+a\s+meses\s*\)"#,
             options: .regularExpression
-        ) else { return normalized }
+        )
+        guard marker != nil || assumeMovementTable else { return normalized }
 
-        let prefix = String(normalized[..<marker.lowerBound])
-        let body = String(normalized[marker.lowerBound...])
+        let prefix: String
+        let body: String
+        if let marker {
+            prefix = String(normalized[..<marker.lowerBound])
+            body = String(normalized[marker.lowerBound...])
+        } else {
+            prefix = ""
+            body = normalized
+        }
         let original = body as NSString
         let originalRange = NSRange(location: 0, length: original.length)
         // Accept the selectable PDF's ISO dates and the Spanish localized
@@ -6183,6 +6230,42 @@ final class FinanceStore {
         }
         if cursor < original.length { rebuilt += original.substring(from: cursor) }
         return prefix + (prefix.isEmpty || prefix.hasSuffix("\n") ? "" : "\n") + rebuilt
+    }
+
+    /// Rebuild each Rappi PDF page independently before parsing. PDFKit can
+    /// flatten a continuation page into a content-stream line, and a global
+    /// rebuild then has no table marker at the beginning of that page. The
+    /// page-wise pass keeps the page sentinels and applies date-boundary
+    /// repair to every continuation page, while the parser still accepts rows
+    /// only inside the regular-movements section.
+    private static func rappiPageWiseSelectableText(from document: PDFDocument) -> String {
+        var insideRegularMovements = false
+        var output: [String] = []
+        for index in 0..<document.pageCount {
+            guard let pageText = document.page(at: index)?.string,
+                  !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            let normalized = pageText
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+            let compact = normalized.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+            let startsMovementTable = normalized.contains("cargos, abonos y compras regulares")
+                || compact.contains("cargosabonosycomprasregulares")
+            if startsMovementTable { insideRegularMovements = true }
+            let terminalSection = normalized.contains("notas aclaratorias")
+                || compact.contains("notasaclaratorias")
+                || normalized.contains("glosario de terminos")
+                || compact.contains("glosariodeterminos")
+                || normalized.contains("informacion del comprobante")
+                || compact.contains("informaciondelcomprobante")
+            if terminalSection && !startsMovementTable { insideRegularMovements = false }
+
+            let structured = rebuildRappiSelectableLines(
+                pageText,
+                assumeMovementTable: insideRegularMovements || startsMovementTable
+            )
+            output.append("__PDF_PAGE_\(index + 1)__\n\(structured)")
+        }
+        return output.joined(separator: "\n")
     }
 
     /// PDFKit sometimes returns BBVA's entire movement table as one visual
