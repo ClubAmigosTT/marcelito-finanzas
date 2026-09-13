@@ -189,6 +189,65 @@ final class FinancialLogicAuditTests: XCTestCase {
         XCTAssertEqual(snapshot.accountKey, "bbva:4922")
     }
 
+    func testBBVAForeignChargeWithoutPrintedBalanceKeepsAuthorizationEvidence() {
+        let text = """
+        BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE
+        Periodo DEL 15/11/2025 AL 14/12/2025
+        No. de Cuenta 1575694922
+        Saldo Anterior 1,222.92
+        Depósitos / Abonos (+) 0 0.00
+        Retiros / Cargos (-) 2 99.89
+        Saldo Final 1,123.03
+        Detalle de Movimientos Realizados
+        18/NOV 16/NOV FACEBK *UG4FT6ZNY2 40.89
+        USD 2.22TC018.4189AUT: 057867 Referencia ******1945
+        18/NOV 18/NOV Google One 59.00 1,123.03 1,123.03
+        Total de Movimientos
+        TOTAL IMPORTE CARGOS 99.89 TOTAL MOVIMIENTOS CARGOS 2
+        TOTAL IMPORTE ABONOS 0.00 TOTAL MOVIMIENTOS ABONOS 0
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "Diciembre BBVA 25.pdf",
+            sourceHint: "BBVA"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 2)
+        XCTAssertEqual(snapshot.movements.reduce(Decimal.zero) { $0 + abs($1.amount) }, Decimal(string: "99.89"))
+        XCTAssertTrue(snapshot.movements.allSatisfy { $0.amount < 0 })
+        XCTAssertEqual(snapshot.movements.first?.extractionEvidence?.selectedColumn, "CARGOS (USD/TC/AUT)")
+    }
+
+    func testBBVARunningBalanceOverridesMisleadingPaymentDescriptionInDepositColumn() {
+        let text = """
+        BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE
+        Periodo DEL 15/03/2026 AL 14/04/2026
+        No. de Cuenta 1575694922
+        Saldo Anterior 66.87
+        Depósitos / Abonos (+) 2 4,000.00
+        Retiros / Cargos (-) 1 2,000.00
+        Saldo Final 2,066.87
+        Detalle de Movimientos Realizados
+        27/MAR 27/MAR SPEI RECIBIDOSANTANDER 2,000.00
+        27/MAR 27/MAR PAGO CUENTA DE TERCERO 2,000.00
+        27/MAR 27/MAR PAGO CUENTA DE TERCERO 2,000.00 2,066.87 2,066.87
+        Total de Movimientos
+        TOTAL IMPORTE CARGOS 2,000.00 TOTAL MOVIMIENTOS CARGOS 1
+        TOTAL IMPORTE ABONOS 4,000.00 TOTAL MOVIMIENTOS ABONOS 2
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "Abril BBVA.pdf",
+            sourceHint: "BBVA"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 3)
+        XCTAssertEqual(snapshot.movements.map(\.amount), [2_000, -2_000, 2_000])
+        XCTAssertEqual(snapshot.movements.last?.extractionEvidence?.selectedColumn, "ABONOS (saldo corrido)")
+    }
+
     func testManualReviewSurvivesNormalization() {
         withStore { store in
             let movement = row(-100, title: "SPEI TRANSFERENCIA MARCELO DIAZ")

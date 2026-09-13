@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.12.27"
+    static let readerVersion = "ios-reader-deterministic-2026.09.13.28"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -4445,9 +4445,15 @@ final class FinanceStore {
             && (normalized.contains("fecha y detalle de las operaciones")
                 || layoutNormalized.contains("fecha y detalle de las operaciones"))
         let structuredText = isAmexLayout ? Self.rebuildAmexSelectableLines(text) : text
+        let controls = summary(from: structuredText, source: source)
         let candidates: [Movement]
         if source == "BBVA", kind == .bank {
-            candidates = parseBBVASelectableText(text: structuredText, fileName: fileName, sourceHint: source)
+            candidates = parseBBVASelectableText(
+                text: structuredText,
+                fileName: fileName,
+                sourceHint: source,
+                openingBalance: controls?.previousBalance
+            )
         } else if isAmexLayout {
             candidates = parseAmexText(structuredText, fileName: fileName)
         } else if source == "Rappi" {
@@ -4465,7 +4471,7 @@ final class FinanceStore {
         // the probe therefore stays a pure validation of parser output.
         return FinanceStore(reconciliationOnly: true).reconcileStatement(
             kind: kind,
-            summary: summary(from: structuredText, source: source),
+            summary: controls,
             movements: candidates
         ).status == .valid
     }
@@ -4732,7 +4738,12 @@ final class FinanceStore {
             parsedCandidates = Self.parseRappiText(text)
             rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "RappiCard: importe MXN firmado en tabla regular")
         } else if source == "BBVA" {
-            parsedCandidates = Self.parseBBVASelectableText(text: text, fileName: fileName, sourceHint: source)
+            parsedCandidates = Self.parseBBVASelectableText(
+                text: text,
+                fileName: fileName,
+                sourceHint: source,
+                openingBalance: summary?.previousBalance
+            )
             rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "fila BBVA dentro de Detalle de Movimientos Realizados")
         } else if source.localizedCaseInsensitiveContains("Amex") {
             // The selectable Amex parser is section-aware and ignores all
@@ -6180,7 +6191,8 @@ final class FinanceStore {
     private static func parseBBVASelectableText(
         text: String,
         fileName: String,
-        sourceHint: String?
+        sourceHint: String?,
+        openingBalance: Decimal? = nil
     ) -> [Movement] {
         let structuredText = rebuildBBVASelectableLines(text)
         let foldedDocument = structuredText.folding(
@@ -6314,7 +6326,16 @@ final class FinanceStore {
                 // Once the movement and balance token(s) are present, legal
                 // footers, RFCs and references belong to neither the title nor
                 // the amount. A new date will flush the row as well.
-                if hasAmount { pending.append(line) } else { flush() }
+                // A foreign card purchase can be the exception: BBVA may omit
+                // both running balances on the operation baseline and print
+                // only `USD + TC + AUT` on the next line. Preserve that line
+                // as independent charge evidence; it never supplies the MXN
+                // movement amount selected from the first line.
+                let compact = normalized.replacingOccurrences(of: " ", with: "")
+                let foreignAuthorization = normalized.contains("usd")
+                    && compact.contains("tc")
+                    && compact.contains("aut")
+                if hasAmount || foreignAuthorization { pending.append(line) } else { flush() }
             } else {
                 pending.append(line)
                 pendingHasAmount = hasAmount
@@ -6331,6 +6352,7 @@ final class FinanceStore {
             "comision", "iva", "interes", "anualidad", "cuota"
         ]
 
+        var calculatedBalance = openingBalance
         return rows.compactMap { rawRow -> Movement? in
             let original = rawRow.lines.joined(separator: " ")
             guard let dateMatch = leadingDate(in: original),
@@ -6361,11 +6383,31 @@ final class FinanceStore {
             let titleNormalized = title.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
             let explicitIncoming = incomingWords.contains { titleNormalized.contains($0) }
             let explicitOutgoing = outgoingWords.contains { titleNormalized.contains($0) }
+            let normalizedOriginal = original.folding(
+                options: [.diacriticInsensitive, .caseInsensitive],
+                locale: .current
+            )
+            let compactOriginal = normalizedOriginal.replacingOccurrences(of: " ", with: "")
+            let foreignAuthorization = normalizedOriginal.contains("usd")
+                && compactOriginal.contains("tc")
+                && compactOriginal.contains("aut")
             // FACEBK/TELEF rows do not spell out CARGOS in their description,
             // but their movement token is followed by a running balance. The
             // first amount is safe in that unambiguous bank-table shape.
             let balancePairFallback = moneyMatches.count >= 2
-            guard explicitIncoming || explicitOutgoing || balancePairFallback else { return nil }
+            let printedRunningBalance = moneyMatches.dropFirst().compactMap {
+                parseAmount($0.text)
+            }.first
+            let directionFromBalance: Bool? = {
+                guard let calculatedBalance, let printedRunningBalance else { return nil }
+                let magnitude = abs(parsedAmount)
+                let incomingMatches = calculatedBalance + magnitude == printedRunningBalance
+                let outgoingMatches = calculatedBalance - magnitude == printedRunningBalance
+                guard incomingMatches != outgoingMatches else { return nil }
+                return incomingMatches
+            }()
+            guard explicitIncoming || explicitOutgoing || balancePairFallback
+                    || foreignAuthorization || directionFromBalance != nil else { return nil }
 
             let explicitOwnTransfer = titleNormalized.contains("entre cuentas")
                 || titleNormalized.contains("cuenta propia")
@@ -6378,10 +6420,11 @@ final class FinanceStore {
                 || (titleNormalized.contains("pago") && (titleNormalized.contains("amex") || titleNormalized.contains("american express") || titleNormalized.contains("americanexpress") || titleNormalized.contains("credito")))
             let isFee = titleNormalized.contains("comision") || titleNormalized.contains("anualidad")
             let isInterest = titleNormalized.contains("interes")
+            let rowIsIncoming = directionFromBalance ?? explicitIncoming
             let flow: FlowKind
             if explicitOwnTransfer {
                 flow = .transfer
-            } else if explicitIncoming {
+            } else if rowIsIncoming {
                 flow = .income
             } else if isCardPayment {
                 flow = .debt
@@ -6391,7 +6434,7 @@ final class FinanceStore {
             let signedAmount: Decimal
             switch flow {
             case .income: signedAmount = abs(parsedAmount)
-            case .transfer: signedAmount = explicitIncoming ? abs(parsedAmount) : -abs(parsedAmount)
+            case .transfer: signedAmount = rowIsIncoming ? abs(parsedAmount) : -abs(parsedAmount)
             default: signedAmount = -abs(parsedAmount)
             }
             let kind: MovementKind
@@ -6403,11 +6446,21 @@ final class FinanceStore {
             else if titleNormalized.contains("msi") || titleNormalized.contains("meses sin intereses") { kind = .msi }
             else if flow == .income { kind = .income }
             else { kind = .purchase }
-            let selectedColumn = explicitIncoming ? "ABONOS (texto)" : "CARGOS (texto)"
-            let reason = explicitIncoming
-                ? "dirección explícita de ABONOS/SPEI recibido; primer importe de la fila; saldos y referencias excluidos"
-                : "dirección explícita de CARGOS/SPEI enviado o par movimiento-saldo; primer importe de la fila; saldos y referencias excluidos"
-            return Movement(
+            let selectedColumn: String
+            let reason: String
+            if directionFromBalance != nil {
+                selectedColumn = rowIsIncoming ? "ABONOS (saldo corrido)" : "CARGOS (saldo corrido)"
+                reason = "dirección demostrada por saldo anterior ± movimiento = saldo impreso; primer importe de la fila; referencias excluidas"
+            } else if foreignAuthorization {
+                selectedColumn = "CARGOS (USD/TC/AUT)"
+                reason = "cargo internacional demostrado por USD, tipo de cambio y autorización; primer importe MXN de la fila"
+            } else {
+                selectedColumn = rowIsIncoming ? "ABONOS (texto)" : "CARGOS (texto)"
+                reason = rowIsIncoming
+                    ? "dirección explícita de ABONOS/SPEI recibido; primer importe de la fila; saldos y referencias excluidos"
+                    : "dirección explícita de CARGOS/SPEI enviado o par movimiento-saldo; primer importe de la fila; saldos y referencias excluidos"
+            }
+            let movement = Movement(
                 date: date,
                 title: title,
                 account: "BBVA",
@@ -6427,6 +6480,14 @@ final class FinanceStore {
                     selectionReason: reason
                 )
             )
+            if let printedRunningBalance, directionFromBalance != nil {
+                calculatedBalance = printedRunningBalance
+            } else if let prior = calculatedBalance {
+                calculatedBalance = prior + signedAmount
+            } else if let printedRunningBalance {
+                calculatedBalance = printedRunningBalance
+            }
+            return movement
         }
     }
 
@@ -6588,7 +6649,12 @@ final class FinanceStore {
             : filenameAccount
         let documentKind = statementKind(from: documentNormalized, source: account)
         if account.localizedCaseInsensitiveCompare("BBVA") == .orderedSame {
-            let bbvaRows = parseBBVASelectableText(text: text, fileName: fileName, sourceHint: sourceHint)
+            let bbvaRows = parseBBVASelectableText(
+                text: text,
+                fileName: fileName,
+                sourceHint: sourceHint,
+                openingBalance: summary(from: text, source: account)?.previousBalance
+            )
             if !bbvaRows.isEmpty { return bbvaRows }
         }
         let ignoredPhrases = [
