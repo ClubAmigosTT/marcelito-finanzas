@@ -90,5 +90,14 @@ test("cada periodo explica consumo real y permite bajar hasta movimientos", asyn
   assert.match(source, /Días de la semana/);
   assert.match(source, /Movimientos del día/);
   assert.match(source, /MovementDetailView\(movement: movement\)/);
-  assert.match(source, /no incluye transferencias entre tus cuentas ni pagos de tarjetas/);
+  assert.match(source, /excluye transferencias propias y pagos de tarjetas/);
+});
+
+test("devoluciones, ticket y promedio mensual conservan una definición auditable", async () => {
+  const source = await readFile(calendarPath, "utf8");
+  assert.match(source, /var purchaseMovements: \[Movement\]/);
+  assert.match(source, /El ticket promedio usa solo cargos/);
+  assert.match(source, /var isNetRefund: Bool/);
+  assert.match(source, /devolución/);
+  assert.match(source, /\(1\.\.\.12\)\.compactMap/);
 });
