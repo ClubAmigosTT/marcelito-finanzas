@@ -128,7 +128,10 @@ function parseMoneyRows(input: DeterministicParseInput) {
     if (marker) {
       finish();
       page = Number(marker[1]);
-      active = false;
+      // The regular-movements table continues across page breaks.  A PDF
+      // page marker is metadata for evidence/diagnostics, not a section
+      // boundary; resetting `active` here silently discarded every movement
+      // on continuation pages and left only the first/last page to reconcile.
       continue;
     }
     if (normalized.includes(fold(sectionTitle))) {

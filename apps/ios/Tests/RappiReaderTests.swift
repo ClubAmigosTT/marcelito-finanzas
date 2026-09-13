@@ -149,6 +149,30 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements).status, .valid)
     }
 
+    func testFlattenedContinuationTableRebuildsEveryRappiRow() {
+        guard let tableRange = fixture.range(of: "DESGLOSE DE MOVIMIENTOS") else {
+            XCTFail("fixture must include the Rappi movement section")
+            return
+        }
+        let collapsed = String(fixture[tableRange.lowerBound...]).replacingOccurrences(of: "\n", with: " ")
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: String(fixture[..<tableRange.lowerBound]) + collapsed,
+            fileName: "rappi-continuation-pages.pdf"
+        )
+
+        // PDFKit may flatten all continuation pages into one stream. The
+        // parser must recover the four date-anchored rows before reconciling
+        // against the independent charge/credit controls.
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .cardPayment }.count, 1)
+        XCTAssertEqual(
+            FinanceStore.reconcileStatementForTesting(
+                kind: .card, summary: snapshot.summary, movements: snapshot.movements
+            ).status,
+            .valid
+        )
+    }
+
     func testRowsAcceptLocalizedOCRDateFormats() {
         let text = fixture
             .replacingOccurrences(
