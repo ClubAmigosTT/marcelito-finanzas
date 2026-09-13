@@ -10215,10 +10215,14 @@ final class FinanceStore {
                     #"^(.+?)\s*(?:[+-]?\s*\$|compra en el extranjero)"#,
                     in: segment
                 ) ?? segment
-                let title = titleBody.replacingOccurrences(
+                let title = titleBody
+                    .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                    .replacingOccurrences(
                     of: #"(?i);?\s*\bRFC\s*:\s*[A-Z0-9&Ñ]+"#,
                     with: "", options: .regularExpression
-                ).trimmingCharacters(in: .whitespacesAndNewlines)
+                    )
+                    .replacingOccurrences(of: #"[;,:]+\s*$"#, with: "", options: .regularExpression)
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !title.isEmpty else { continue }
                 // PDF extraction may split the payment label across lines or
                 // insert repeated spaces. Match whole words, not a prefix that
