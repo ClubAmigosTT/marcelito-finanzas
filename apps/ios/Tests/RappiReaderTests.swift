@@ -378,9 +378,11 @@ final class RappiReaderTests: XCTestCase {
         ))
         XCTAssertEqual(FinanceStore.rappiTableRowRegionsForTesting(cgImage).count, rows.count)
 
-        let recognizedRows = rows.map { row in
+        let isolatedRowTexts = rows.map { row in
             "\(row.0) \(row.1) \(row.2) \(row.3)"
         }
+        let recognizedRows = FinanceStore.rappiIsolatedRowLinesForTesting(isolatedRowTexts)
+        XCTAssertEqual(recognizedRows.count, rows.count)
         let cover = fixture.components(separatedBy: "__PDF_PAGE_3__")[0]
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
             text: cover + "__PDF_PAGE_3__\nCARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)\n"
