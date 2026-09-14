@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.13.31"
+    static let readerVersion = "ios-reader-deterministic-2026.09.13.32"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -1184,9 +1184,16 @@ final class FinanceStore {
         let ocrCandidates = parseRappiText(ocrText, evidenceMethod: "vision-ocr")
         let selectableCandidates = parseRappiText(selectableText, evidenceMethod: "pdf-text")
         let layoutCandidates = parseRappiText(layoutText, evidenceMethod: "pdf-text")
+        let duplicateRepairedOCRCandidates = rappiOCRDuplicateRepairedCandidates(ocrCandidates)
         let repairedOCRCandidates = rappiEvidenceBackedFallbackCandidates(ocrCandidates)
         let selected = reconciledRappiSelection(
-            candidateSets: [layoutCandidates, selectableCandidates, ocrCandidates, repairedOCRCandidates],
+            candidateSets: [
+                layoutCandidates,
+                selectableCandidates,
+                duplicateRepairedOCRCandidates,
+                ocrCandidates,
+                repairedOCRCandidates
+            ],
             summaries: [statementSummary],
             kind: .card
         )
@@ -4737,17 +4744,75 @@ final class FinanceStore {
                 ? nil
                 : Self.summary(from: rappiPageWiseSelectableText, source: source)
             let ocrSummary = Self.summary(from: text, source: source)
+            let duplicateRepairedOCRCandidates = Self.rappiOCRDuplicateRepairedCandidates(ocrCandidates)
             let evidenceBackedOCRCandidates = Self.rappiEvidenceBackedFallbackCandidates(ocrCandidates)
-            if let selected = Self.reconciledRappiSelection(
-                candidateSets: [pageWiseCandidates, layoutCandidates, selectableCandidates, ocrCandidates, evidenceBackedOCRCandidates],
+            var selectedRappiCandidates = ocrCandidates
+            var selectedRappiSummary = summary
+            var selected = Self.reconciledRappiSelection(
+                candidateSets: [
+                    pageWiseCandidates,
+                    layoutCandidates,
+                    selectableCandidates,
+                    duplicateRepairedOCRCandidates,
+                    ocrCandidates,
+                    evidenceBackedOCRCandidates
+                ],
                 summaries: [pageWiseSummary, layoutSummary, selectableSummary, summary, ocrSummary],
                 kind: kind
-            ) {
-                summary = selected.summary
-                parsedCandidates = selected.candidates
-            } else {
-                parsedCandidates = ocrCandidates
+            )
+
+            if let selected {
+                selectedRappiSummary = selected.summary
+                selectedRappiCandidates = selected.candidates
+            } else if allowOCR {
+                // The first full-page OCR pass is intentionally conservative,
+                // but a dense continuation page can still omit a complete
+                // vertical band while reporting high confidence. Re-run only
+                // after every existing evidence stream fails exact issuer
+                // reconciliation; the tiled pass recovers the missing band
+                // without making normal imports pay the extra Vision cost.
+                let retryObservations = Self.ocrObservations(
+                    from: document,
+                    pageIndexes: rappiPages,
+                    prioritizeNumericEvidence: true,
+                    forceRappiRegionRecovery: true
+                )
+                let retryText = Self.ocrText(from: retryObservations)
+                let retryConfidenceByPage = Dictionary(grouping: retryObservations, by: { $0.page + 1 })
+                    .mapValues { $0.map(\.confidence).min() ?? 0 }
+                let retryCandidates = Self.parseRappiText(
+                    retryText,
+                    evidenceMethod: "vision-ocr",
+                    confidenceByPage: retryConfidenceByPage
+                )
+                let retryDuplicateRepairedCandidates = Self.rappiOCRDuplicateRepairedCandidates(retryCandidates)
+                let retryEvidenceBackedCandidates = Self.rappiEvidenceBackedFallbackCandidates(retryCandidates)
+                let retrySummary = Self.summary(from: retryText, source: source)
+                let retrySelection = Self.reconciledRappiSelection(
+                    candidateSets: [
+                        pageWiseCandidates,
+                        layoutCandidates,
+                        selectableCandidates,
+                        retryDuplicateRepairedCandidates,
+                        retryCandidates,
+                        retryEvidenceBackedCandidates
+                    ],
+                    summaries: [pageWiseSummary, layoutSummary, selectableSummary, summary, retrySummary],
+                    kind: kind
+                )
+                if let retrySelection {
+                    selected = retrySelection
+                    selectedRappiSummary = retrySelection.summary
+                    selectedRappiCandidates = retrySelection.candidates
+                } else if retryCandidates.count > selectedRappiCandidates.count {
+                    // Keep the richer forensic stream visible when controls
+                    // still disagree; it remains quarantined by the normal
+                    // reconciliation gate and never enters the ledger.
+                    selectedRappiCandidates = retryCandidates
+                }
             }
+            summary = selectedRappiSummary
+            parsedCandidates = selectedRappiCandidates
             rowDiagnostics = Self.rowDiagnostics(
                 for: parsedCandidates,
                 fallbackReason: "RappiCard: importe firmado recuperado visualmente y conciliado con controles independientes"
@@ -5516,7 +5581,8 @@ final class FinanceStore {
     private static func ocrObservations(
         from document: PDFDocument,
         pageIndexes: Set<Int>? = nil,
-        prioritizeNumericEvidence: Bool = false
+        prioritizeNumericEvidence: Bool = false,
+        forceRappiRegionRecovery: Bool = false
     ) -> [OCRObservation] {
         var observations: [OCRObservation] = []
         let ciContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -5551,7 +5617,8 @@ final class FinanceStore {
         func recognize(
             _ cgImage: CGImage,
             page: Int,
-            numericFocus: Bool = false
+            numericFocus: Bool = false,
+            regionOfInterest: CGRect? = nil
         ) -> [OCRObservation] {
             // Some iOS revisions expose only the base language identifiers
             // ("es"/"en") even though the regional BCP-47 tags are accepted
@@ -5592,6 +5659,15 @@ final class FinanceStore {
                         "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
                     ]
                     request.usesLanguageCorrection = true
+                }
+                // A full-page Vision pass can silently skip the upper half of
+                // a dense Rappi table even when the glyphs are legible.  The
+                // recovery pass below can constrain Vision to an overlapping
+                // strip; keep the returned boxes in the original page
+                // coordinate space so the parser can merge the strips by
+                // their real vertical position.
+                if let regionOfInterest {
+                    request.regionOfInterest = regionOfInterest
                 }
 
                 do {
@@ -6007,6 +6083,73 @@ final class FinanceStore {
                             selectedObservations = completeRecovery
                         }
                     }
+                }
+                if prioritizeNumericEvidence, forceRappiRegionRecovery, pageIndex > 0 {
+                    // A dense Rappi continuation page can produce a confident
+                    // full-page result while silently omitting the first
+                    // column of rows (the April statement lost the first 15
+                    // rows of page 6 this way). Re-read two overlapping
+                    // horizontal strips only on the explicit retry path. The
+                    // initial import therefore keeps its normal latency, and
+                    // a retry adds evidence without relaxing reconciliation.
+                    let regions = [
+                        CGRect(x: 0, y: 0, width: 1, height: 0.58),
+                        CGRect(x: 0, y: 0.42, width: 1, height: 0.58)
+                    ]
+                    var supplemental: [OCRObservation] = []
+                    for region in regions {
+                        supplemental.append(contentsOf: recognize(
+                            selectedImage,
+                            page: pageIndex,
+                            numericFocus: true,
+                            regionOfInterest: region
+                        ))
+                    }
+
+                    func normalizedOCRToken(_ value: String) -> String {
+                        value
+                            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                            .lowercased()
+                            .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+                    }
+
+                    func sameVisualLine(_ left: OCRObservation, _ right: OCRObservation) -> Bool {
+                        guard abs(left.centerY - right.centerY) <= 0.014 else { return false }
+                        let expandedLeft = left.boundingBox.insetBy(dx: -0.02, dy: -0.006)
+                        let expandedRight = right.boundingBox.insetBy(dx: -0.02, dy: -0.006)
+                        return expandedLeft.intersects(expandedRight)
+                            || abs(left.centerX - right.centerX) <= 0.08
+                    }
+
+                    func appendUniqueToken(_ token: OCRObservation, to values: inout [OCRObservation]) {
+                        let normalized = normalizedOCRToken(token.text)
+                        let duplicate = values.contains { existing in
+                            normalizedOCRToken(existing.text) == normalized
+                                && abs(existing.centerX - token.centerX) <= 0.018
+                                && abs(existing.centerY - token.centerY) <= 0.012
+                        }
+                        if !duplicate { values.append(token) }
+                    }
+
+                    var merged = selectedObservations
+                    for observation in supplemental {
+                        let sharesLine = selectedObservations.contains { sameVisualLine($0, observation) }
+                        if sharesLine {
+                            // Keep the merchant line chosen by the full-page
+                            // pass, but add a missing date/amount token from a
+                            // strip when it is genuinely new evidence.
+                            for token in numericTokens(from: [observation]) {
+                                appendUniqueToken(token, to: &merged)
+                            }
+                        } else {
+                            let duplicateLine = merged.contains { existing in
+                                sameVisualLine(existing, observation)
+                                    && normalizedOCRToken(existing.text) == normalizedOCRToken(observation.text)
+                            }
+                            if !duplicateLine { merged.append(observation) }
+                        }
+                    }
+                    selectedObservations = merged
                 }
                 if prioritizeNumericEvidence, pageIndex == 0,
                    let coverObservation = rappiCoverNumericObservation(from: coverImage, page: pageIndex) {
@@ -10668,6 +10811,96 @@ final class FinanceStore {
         }
         flush()
         return rows
+    }
+
+    /// Vision can repeat a signed amount (or an entire OCR line) while the
+    /// printed statement contains one row.  Do not blindly collapse equal
+    /// date/amount/title tuples: legitimate Rappi statements frequently have
+    /// several identical purchases.  Instead, use the bounded source fragment
+    /// retained on each row as an occurrence budget.  A candidate is removed
+    /// only when its normalized merchant text occurs fewer times in that same
+    /// fragment than Vision emitted candidates for it.  The untouched OCR
+    /// stream remains a candidate too; issuer totals choose whichever stream
+    /// proves exact reconciliation.
+    private static func rappiOCRDuplicateRepairedCandidates(_ candidates: [Movement]) -> [Movement] {
+        func compact(_ value: String) -> String {
+            value
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+        }
+
+        func occurrenceCount(of needle: String, in haystack: String) -> Int {
+            guard !needle.isEmpty, needle.count >= 3 else { return 0 }
+            var count = 0
+            var searchStart = haystack.startIndex
+            while searchStart < haystack.endIndex,
+                  let range = haystack.range(of: needle, range: searchStart..<haystack.endIndex) {
+                count += 1
+                searchStart = range.upperBound
+            }
+            return count
+        }
+
+        struct GroupKey: Hashable {
+            let page: Int
+            let source: String
+        }
+
+        var grouped: [GroupKey: [Int]] = [:]
+        for (index, candidate) in candidates.enumerated() {
+            guard candidate.extractionEvidence?.method == "vision-ocr",
+                  let source = candidate.extractionEvidence?.sourceText,
+                  !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  let page = candidate.extractionEvidence?.page else { continue }
+            grouped[GroupKey(page: page, source: source), default: []].append(index)
+        }
+
+        var keep = Array(repeating: true, count: candidates.count)
+        for (key, indexes) in grouped where indexes.count > 1 {
+            let source = compact(key.source)
+            // A repeated signed token inside one OCR observation produces a
+            // second candidate whose segment is only the unsigned cents text
+            // (`+$392.70 392.70 +$392.70`).  That synthetic candidate has no
+            // letters and is already quarantined by the stored-row validator;
+            // remove it from this repaired stream when the same signed amount
+            // has a merchant-backed sibling.  A genuinely unreadable row with
+            // no sibling is retained for the evidence-backed fallback below.
+            for index in indexes {
+                let title = candidates[index].title
+                guard title.rangeOfCharacter(from: .letters) == nil else { continue }
+                let hasMerchantSibling = indexes.contains { siblingIndex in
+                    siblingIndex != index
+                        && candidates[siblingIndex].date == candidates[index].date
+                        && candidates[siblingIndex].amount == candidates[index].amount
+                        && candidates[siblingIndex].flow == candidates[index].flow
+                        && candidates[siblingIndex].title.rangeOfCharacter(from: .letters) != nil
+                }
+                if hasMerchantSibling { keep[index] = false }
+            }
+            var availableByTitle: [String: Int] = [:]
+            for index in indexes {
+                guard keep[index] else { continue }
+                let title = compact(candidates[index].title)
+                if availableByTitle[title] == nil {
+                    availableByTitle[title] = occurrenceCount(of: title, in: source)
+                }
+            }
+            var consumedByTitle: [String: Int] = [:]
+            for index in indexes {
+                guard keep[index] else { continue }
+                let title = compact(candidates[index].title)
+                let available = availableByTitle[title] ?? 0
+                guard available > 0 else { continue }
+                let consumed = consumedByTitle[title, default: 0]
+                if consumed < available {
+                    consumedByTitle[title] = consumed + 1
+                } else {
+                    keep[index] = false
+                }
+            }
+        }
+        return candidates.enumerated().compactMap { keep[$0.offset] ? $0.element : nil }
     }
 
     /// Pick one complete Rappi evidence stream. Candidate streams are never
