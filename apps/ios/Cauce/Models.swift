@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.13.32"
+    static let readerVersion = "ios-reader-deterministic-2026.09.14.33"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -1155,7 +1155,7 @@ final class FinanceStore {
                 confidence: fixture.confidence
             )
         }
-        let text = ocrText(from: observations)
+        let text = rappiOCRText(from: observations)
         let detection = sourceDetection(from: text, fileName: fileName)
         let source = detection.source
         let confidenceByPage = Dictionary(grouping: observations, by: { $0.page + 1 })
@@ -4591,7 +4591,9 @@ final class FinanceStore {
                 prioritizeNumericEvidence: selectableSource == "Rappi"
             )
             : []
-        let ocrText = Self.ocrText(from: ocrObservations)
+        let ocrText = selectableSource.localizedCaseInsensitiveCompare("Rappi") == .orderedSame
+            ? Self.rappiOCRText(from: ocrObservations)
+            : Self.ocrText(from: ocrObservations)
         let usedOCR = shouldAttemptOCR && !ocrObservations.isEmpty
         // If Vision cannot produce a single observation, keep the original
         // text so the caller receives the normal reconciliation diagnostics
@@ -4777,7 +4779,7 @@ final class FinanceStore {
                     prioritizeNumericEvidence: true,
                     forceRappiRegionRecovery: true
                 )
-                let retryText = Self.ocrText(from: retryObservations)
+                let retryText = Self.rappiOCRText(from: retryObservations)
                 let retryConfidenceByPage = Dictionary(grouping: retryObservations, by: { $0.page + 1 })
                     .mapValues { $0.map(\.confidence).min() ?? 0 }
                 let retryCandidates = Self.parseRappiText(
@@ -5389,6 +5391,7 @@ final class FinanceStore {
         let boundingBox: CGRect
 
         var centerX: CGFloat { boundingBox.midX }
+        var centerY: CGFloat { boundingBox.midY }
     }
 
     private struct OCRObservation {
@@ -6167,6 +6170,211 @@ final class FinanceStore {
         return linesByPage.keys.sorted().flatMap { page in
             ["__PDF_PAGE_\(page + 1)__"] + (linesByPage[page] ?? []).map(\.text)
         }.joined(separator: "\n")
+    }
+
+    /// Rebuilds Rappi's movement table from the substring geometry returned by
+    /// Vision. A single Vision observation can span several printed rows (the
+    /// affected Banorte PDFs often return four dates and four amounts as one
+    /// line). Feeding that text to the generic line parser makes every signed
+    /// amount look like a new movement. Rappi has a stable visual contract:
+    /// two date columns on the left, a description column in the middle and a
+    /// signed MXN amount on the right. Reconstruct one row per right-column
+    /// amount and only use a generic page line when geometry is unavailable.
+    private static func rappiOCRText(from observations: [OCRObservation]) -> String {
+        let observationsByPage = Dictionary(grouping: observations, by: \.page)
+        return observationsByPage.keys.sorted().flatMap { page in
+            let pageObservations = observationsByPage[page] ?? []
+            var lines = ["__PDF_PAGE_\(page + 1)__"]
+            if page == 0 {
+                // The cover contains the independent controls and period. Do
+                // not synthesize rows from its account/credit-limit amounts.
+                lines.append(contentsOf: ocrLines(from: pageObservations).map(\.text))
+            } else {
+                let movementLines = rappiOCRMovementLines(from: pageObservations)
+                if movementLines.isEmpty {
+                    lines.append(contentsOf: ocrLines(from: pageObservations).map(\.text))
+                } else {
+                    lines.append("CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)")
+                    lines.append(contentsOf: movementLines)
+                }
+            }
+            return lines
+        }.joined(separator: "\n")
+    }
+
+    private static func rappiOCRMovementLines(from observations: [OCRObservation]) -> [String] {
+        guard !observations.isEmpty else { return [] }
+
+        func normalized(_ value: String) -> String {
+            value
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+                .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+        }
+
+        func hasExplicitSign(_ value: String) -> Bool {
+            value.contains("+") || value.contains("-") || value.contains("−")
+        }
+
+        func deduplicated(_ boxes: [OCRTextBox]) -> [OCRTextBox] {
+            var result: [OCRTextBox] = []
+            for box in boxes.sorted(by: {
+                if abs($0.centerY - $1.centerY) > 0.004 { return $0.centerY > $1.centerY }
+                return $0.centerX < $1.centerX
+            }) {
+                guard !box.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+                let duplicate = result.contains { existing in
+                    normalized(existing.text) == normalized(box.text)
+                        && abs(existing.centerX - box.centerX) <= 0.018
+                        && abs(existing.centerY - box.centerY) <= 0.012
+                }
+                if !duplicate { result.append(box) }
+            }
+            return result
+        }
+
+        // Rappi's movement dates sit before the description (roughly the
+        // left 45% of the page); cover/header dates are not present on these
+        // continuation pages. The amount column is the rightmost column.
+        let dateBoxes = deduplicated(observations.flatMap(\.dateBoxes).filter { $0.centerX < 0.48 })
+        let amountBoxes = deduplicated(observations.flatMap(\.amountBoxes).filter { $0.centerX > 0.62 })
+        guard !dateBoxes.isEmpty, !amountBoxes.isEmpty else { return [] }
+
+        struct Row {
+            var y: CGFloat
+            var amount: OCRTextBox
+        }
+
+        var rows: [Row] = []
+        for amount in amountBoxes {
+            guard amountToken(from: amount.text) != nil else { continue }
+            if let index = rows.firstIndex(where: { abs($0.y - amount.centerY) <= 0.010 }) {
+                let current = rows[index].amount
+                // Recovery passes can return both an unsigned fragment and
+                // its signed sibling at the same coordinate. Prefer the
+                // signed and rightmost token; the printed amount column has
+                // only one financial value per visual row.
+                if (hasExplicitSign(amount.text) && !hasExplicitSign(current.text))
+                    || (hasExplicitSign(amount.text) == hasExplicitSign(current.text)
+                        && amount.centerX > current.centerX) {
+                    rows[index].amount = amount
+                }
+            } else {
+                rows.append(Row(y: amount.centerY, amount: amount))
+            }
+        }
+        guard !rows.isEmpty else { return [] }
+
+        let dateTolerance: CGFloat = 0.015
+        let datePattern = #"(?i)(?:\d{4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}|\d{1,2}\s*[-/.]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*\d{2,4}|\d{1,2}\s+(?:de\s+)?[A-Za-zÁÉÍÓÚáéíóú]{3,12}\s+\d{2,4})"#
+        let moneyPattern = #"(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+        let dateRegex = try? NSRegularExpression(pattern: datePattern)
+        let moneyRegex = try? NSRegularExpression(pattern: moneyPattern)
+        let headerRegex = try? NSRegularExpression(
+            pattern: #"(?i)\b(?:fecha|operaci[oó]n|cargo|monto|movimiento|descripci[oó]n|p[aá]gina|notas?)\b"#
+        )
+        let rfcRegex = try? NSRegularExpression(pattern: #"(?i)\bRFC\s*:?\s*[A-Z0-9&Ñ-]+"#)
+
+        func cleanTitle(_ raw: String) -> String {
+            var value = raw
+            let fullRange = NSRange(value.startIndex..<value.endIndex, in: value)
+            if let dateRegex {
+                value = dateRegex.stringByReplacingMatches(in: value, range: fullRange, withTemplate: " ")
+            }
+            let moneyRange = NSRange(value.startIndex..<value.endIndex, in: value)
+            if let moneyRegex {
+                value = moneyRegex.stringByReplacingMatches(in: value, range: moneyRange, withTemplate: " ")
+            }
+            let rfcRange = NSRange(value.startIndex..<value.endIndex, in: value)
+            if let rfcRegex {
+                value = rfcRegex.stringByReplacingMatches(in: value, range: rfcRange, withTemplate: " ")
+            }
+            let headerRange = NSRange(value.startIndex..<value.endIndex, in: value)
+            if let headerRegex {
+                value = headerRegex.stringByReplacingMatches(in: value, range: headerRange, withTemplate: " ")
+            }
+            value = value
+                // Vision sometimes prefixes a row with the tail of an
+                // adjacent merchant ("O"/"O POR"). Keep the meaningful
+                // `POR` in `PAGO POR SPEI`; it is what classifies a payment
+                // instead of a refund.
+                .replacingOccurrences(of: #"(?i)^\s*O(?:\s+POR)?\s+"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            var trimSet = CharacterSet.whitespacesAndNewlines
+            trimSet.formUnion(.punctuationCharacters)
+            value = value.trimmingCharacters(in: trimSet)
+            return value
+        }
+
+        func isPaymentLabel(_ title: String) -> Bool {
+            let value = title
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return value == "pago por spei"
+                || value == "pago"
+                || value.hasSuffix(" pago por spei")
+        }
+
+        func titleForRow(y: CGFloat, amount: OCRTextBox) -> String {
+            let nearby = observations.filter { observation in
+                abs(observation.centerY - y) <= dateTolerance
+                    && observation.centerX > 0.16
+                    && observation.centerX < 0.80
+                    && !observation.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
+            let ranked = nearby.sorted { left, right in
+                func owns(_ observation: OCRObservation) -> Bool {
+                    observation.amountBoxes.contains { box in
+                        normalized(box.text) == normalized(amount.text)
+                            && abs(box.centerX - amount.centerX) <= 0.018
+                            && abs(box.centerY - amount.centerY) <= 0.012
+                    }
+                }
+                if owns(left) != owns(right) { return owns(left) }
+                let leftDistance = abs(left.centerY - y)
+                let rightDistance = abs(right.centerY - y)
+                if abs(leftDistance - rightDistance) > 0.002 { return leftDistance < rightDistance }
+                return left.text.count < right.text.count
+            }
+
+            for observation in ranked {
+                let raw = observation.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if raw.range(of: #"(?i)\bpago\s+por\s+spei\b"#, options: .regularExpression) != nil {
+                    let cleaned = cleanTitle(raw)
+                    if isPaymentLabel(cleaned) { return "PAGO POR SPEI" }
+                }
+                let cleaned = cleanTitle(raw)
+                guard cleaned.rangeOfCharacter(from: .letters) != nil,
+                      cleaned.count <= 96 else { continue }
+                if isPaymentLabel(cleaned) { return "PAGO POR SPEI" }
+                return cleaned
+            }
+            return "Movimiento Rappi"
+        }
+
+        return rows.sorted { $0.y > $1.y }.compactMap { row in
+            let matchingDates = deduplicated(dateBoxes.filter { abs($0.centerY - row.y) <= dateTolerance })
+                .sorted { $0.centerX < $1.centerX }
+            guard matchingDates.first != nil,
+                  let amount = amountToken(from: row.amount.text) else { return nil }
+            let dates = Array(matchingDates.prefix(2)).map(\.text)
+            let title = titleForRow(y: row.y, amount: row.amount)
+            return (dates + [title, amount]).joined(separator: " ")
+        }
+    }
+
+    private static func amountToken(from rawValue: String) -> String? {
+        let normalized = rawValue
+            .replacingOccurrences(of: "−", with: "-")
+            .replacingOccurrences(of: "–", with: "-")
+            .replacingOccurrences(of: "—", with: "-")
+        guard let range = normalized.range(of: rappiMoneyToken, options: .regularExpression) else { return nil }
+        let number = String(normalized[range])
+        guard number.contains(".") || number.contains(",") else { return nil }
+        let sign = normalized.contains("-") ? "-" : "+"
+        return "\(sign)$\(number)"
     }
 
     private static func ocrLines(from observations: [OCRObservation]) -> [OCRObservation] {
