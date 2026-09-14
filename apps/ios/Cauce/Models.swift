@@ -5918,12 +5918,12 @@ final class FinanceStore {
         rappiVisualRowObservations(from: image, page: page).map(\.text)
     }
 
-    static func rappiIsolatedRowLinesForTesting(_ texts: [String], page: Int = 2) -> [String] {
+    static func rappiIsolatedRowLinesForTesting(_ texts: [String], page: Int = 2, spacing: CGFloat = 0.04) -> [String] {
         let observations = texts.enumerated().compactMap { index, text in
             rappiIsolatedRowObservation(
                 page: page,
                 text: text,
-                region: CGRect(x: 0.045, y: 0.90 - (CGFloat(index) * 0.04), width: 0.91, height: 0.03),
+                region: CGRect(x: 0.045, y: 0.90 - (CGFloat(index) * spacing), width: 0.91, height: spacing * 0.8),
                 confidence: 0.99
             )
         }
