@@ -339,6 +339,67 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements).status, .valid)
     }
 
+    func testVisualRowBandsKeepOneCandidatePerPrintedTransaction() throws {
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(
+            size: CGSize(width: 612, height: 792),
+            format: format
+        )
+        let rows = [
+            ("2026-08-01", "2026-08-02", "COMERCIO UNO", "+$50.00"),
+            ("2026-08-01", "2026-08-02", "COMERCIO DOS", "+$50.00"),
+            ("2026-08-02", "2026-08-02", "PAGO POR SPEI", "-$40.00"),
+            ("2026-08-03", "2026-08-03", "BONIFICACION CASHBACK", "-$10.00"),
+        ]
+        let image = renderer.image { rendererContext in
+            UIColor.white.setFill()
+            rendererContext.cgContext.fill(CGRect(x: 0, y: 0, width: 612, height: 792))
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.systemFont(ofSize: 12),
+                .foregroundColor: UIColor.black,
+            ]
+            let lineContext = rendererContext.cgContext
+            lineContext.setStrokeColor(UIColor(white: 0.82, alpha: 1).cgColor)
+            lineContext.setLineWidth(1)
+            var separatorY: CGFloat = 150
+            for _ in 0...rows.count {
+                lineContext.move(to: CGPoint(x: 30, y: separatorY))
+                lineContext.addLine(to: CGPoint(x: 582, y: separatorY))
+                lineContext.strokePath()
+                separatorY += 46
+            }
+            for (index, row) in rows.enumerated() {
+                let y = CGFloat(166 + index * 46)
+                (row.0 as NSString).draw(at: CGPoint(x: 36, y: y), withAttributes: attributes)
+                (row.1 as NSString).draw(at: CGPoint(x: 140, y: y), withAttributes: attributes)
+                (row.2 as NSString).draw(at: CGPoint(x: 245, y: y), withAttributes: attributes)
+                (row.3 as NSString).draw(at: CGPoint(x: 510, y: y), withAttributes: attributes)
+            }
+        }
+        let cgImage = try XCTUnwrap(image.cgImage)
+        XCTAssertEqual(FinanceStore.rappiTableRowRegionsForTesting(cgImage).count, rows.count)
+
+        let recognizedRows = FinanceStore.rappiVisualRowTextsForTesting(cgImage)
+        XCTAssertEqual(recognizedRows.count, rows.count)
+        let cover = fixture.components(separatedBy: "__PDF_PAGE_3__")[0]
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: cover + "__PDF_PAGE_3__\nCARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)\n"
+                + recognizedRows.joined(separator: "\n"),
+            fileName: "rappi-visual-rows.pdf"
+        )
+        XCTAssertEqual(snapshot.movements.count, rows.count)
+        XCTAssertEqual(
+            FinanceStore.reconcileStatementForTesting(
+                kind: .card,
+                summary: snapshot.summary,
+                movements: snapshot.movements
+            ).status,
+            .valid
+        )
+    }
+
     func testSPEIPaymentSpacingAndCaseDoNotBecomeIncome() throws {
         for label in ["PAGO POR SPEI", "Pago por Spei", "PAGO   POR\nSPEI"] {
             let text = fixture.replacingOccurrences(of: "PAGO POR SPEI", with: label)
