@@ -339,6 +339,65 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements).status, .valid)
     }
 
+    func testVisualRowBandsKeepOneCandidatePerPrintedTransaction() throws {
+        let width = 612
+        let height = 792
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var pixels = [UInt8](repeating: 255, count: bytesPerRow * height)
+        let rows = [
+            ("2026-08-01", "2026-08-02", "COMERCIO UNO", "+$50.00"),
+            ("2026-08-01", "2026-08-02", "COMERCIO DOS", "+$50.00"),
+            ("2026-08-02", "2026-08-02", "PAGO POR SPEI", "-$40.00"),
+            ("2026-08-03", "2026-08-03", "BONIFICACION CASHBACK", "-$10.00"),
+        ]
+        for separatorY in stride(from: 150, through: 150 + rows.count * 46, by: 46) {
+            for y in separatorY..<(separatorY + 2) {
+                for x in 30..<582 {
+                    let pixel = (y * bytesPerRow) + (x * bytesPerPixel)
+                    pixels[pixel] = 205
+                    pixels[pixel + 1] = 205
+                    pixels[pixel + 2] = 205
+                    pixels[pixel + 3] = 255
+                }
+            }
+        }
+        let provider = try XCTUnwrap(CGDataProvider(data: Data(pixels) as CFData))
+        let cgImage = try XCTUnwrap(CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        ))
+        XCTAssertEqual(FinanceStore.rappiTableRowRegionsForTesting(cgImage).count, rows.count)
+
+        let recognizedRows = rows.map { row in
+            "\(row.0) \(row.1) \(row.2) \(row.3)"
+        }
+        let cover = fixture.components(separatedBy: "__PDF_PAGE_3__")[0]
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: cover + "__PDF_PAGE_3__\nCARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)\n"
+                + recognizedRows.joined(separator: "\n"),
+            fileName: "rappi-visual-rows.pdf"
+        )
+        XCTAssertEqual(snapshot.movements.count, rows.count)
+        XCTAssertEqual(
+            FinanceStore.reconcileStatementForTesting(
+                kind: .card,
+                summary: snapshot.summary,
+                movements: snapshot.movements
+            ).status,
+            .valid
+        )
+    }
+
     func testSPEIPaymentSpacingAndCaseDoNotBecomeIncome() throws {
         for label in ["PAGO POR SPEI", "Pago por Spei", "PAGO   POR\nSPEI"] {
             let text = fixture.replacingOccurrences(of: "PAGO POR SPEI", with: label)

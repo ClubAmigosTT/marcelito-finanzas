@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.14.33"
+    static let readerVersion = "ios-reader-deterministic-2026.09.14.34"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -4806,11 +4806,6 @@ final class FinanceStore {
                     selected = retrySelection
                     selectedRappiSummary = retrySelection.summary
                     selectedRappiCandidates = retrySelection.candidates
-                } else if retryCandidates.count > selectedRappiCandidates.count {
-                    // Keep the richer forensic stream visible when controls
-                    // still disagree; it remains quarantined by the normal
-                    // reconciliation gate and never enters the ledger.
-                    selectedRappiCandidates = retryCandidates
                 }
             }
             summary = selectedRappiSummary
@@ -5581,6 +5576,282 @@ final class FinanceStore {
         return Array(movementPages.union(pageTexts.isEmpty ? [] : [0])).sorted()
     }
 
+    /// Rappi's Banorte statements draw a horizontal rule above and below
+    /// every transaction. Those rules are more stable than Vision's line
+    /// grouping: on dense pages Vision can emit several competing readings
+    /// for one printed row or merge neighbouring rows into a single
+    /// observation. Detect the printed row bands from the rendered pixels so
+    /// each band can be recognized independently.
+    private static func rappiRuleRowRegions(in image: CGImage) -> [CGRect] {
+        let sampleWidth = min(max(image.width, 1), 1_200)
+        let aspect = CGFloat(max(image.height, 1)) / CGFloat(max(image.width, 1))
+        let sampleHeight = max(1, Int((CGFloat(sampleWidth) * aspect).rounded()))
+        let bytesPerPixel = 4
+        let bytesPerRow = sampleWidth * bytesPerPixel
+        let pixelCount = bytesPerRow * sampleHeight
+        let pixels = UnsafeMutablePointer<UInt8>.allocate(capacity: pixelCount)
+        pixels.initialize(repeating: 255, count: pixelCount)
+        defer {
+            pixels.deinitialize(count: pixelCount)
+            pixels.deallocate()
+        }
+        guard let context = CGContext(
+            data: pixels,
+            width: sampleWidth,
+            height: sampleHeight,
+            bitsPerComponent: 8,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return [] }
+
+        context.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
+        context.fill(CGRect(
+            x: 0,
+            y: 0,
+            width: CGFloat(sampleWidth),
+            height: CGFloat(sampleHeight)
+        ))
+        // Make row zero in the backing buffer the visual top of the page.
+        // Vision uses bottom-left normalized coordinates, so the conversion
+        // below is then explicit and deterministic.
+        context.translateBy(x: 0, y: CGFloat(sampleHeight))
+        context.scaleBy(x: 1, y: -1)
+        context.interpolationQuality = .low
+        context.draw(image, in: CGRect(
+            x: 0,
+            y: 0,
+            width: CGFloat(sampleWidth),
+            height: CGFloat(sampleHeight)
+        ))
+
+        let left = max(0, Int((CGFloat(sampleWidth) * 0.055).rounded()))
+        let right = min(sampleWidth, Int((CGFloat(sampleWidth) * 0.945).rounded()))
+        guard right - left > 20 else { return [] }
+        let firstY = max(0, Int((CGFloat(sampleHeight) * 0.045).rounded()))
+        let lastY = min(sampleHeight, Int((CGFloat(sampleHeight) * 0.985).rounded()))
+        var linePixels: [Int] = []
+        linePixels.reserveCapacity(sampleHeight / 12)
+        for y in firstY..<lastY {
+            let offset = y * bytesPerRow
+            var nonWhite = 0
+            for x in left..<right {
+                let pixel = offset + (x * bytesPerPixel)
+                // Reading explicit RGB channels avoids color-space dependent
+                // behavior from one-component bitmap contexts (notably for
+                // Display-P3 images produced by UIKit and PDFKit).
+                let darkest = min(pixels[pixel], min(pixels[pixel + 1], pixels[pixel + 2]))
+                if darkest < 248 { nonWhite += 1 }
+            }
+            // Merchant text is dark but sparse. A table rule crosses nearly
+            // the complete content width, so 48% keeps faint antialiased
+            // rules while excluding ordinary glyph rows.
+            if Double(nonWhite) / Double(right - left) >= 0.48 {
+                linePixels.append(y)
+            }
+        }
+
+        var lineGroups: [[Int]] = []
+        for y in linePixels {
+            if let last = lineGroups.last?.last, y <= last + 1 {
+                lineGroups[lineGroups.count - 1].append(y)
+            } else {
+                lineGroups.append([y])
+            }
+        }
+        let centers = lineGroups.compactMap { group -> CGFloat? in
+            guard let first = group.first, let last = group.last else { return nil }
+            return CGFloat(first + last) / 2
+        }
+        guard centers.count >= 2 else { return [] }
+
+        let height = CGFloat(sampleHeight)
+        var regions: [CGRect] = []
+        for (top, bottom) in zip(centers, centers.dropFirst()) {
+            let gap = (bottom - top) / height
+            // Normal rows are about 2.6% of the page. Foreign purchases can
+            // include a conversion annotation and become roughly twice as
+            // tall. Wider header/section gaps are recognized but rejected by
+            // the date+signed-amount evidence gate below.
+            guard gap >= 0.018, gap <= 0.075 else { continue }
+            let padding = min(0.0025, gap * 0.08)
+            let visionBottom = max(0, 1 - (bottom / height) - padding)
+            let visionTop = min(1, 1 - (top / height) + padding)
+            guard visionTop > visionBottom else { continue }
+            regions.append(CGRect(
+                x: 0.045,
+                y: visionBottom,
+                width: 0.91,
+                height: visionTop - visionBottom
+            ))
+        }
+        return regions.sorted { $0.maxY > $1.maxY }
+    }
+
+    /// Some renderers flatten Rappi's faint table rules into the white
+    /// background. The two printed dates still form a stable positional
+    /// anchor for every transaction, so use one full-page Vision pass to
+    /// recover row centers and construct non-overlapping bands around them.
+    private static func rappiDateAnchoredRowRegions(in image: CGImage) -> [CGRect] {
+        let dateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
+        )
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["es-MX", "en-US"]
+        request.usesLanguageCorrection = false
+        request.minimumTextHeight = 0.003
+        do {
+            try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        } catch {
+            return []
+        }
+
+        let anchors = (request.results ?? []).compactMap { result -> CGFloat? in
+            guard let text = result.topCandidates(1).first?.string else { return nil }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard (dateRegex?.numberOfMatches(in: text, range: range) ?? 0) > 0 else { return nil }
+            return result.boundingBox.midY
+        }.sorted(by: >)
+        guard !anchors.isEmpty else { return [] }
+
+        var centers: [CGFloat] = []
+        var groups: [[CGFloat]] = []
+        for anchor in anchors {
+            if let last = groups.last?.last, abs(last - anchor) <= 0.010 {
+                groups[groups.count - 1].append(anchor)
+            } else {
+                groups.append([anchor])
+            }
+        }
+        centers = groups.map { group in
+            group.reduce(CGFloat.zero, +) / CGFloat(group.count)
+        }
+        guard !centers.isEmpty else { return [] }
+
+        let spacings = zip(centers, centers.dropFirst())
+            .map { pair in abs(pair.0 - pair.1) }
+            .filter { $0 >= 0.018 && $0 <= 0.075 }
+            .sorted()
+        let typicalSpacing = spacings.isEmpty ? CGFloat(0.032) : spacings[spacings.count / 2]
+
+        return centers.enumerated().map { index, center in
+            let distanceAbove = index > 0 ? centers[index - 1] - center : typicalSpacing
+            let distanceBelow = index + 1 < centers.count ? center - centers[index + 1] : typicalSpacing
+            let topHalf = min(max(distanceAbove / 2, 0.010), 0.038)
+            let bottomHalf = min(max(distanceBelow / 2, 0.010), 0.038)
+            let bottom = max(0, center - bottomHalf)
+            let top = min(1, center + topHalf)
+            return CGRect(x: 0.045, y: bottom, width: 0.91, height: top - bottom)
+        }
+    }
+
+    private static func rappiTableRowRegions(in image: CGImage) -> [CGRect] {
+        let ruleRegions = rappiRuleRowRegions(in: image)
+        return ruleRegions.isEmpty ? rappiDateAnchoredRowRegions(in: image) : ruleRegions
+    }
+
+    private static func rappiVisualRowObservations(
+        from image: CGImage,
+        page: Int
+    ) -> [OCRObservation] {
+        let dateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
+        )
+        let signedMoneyRegex = try? NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9.,])[+-−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+        )
+
+        func evidenceCounts(_ text: String) -> (dates: Int, amounts: Int) {
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            return (
+                dateRegex?.numberOfMatches(in: text, range: range) ?? 0,
+                signedMoneyRegex?.numberOfMatches(in: text, range: range) ?? 0
+            )
+        }
+
+        func recognize(region: CGRect, languages: [String]?, correctLanguage: Bool) -> OCRObservation? {
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.regionOfInterest = region
+            request.usesLanguageCorrection = correctLanguage
+            request.minimumTextHeight = 0.003
+            if let languages { request.recognitionLanguages = languages }
+            do {
+                try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+            } catch {
+                return nil
+            }
+            let values = (request.results ?? []).compactMap { result -> (String, CGRect, Double)? in
+                guard let candidate = result.topCandidates(1).first else { return nil }
+                let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !text.isEmpty else { return nil }
+                return (text, result.boundingBox, Double(candidate.confidence))
+            }.sorted { left, right in
+                if abs(left.1.midY - right.1.midY) > 0.006 { return left.1.midY > right.1.midY }
+                return left.1.midX < right.1.midX
+            }
+            guard !values.isEmpty else { return nil }
+            let text = values.map { $0.0 }.joined(separator: " ")
+            return OCRObservation(
+                page: page,
+                text: text,
+                // Anchor the synthetic observation to the requested page
+                // band. This remains correct whether a Vision revision
+                // reports result boxes in full-image or ROI-relative space.
+                boundingBox: region,
+                confidence: values.map { $0.2 }.min() ?? 0
+            )
+        }
+
+        var rows: [OCRObservation] = []
+        for region in rappiTableRowRegions(in: image) {
+            var candidates: [OCRObservation] = []
+            let passes: [([String]?, Bool)] = [
+                (["es-MX", "en-US"], true),
+                (["es", "en"], true),
+                (nil, false),
+            ]
+            for (languages, correction) in passes {
+                if let candidate = recognize(
+                    region: region,
+                    languages: languages,
+                    correctLanguage: correction
+                ) {
+                    candidates.append(candidate)
+                    let evidence = evidenceCounts(candidate.text)
+                    if evidence.dates >= 2, evidence.amounts >= 1 { break }
+                }
+            }
+            guard let selected = candidates
+                .filter({
+                    let evidence = evidenceCounts($0.text)
+                    return evidence.dates >= 2 && evidence.amounts >= 1
+                })
+                .max(by: { left, right in
+                    let leftEvidence = evidenceCounts(left.text)
+                    let rightEvidence = evidenceCounts(right.text)
+                    if leftEvidence.dates != rightEvidence.dates {
+                        return leftEvidence.dates < rightEvidence.dates
+                    }
+                    if leftEvidence.amounts != rightEvidence.amounts {
+                        return leftEvidence.amounts < rightEvidence.amounts
+                    }
+                    return left.confidence < right.confidence
+                }) else { continue }
+            rows.append(selected)
+        }
+        return rows
+    }
+
+    static func rappiTableRowRegionsForTesting(_ image: CGImage) -> [CGRect] {
+        rappiTableRowRegions(in: image)
+    }
+
+    static func rappiVisualRowTextsForTesting(_ image: CGImage, page: Int = 2) -> [String] {
+        rappiVisualRowObservations(from: image, page: page).map(\.text)
+    }
+
     private static func ocrObservations(
         from document: PDFDocument,
         pageIndexes: Set<Int>? = nil,
@@ -6000,6 +6271,21 @@ final class FinanceStore {
                         // digits even though the retry successfully recovered
                         // them elsewhere on the page.
                         selectedImage = contrastImage
+                    }
+                }
+
+                if prioritizeNumericEvidence, pageIndex > 0 {
+                    let visualRows = Self.rappiVisualRowObservations(
+                        from: selectedImage,
+                        page: pageIndex
+                    )
+                    if !visualRows.isEmpty {
+                        // One observation now represents one printed row.
+                        // Do not merge the full-page or tiled alternatives:
+                        // those are competing OCR readings, not additional
+                        // transactions.
+                        observations.append(contentsOf: visualRows)
+                        return
                     }
                 }
 
