@@ -173,7 +173,8 @@ test("una capa de texto no conciliada fuerza una recuperación visual", async ()
   // issuer controls; if Vision returns no observations, the original text is
   // retained so the normal reconciliation error remains visible.
   assert.match(source, /let shouldAttemptOCR = allowOCR && !textLayerReconciles/);
-  assert.match(source, /let ocrText = Self\.ocrText\(from: ocrObservations\)/);
+  assert.match(source, /let ocrText = selectableSource\.localizedCaseInsensitiveCompare\("Rappi"\)/);
+  assert.match(source, /Self\.rappiOCRText\(from: ocrObservations\)/);
   assert.match(source, /let usedOCR = shouldAttemptOCR && !ocrObservations\.isEmpty/);
   assert.match(source, /let text = usedOCR \? ocrText : extractedText/);
 });
