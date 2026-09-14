@@ -5615,11 +5615,9 @@ final class FinanceStore {
             width: CGFloat(sampleWidth),
             height: CGFloat(sampleHeight)
         ))
-        // Make row zero in the backing buffer the visual top of the page.
-        // Vision uses bottom-left normalized coordinates, so the conversion
-        // below is then explicit and deterministic.
-        context.translateBy(x: 0, y: CGFloat(sampleHeight))
-        context.scaleBy(x: 1, y: -1)
+        // CGImage scanlines already start at the visual top. Flipping this
+        // bitmap mirrors the detected bands; the conversion to Vision below
+        // would then crop the opposite side of the page.
         context.interpolationQuality = .low
         context.draw(image, in: CGRect(
             x: 0,
