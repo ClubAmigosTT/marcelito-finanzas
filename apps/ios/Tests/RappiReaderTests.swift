@@ -443,6 +443,9 @@ final class RappiReaderTests: XCTestCase {
             }
         }
         let image = try XCTUnwrap(rendered.cgImage)
+        let regions = FinanceStore.rappiTableRowRegionsForTesting(image)
+        XCTAssertEqual(regions.count, 3)
+        XCTAssertEqual(try XCTUnwrap(regions.first).midY, 1 - 336.0 / 1584.0, accuracy: 0.01)
         let rows = FinanceStore.rappiVisualRowTextsForTesting(image)
         XCTAssertEqual(rows.count, 3)
         XCTAssertTrue(rows.contains { $0.contains("500.00") && !$0.contains("389.76") })
