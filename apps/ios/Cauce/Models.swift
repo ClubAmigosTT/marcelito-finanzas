@@ -5582,7 +5582,7 @@ final class FinanceStore {
     /// for one printed row or merge neighbouring rows into a single
     /// observation. Detect the printed row bands from the rendered pixels so
     /// each band can be recognized independently.
-    private static func rappiTableRowRegions(in image: CGImage) -> [CGRect] {
+    private static func rappiRuleRowRegions(in image: CGImage) -> [CGRect] {
         let sampleWidth = min(max(image.width, 1), 1_200)
         let aspect = CGFloat(max(image.height, 1)) / CGFloat(max(image.width, 1))
         let sampleHeight = max(1, Int((CGFloat(sampleWidth) * aspect).rounded()))
@@ -5686,6 +5686,69 @@ final class FinanceStore {
             ))
         }
         return regions.sorted { $0.maxY > $1.maxY }
+    }
+
+    /// Some renderers flatten Rappi's faint table rules into the white
+    /// background. The two printed dates still form a stable positional
+    /// anchor for every transaction, so use one full-page Vision pass to
+    /// recover row centers and construct non-overlapping bands around them.
+    private static func rappiDateAnchoredRowRegions(in image: CGImage) -> [CGRect] {
+        let dateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
+        )
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["es-MX", "en-US"]
+        request.usesLanguageCorrection = false
+        request.minimumTextHeight = 0.003
+        do {
+            try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        } catch {
+            return []
+        }
+
+        let anchors = (request.results ?? []).compactMap { result -> CGFloat? in
+            guard let text = result.topCandidates(1).first?.string else { return nil }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard (dateRegex?.numberOfMatches(in: text, range: range) ?? 0) > 0 else { return nil }
+            return result.boundingBox.midY
+        }.sorted(by: >)
+        guard !anchors.isEmpty else { return [] }
+
+        var centers: [CGFloat] = []
+        var groups: [[CGFloat]] = []
+        for anchor in anchors {
+            if let last = groups.last?.last, abs(last - anchor) <= 0.010 {
+                groups[groups.count - 1].append(anchor)
+            } else {
+                groups.append([anchor])
+            }
+        }
+        centers = groups.map { group in
+            group.reduce(CGFloat.zero, +) / CGFloat(group.count)
+        }
+        guard !centers.isEmpty else { return [] }
+
+        let spacings = zip(centers, centers.dropFirst())
+            .map { pair in abs(pair.0 - pair.1) }
+            .filter { $0 >= 0.018 && $0 <= 0.075 }
+            .sorted()
+        let typicalSpacing = spacings.isEmpty ? CGFloat(0.032) : spacings[spacings.count / 2]
+
+        return centers.enumerated().map { index, center in
+            let distanceAbove = index > 0 ? centers[index - 1] - center : typicalSpacing
+            let distanceBelow = index + 1 < centers.count ? center - centers[index + 1] : typicalSpacing
+            let topHalf = min(max(distanceAbove / 2, 0.010), 0.038)
+            let bottomHalf = min(max(distanceBelow / 2, 0.010), 0.038)
+            let bottom = max(0, center - bottomHalf)
+            let top = min(1, center + topHalf)
+            return CGRect(x: 0.045, y: bottom, width: 0.91, height: top - bottom)
+        }
+    }
+
+    private static func rappiTableRowRegions(in image: CGImage) -> [CGRect] {
+        let ruleRegions = rappiRuleRowRegions(in: image)
+        return ruleRegions.isEmpty ? rappiDateAnchoredRowRegions(in: image) : ruleRegions
     }
 
     private static func rappiVisualRowObservations(
