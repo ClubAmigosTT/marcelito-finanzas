@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.14.34"
+    static let readerVersion = "ios-reader-deterministic-2026.09.14.35"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -5751,6 +5751,55 @@ final class FinanceStore {
         return ruleRegions.isEmpty ? rappiDateAnchoredRowRegions(in: image) : ruleRegions
     }
 
+    /// Converts the OCR text from one isolated visual band into the same
+    /// geometric evidence contract used by the full-page Vision reader. The
+    /// previous implementation kept only `text`; the Rappi row reconstructor
+    /// consequently saw zero date/amount boxes and discarded every row.
+    private static func rappiIsolatedRowObservation(
+        page: Int,
+        text: String,
+        region: CGRect,
+        confidence: Double
+    ) -> OCRObservation? {
+        let dateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
+        )
+        let signedMoneyRegex = try? NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9.,])[+-−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+        )
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        let dateMatches = dateRegex?.matches(in: text, range: range) ?? []
+        let amountMatches = signedMoneyRegex?.matches(in: text, range: range) ?? []
+        guard dateMatches.count >= 2, let amountMatch = amountMatches.last else { return nil }
+
+        let dateBoxes = dateMatches.prefix(2).enumerated().compactMap { index, match -> OCRTextBox? in
+            guard let matchRange = Range(match.range, in: text) else { return nil }
+            return OCRTextBox(
+                text: String(text[matchRange]),
+                boundingBox: CGRect(
+                    x: index == 0 ? 0.08 : 0.27,
+                    y: region.minY,
+                    width: 0.14,
+                    height: region.height
+                )
+            )
+        }
+        guard dateBoxes.count == 2,
+              let amountRange = Range(amountMatch.range, in: text) else { return nil }
+        let amountBox = OCRTextBox(
+            text: String(text[amountRange]),
+            boundingBox: CGRect(x: 0.80, y: region.minY, width: 0.15, height: region.height)
+        )
+        return OCRObservation(
+            page: page,
+            text: text,
+            boundingBox: region,
+            confidence: confidence,
+            dateBoxes: dateBoxes,
+            amountBoxes: [amountBox]
+        )
+    }
+
     private static func rappiVisualRowObservations(
         from image: CGImage,
         page: Int
@@ -5793,13 +5842,14 @@ final class FinanceStore {
             }
             guard !values.isEmpty else { return nil }
             let text = values.map { $0.0 }.joined(separator: " ")
-            return OCRObservation(
+            return rappiIsolatedRowObservation(
                 page: page,
                 text: text,
-                // Anchor the synthetic observation to the requested page
-                // band. This remains correct whether a Vision revision
-                // reports result boxes in full-image or ROI-relative space.
-                boundingBox: region,
+                // Anchor the synthetic observation and its date/amount cells
+                // to the requested page band. This remains correct whether a
+                // Vision revision reports result boxes in full-image or
+                // ROI-relative space.
+                region: region,
                 confidence: values.map { $0.2 }.min() ?? 0
             )
         }
@@ -5850,6 +5900,18 @@ final class FinanceStore {
 
     static func rappiVisualRowTextsForTesting(_ image: CGImage, page: Int = 2) -> [String] {
         rappiVisualRowObservations(from: image, page: page).map(\.text)
+    }
+
+    static func rappiIsolatedRowLinesForTesting(_ texts: [String], page: Int = 2) -> [String] {
+        let observations = texts.enumerated().compactMap { index, text in
+            rappiIsolatedRowObservation(
+                page: page,
+                text: text,
+                region: CGRect(x: 0.045, y: 0.90 - (CGFloat(index) * 0.04), width: 0.91, height: 0.03),
+                confidence: 0.99
+            )
+        }
+        return rappiOCRMovementLines(from: observations)
     }
 
     private static func ocrObservations(
