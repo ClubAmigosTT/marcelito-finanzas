@@ -407,6 +407,17 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertTrue(FinanceStore.rappiIsolatedRowLinesForTesting([ambiguous]).isEmpty)
     }
 
+    func testDenseIsolatedRowsKeepTheirOwnDatesAndIdenticalAmounts() {
+        let lines = FinanceStore.rappiIsolatedRowLinesForTesting([
+            "2026-08-01 2026-08-02 COMERCIO UNO +$50.00",
+            "2026-08-03 2026-08-04 COMERCIO DOS +$50.00"
+        ], spacing: 0.009)
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertTrue(lines.first?.hasPrefix("2026-08-01 2026-08-02") == true)
+        XCTAssertTrue(lines.last?.hasPrefix("2026-08-03 2026-08-04") == true)
+        XCTAssertTrue(lines.last?.contains("COMERCIO DOS") == true)
+    }
+
     func testVisualRowOCRReadsPixelsAndKeepsPaymentSeparateFromPurchase() throws {
         let size = CGSize(width: 1224, height: 1584)
         let format = UIGraphicsImageRendererFormat()
