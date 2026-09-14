@@ -5586,7 +5586,9 @@ final class FinanceStore {
         let sampleWidth = min(max(image.width, 1), 1_200)
         let aspect = CGFloat(max(image.height, 1)) / CGFloat(max(image.width, 1))
         let sampleHeight = max(1, Int((CGFloat(sampleWidth) * aspect).rounded()))
-        let pixelCount = sampleWidth * sampleHeight
+        let bytesPerPixel = 4
+        let bytesPerRow = sampleWidth * bytesPerPixel
+        let pixelCount = bytesPerRow * sampleHeight
         let pixels = UnsafeMutablePointer<UInt8>.allocate(capacity: pixelCount)
         pixels.initialize(repeating: 255, count: pixelCount)
         defer {
@@ -5598,12 +5600,12 @@ final class FinanceStore {
             width: sampleWidth,
             height: sampleHeight,
             bitsPerComponent: 8,
-            bytesPerRow: sampleWidth,
-            space: CGColorSpaceCreateDeviceGray(),
-            bitmapInfo: CGImageAlphaInfo.none.rawValue
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return [] }
 
-        context.setFillColor(gray: 1, alpha: 1)
+        context.setFillColor(red: 1, green: 1, blue: 1, alpha: 1)
         context.fill(CGRect(
             x: 0,
             y: 0,
@@ -5631,10 +5633,15 @@ final class FinanceStore {
         var linePixels: [Int] = []
         linePixels.reserveCapacity(sampleHeight / 12)
         for y in firstY..<lastY {
-            let offset = y * sampleWidth
+            let offset = y * bytesPerRow
             var nonWhite = 0
-            for x in left..<right where pixels[offset + x] < 248 {
-                nonWhite += 1
+            for x in left..<right {
+                let pixel = offset + (x * bytesPerPixel)
+                // Reading explicit RGB channels avoids color-space dependent
+                // behavior from one-component bitmap contexts (notably for
+                // Display-P3 images produced by UIKit and PDFKit).
+                let darkest = min(pixels[pixel], min(pixels[pixel + 1], pixels[pixel + 2]))
+                if darkest < 248 { nonWhite += 1 }
             }
             // Merchant text is dark but sparse. A table rule crosses nearly
             // the complete content width, so 48% keeps faint antialiased
