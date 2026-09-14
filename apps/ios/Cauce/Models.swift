@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.13.30"
+    static let readerVersion = "ios-reader-deterministic-2026.09.13.31"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -5470,44 +5470,47 @@ final class FinanceStore {
         }
     }
 
-    private static func rappiOCRPageIndexes(in document: PDFDocument) -> Set<Int> {
-        var result: Set<Int> = document.pageCount > 0 ? [0] : []
-        var insideRegularMovements = false
-        var foundMovementTable = false
-        for index in 0..<document.pageCount {
-            let text = (document.page(at: index)?.string ?? "")
+    /// Rappi prints “Ver notas en la sección NOTAS ACLARATORIAS” in the footer
+    /// of every movement page. Treating that reference as a section heading
+    /// used to close the table after its first page and skip every continuation
+    /// page until the next physical-card header. Select the continuous range
+    /// from the first regular-movements header through the *last* printed total;
+    /// the last total is important because a statement can contain one table
+    /// per card and therefore repeat both headers and totals.
+    private static func rappiMovementPageIndexes(in pageTexts: [String]) -> Set<Int> {
+        var firstTablePage: Int?
+        var lastTotalPage: Int?
+        for (index, rawText) in pageTexts.enumerated() {
+            let text = rawText
                 .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
                 .lowercased()
             let compact = text.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
             let startsMovementTable = text.contains("cargos, abonos y compras regulares")
                 || compact.contains("cargosabonosycomprasregulares")
-            if startsMovementTable {
-                insideRegularMovements = true
-                foundMovementTable = true
+            if startsMovementTable, firstTablePage == nil { firstTablePage = index }
+            if firstTablePage != nil,
+               text.contains("total de cargos") || compact.contains("totaldecargos") {
+                lastTotalPage = index
             }
-
-            // “Total de cargos” is a footer of the movement table, not its
-            // end. On Rappi's multi-page exports it may be repeated by the
-            // PDF content stream before a continuation page, which used to
-            // select only the first and last movement pages. Stop only at a
-            // section that is unambiguously outside regular movements.
-            let terminalSection = text.contains("notas aclaratorias")
-                || compact.contains("notasaclaratorias")
-                || text.contains("glosario de terminos")
-                || compact.contains("glosariodeterminos")
-                || text.contains("informacion del comprobante")
-                || compact.contains("informaciondelcomprobante")
-            if insideRegularMovements && terminalSection && !startsMovementTable {
-                insideRegularMovements = false
-                continue
-            }
-            if insideRegularMovements { result.insert(index) }
         }
+        guard let firstTablePage else { return [] }
+        let lastPage = max(firstTablePage, lastTotalPage ?? pageTexts.index(before: pageTexts.endIndex))
+        return Set(firstTablePage...lastPage)
+    }
+
+    private static func rappiOCRPageIndexes(in document: PDFDocument) -> Set<Int> {
+        let pageTexts = (0..<document.pageCount).map { document.page(at: $0)?.string ?? "" }
+        let movementPages = rappiMovementPageIndexes(in: pageTexts)
         // If the damaged text layer lost the table marker too, OCR all pages.
         // The issuer-specific parser still confines rows to the regular table.
-        // A marker found on one page is enough to preserve all continuation
-        // pages, even when their text layer is sparse.
-        return foundMovementTable && result.count > 1 ? result : Set(0..<document.pageCount)
+        guard !movementPages.isEmpty else { return Set(0..<document.pageCount) }
+        return movementPages.union(document.pageCount > 0 ? [0] : [])
+    }
+
+    static func rappiOCRPageIndexesForTesting(_ pageTexts: [String]) -> [Int] {
+        let movementPages = rappiMovementPageIndexes(in: pageTexts)
+        guard !movementPages.isEmpty else { return Array(pageTexts.indices) }
+        return Array(movementPages.union(pageTexts.isEmpty ? [] : [0])).sorted()
     }
 
     private static func ocrObservations(
@@ -6205,7 +6208,6 @@ final class FinanceStore {
             #"(?i)total\s+de\s+(?:cargos|abonos)\b"#,
             #"(?i)cargos\s+no\s+reconocidos\b"#,
             #"(?i)atenci[oó]n\s+de\s+quejas\b"#,
-            #"(?i)notas\s+aclaratorias\b"#,
         ]
         for pattern in boundaryPatterns {
             guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
@@ -6239,29 +6241,15 @@ final class FinanceStore {
     /// repair to every continuation page, while the parser still accepts rows
     /// only inside the regular-movements section.
     private static func rappiPageWiseSelectableText(from document: PDFDocument) -> String {
-        var insideRegularMovements = false
+        let pageTexts = (0..<document.pageCount).map { document.page(at: $0)?.string ?? "" }
+        let movementPages = rappiMovementPageIndexes(in: pageTexts)
         var output: [String] = []
         for index in 0..<document.pageCount {
-            guard let pageText = document.page(at: index)?.string,
-                  !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-            let normalized = pageText
-                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
-                .lowercased()
-            let compact = normalized.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
-            let startsMovementTable = normalized.contains("cargos, abonos y compras regulares")
-                || compact.contains("cargosabonosycomprasregulares")
-            if startsMovementTable { insideRegularMovements = true }
-            let terminalSection = normalized.contains("notas aclaratorias")
-                || compact.contains("notasaclaratorias")
-                || normalized.contains("glosario de terminos")
-                || compact.contains("glosariodeterminos")
-                || normalized.contains("informacion del comprobante")
-                || compact.contains("informaciondelcomprobante")
-            if terminalSection && !startsMovementTable { insideRegularMovements = false }
-
+            let pageText = pageTexts[index]
+            guard !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             let structured = rebuildRappiSelectableLines(
                 pageText,
-                assumeMovementTable: insideRegularMovements || startsMovementTable
+                assumeMovementTable: movementPages.contains(index)
             )
             output.append("__PDF_PAGE_\(index + 1)__\n\(structured)")
         }
@@ -10652,7 +10640,6 @@ final class FinanceStore {
             if lower.hasPrefix("total de cargos") || compactLower.hasPrefix("totaldecargos")
                 || lower.hasPrefix("cargos no reconocidos") || compactLower.hasPrefix("cargosnoreconocidos")
                 || lower.hasPrefix("atencion de quejas") || compactLower.hasPrefix("atenciondequejas")
-                || lower.hasPrefix("notas aclaratorias") || compactLower.hasPrefix("notasaclaratorias")
                 || lower.hasPrefix("compras y cargos diferidos") || compactLower.hasPrefix("comprasycargosdiferidos") {
                 flush(); table = false; continue
             }

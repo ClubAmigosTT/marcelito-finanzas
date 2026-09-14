@@ -173,6 +173,48 @@ final class RappiReaderTests: XCTestCase {
         )
     }
 
+    func testFooterNotesReferenceDoesNotSkipContinuationPages() {
+        let pages = [
+            "Tarjeta de crédito RappiCard",
+            "Resumen del estado",
+            "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)\nMovimiento uno\nNotas: Ver notas en la sección NOTAS ACLARATORIAS en este estado de cuenta.",
+            "Movimiento dos\nNotas: Ver notas en la sección NOTAS ACLARATORIAS en este estado de cuenta.",
+            "Movimiento tres\nNotas: Ver notas en la sección NOTAS ACLARATORIAS en este estado de cuenta.",
+            "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)\nMovimiento cuatro\nTotal de cargos +$100.00\nTotal de abonos -$50.00",
+            "NOTAS ACLARATORIAS\nContenido legal"
+        ]
+
+        XCTAssertEqual(FinanceStore.rappiOCRPageIndexesForTesting(pages), [0, 2, 3, 4, 5])
+    }
+
+    func testFooterNotesReferenceDoesNotCloseMovementParser() {
+        let header = fixture.components(separatedBy: "__PDF_PAGE_3__")[0]
+        let text = header + """
+        __PDF_PAGE_3__
+        CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)
+        2026-08-01 2026-08-02 COMERCIO UNO +$50.00
+        NOTAS ACLARATORIAS en este estado de cuenta.
+        __PDF_PAGE_4__
+        2026-08-01 2026-08-02 COMERCIO DOS +$50.00
+        Notas: Ver notas en la sección NOTAS ACLARATORIAS en este estado de cuenta.
+        __PDF_PAGE_5__
+        2026-08-02 2026-08-02 PAGO POR SPEI -$40.00
+        2026-08-03 2026-08-03 BONIFICACIÓN CON CASHBACK -$10.00
+        Total de cargos +$100.00
+        Total de abonos -$50.00
+        """
+
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "rappi-footer.pdf")
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertEqual(Set(snapshot.movements.compactMap { $0.extractionEvidence?.page }), Set([3, 4, 5]))
+        XCTAssertEqual(
+            FinanceStore.reconcileStatementForTesting(
+                kind: .card, summary: snapshot.summary, movements: snapshot.movements
+            ).status,
+            .valid
+        )
+    }
+
     func testRowsAcceptLocalizedOCRDateFormats() {
         let text = fixture
             .replacingOccurrences(
