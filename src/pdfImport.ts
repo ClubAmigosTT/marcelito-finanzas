@@ -1326,8 +1326,13 @@ function calibrateRappiColumns(lines: OcrLine[]): RappiOcrColumns | undefined {
   const amountWord = header.words.find((word) => /monto|importe/i.test(normalizeText(word.text)));
   const dateWords = header.words.filter((word) => /fecha/i.test(normalizeText(word.text)));
   if (!descriptionWord || !amountWord || !dateWords.length || amountWord.x <= descriptionWord.x) return undefined;
-  const descriptionStart = Math.max(0, descriptionWord.x - Math.max(0.025, descriptionWord.width));
-  const amountStart = Math.max(descriptionStart + 0.12, amountWord.x - Math.max(0.025, amountWord.width));
+  // Tesseract may return the complete “Descripción del movimiento” label as
+  // one wide word. Use a small left gutter from its start so the second date
+  // column remains a date instead of leaking into the merchant.
+  const descriptionGutter = Math.max(0.02, Math.min(0.08, descriptionWord.width * 0.25));
+  const amountGutter = Math.max(0.025, Math.min(0.08, amountWord.width * 0.25));
+  const descriptionStart = Math.max(0, descriptionWord.x - descriptionGutter);
+  const amountStart = Math.max(descriptionStart + 0.12, amountWord.x - amountGutter);
   if (amountStart >= 1 || amountStart <= descriptionStart) return undefined;
   return { descriptionStart, amountStart, headerY: header.y };
 }

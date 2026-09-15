@@ -3711,8 +3711,14 @@ final class FinanceStore {
                       let amount = headerGroup.first(where: { normalized($0.text).contains("monto") || normalized($0.text).contains("importe") }),
                       headerGroup.contains(where: { normalized($0.text).contains("fecha") }),
                       amount.boundingBox.minX > description.boundingBox.minX else { return nil }
-                let descriptionStart = max(0, description.boundingBox.minX - max(0.025, description.boundingBox.width))
-                let amountStart = max(descriptionStart + 0.12, amount.boundingBox.minX - max(0.025, amount.boundingBox.width))
+                // Vision may return the complete “Descripción del movimiento”
+                // label as one wide observation. Use a small left gutter from
+                // its start, not the full label width, so the second date
+                // column remains a date instead of leaking into the merchant.
+                let descriptionGutter = max(0.02, min(0.08, description.boundingBox.width * 0.25))
+                let amountGutter = max(0.025, min(0.08, amount.boundingBox.width * 0.25))
+                let descriptionStart = max(0, description.boundingBox.minX - descriptionGutter)
+                let amountStart = max(descriptionStart + 0.12, amount.boundingBox.minX - amountGutter)
                 guard amountStart < 1, amountStart > descriptionStart else { return nil }
                 return RappiOCRColumns(descriptionStart: descriptionStart, amountStart: amountStart, headerY: headerGroup.map(\.centerY).reduce(0, +) / CGFloat(headerGroup.count))
             }()
@@ -4871,9 +4877,9 @@ final class FinanceStore {
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let displayBase = (alias?.display ?? technical).isEmpty ? raw : (alias?.display ?? technical)
-        let display = displayBase.rangeOfCharacter(from: .lowercaseLetters) == nil
+        let display = alias?.display ?? (displayBase.rangeOfCharacter(from: .lowercaseLetters) == nil
             ? displayBase.lowercased().capitalized
-            : displayBase
+            : displayBase)
         let letters = normalized.rangeOfCharacter(from: .letters) != nil
         let confidence: Double = alias != nil ? 0.96 : !letters || raw.count > 100 ? 0.48 : technical.count >= 3 ? 0.88 : 0.58
         let reason = confidence < 0.75
