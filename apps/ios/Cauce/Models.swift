@@ -5401,6 +5401,7 @@ final class FinanceStore {
         /// recognizes the full printed row as one observation.
         let dateBoxes: [OCRTextBox]
         let amountBoxes: [OCRTextBox]
+        let isolatedRappiRow: Bool
 
         init(
             page: Int,
@@ -5408,7 +5409,8 @@ final class FinanceStore {
             boundingBox: CGRect,
             confidence: Double,
             dateBoxes: [OCRTextBox] = [],
-            amountBoxes: [OCRTextBox] = []
+            amountBoxes: [OCRTextBox] = [],
+            isolatedRappiRow: Bool = false
         ) {
             self.page = page
             self.text = text
@@ -5416,6 +5418,7 @@ final class FinanceStore {
             self.confidence = confidence
             self.dateBoxes = dateBoxes
             self.amountBoxes = amountBoxes
+            self.isolatedRappiRow = isolatedRappiRow
         }
 
         var centerX: CGFloat { boundingBox.midX }
@@ -5612,11 +5615,9 @@ final class FinanceStore {
             width: CGFloat(sampleWidth),
             height: CGFloat(sampleHeight)
         ))
-        // Make row zero in the backing buffer the visual top of the page.
-        // Vision uses bottom-left normalized coordinates, so the conversion
-        // below is then explicit and deterministic.
-        context.translateBy(x: 0, y: CGFloat(sampleHeight))
-        context.scaleBy(x: 1, y: -1)
+        // CGImage scanlines already start at the visual top. Flipping this
+        // bitmap mirrors the detected bands; the conversion to Vision below
+        // would then crop the opposite side of the page.
         context.interpolationQuality = .low
         context.draw(image, in: CGRect(
             x: 0,
@@ -5770,7 +5771,10 @@ final class FinanceStore {
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         let dateMatches = dateRegex?.matches(in: text, range: range) ?? []
         let amountMatches = signedMoneyRegex?.matches(in: text, range: range) ?? []
-        guard dateMatches.count >= 2, let amountMatch = amountMatches.last else { return nil }
+        // A band containing several transactions must never be reduced to
+        // its first dates and last amount: that silently loses payments.
+        guard dateMatches.count == 2, amountMatches.count == 1,
+              let amountMatch = amountMatches.first else { return nil }
 
         let dateBoxes = dateMatches.prefix(2).enumerated().compactMap { index, match -> OCRTextBox? in
             guard let matchRange = Range(match.range, in: text) else { return nil }
@@ -5796,7 +5800,8 @@ final class FinanceStore {
             boundingBox: region,
             confidence: confidence,
             dateBoxes: dateBoxes,
-            amountBoxes: [amountBox]
+            amountBoxes: [amountBox],
+            isolatedRappiRow: true
         )
     }
 
@@ -5820,14 +5825,23 @@ final class FinanceStore {
         }
 
         func recognize(region: CGRect, languages: [String]?, correctLanguage: Bool) -> OCRObservation? {
+            // Physically crop the pixels. A Vision ROI alone can still group
+            // text from adjacent rows in the source image.
+            let bounds = CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height))
+            let crop = CGRect(
+                x: region.minX * CGFloat(image.width),
+                y: (1 - region.maxY) * CGFloat(image.height),
+                width: region.width * CGFloat(image.width),
+                height: region.height * CGFloat(image.height)
+            ).integral.intersection(bounds)
+            guard !crop.isEmpty, let rowImage = image.cropping(to: crop) else { return nil }
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
-            request.regionOfInterest = region
             request.usesLanguageCorrection = correctLanguage
             request.minimumTextHeight = 0.003
             if let languages { request.recognitionLanguages = languages }
             do {
-                try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+                try VNImageRequestHandler(cgImage: rowImage, options: [:]).perform([request])
             } catch {
                 return nil
             }
@@ -5902,12 +5916,12 @@ final class FinanceStore {
         rappiVisualRowObservations(from: image, page: page).map(\.text)
     }
 
-    static func rappiIsolatedRowLinesForTesting(_ texts: [String], page: Int = 2) -> [String] {
+    static func rappiIsolatedRowLinesForTesting(_ texts: [String], page: Int = 2, spacing: CGFloat = 0.04) -> [String] {
         let observations = texts.enumerated().compactMap { index, text in
             rappiIsolatedRowObservation(
                 page: page,
                 text: text,
-                region: CGRect(x: 0.045, y: 0.90 - (CGFloat(index) * 0.04), width: 0.91, height: 0.03),
+                region: CGRect(x: 0.045, y: 0.90 - (CGFloat(index) * spacing), width: 0.91, height: spacing * 0.8),
                 confidence: 0.99
             )
         }
@@ -6552,6 +6566,12 @@ final class FinanceStore {
 
     private static func rappiOCRMovementLines(from observations: [OCRObservation]) -> [String] {
         guard !observations.isEmpty else { return [] }
+        // Preserve physical row ownership. Dense adjacent rows can be closer
+        // than the generic geometric matching tolerance.
+        if observations.count > 1, observations.allSatisfy(\.isolatedRappiRow) {
+            return observations.sorted { $0.centerY > $1.centerY }
+                .flatMap { rappiOCRMovementLines(from: [$0]) }
+        }
 
         func normalized(_ value: String) -> String {
             value

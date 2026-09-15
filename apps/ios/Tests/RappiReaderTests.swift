@@ -400,6 +400,58 @@ final class RappiReaderTests: XCTestCase {
         )
     }
 
+    func testIsolatedRowRejectsMergedTransactionsInsteadOfSelectingLastAmount() {
+        let merged = "2026-08-01 2026-08-01 PAGO POR SPEI -$500.00 2026-08-02 2026-08-02 COMERCIO +$50.00"
+        XCTAssertTrue(FinanceStore.rappiIsolatedRowLinesForTesting([merged]).isEmpty)
+        let ambiguous = "2026-08-01 2026-08-01 PAGO POR SPEI -$500.00 COMERCIO +$50.00"
+        XCTAssertTrue(FinanceStore.rappiIsolatedRowLinesForTesting([ambiguous]).isEmpty)
+    }
+
+    func testDenseIsolatedRowsKeepTheirOwnDatesAndIdenticalAmounts() {
+        let lines = FinanceStore.rappiIsolatedRowLinesForTesting([
+            "2026-08-01 2026-08-02 COMERCIO UNO +$50.00",
+            "2026-08-03 2026-08-04 COMERCIO DOS +$50.00"
+        ], spacing: 0.009)
+        XCTAssertEqual(lines.count, 2)
+        XCTAssertTrue(lines.first?.hasPrefix("2026-08-01 2026-08-02") == true)
+        XCTAssertTrue(lines.last?.hasPrefix("2026-08-03 2026-08-04") == true)
+        XCTAssertTrue(lines.last?.contains("COMERCIO DOS") == true)
+    }
+
+    func testVisualRowOCRReadsPixelsAndKeepsPaymentSeparateFromPurchase() throws {
+        let size = CGSize(width: 1224, height: 1584)
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        let rendered = UIGraphicsImageRenderer(size: size, format: format).image { context in
+            UIColor.white.setFill()
+            context.fill(CGRect(origin: .zero, size: size))
+            let lines = [
+                "2026-08-01  2026-08-01  PAGO POR SPEI  -$500.00",
+                "2026-08-02  2026-08-02  GOOGLE CLOUD  +$389.76",
+                "2026-08-03  2026-08-03  COMERCIO  +$50.00"
+            ]
+            for index in 0...lines.count {
+                UIColor.gray.setFill()
+                context.fill(CGRect(x: 60, y: 300 + index * 70, width: 1104, height: 2))
+                if index < lines.count {
+                    (lines[index] as NSString).draw(
+                        at: CGPoint(x: 80, y: 315 + index * 70),
+                        withAttributes: [.font: UIFont.monospacedSystemFont(ofSize: 23, weight: .regular),
+                                         .foregroundColor: UIColor.black]
+                    )
+                }
+            }
+        }
+        let image = try XCTUnwrap(rendered.cgImage)
+        let regions = FinanceStore.rappiTableRowRegionsForTesting(image)
+        XCTAssertEqual(regions.count, 3)
+        XCTAssertEqual(try XCTUnwrap(regions.first).midY, 1 - 336.0 / 1584.0, accuracy: 0.01)
+        let rows = FinanceStore.rappiVisualRowTextsForTesting(image)
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertTrue(rows.contains { $0.contains("500.00") && !$0.contains("389.76") })
+        XCTAssertTrue(rows.contains { $0.contains("389.76") && !$0.contains("500.00") })
+    }
+
     func testSPEIPaymentSpacingAndCaseDoNotBecomeIncome() throws {
         for label in ["PAGO POR SPEI", "Pago por Spei", "PAGO   POR\nSPEI"] {
             let text = fixture.replacingOccurrences(of: "PAGO POR SPEI", with: label)

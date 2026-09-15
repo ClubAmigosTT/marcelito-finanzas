@@ -1811,7 +1811,9 @@ private struct StatementDocumentTile: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Text("\(statement.transactionCount) mov.")
+            Text(statement.requiresReview
+                 ? "\(statement.reconciliation?.extractedMovementCount ?? statement.transactionCount) detectados · por revisar"
+                 : "\(statement.transactionCount) mov.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()
