@@ -17,6 +17,14 @@ const OCR_MIN_PAGE_CONFIDENCE = 0.78;
  * older build, so every KPI boundary must re-check the same thresholds.
  */
 export function hasSufficientOcrQuality(statement: Statement) {
+  // Santander bank rows are only eligible when the stored import decision
+  // identifies the versioned template and its calibrated alignment. This is
+  // independent from generic OCR confidence: a clear scan of an unknown
+  // Santander layout must remain in review instead of entering the KPI path.
+  if (statement.source === "Santander" && statement.kind === "bank") {
+    const template = statement.templateMatch;
+    if (!template || template.templateId !== "santander-checking" || template.templateVersion !== "1" || template.status !== "matched" || !Number.isFinite(template.alignmentScore) || template.alignmentScore < 0.9) return false;
+  }
   if (["santander-checking-v1", "bbva-movements-v1", "amex-operations-v1", "rappicard-operations-v1"].includes(statement.parserId ?? "")) {
     return true;
   }

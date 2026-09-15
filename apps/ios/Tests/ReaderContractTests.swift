@@ -2263,6 +2263,10 @@ final class ReaderContractTests: XCTestCase {
                     evidence: ["encabezado institucional Santander"],
                     ignoredBodyMentions: []
                 ),
+                templateMatch: StatementTemplateMatchRecord(
+                    templateId: "santander-checking", templateVersion: "1", status: "matched",
+                    alignmentScore: 1, reason: "fixture", calibratedPages: [1], inheritedPages: []
+                ),
                 readerVersion: FinanceStore.readerVersion
             )
         }
@@ -2365,6 +2369,10 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(store.ledgerQuality.message?.contains("columnas de movimientos") == true)
 
         store.statements[0].ocrColumnsCalibrated = true
+        store.statements[0].templateMatch = StatementTemplateMatchRecord(
+            templateId: "santander-checking", templateVersion: "1", status: "matched",
+            alignmentScore: 1, reason: "fixture", calibratedPages: [1], inheritedPages: []
+        )
         XCTAssertFalse(store.dashboardIsBlocked)
         XCTAssertEqual(store.ledgerQuality.validatedStatementCount, 1)
     }

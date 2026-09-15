@@ -12,6 +12,10 @@ targets:
     platform: iOS
     sources:
       - Cauce
+      # Canonical versioned reader template shared with the web parser. It is
+      # bundled as a resource, never copied into source code or a test corpus.
+      - path: ../../schemas/statement-templates/santander-checking-v1.json
+        buildPhase: resources
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: mx.marcelito.personal

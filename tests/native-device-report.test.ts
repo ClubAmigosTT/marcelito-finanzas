@@ -84,3 +84,17 @@ test("el informe híbrido acepta una lectura multimodal conciliada", () => {
   );
   assert.equal(result.ok, true);
 });
+
+test("el informe del dispositivo no certifica Santander visual sin plantilla versionada", () => {
+  const rows = Array.from({ length: 10 }, (_, index) => row(index + 1));
+  rows[0] = row(1, {
+    source: "Santander",
+    mode: "vision-ocr",
+    ocrConfidence: 0.94,
+    weakestOCRPage: 0.84,
+    ocrColumnsCalibrated: true,
+  });
+  const result = verifyNativeDeviceReport(report(rows), "ios-reader-2026.08.31.14", 10);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("plantilla Santander v1")));
+});

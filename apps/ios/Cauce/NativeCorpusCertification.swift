@@ -25,6 +25,12 @@ struct NativeCorpusFileReport: Codable, Identifiable {
     let ocrConfidence: Double?
     let weakestOCRPage: Double?
     let ocrColumnsCalibrated: Bool?
+    /// Safe-to-export template provenance; it contains no PDF text, amounts
+    /// or account data, yet prevents a bare calibration boolean from being
+    /// mistaken for a reproducible template match.
+    var templateId: String? = nil
+    var templateVersion: String? = nil
+    var templateAlignmentScore: Double? = nil
     let reconciliationValid: Bool
     let duplicate: Bool
     let errorCode: String?
@@ -41,6 +47,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
              sourceStatus, sourceConfidence, status, requiresReview, rows,
              extractedRows,
              ocrConfidence, weakestOCRPage, ocrColumnsCalibrated,
+             templateId, templateVersion, templateAlignmentScore,
              reconciliationValid, duplicate, errorCode, reconciliationReason,
              multimodalFallbackAttempted, multimodalFallbackError
     }
@@ -60,6 +67,10 @@ struct NativeCorpusFileReport: Codable, Identifiable {
                   ocrConfidence >= 0.88,
                   weakestOCRPage >= 0.78 else { return false }
             if mode == "vision-ocr", ["Santander", "BBVA"].contains(source), ocrColumnsCalibrated != true { return false }
+            if mode == "vision-ocr", source == "Santander" {
+                guard templateId == "santander-checking", templateVersion == "1",
+                      (templateAlignmentScore ?? 0) >= 0.9 else { return false }
+            }
         }
         return true
     }
@@ -84,6 +95,9 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         ocrConfidence = summary.ocrConfidence
         weakestOCRPage = summary.ocrPageConfidences?.min()
         ocrColumnsCalibrated = summary.ocrColumnsCalibrated
+        templateId = summary.templateMatch?.templateId
+        templateVersion = summary.templateMatch?.templateVersion
+        templateAlignmentScore = summary.templateMatch?.alignmentScore
         reconciliationValid = summary.reconciliation?.status == .valid
         duplicate = false
         errorCode = Self.redactedRowError(summary.rowDiagnostics.first(where: { !$0.accepted })?.reason)
@@ -109,6 +123,9 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         ocrConfidence = nil
         weakestOCRPage = nil
         ocrColumnsCalibrated = nil
+        templateId = nil
+        templateVersion = nil
+        templateAlignmentScore = nil
         reconciliationValid = false
         duplicate = false
         self.errorCode = errorCode
@@ -143,6 +160,9 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         try c.encodeIfPresent(ocrConfidence, forKey: .ocrConfidence)
         try c.encodeIfPresent(weakestOCRPage, forKey: .weakestOCRPage)
         try c.encodeIfPresent(ocrColumnsCalibrated, forKey: .ocrColumnsCalibrated)
+        try c.encodeIfPresent(templateId, forKey: .templateId)
+        try c.encodeIfPresent(templateVersion, forKey: .templateVersion)
+        try c.encodeIfPresent(templateAlignmentScore, forKey: .templateAlignmentScore)
         try c.encode(reconciliationValid, forKey: .reconciliationValid)
         try c.encode(duplicate, forKey: .duplicate)
         try c.encodeIfPresent(errorCode, forKey: .errorCode)
@@ -171,6 +191,9 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         ocrConfidence = summary.ocrConfidence
         weakestOCRPage = summary.ocrPageConfidences?.min()
         ocrColumnsCalibrated = summary.ocrColumnsCalibrated
+        templateId = summary.templateMatch?.templateId
+        templateVersion = summary.templateMatch?.templateVersion
+        templateAlignmentScore = summary.templateMatch?.alignmentScore
         reconciliationValid = false
         duplicate = true
         errorCode = "duplicate-pdf"
@@ -193,6 +216,9 @@ struct NativeAuditRow: Codable {
     let foreignCurrency: Bool?
     let section: String?
     let selectionReason: String?
+    let templateId: String?
+    let templateVersion: String?
+    let templateAlignmentScore: Double?
 
     init(_ movement: Movement) {
         let formatter = DateFormatter()
@@ -209,6 +235,9 @@ struct NativeAuditRow: Codable {
         foreignCurrency = movement.foreignCurrency
         section = movement.extractionEvidence?.selectedColumn
         selectionReason = movement.extractionEvidence?.selectionReason
+        templateId = movement.extractionEvidence?.templateId
+        templateVersion = movement.extractionEvidence?.templateVersion
+        templateAlignmentScore = movement.extractionEvidence?.templateAlignmentScore
     }
 }
 
@@ -393,7 +422,7 @@ struct NativeCorpusDiagnosticReport: Codable {
 struct NativeCorpusCertificationReport: Codable, Identifiable {
     static let schemaVersion = 1
     static let minimumFileCount = 10
-    static let targetPrecision = 0.97
+    static let targetPrecision = 0.99
 
     let schemaVersion: Int
     let generatedAt: Date
@@ -736,7 +765,7 @@ struct NativeCorpusCertificationView: View {
 
             Text(report.certified
                 ? "Comparte este informe JSON y guárdalo como docs/native-corpus-certification.json en GitHub. La siguiente build podrá usarlo sin una Mac."
-                : "Corrige los archivos bloqueados y vuelve a ejecutar el lector. El informe no habilita publicación hasta alcanzar 97% y cubrir los 10 estados; cada archivo aceptado debe conciliar al 100%.")
+                : "Corrige los archivos bloqueados y vuelve a ejecutar el lector. El informe no habilita publicación hasta alcanzar 99% y cubrir los 10 estados; cada archivo aceptado debe conciliar al 100%.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 

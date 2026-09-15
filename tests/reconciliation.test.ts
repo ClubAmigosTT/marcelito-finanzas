@@ -7,6 +7,16 @@ import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
 import { prepareStoredLedger, prepareStoredStatements } from "../src/statementMigration.ts";
 import type { Statement, Transaction } from "../src/types.ts";
 
+const verifiedSantanderTemplate = {
+  templateId: "santander-checking",
+  templateVersion: "1",
+  status: "matched",
+  alignmentScore: 1,
+  reason: "fixture: Santander cuenta de cheques v1 alineada",
+  calibratedPages: [1],
+  inheritedPages: [],
+} as const satisfies NonNullable<Statement["templateMatch"]>;
+
 test("un saldo OCR incorrecto no modifica dos importes explícitos que se compensan", () => {
   const text = [
     "Banco Santander México",
@@ -33,6 +43,7 @@ const bank = (id: string, source: string, period: string): Statement => ({
   reconciliationStatus: "valid",
   reconciliation: { status: "valid", tolerance: 0.05 },
   sourceDetection: { source, confidence: 1, status: "verified", evidence: [`encabezado institucional ${source}`], ignoredBodyMentions: [] },
+  ...(source === "Santander" ? { templateMatch: verifiedSantanderTemplate } : {}),
 });
 
 const card = (id: string, source: string, period: string, debtBalance = 0): Statement => ({

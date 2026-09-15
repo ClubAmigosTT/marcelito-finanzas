@@ -1,0 +1,36 @@
+{
+  "$schema": "../statement-template.schema.json",
+  "schemaVersion": 1,
+  "id": "santander-checking",
+  "version": "1",
+  "displayName": "Santander cuenta de cheques v1",
+  "issuer": "Santander",
+  "statementKind": "bank",
+  "coordinateSpace": "normalized-bottom-left",
+  "headerSignature": {
+    "institutionalAny": ["banco santander mexico", "grupo financiero santander", "santander.com"],
+    "tableTitleAll": ["detalle", "movimientos", "cuenta", "cheques"],
+    "minimumAlignmentScore": 0.9
+  },
+  "movementRegions": [{
+    "id": "checking-movements",
+    "pageRole": "title-or-continuation",
+    "referenceBounds": { "x": 0.045, "y": 0.04, "width": 0.91, "height": 0.76 }
+  }],
+  "columns": [
+    { "key": "FECHA", "aliases": ["fecha"], "referenceBounds": { "x": 0.045, "y": 0.04, "width": 0.115, "height": 0.76 }, "headerAnchorX": 0.06, "role": "date" },
+    { "key": "FOLIO", "aliases": ["folio", "f0lio"], "referenceBounds": { "x": 0.13, "y": 0.04, "width": 0.07, "height": 0.76 }, "headerAnchorX": 0.14, "role": "excluded" },
+    { "key": "DESCRIPCION", "aliases": ["descripcion", "descripci0n", "descrip"], "referenceBounds": { "x": 0.18, "y": 0.04, "width": 0.42, "height": 0.76 }, "headerAnchorX": 0.2, "role": "description" },
+    { "key": "DEPOSITO", "aliases": ["deposito", "depositos", "dep0sito", "abono", "abonos"], "referenceBounds": { "x": 0.6, "y": 0.04, "width": 0.12, "height": 0.76 }, "headerAnchorX": 0.63, "role": "deposit" },
+    { "key": "RETIRO", "aliases": ["retiro", "retiros", "retlro", "cargo", "cargos"], "referenceBounds": { "x": 0.72, "y": 0.04, "width": 0.12, "height": 0.76 }, "headerAnchorX": 0.75, "role": "withdrawal" },
+    { "key": "SALDO", "aliases": ["saldo", "sald0", "balance"], "referenceBounds": { "x": 0.84, "y": 0.04, "width": 0.115, "height": 0.76 }, "headerAnchorX": 0.88, "role": "balance" }
+  ],
+  "excludedTextPatterns": ["clave de rastreo", "referencia", "rfc", "clabe", "certificado", "pagina", "saldo final del periodo anterior", "saldo final del periodo", "total"],
+  "validation": {
+    "requireDate": true,
+    "requireDescription": true,
+    "requireSingleMovementColumn": true,
+    "requireRunningBalanceEvidence": true,
+    "reconciliationTolerance": 0.05
+  }
+}

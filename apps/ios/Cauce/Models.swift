@@ -173,6 +173,25 @@ struct MovementExtractionEvidence: Codable, Equatable, Sendable {
     var selectedAmount: Decimal? = nil
     /// Short explanation of the deterministic selection rule used for the row.
     var selectionReason: String? = nil
+    /// Versioned template that calibrated this row's visual columns. A nil
+    /// value is deliberately not equivalent to a matched template.
+    var templateId: String? = nil
+    var templateVersion: String? = nil
+    var templateAlignmentScore: Double? = nil
+}
+
+/// Persisted result of matching a document to a versioned reader template.
+/// It records the calibration decision itself, rather than reducing it to a
+/// boolean that cannot be audited after a later reader update.
+struct StatementTemplateMatchRecord: Codable, Equatable, Sendable {
+    var templateId: String
+    var templateVersion: String
+    /// `matched` is the only value that may feed the automatic ledger.
+    var status: String
+    var alignmentScore: Double
+    var reason: String
+    var calibratedPages: [Int]
+    var inheritedPages: [Int]
 }
 /// Private row-level evidence used to debug a visual import. It is exported
 /// only through the explicit diagnostic share action; the public corpus
@@ -386,6 +405,8 @@ struct StatementRecord: Identifiable, Codable {
     /// CARGOS/ABONOS/SALDO for BBVA). A false value keeps the state
     /// provisional even if its totals happen to reconcile.
     var ocrColumnsCalibrated: Bool? = nil
+    /// Exact template/calibration decision used by a visual statement reader.
+    var templateMatch: StatementTemplateMatchRecord? = nil
     /// SHA-256 of the original PDF bytes. This is the stable document identity
     /// used to reprocess a UUID-named stored file without relying on its name.
     var sourceFingerprint: String? = nil
@@ -425,6 +446,7 @@ struct ImportSummary {
     let ocrConfidence: Double?
     let ocrPageConfidences: [Double]?
     let ocrColumnsCalibrated: Bool?
+    var templateMatch: StatementTemplateMatchRecord? = nil
     var fileSizeBytes: Int? = nil
     var pageCount: Int? = nil
     /// Row-level visual decisions retained for the explicit private
@@ -665,6 +687,7 @@ private struct PDFImportExtraction: Codable, @unchecked Sendable {
     let ocrConfidence: Double?
     let ocrPageConfidences: [Double]?
     let ocrColumnsCalibrated: Bool?
+    let templateMatch: StatementTemplateMatchRecord?
     let ocrFallbackNeedsReview: Bool
     let ocrColumnCalibrationNeedsReview: Bool
     let ocrConfidenceNeedsReview: Bool
@@ -730,7 +753,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.14.37"
+    static let readerVersion = "ios-reader-template-2026.09.14.38"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -1046,7 +1069,7 @@ final class FinanceStore {
         fileName: String,
         openingBalance: Decimal? = nil,
         recoveryPDF: PDFDocument? = nil
-    ) -> (movements: [Movement], diagnostics: [OCRRowDiagnostic]) {
+    ) -> (movements: [Movement], diagnostics: [OCRRowDiagnostic], templateMatch: StatementTemplateMatchRecord?) {
         let observations = fixtures.map { fixture in
             OCRObservation(
                 page: fixture.page,
@@ -1066,7 +1089,7 @@ final class FinanceStore {
             openingBalance: openingBalance,
             document: recoveryPDF
         )
-        return (result.movements, result.diagnostics)
+        return (result.movements, result.diagnostics, result.templateMatch)
     }
 
     /// Reports whether the OCR fixture contains a geometrically valid
@@ -2109,6 +2132,14 @@ final class FinanceStore {
     /// Re-check persisted values here so an old/corrupt `requiresReview=false`
     /// flag cannot promote a weak visual read into a KPI.
     private func hasSufficientOCRQuality(_ statement: StatementRecord) -> Bool {
+        if statement.source.caseInsensitiveCompare("Santander") == .orderedSame {
+            guard let template = statement.templateMatch,
+                  template.templateId == "santander-checking",
+                  template.templateVersion == "1",
+                  template.status == "matched",
+                  template.alignmentScore.isFinite,
+                  template.alignmentScore >= 0.9 else { return false }
+        }
         if isCurrentReader(statement), statement.reconciliation?.status == .valid {
             return true
         }
@@ -2175,6 +2206,15 @@ final class FinanceStore {
             reasons.append("El banco o el tipo de documento no están identificados con evidencia suficiente.")
         }
         if statement.ocrColumnsCalibrated == false { reasons.append("No se identificaron con seguridad las columnas de cargos, abonos y saldo.") }
+        if statement.source.caseInsensitiveCompare("Santander") == .orderedSame,
+           let template = statement.templateMatch {
+            if template.status != "matched" || template.templateId != "santander-checking"
+                || template.templateVersion != "1" || template.alignmentScore < 0.9 {
+                reasons.append("El PDF no coincide de forma suficiente con la plantilla Santander cuenta de cheques v1.")
+            }
+        } else if statement.source.caseInsensitiveCompare("Santander") == .orderedSame {
+            reasons.append("Falta la evidencia de plantilla versionada Santander para este estado.")
+        }
         if !hasSufficientOCRQuality(statement) { reasons.append("La lectura visual tiene confianza insuficiente; revisa la legibilidad del PDF.") }
         if statement.requiresReview { reasons.append("El lector marcó este estado para revisión de su evidencia.") }
         return reasons
@@ -4701,16 +4741,19 @@ final class FinanceStore {
         var summary = Self.summary(from: summaryText, source: source)
         var movementColumnsCalibrated = true
         var rowDiagnostics: [OCRRowDiagnostic] = []
+        var templateMatch: StatementTemplateMatchRecord? = nil
         let parsedCandidates: [Movement]
         if usedOCR, source == "Santander" {
             let santanderResult = Self.parseSantanderTable(
                 ocrObservations,
                 fileName: fileName,
                 openingBalance: summary?.previousBalance,
-                document: document
+                document: document,
+                institutionalText: [extractedText, text].joined(separator: "\n")
             )
             movementColumnsCalibrated = santanderResult.columnsCalibrated
             rowDiagnostics = santanderResult.diagnostics
+            templateMatch = santanderResult.templateMatch
             parsedCandidates = santanderResult.movements
         } else if usedOCR, source == "BBVA" {
             let bbvaResult = Self.parseBBVAOCRResult(ocrObservations, fileName: fileName)
@@ -4898,6 +4941,7 @@ final class FinanceStore {
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences,
             ocrColumnsCalibrated: usedOCR && (source == "Santander" || source == "BBVA") ? movementColumnsCalibrated : nil,
+            templateMatch: templateMatch,
             ocrFallbackNeedsReview: ocrFallbackNeedsReview,
             ocrColumnCalibrationNeedsReview: ocrColumnCalibrationNeedsReview,
             ocrConfidenceNeedsReview: ocrConfidenceNeedsReview,
@@ -4925,6 +4969,7 @@ final class FinanceStore {
         let ocrConfidence = extraction.ocrConfidence
         let ocrPageConfidences = extraction.ocrPageConfidences
         let ocrColumnsCalibrated = extraction.ocrColumnsCalibrated
+        let templateMatch = extraction.templateMatch
         // The original export name is often reused every month. Match the
         // exact PDF by SHA-256 first so a new cutoff cannot overwrite history;
         // fall back to a legacy filename-only record once for older builds
@@ -4975,18 +5020,20 @@ final class FinanceStore {
         // the issuer-specific section parser and exact declared controls.
         let ocrQualityNeedsReview = false
         let gatedReconciliation = Self.santanderRowGate(reconciliation, source: source, diagnostics: extraction.rowDiagnostics)
+        let templateNeedsReview = source == "Santander" && templateMatch?.status != "matched"
         let needsReview = fresh.isEmpty
             || summary == nil
             || detectedKind == .unknown
             || gatedReconciliation.status != .valid
             || sourceDetection.status != .verified
+            || templateNeedsReview
 
         // The operational ledger contains only rows backed by a verified
         // issuer control. Rejected or OCR-provisional rows are represented by
         // the statement metadata and its row diagnostics, never by Movement
         // records. This keeps quarantine forensic and prevents tab switches
         // and KPI projections from scanning hundreds of unusable rows.
-        let canonicalFresh = Self.shouldPersistCanonicalRowsForTesting(
+        let canonicalFresh = !templateNeedsReview && Self.shouldPersistCanonicalRowsForTesting(
             reconciliation: gatedReconciliation.status,
             hasSummary: summary != nil,
             kind: detectedKind,
@@ -5028,6 +5075,7 @@ final class FinanceStore {
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences,
             ocrColumnsCalibrated: ocrColumnsCalibrated,
+            templateMatch: templateMatch,
             sourceFingerprint: sourceFingerprint,
             readerVersion: Self.readerVersion,
             extractionProvider: extraction.extractionProvider,
@@ -5083,6 +5131,7 @@ final class FinanceStore {
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences,
             ocrColumnsCalibrated: ocrColumnsCalibrated,
+            templateMatch: templateMatch,
             fileSizeBytes: documentData.count,
             pageCount: extraction.pageCount,
             rowDiagnostics: extraction.rowDiagnostics,
@@ -5287,6 +5336,7 @@ final class FinanceStore {
             || extraction.kind == .unknown
             || gatedReconciliation.status != .valid
             || extraction.sourceDetection.status != .verified
+            || (extraction.source == "Santander" && extraction.templateMatch?.status != "matched")
 
         return ImportSummary(
             source: extraction.source,
@@ -5307,6 +5357,7 @@ final class FinanceStore {
             ocrConfidence: extraction.ocrConfidence,
             ocrPageConfidences: extraction.ocrPageConfidences,
             ocrColumnsCalibrated: extraction.ocrColumnsCalibrated,
+            templateMatch: extraction.templateMatch,
             fileSizeBytes: extraction.documentData.count,
             pageCount: extraction.pageCount,
             rowDiagnostics: extraction.rowDiagnostics,
@@ -5389,10 +5440,83 @@ final class FinanceStore {
         var centerY: CGFloat { boundingBox.midY }
     }
 
+    /// Decoded directly from the same JSON resource that the web reader uses.
+    /// The JSON is intentionally declarative: issuer detection, column roles
+    /// and normalized geometry do not drift into two unrelated implementations.
+    private struct StatementTemplateResource: Decodable {
+        struct HeaderSignature: Decodable {
+            let institutionalAny: [String]
+            let tableTitleAll: [String]
+            let minimumAlignmentScore: Double
+        }
+
+        struct Bounds: Decodable {
+            let x: Double
+            let y: Double
+            let width: Double
+            let height: Double
+        }
+
+        struct MovementRegion: Decodable {
+            let id: String
+            let pageRole: String
+            let referenceBounds: Bounds
+        }
+
+        struct Column: Decodable {
+            let key: String
+            let aliases: [String]
+            let referenceBounds: Bounds
+            let headerAnchorX: Double
+            let role: String
+        }
+
+        let id: String
+        let version: String
+        let issuer: String
+        let statementKind: String
+        let coordinateSpace: String
+        let headerSignature: HeaderSignature
+        let movementRegions: [MovementRegion]
+        let columns: [Column]
+        let excludedTextPatterns: [String]
+    }
+
+    private struct SantanderTemplateCalibration {
+        let record: StatementTemplateMatchRecord
+        let columns: SantanderOCRColumns?
+        let dateMaxX: CGFloat?
+        let titleBounds: (min: CGFloat, max: CGFloat)?
+        let tableLeft: CGFloat?
+        let tableSpan: CGFloat?
+    }
+
+    private static let santanderCheckingTemplateV1: StatementTemplateResource? = {
+        let bundles = [Bundle.main, Bundle(for: FinanceStore.self)]
+        for bundle in bundles {
+            guard let url = bundle.url(
+                forResource: "santander-checking-v1",
+                withExtension: "json"
+            ), let data = try? Data(contentsOf: url),
+               let template = try? JSONDecoder().decode(StatementTemplateResource.self, from: data)
+            else { continue }
+            guard template.id == "santander-checking", template.version == "1",
+                  template.coordinateSpace == "normalized-bottom-left" else { continue }
+            return template
+        }
+        return nil
+    }()
+
     private struct OCRObservation {
         let page: Int
         let text: String
         let boundingBox: CGRect
+        /// Shared OCR-contract fields: each source line has normalized page
+        /// geometry, its deterministic visual order and the engine that
+        /// produced it. The web reader emits the same conceptual record from
+        /// Tesseract observations.
+        let readingOrder: Int
+        let engine: String
         /// Confidence returned by Vision for this observation (0–1). It is
         /// propagated to every movement instead of using a fixed optimistic
         /// value, so a visually weak row cannot pass the automatic gate.
@@ -5410,11 +5534,15 @@ final class FinanceStore {
             confidence: Double,
             dateBoxes: [OCRTextBox] = [],
             amountBoxes: [OCRTextBox] = [],
-            isolatedRappiRow: Bool = false
+            isolatedRappiRow: Bool = false,
+            readingOrder: Int = 0,
+            engine: String = "vision"
         ) {
             self.page = page
             self.text = text
             self.boundingBox = boundingBox
+            self.readingOrder = readingOrder
+            self.engine = engine
             self.confidence = confidence
             self.dateBoxes = dateBoxes
             self.amountBoxes = amountBoxes
@@ -5470,6 +5598,7 @@ final class FinanceStore {
         let movements: [Movement]
         let columnsCalibrated: Bool
         let diagnostics: [OCRRowDiagnostic]
+        let templateMatch: StatementTemplateMatchRecord?
     }
 
     private struct AmexOCRParseResult {
@@ -6074,7 +6203,7 @@ final class FinanceStore {
                     }
                 }
 
-                return (request.results ?? []).compactMap { result -> OCRObservation? in
+                let recognized = (request.results ?? []).compactMap { result -> OCRObservation? in
                     guard let candidate = result.topCandidates(1).first,
                           !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                         return nil
@@ -6094,6 +6223,19 @@ final class FinanceStore {
                         return $0.centerY > $1.centerY
                     }
                     return $0.centerX < $1.centerX
+                }
+                return recognized.enumerated().map { index, observation in
+                    OCRObservation(
+                        page: observation.page,
+                        text: observation.text,
+                        boundingBox: observation.boundingBox,
+                        confidence: observation.confidence,
+                        dateBoxes: observation.dateBoxes,
+                        amountBoxes: observation.amountBoxes,
+                        isolatedRappiRow: observation.isolatedRappiRow,
+                        readingOrder: index,
+                        engine: "vision"
+                    )
                 }
             }
 
@@ -8982,18 +9124,215 @@ final class FinanceStore {
         }.cgImage
     }
 
+    /// Matches and dynamically calibrates Santander checking v1. The
+    /// reference geometry is transformed from the *detected* header span, so
+    /// it tolerates scale/margin changes but does not turn into a permissive
+    /// fixed-coordinate fallback when the columns themselves move.
+    private static func calibrateSantanderCheckingTemplate(
+        institutionalText: String,
+        tableTitle: String,
+        header: [OCRObservation],
+        movementPages: [Int]
+    ) -> SantanderTemplateCalibration {
+        guard let template = santanderCheckingTemplateV1,
+              let region = template.movementRegions.first,
+              let dateColumn = template.columns.first(where: { $0.role == "date" }),
+              let descriptionColumn = template.columns.first(where: { $0.role == "description" }),
+              let depositColumn = template.columns.first(where: { $0.role == "deposit" }),
+              let withdrawalColumn = template.columns.first(where: { $0.role == "withdrawal" }),
+              let balanceColumn = template.columns.first(where: { $0.role == "balance" }) else {
+            return SantanderTemplateCalibration(
+                record: StatementTemplateMatchRecord(
+                    templateId: "santander-checking", templateVersion: "1", status: "review",
+                    alignmentScore: 0, reason: "santander.template-resource-unavailable",
+                    calibratedPages: [], inheritedPages: []
+                ), columns: nil, dateMaxX: nil, titleBounds: nil, tableLeft: nil, tableSpan: nil
+            )
+        }
+
+        func normalized(_ value: String) -> String {
+            value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        func compact(_ value: String) -> String {
+            normalized(value).replacingOccurrences(of: " ", with: "")
+        }
+        let normalizedInstitutionalText = normalized(institutionalText)
+        guard template.headerSignature.institutionalAny.contains(where: {
+            normalizedInstitutionalText.contains(normalized($0))
+        }) else {
+            return SantanderTemplateCalibration(
+                record: StatementTemplateMatchRecord(
+                    templateId: template.id, templateVersion: template.version, status: "review",
+                    alignmentScore: 0, reason: "santander.template-institutional-header-not-found",
+                    calibratedPages: [], inheritedPages: []
+                ), columns: nil, dateMaxX: nil, titleBounds: nil, tableLeft: nil, tableSpan: nil
+            )
+        }
+
+        let normalizedTitle = normalized(tableTitle)
+        guard template.headerSignature.tableTitleAll.allSatisfy({ normalizedTitle.contains(normalized($0)) }) else {
+            return SantanderTemplateCalibration(
+                record: StatementTemplateMatchRecord(
+                    templateId: template.id, templateVersion: template.version, status: "review",
+                    alignmentScore: 0, reason: "santander.template-table-title-not-matched",
+                    calibratedPages: [], inheritedPages: []
+                ), columns: nil, dateMaxX: nil, titleBounds: nil, tableLeft: nil, tableSpan: nil
+            )
+        }
+
+        let coreColumns = [dateColumn, descriptionColumn, depositColumn, withdrawalColumn, balanceColumn]
+        func hasAlias(_ column: StatementTemplateResource.Column, in observation: OCRObservation) -> Bool {
+            let text = compact(observation.text)
+            return column.aliases.contains { text.contains(compact($0)) }
+        }
+        let headerText = header.map(\.text).joined(separator: " ")
+        guard coreColumns.allSatisfy({ column in
+            column.aliases.contains { compact(headerText).contains(compact($0)) }
+        }) else {
+            return SantanderTemplateCalibration(
+                record: StatementTemplateMatchRecord(
+                    templateId: template.id, templateVersion: template.version, status: "review",
+                    alignmentScore: 0, reason: "santander.template-required-columns-not-found",
+                    calibratedPages: [], inheritedPages: []
+                ), columns: nil, dateMaxX: nil, titleBounds: nil, tableLeft: nil, tableSpan: nil
+            )
+        }
+
+        // A single wide Vision line can contain all labels. Its character
+        // spacing is not the table's column spacing, so transform the
+        // template's normalized anchor across that detected line. Individual
+        // word boxes, when available, remain the stronger geometric signal.
+        let combinedHeader = header.first(where: { observation in
+            observation.boundingBox.width >= 0.45
+                && coreColumns.filter { hasAlias($0, in: observation) }.count >= 4
+        })
+        func anchor(_ column: StatementTemplateResource.Column) -> CGFloat? {
+            if let observation = header.first(where: {
+                hasAlias(column, in: $0) && $0.boundingBox.width < 0.45
+            }) {
+                // Template anchors describe the leading edge of each printed
+                // header label.  Using that same edge on both Vision and
+                // Tesseract avoids making alignment depend on OCR's varying
+                // word-width estimate (accented DESCRIPCIÓN is a common case).
+                return observation.boundingBox.minX
+            }
+            guard let combinedHeader else { return nil }
+            let relative = (column.headerAnchorX - region.referenceBounds.x) / region.referenceBounds.width
+            return combinedHeader.boundingBox.minX + combinedHeader.boundingBox.width * CGFloat(relative)
+        }
+        guard let date = anchor(dateColumn), let description = anchor(descriptionColumn),
+              let deposit = anchor(depositColumn), let withdrawal = anchor(withdrawalColumn),
+              let balance = anchor(balanceColumn), date < description, description < deposit,
+              deposit < withdrawal, withdrawal < balance else {
+            return SantanderTemplateCalibration(
+                record: StatementTemplateMatchRecord(
+                    templateId: template.id, templateVersion: template.version, status: "review",
+                    alignmentScore: 0, reason: "santander.template-column-order-or-geometry-invalid",
+                    calibratedPages: [], inheritedPages: []
+                ), columns: nil, dateMaxX: nil, titleBounds: nil, tableLeft: nil, tableSpan: nil
+            )
+        }
+        let referenceSpan = balanceColumn.headerAnchorX - dateColumn.headerAnchorX
+        let detectedSpan = Double(balance - date)
+        guard referenceSpan > 0, detectedSpan > 0.2 else {
+            return SantanderTemplateCalibration(
+                record: StatementTemplateMatchRecord(
+                    templateId: template.id, templateVersion: template.version, status: "review",
+                    alignmentScore: 0, reason: "santander.template-header-span-invalid",
+                    calibratedPages: [], inheritedPages: []
+                ), columns: nil, dateMaxX: nil, titleBounds: nil, tableLeft: nil, tableSpan: nil
+            )
+        }
+        let geometryErrors = [descriptionColumn, depositColumn, withdrawalColumn].map { column -> Double in
+            guard let observed = anchor(column) else { return 1 }
+            let expectedRelative = (column.headerAnchorX - dateColumn.headerAnchorX) / referenceSpan
+            let observedRelative = Double(observed - date) / detectedSpan
+            return abs(observedRelative - expectedRelative)
+        }
+        let geometryScore = max(0, 1 - (geometryErrors.reduce(0, +) / Double(geometryErrors.count)) / 0.10)
+        let alignmentScore = 0.4 + geometryScore * 0.6
+        guard alignmentScore >= template.headerSignature.minimumAlignmentScore else {
+            return SantanderTemplateCalibration(
+                record: StatementTemplateMatchRecord(
+                    templateId: template.id, templateVersion: template.version, status: "review",
+                    alignmentScore: alignmentScore, reason: "santander.template-alignment-below-threshold",
+                    calibratedPages: [], inheritedPages: []
+                ), columns: nil, dateMaxX: nil, titleBounds: nil, tableLeft: nil, tableSpan: nil
+            )
+        }
+
+        let scale = CGFloat(detectedSpan / referenceSpan)
+        let tableLeft = date + CGFloat(region.referenceBounds.x - dateColumn.headerAnchorX) * scale
+        let tableSpan = CGFloat(region.referenceBounds.width) * scale
+        let movementMinX = deposit + CGFloat(depositColumn.referenceBounds.x - depositColumn.headerAnchorX) * scale
+        let depositMaxX = withdrawal + CGFloat(withdrawalColumn.referenceBounds.x - withdrawalColumn.headerAnchorX) * scale
+        let balanceMinX = balance + CGFloat(balanceColumn.referenceBounds.x - balanceColumn.headerAnchorX) * scale
+        guard tableLeft >= 0, tableLeft + tableSpan <= 1.001,
+              movementMinX < depositMaxX, depositMaxX < balanceMinX, balanceMinX < tableLeft + tableSpan else {
+            return SantanderTemplateCalibration(
+                record: StatementTemplateMatchRecord(
+                    templateId: template.id, templateVersion: template.version, status: "review",
+                    alignmentScore: alignmentScore, reason: "santander.template-calibrated-columns-out-of-bounds",
+                    calibratedPages: [], inheritedPages: []
+                ), columns: nil, dateMaxX: nil, titleBounds: nil, tableLeft: nil, tableSpan: nil
+            )
+        }
+
+        let headerPage = header.first?.page ?? 0
+        return SantanderTemplateCalibration(
+            record: StatementTemplateMatchRecord(
+                templateId: template.id, templateVersion: template.version, status: "matched",
+                alignmentScore: alignmentScore,
+                reason: "santander.template-matched; encabezado y columnas calibrados dinámicamente",
+                calibratedPages: [headerPage + 1],
+                inheritedPages: movementPages.filter { $0 != headerPage }.map { $0 + 1 }
+            ),
+            columns: SantanderOCRColumns(
+                movementMinX: movementMinX, balanceMinX: balanceMinX, depositMaxX: depositMaxX,
+                calibratedFromHeader: true,
+                calibrationReason: "plantilla Santander cuenta de cheques v1; alineación \(Int((alignmentScore * 100).rounded()))%"
+            ),
+            dateMaxX: date + CGFloat(dateColumn.referenceBounds.x + dateColumn.referenceBounds.width - dateColumn.headerAnchorX) * scale,
+            titleBounds: (
+                min: description + CGFloat(descriptionColumn.referenceBounds.x - descriptionColumn.headerAnchorX) * scale,
+                max: movementMinX
+            ),
+            tableLeft: tableLeft,
+            tableSpan: tableSpan
+        )
+    }
+
+    private static func santanderTemplateReviewRecord(_ reason: String) -> StatementTemplateMatchRecord {
+        StatementTemplateMatchRecord(
+            templateId: santanderCheckingTemplateV1?.id ?? "santander-checking",
+            templateVersion: santanderCheckingTemplateV1?.version ?? "1",
+            status: "review",
+            alignmentScore: 0,
+            reason: reason,
+            calibratedPages: [],
+            inheritedPages: []
+        )
+    }
+
     private static func parseSantanderTable(
         _ observations: [OCRObservation],
         fileName: String,
         openingBalance: Decimal? = nil,
-        document: PDFDocument? = nil
+        document: PDFDocument? = nil,
+        institutionalText: String = "Banco Santander Mexico Grupo Financiero Santander"
     ) -> SantanderOCRParseResult {
         guard let dateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-.]\s*(\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*(\d{2,4}))?(?![A-Za-z])"#
         ), let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
         ) else {
-            return SantanderOCRParseResult(movements: [], columnsCalibrated: false, diagnostics: [])
+            return SantanderOCRParseResult(
+                movements: [], columnsCalibrated: false, diagnostics: [],
+                templateMatch: santanderTemplateReviewRecord("santander.template-regex-unavailable")
+            )
         }
 
         let defaultYear: Int = {
@@ -9102,7 +9441,8 @@ final class FinanceStore {
                     selectedColumn: "ENCABEZADO",
                     reason: "santander.table-title-not-found: no se localizaron juntos los términos del título dentro de tres líneas adyacentes",
                     accepted: false
-                )]
+                )],
+                templateMatch: santanderTemplateReviewRecord("santander.table-title-not-found")
             )
         }
 
@@ -9145,7 +9485,8 @@ final class FinanceStore {
                     selectedColumn: "LÍMITE DE TABLA",
                     reason: "santander.table-total-not-found: no se localizó el cierre TOTAL/SALDO FINAL de la tabla de cheques",
                     accepted: false
-                )]
+                )],
+                templateMatch: santanderTemplateReviewRecord("santander.table-total-not-found")
             )
         }
 
@@ -9165,7 +9506,8 @@ final class FinanceStore {
                     selectedColumn: "RECTÁNGULO",
                     reason: "santander.table-empty: el rectángulo entre el título y el total no contiene observaciones OCR",
                     accepted: false
-                )]
+                )],
+                templateMatch: santanderTemplateReviewRecord("santander.table-empty")
             )
         }
 
@@ -9190,8 +9532,26 @@ final class FinanceStore {
             return nil
         }
 
-        let header = pages.compactMap { page in headerWindow(on: page) }.first
-        guard header != nil else {
+        // `ocrLines` intentionally joins words to recognize a header split
+        // over neighbouring visual lines.  Do not pass that joined box to the
+        // template matcher, though: its union hides a shifted DEPÓSITO or
+        // RETIRO label and would make any six-word header look aligned.  Keep
+        // the original Vision observations for geometry; a genuinely fused
+        // Vision header remains one wide observation and is handled by the
+        // explicit combined-header branch in the template calibration.
+        let header = pages.compactMap { page -> [OCRObservation]? in
+            guard let lines = headerWindow(on: page) else { return nil }
+            let raw = scoped.filter { observation in
+                observation.page == page && lines.contains { line in
+                    abs(line.centerY - observation.centerY) <= 0.012
+                }
+            }.sorted { left, right in
+                if abs(left.centerY - right.centerY) > 0.012 { return left.centerY > right.centerY }
+                return left.centerX < right.centerX
+            }
+            return raw.isEmpty ? lines : raw
+        }.first
+        guard let header else {
             let evidence = diagnosticEvidence(matching: requiredLabels)
             return SantanderOCRParseResult(
                 movements: [],
@@ -9202,36 +9562,36 @@ final class FinanceStore {
                     selectedColumn: "COLUMNAS",
                     reason: "santander.column-header-not-found: FECHA/FOLIO/DESCRIPCIÓN/DEPÓSITO/RETIRO/SALDO no quedaron demostradas dentro de tres líneas adyacentes",
                     accepted: false
-                )]
+                )],
+                templateMatch: santanderTemplateReviewRecord("santander.template-required-columns-not-found")
             )
         }
 
         let byPage = Dictionary(grouping: scoped, by: \.page)
-
-        // These four supplied statements use Santander's fixed Carta table:
-        // the printed rectangle runs from x=0.045 through x=0.955.  Column
-        // boundaries below are fixed fractions of that rectangle, measured
-        // from the original pages rather than from the width of the header
-        // words.  The previous implementation treated the right edge of the
-        // word SALDO as the right edge of the table, which shifted DEPÓSITO
-        // into RETIRO and admitted description/reference amounts.
-        let tableLeft = CGFloat(0.045)
-        let tableSpan = CGFloat(0.910)
-        func tableX(_ fraction: CGFloat) -> CGFloat {
-            tableLeft + tableSpan * fraction
+        let calibration = calibrateSantanderCheckingTemplate(
+            institutionalText: institutionalText,
+            tableTitle: titleAnchor.text,
+            header: header,
+            movementPages: byPage.keys.sorted()
+        )
+        guard calibration.record.status == "matched",
+              let columns = calibration.columns,
+              let dateMaxX = calibration.dateMaxX,
+              let titleBounds = calibration.titleBounds,
+              let tableLeft = calibration.tableLeft,
+              let tableSpan = calibration.tableSpan else {
+            return SantanderOCRParseResult(
+                movements: [], columnsCalibrated: false,
+                diagnostics: [OCRRowDiagnostic(
+                    page: header.first.map { $0.page + 1 },
+                    rawText: header.map(\.text).joined(separator: " "),
+                    selectedColumn: "PLANTILLA",
+                    reason: calibration.record.reason,
+                    accepted: false
+                )],
+                templateMatch: calibration.record
+            )
         }
-        let columns = SantanderOCRColumns(
-            movementMinX: tableX(0.610),
-            balanceMinX: tableX(0.874),
-            depositMaxX: tableX(0.742),
-            calibratedFromHeader: true,
-            calibrationReason: "geometría fija de la tabla Carta Santander"
-        )
-        let dateMaxX = tableX(0.095)
-        let titleBounds = (
-            min: tableX(0.148),
-            max: tableX(0.610)
-        )
         var parsed: [Movement] = []
         var diagnostics: [OCRRowDiagnostic] = []
         struct PhysicalRow {
@@ -9434,6 +9794,9 @@ final class FinanceStore {
             let reason = "\(problem ?? "santander.row-verified"); fila \(index + 1); saldo anterior \(previousPrintedBalance.map { NSDecimalNumber(decimal: $0).stringValue } ?? "ilegible"); saldo impreso \(physical.balance.map { NSDecimalNumber(decimal: $0).stringValue } ?? "ilegible"); relectura de celdas \(physical.retried ? "sí" : "no"); resultado \(physical.retryOutcome)"
             if accepted, var movement = physical.movement {
                 movement.extractionEvidence?.selectionReason = reason
+                movement.extractionEvidence?.templateId = calibration.record.templateId
+                movement.extractionEvidence?.templateVersion = calibration.record.templateVersion
+                movement.extractionEvidence?.templateAlignmentScore = calibration.record.alignmentScore
                 parsed.append(movement)
             }
             diagnostics.append(OCRRowDiagnostic(page: physical.observations.first.map { $0.page + 1 },
@@ -9456,7 +9819,12 @@ final class FinanceStore {
                 accepted: false
             ))
         }
-        return SantanderOCRParseResult(movements: parsed, columnsCalibrated: true, diagnostics: diagnostics)
+        return SantanderOCRParseResult(
+            movements: parsed,
+            columnsCalibrated: true,
+            diagnostics: diagnostics,
+            templateMatch: calibration.record
+        )
     }
 
     /// Santander's statement is a scanned table. A plain text OCR stream loses
@@ -9482,7 +9850,7 @@ final class FinanceStore {
         ), let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
         ) else {
-            return SantanderOCRParseResult(movements: [], columnsCalibrated: false, diagnostics: [])
+            return SantanderOCRParseResult(movements: [], columnsCalibrated: false, diagnostics: [], templateMatch: nil)
         }
 
         let defaultYear: Int = {
@@ -9620,7 +9988,8 @@ final class FinanceStore {
         return SantanderOCRParseResult(
             movements: parsed,
             columnsCalibrated: everyPageCalibrated && !observationsByPage.isEmpty,
-            diagnostics: diagnostics
+            diagnostics: diagnostics,
+            templateMatch: nil
         )
     }
 

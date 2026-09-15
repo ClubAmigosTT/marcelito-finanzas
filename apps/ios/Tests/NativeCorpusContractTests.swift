@@ -600,6 +600,9 @@ final class NativeCorpusContractTests: XCTestCase {
                 "ocrConfidence": percentText(result.ocrConfidence),
                 "weakestOCRPage": percentText(result.ocrPageConfidences?.min()),
                 "ocrColumnsCalibrated": result.ocrColumnsCalibrated.map { $0 ? "true" : "false" } ?? "",
+                "templateId": result.templateMatch?.templateId ?? "",
+                "templateVersion": result.templateMatch?.templateVersion ?? "",
+                "templateAlignmentScore": percentText(result.templateMatch?.alignmentScore),
                 "diagnosticRows": String(result.rowDiagnostics.count),
                 "acceptedDiagnosticRows": String(result.rowDiagnostics.filter(\.accepted).count),
                 "expectedPreviousBalance": decimalText(expected.previousBalance),
@@ -648,7 +651,7 @@ final class NativeCorpusContractTests: XCTestCase {
             && expectedPendingCount == 0
             && goldenFalseAccepted == 0
             && goldenAutoAccepted == expectedValidCount
-            && automaticAcceptancePrecision >= 0.97
+            && automaticAcceptancePrecision >= 0.99
             && unresolvedOCR == 0
         let requireCertified = ["1", "true", "yes"].contains(
             ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED"]?.lowercased() ?? ""

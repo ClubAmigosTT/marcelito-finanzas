@@ -274,6 +274,12 @@ struct DiagnosticsView: View {
                                 .foregroundStyle(columnsCalibrated ? Color.marcelitoSuccess : Color.marcelitoAmber)
                                 .fixedSize(horizontal: false, vertical: true)
                             }
+                            if let template = statement.templateMatch {
+                                Text("Plantilla: \(template.templateId) v\(template.templateVersion) · alineación \(Int((template.alignmentScore * 100).rounded()))%")
+                                    .font(.caption2)
+                                    .foregroundStyle(template.status == "matched" && template.alignmentScore >= 0.9
+                                        ? Color.marcelitoSuccess : Color.marcelitoAmber)
+                            }
                             if let reconciliation = statement.reconciliation,
                                let extracted = reconciliation.extractedMovementCount,
                                let expected = reconciliation.expectedMovementCount {

@@ -34,6 +34,9 @@ type NativeCorpusReportRow = {
   ocrConfidence?: string | number;
   weakestOCRPage?: string | number;
   ocrColumnsCalibrated?: string | boolean;
+  templateId?: string;
+  templateVersion?: string;
+  templateAlignmentScore?: string | number;
   rows?: string | number;
   accountKey?: string;
   expectedAccountKey?: string;
@@ -121,8 +124,8 @@ export function verifyNativeCorpusSummary(summary: NativeCorpusSummary, expected
     && goldenAutoAccepted + goldenFalseAccepted > accepted) {
     errors.push("los contadores golden superan el número de aceptados");
   }
-  if (precision === undefined || precision < 0 || precision > 1 || precision < 0.97) {
-    errors.push(`precisión automática ${precision ?? "ausente"} fuera del objetivo 0.97`);
+  if (precision === undefined || precision < 0 || precision > 1 || precision < 0.99) {
+    errors.push(`precisión automática ${precision ?? "ausente"} fuera del objetivo 0.99`);
   }
   if (unresolvedOCR === undefined || unresolvedOCR !== 0) errors.push(`quedan ${unresolvedOCR ?? "desconocido"} OCR sin resolver`);
   if (!booleanField(summary.certified)) errors.push("el runner no marcó certified=true");
@@ -225,6 +228,12 @@ export function verifyNativeCorpusReport(
         if (weakestOCRPage < 0.78) errors.push(`${label}: OCR válido con página menor a 0.78`);
         if (mode === "vision-ocr" && source === "Santander" && columnsToken !== true && columnsToken !== "true" && columnsToken !== "1") {
           errors.push(`${label}: Santander válido sin columnas OCR calibradas`);
+        }
+        if (mode === "vision-ocr" && source === "Santander") {
+          const alignment = numericValue(row.templateAlignmentScore);
+          if (row.templateId !== "santander-checking" || row.templateVersion !== "1" || alignment < 0.9) {
+            errors.push(`${label}: Santander válido sin plantilla v1 y alineación verificable`);
+          }
         }
       }
     }

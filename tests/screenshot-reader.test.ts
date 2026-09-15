@@ -6,6 +6,16 @@ import type { ScreenshotCapture, Statement, Transaction } from "../src/types.ts"
 
 const capturedAt = "2026-09-08T12:00:00.000Z";
 
+const verifiedSantanderTemplate = {
+  templateId: "santander-checking",
+  templateVersion: "1",
+  status: "matched",
+  alignmentScore: 1,
+  reason: "fixture: Santander cuenta de cheques v1 alineada",
+  calibratedPages: [1],
+  inheritedPages: [],
+} as const satisfies NonNullable<Statement["templateMatch"]>;
+
 test("el lector BBVA conserva signos, fechas y filas cuyo importe aparece antes del concepto", () => {
   const result = parseScreenshotText({
     fileName: "1-Foto-1.jpg",
@@ -119,6 +129,7 @@ test("la identidad de cuenta admite formatos oficiales equivalentes y no cruza u
     reconciliationStatus: "valid",
     reconciliation: { status: "valid", tolerance: 0.05 },
     sourceDetection: { source: "Santander", confidence: 1, status: "verified", evidence: ["SUPER NOMINA"], ignoredBodyMentions: [] },
+    templateMatch: verifiedSantanderTemplate,
   };
   const capture = (accountKey: string): ScreenshotCapture => ({
     id: `capture-${accountKey}`,
@@ -160,6 +171,7 @@ test("la terminación no basta para cruzar una cuenta bancaria con una tarjeta",
     reconciliationStatus: "valid",
     reconciliation: { status: "valid", tolerance: 0.05 },
     sourceDetection: { source: "Santander", confidence: 1, status: "verified", evidence: ["SUPER NOMINA"], ignoredBodyMentions: [] },
+    templateMatch: verifiedSantanderTemplate,
   };
   const screenshot = screenshotTransaction({ id: "screen-card-tail", date: "2026-08-29", description: "SPEI RECIBIDO", account: "Santander", accountKey: "Santander:card:7079", amount: 11000, flow: "income", sourceCaptureId: "capture-card-tail" });
   const capture: ScreenshotCapture = {
@@ -316,6 +328,7 @@ test("la conciliación confirma una captura contra el estado oficial sin sustitu
     reconciliationStatus: "valid",
     reconciliation: { status: "valid", tolerance: 0.05 },
     sourceDetection: { source: "Santander", confidence: 1, status: "verified", evidence: ["SUPER NOMINA"], ignoredBodyMentions: [] },
+    templateMatch: verifiedSantanderTemplate,
   };
   const screenshot = screenshotTransaction({ id: "screen-1", date: "2026-08-29", description: "SPEI RECIBIDO SANTANDER", account: "Santander", accountKey: "Santander:bank:7079", amount: 11000, flow: "income", sourceCaptureId: "capture-1" });
   const unmatchedOtherAccount = screenshotTransaction({ id: "screen-2", date: "2026-08-29", description: "SPEI RECIBIDO SANTANDER", account: "Santander", accountKey: "Santander:bank:9999", amount: 11000, flow: "income", sourceCaptureId: "capture-1" });

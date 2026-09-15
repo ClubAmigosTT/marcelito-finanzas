@@ -255,9 +255,9 @@ const ocrDpi = ocrDpiRaw === undefined ? 220 : Number(ocrDpiRaw);
 const pdftoppmPath = argument("--pdftoppm") ?? process.env.MARCELITO_PDFTOPPM ?? "pdftoppm";
 const requireManifest = process.argv.includes("--require-manifest");
 const targetPrecisionRaw = argument("--target-precision");
-const targetPrecision = targetPrecisionRaw === undefined ? 0.97 : Number(targetPrecisionRaw);
+const targetPrecision = targetPrecisionRaw === undefined ? 0.99 : Number(targetPrecisionRaw);
 if (!directory) {
-  console.error("Uso: npm run pdf:corpus -- --dir <carpeta> [--manifest <archivo.json>] [--out <reporte.json>] [--require-manifest] [--target-precision 0.97] [--ocr --ocr-dpi 220 --pdftoppm <ruta>]");
+  console.error("Uso: npm run pdf:corpus -- --dir <carpeta> [--manifest <archivo.json>] [--out <reporte.json>] [--require-manifest] [--target-precision 0.99] [--ocr --ocr-dpi 220 --pdftoppm <ruta>]");
   process.exitCode = 2;
 } else if (requireManifest && !manifestPath) {
   console.error("La certificación requiere --manifest con expectativas doradas para cada PDF.");
@@ -395,7 +395,7 @@ if (!directory) {
     // Local Tesseract is a diagnostic aid, not the production acceptance
     // path. Keep its successful promotions visible, but do not call them
     // automatic acceptances or count them as false positives against the
-    // 97% metric reserved for text extraction/Vision-native output.
+    // 99% metric reserved for text extraction/Vision-native output.
     const autoAccepted = qualityAccepted;
     if (expected && result.mode === "ocr" && qualityAccepted) diagnosticOcrAccepted += 1;
     if (expected && autoAccepted) {

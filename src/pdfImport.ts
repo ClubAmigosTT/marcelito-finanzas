@@ -3,15 +3,15 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
 import { deterministicExpenseClassification } from "./categoryRules.ts";
 import { parseDeterministicStatement, reconcileExactly } from "./issuerParsers/index.ts";
-import type { DocumentLayout, DocumentLayoutLine, DocumentLayoutPage } from "./issuerParsers/types.ts";
+import type { DocumentLayout, DocumentLayoutLine, DocumentLayoutPage, OCRObservation } from "./issuerParsers/types.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-deterministic-2026.09.12.2";
+export const PDF_READER_VERSION = "web-reader-template-2026.09.14.1";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
 
-type PdfTextItem = { str: string; transform: number[] };
+type PdfTextItem = { str: string; transform: number[]; width?: number; height?: number };
 
 /** Rebuilds PDF.js text items into visual lines without losing column order. */
 export function rebuildPdfText(items: unknown[]) {
@@ -34,9 +34,9 @@ export function rebuildPdfText(items: unknown[]) {
 }
 
 /** Preserves source columns so issuer parsers never infer direction from descriptions. */
-export function rebuildPdfLayout(items: unknown[], page: number, pageWidth: number): DocumentLayoutPage {
+export function rebuildPdfLayout(items: unknown[], page: number, pageWidth: number, pageHeight = 1): DocumentLayoutPage {
   const rows: Array<{ y: number; words: DocumentLayoutLine["words"] }> = [];
-  (items as PdfTextItem[]).forEach((item) => {
+  (items as PdfTextItem[]).forEach((item, readingOrder) => {
     if (!item.str?.trim() || !Array.isArray(item.transform)) return;
     const sourceX = item.transform[4] ?? 0;
     const y = item.transform[5] ?? 0;
@@ -45,7 +45,16 @@ export function rebuildPdfLayout(items: unknown[], page: number, pageWidth: numb
       row = { y, words: [] };
       rows.push(row);
     }
-    row.words.push({ x: Math.max(0, Math.min(1, sourceX / Math.max(pageWidth, 1))), text: item.str.trim(), confidence: 1 });
+    const sourceY = item.transform[5] ?? 0;
+    row.words.push({
+      x: Math.max(0, Math.min(1, sourceX / Math.max(pageWidth, 1))),
+      y: Math.max(0, Math.min(1, sourceY / Math.max(pageHeight, 1))),
+      width: Math.max(0, Math.min(1, Math.abs(item.width ?? 0) / Math.max(pageWidth, 1))),
+      height: Math.max(0, Math.min(1, Math.abs(item.height ?? item.transform[3] ?? 0) / Math.max(pageHeight, 1))),
+      text: item.str.trim(),
+      confidence: 1,
+      readingOrder,
+    });
   });
   return {
     page,
@@ -53,7 +62,7 @@ export function rebuildPdfLayout(items: unknown[], page: number, pageWidth: numb
   };
 }
 
-export function rebuildOcrLayout(tsv: string | null | undefined, page: number, pageWidth: number): DocumentLayoutPage {
+export function rebuildOcrLayout(tsv: string | null | undefined, page: number, pageWidth: number, pageHeight = 1): DocumentLayoutPage {
   const rows = new Map<string, DocumentLayoutLine["words"]>();
   for (const raw of (tsv ?? "").split(/\r?\n/).slice(1)) {
     const fields = raw.split("\t");
@@ -62,14 +71,41 @@ export function rebuildOcrLayout(tsv: string | null | undefined, page: number, p
     if (!text) continue;
     const key = fields.slice(1, 5).join(":");
     const words = rows.get(key) ?? [];
+    const x = Number(fields[6]);
+    const yFromTop = Number(fields[7]);
+    const width = Number(fields[8]);
+    const height = Number(fields[9]);
     words.push({
-      x: Math.max(0, Math.min(1, Number(fields[6]) / Math.max(pageWidth, 1))),
+      x: Math.max(0, Math.min(1, x / Math.max(pageWidth, 1))),
+      // Tesseract TSV uses a top-left origin. Convert once at the boundary so
+      // its evidence is directly comparable with Vision's normalized boxes.
+      y: Math.max(0, Math.min(1, 1 - (yFromTop + height) / Math.max(pageHeight, 1))),
+      width: Math.max(0, Math.min(1, width / Math.max(pageWidth, 1))),
+      height: Math.max(0, Math.min(1, height / Math.max(pageHeight, 1))),
       text,
       confidence: Math.max(0, Math.min(1, Number(fields[10]) / 100)),
+      readingOrder: Number(fields[5]),
     });
     rows.set(key, words);
   }
   return { page, lines: [...rows.values()].map((words) => ({ page, words: words.sort((a, b) => a.x - b.x) })) };
+}
+
+/** Converts every retained word into the cross-platform OCR observation contract. */
+function layoutObservations(layout: DocumentLayout, engine: OCRObservation["engine"]): OCRObservation[] {
+  return layout.pages.flatMap((page) => page.lines.flatMap((line) => line.words.map((word, index) => ({
+    page: page.page,
+    text: word.text,
+    bounds: {
+      x: word.x,
+      y: word.y ?? 0,
+      width: word.width ?? 0,
+      height: word.height ?? 0,
+    },
+    confidence: word.confidence,
+    readingOrder: word.readingOrder ?? index,
+    engine,
+  }))));
 }
 
 function normalizeAmount(value: string) {
@@ -1426,7 +1462,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       // Keep explicit page sentinels so row reconstruction cannot cross page
       // boundaries or blend a movement with the following page's summary.
       pages.push(`__PDF_PAGE_${pageNumber}__\n${bestText}`);
-      layoutPages.push(rebuildOcrLayout(bestTsv, pageNumber, canvas.width));
+      layoutPages.push(rebuildOcrLayout(bestTsv, pageNumber, canvas.width, canvas.height));
       onProgress(88 + Math.round((pageNumber / document.numPages) * 10), `Reconociendo página ${pageNumber} de ${document.numPages}`);
       canvas.width = 0;
       canvas.height = 0;
@@ -1436,9 +1472,11 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
     await worker.terminate();
   }
 
+  const layout: DocumentLayout = { pages: layoutPages };
+  layout.observations = layoutObservations(layout, "tesseract");
   return {
     text: pages.join("\n"),
-    layout: { pages: layoutPages } satisfies DocumentLayout,
+    layout,
     pageConfidences,
     confidence: pageConfidences.length
       ? pageConfidences.reduce((sum, value) => sum + value, 0) / pageConfidences.length
@@ -1500,7 +1538,8 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
     // selectable text layer. The sentinel is consumed by extractTransactions
     // and never reaches a merchant description.
     pageTexts.push(`__PDF_PAGE_${pageNumber}__\n${rebuildPdfText(content.items)}`);
-    textLayoutPages.push(rebuildPdfLayout(content.items, pageNumber, page.getViewport({ scale: 1 }).width));
+    const viewport = page.getViewport({ scale: 1 });
+    textLayoutPages.push(rebuildPdfLayout(content.items, pageNumber, viewport.width, viewport.height));
     onProgress(12 + Math.round((pageNumber / document.numPages) * 58), `Leyendo pagina ${pageNumber} de ${document.numPages}`);
     page.cleanup();
   }
@@ -1509,7 +1548,10 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   const mode = shouldUseOCR(extractedText) ? "ocr" : "text";
   const ocrResult = mode === "ocr" ? await recognizePdfText(document, onProgress) : undefined;
   const text = ocrResult?.text ?? extractedText;
-  const layout = ocrResult?.layout ?? { pages: textLayoutPages };
+  const layout = ocrResult?.layout ?? {
+    pages: textLayoutPages,
+    observations: layoutObservations({ pages: textLayoutPages }, "pdf-text"),
+  };
   const sourceDetection = detectSourceEvidence(text, file.name);
   const source = sourceDetection.source;
   const accountKey = detectAccountKey(text, source);
@@ -1548,6 +1590,15 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
       reconciliation,
       ocrConfidence: ocrResult?.confidence,
       ocrPageConfidences: ocrResult?.pageConfidences,
+      templateMatch: deterministic?.templateMatch ? {
+        templateId: deterministic.templateMatch.templateId,
+        templateVersion: deterministic.templateMatch.templateVersion,
+        status: deterministic.templateMatch.status,
+        alignmentScore: deterministic.templateMatch.alignmentScore,
+        reason: deterministic.templateMatch.reason,
+        calibratedPages: deterministic.templateMatch.calibratedPages,
+        inheritedPages: deterministic.templateMatch.inheritedPages,
+      } : undefined,
       extractedText: text,
     };
     return result;

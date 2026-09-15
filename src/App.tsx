@@ -488,6 +488,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       issuerConfirmedByUser: false,
       ocrConfidence: commit.ocrConfidence,
       ocrPageConfidences: commit.ocrPageConfidences,
+      templateMatch: commit.templateMatch,
     };
     const nextStatements = previous
       ? statements.map((item) => item.id === statementId ? statement : item)
@@ -503,6 +504,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       // eligibility boundary so a weak remote read is never displayed as
       // ready before the next render/migration pass.
       || !hasSufficientOcrQuality(statement)
+      || (commit.source === "Santander" && commit.templateMatch?.status !== "matched")
       || importedPipeline.audit.criticalIssues.length > 0;
     statement.status = importedTransactions.length && !needsReview ? "ready" : "review";
     statement.transactionCount = importedPipeline.transactions.filter((item) => item.statementId === statementId).length;
@@ -1691,6 +1693,7 @@ function ImportDialog({ open, initialMode, onClose, onSave, onSaveScreenshot, ca
         <div><span>Periodo</span><strong>{result.period}</strong></div>
         <div><span>Parser</span><strong>{result.parserId ?? "No compatible"}</strong></div>
         <div><span>Sección</span><strong>{result.sourceSection ?? "No encontrada"}</strong></div>
+        {result.source === "Santander" && <div><span>Plantilla</span><strong>{result.templateMatch?.status === "matched" ? `v${result.templateMatch.templateVersion} · ${Math.round(result.templateMatch.alignmentScore * 100)}%` : "En revisión"}</strong></div>}
         <div><span>Movimientos</span><strong>{result.transactions.length}</strong></div>
       </div>
       <div className={`reconciliation-callout ${currentReconciliation?.status ?? "pending"}`} role="status">
@@ -1700,7 +1703,7 @@ function ImportDialog({ open, initialMode, onClose, onSave, onSaveScreenshot, ca
       {transactionClassifierEndpoint && currentReconciliation?.status === "valid" && validItems.length > 0 && <div className="classifier-callout"><div><strong>Clasificación opcional con Zen</strong><small>Solo enriquece filas ya conciliadas; no puede cambiar importes, emisor ni aceptación.</small></div><button type="button" className="secondary-button" onClick={classifyExpensesWithZen} disabled={classificationBusy || !readerPreflightReady}>{classificationBusy ? "Clasificando…" : "Clasificar gastos"}</button>{classificationMessage && <span role="status">{classificationMessage}</span>}</div>}
       {result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Lectura OCR con plantilla fija</strong><p>Solo se aceptaron filas dentro de la sección contractual del emisor. No se permiten correcciones manuales de importes; si el archivo no concilia, debe reimportarse.</p></div></div>}
       {items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><strong>{item.description}</strong><small>{item.date} · página {item.extractionEvidence?.page ?? "—"}</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)} disabled={reconciliationBlocked}>{["Ingresos", "Transferencia", ...expenseCategories].map((category) => <option key={category}>{category}</option>)}</select><span className={item.amount > 0 ? "review-amount positive" : "review-amount"}>{moneyPrecise.format(item.amount)}</span></div>)}</div> : <EmptyState title="Importación rechazada" body="No se extrajeron movimientos contractuales. Este archivo no puede guardarse ni afectar los KPI." />}
-      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "El parser rechazó el estado; no admite desbloqueo manual" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: result.source, accountKey: result.accountKey, kind: result.kind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, parserId: result.parserId, sourceSection: result.sourceSection, extractionProvider: result.extractionProvider, extractionModel: result.extractionModel, extractionPromptVersion: result.extractionPromptVersion, mode: result.mode, transactions: validItems, summary: result.summary, reconciliation: result.reconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Estado rechazado" : `Guardar estado y ${validItems.length} movimientos`}</button></div>
+      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "El parser rechazó el estado; no admite desbloqueo manual" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: result.source, accountKey: result.accountKey, kind: result.kind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, parserId: result.parserId, sourceSection: result.sourceSection, extractionProvider: result.extractionProvider, extractionModel: result.extractionModel, extractionPromptVersion: result.extractionPromptVersion, mode: result.mode, transactions: validItems, summary: result.summary, reconciliation: result.reconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, templateMatch: result.templateMatch, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Estado rechazado" : `Guardar estado y ${validItems.length} movimientos`}</button></div>
     </div>}
     {stage === "review" && importMode === "screenshots" && screenshotResult && <div className="review-state screenshot-review-state">
       <div className="review-summary">

@@ -63,7 +63,41 @@ final class SantanderIndependentRowsTests: XCTestCase {
 
     private func read(_ rows: [OCRObservationFixture], pdf: PDFDocument? = nil) -> (movements: [Movement], diagnostics: [OCRRowDiagnostic]) {
         let footer = OCRObservationFixture(page: rows.map(\.page).max() ?? 0, text: "TOTAL", x: 0.20, y: 0.10, width: 0.10)
-        return FinanceStore.santanderTableSnapshotForTesting(header + rows + [footer], fileName: "julio-2026.pdf", openingBalance: 1000, recoveryPDF: pdf)
+        let result = FinanceStore.santanderTableSnapshotForTesting(
+            header + rows + [footer], fileName: "julio-2026.pdf", openingBalance: 1000, recoveryPDF: pdf
+        )
+        return (result.movements, result.diagnostics)
+    }
+
+    func testVersionedTemplateIsStoredOnMatchedRows() {
+        let result = FinanceStore.santanderTableSnapshotForTesting(
+            header + row(1, amount: "30.00", balance: "970.00")
+                + [OCRObservationFixture(text: "TOTAL", x: 0.20, y: 0.10, width: 0.10)],
+            fileName: "julio-2026.pdf",
+            openingBalance: 1000
+        )
+        XCTAssertEqual(result.templateMatch?.templateId, "santander-checking")
+        XCTAssertEqual(result.templateMatch?.templateVersion, "1")
+        XCTAssertEqual(result.templateMatch?.status, "matched")
+        XCTAssertGreaterThanOrEqual(result.templateMatch?.alignmentScore ?? 0, 0.9)
+        XCTAssertEqual(result.movements.first?.extractionEvidence?.templateId, "santander-checking")
+        XCTAssertEqual(result.movements.first?.extractionEvidence?.templateVersion, "1")
+    }
+
+    func testUnknownOrMisalignedSantanderHeaderStaysInReview() {
+        let title = OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.09, y: 0.96, width: 0.42)
+        let shiftedHeader = [
+            OCRObservationFixture(text: "FECHA", x: 0.06, y: 0.90, width: 0.05),
+            OCRObservationFixture(text: "FOLIO", x: 0.14, y: 0.90, width: 0.05),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.20, y: 0.90, width: 0.10),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.79, y: 0.90, width: 0.07),
+            OCRObservationFixture(text: "RETIRO", x: 0.86, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "SALDO", x: 0.93, y: 0.90, width: 0.05),
+            OCRObservationFixture(text: "TOTAL", x: 0.20, y: 0.10, width: 0.10),
+        ]
+        let result = FinanceStore.santanderTableSnapshotForTesting([title] + shiftedHeader, fileName: "unknown.pdf")
+        XCTAssertEqual(result.templateMatch?.status, "review")
+        XCTAssertTrue(result.movements.isEmpty)
     }
 
     func testMissingMovementDoesNotCascadeToFollowingRowsEvenAcrossPages() {

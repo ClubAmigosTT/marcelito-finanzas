@@ -1,5 +1,5 @@
 import type { ImportResult, StatementReconciliation, StatementSummary, Transaction, TransactionKind } from "../types.ts";
-import type { DocumentLayout, DocumentLayoutLine } from "./types.ts";
+import type { DocumentLayout, DocumentLayoutLine, NormalizedBox } from "./types.ts";
 
 export function fold(value: string) {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/\s+/g, " ").trim();
@@ -48,6 +48,22 @@ export function lineText(line: DocumentLayoutLine) {
   return line.words.map((word) => word.text).join(" ").replace(/\s+/g, " ").trim();
 }
 
+/** Visual evidence for one derived OCR line, still normalized 0–1. */
+export function lineBounds(line: DocumentLayoutLine): NormalizedBox | undefined {
+  if (!line.words.length) return undefined;
+  const minX = Math.min(...line.words.map((word) => word.x));
+  const maxX = Math.max(...line.words.map((word) => word.x + (word.width ?? 0)));
+  const ys = line.words.flatMap((word) => word.y === undefined ? [] : [word.y]);
+  const tops = line.words.flatMap((word) => word.y === undefined ? [] : [word.y + (word.height ?? 0)]);
+  if (!ys.length || !tops.length) return undefined;
+  return {
+    x: Math.max(0, Math.min(1, minX)),
+    y: Math.max(0, Math.min(1, Math.min(...ys))),
+    width: Math.max(0, Math.min(1, maxX) - Math.max(0, Math.min(1, minX))),
+    height: Math.max(0, Math.min(1, Math.max(...tops)) - Math.max(0, Math.min(1, Math.min(...ys)))),
+  };
+}
+
 const months: Record<string, number> = {
   ene: 1, enero: 1, feb: 2, febrero: 2, mar: 3, marzo: 3, abr: 4, abril: 4,
   may: 5, mayo: 5, jun: 6, junio: 6, jul: 7, julio: 7, ago: 8, agosto: 8,
@@ -88,6 +104,10 @@ export function makeTransaction(options: {
   confidence: number;
   foreignCurrency?: boolean;
   sourceText: string;
+  bounds?: NormalizedBox;
+  selectedColumn?: string;
+  selectionReason?: string;
+  template?: { id: string; version: string; alignmentScore: number };
 }) : Transaction {
   const amount = options.amountCents / 100;
   const flow: Transaction["flow"] = options.kind === "cardPayment" ? "debt" : amount > 0 ? "income" : "expense";
@@ -108,6 +128,12 @@ export function makeTransaction(options: {
       page: options.page,
       confidence: options.confidence,
       sourceText: options.sourceText.slice(0, 240),
+      bounds: options.bounds,
+      selectedColumn: options.selectedColumn,
+      selectionReason: options.selectionReason,
+      templateId: options.template?.id,
+      templateVersion: options.template?.version,
+      templateAlignmentScore: options.template?.alignmentScore,
     },
   };
 }

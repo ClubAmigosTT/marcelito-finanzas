@@ -246,7 +246,7 @@ test("RappiCard usa tabla dedicada y concilia abonos además de cargos", async (
   assert.match(source, /evidenceMethod: "vision-ocr"/);
 });
 
-test("Santander usa rectángulo y columnas fijas de la tabla", async () => {
+test("Santander usa una plantilla versionada y columnas calibradas por documento", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /private static func parseSantanderTable\(/);
   assert.match(source, /let requiredLabels = \["fecha", "folio", "descripcion", "deposito", "retiro", "saldo"\]/);
@@ -254,11 +254,12 @@ test("Santander usa rectángulo y columnas fijas de la tabla", async () => {
   assert.match(source, /santander\.column-header-not-found/);
   assert.match(source, /lineWindows\(on: page\)/);
   assert.match(source, /if normalized\.contains\("saldo final del periodo anterior"\) \{ return false \}/);
-  assert.match(source, /calibrationReason: "geometría fija de la tabla Carta Santander"/);
-  assert.match(source, /movementMinX: tableX\(0\.610\)/);
-  assert.match(source, /depositMaxX: tableX\(0\.742\)/);
-  assert.match(source, /balanceMinX: tableX\(0\.874\)/);
-  assert.match(source, /requireFixedMovementColumn: true/);
+  assert.match(source, /private static func calibrateSantanderCheckingTemplate\(/);
+  assert.match(source, /santanderCheckingTemplateV1/);
+  assert.match(source, /santander\.template-matched; encabezado y columnas calibrados dinámicamente/);
+  assert.match(source, /templateId: template\.id, templateVersion: template\.version, status: "matched"/);
+  assert.doesNotMatch(source, /geometría fija de la tabla Carta Santander/);
+  assert.doesNotMatch(source, /movementMinX: tableX\(0\.610\)/);
   assert.match(source, /return previousPrintedBalance \+ movement.amount == balance/);
   assert.match(source, /previousPrintedBalance = physical.balance/);
   assert.equal((source.match(/let gatedReconciliation = Self.santanderRowGate\(/g) ?? []).length, 2);
@@ -350,7 +351,7 @@ test("iOS usa el proveedor seleccionado solo para enriquecer gastos después de 
   assert.match(certification, /El proveedor de IA seleccionado no recibe PDFs/);
   assert.match(models, /Legacy compatibility markers/);
   assert.match(certification, /multimodalFallbackAttempted/);
-  assert.match(certification, /static let targetPrecision = 0\.97/);
+  assert.match(certification, /static let targetPrecision = 0\.99/);
   assert.match(certification, /cada archivo aceptado debe conciliar al 100%/);
 });
 

@@ -60,6 +60,25 @@ export type TransactionExtractionEvidence = {
   sourceText?: string;
   /** Bounding box when the extraction method provides visual coordinates. */
   bounds?: ExtractionBounds;
+  /** Versioned statement template that selected this row, when applicable. */
+  templateId?: string;
+  templateVersion?: string;
+  /** Alignment score recorded at import time; it is evidence, not a KPI. */
+  templateAlignmentScore?: number;
+  /** Issuer column that supplied the amount, never inferred from the saldo. */
+  selectedColumn?: string;
+  /** Bounded deterministic reason for the selected row/column. */
+  selectionReason?: string;
+};
+
+export type StatementTemplateMatch = {
+  templateId: string;
+  templateVersion: string;
+  status: "matched" | "review";
+  alignmentScore: number;
+  reason: string;
+  calibratedPages: number[];
+  inheritedPages: number[];
 };
 
 /** Evidence used to identify the issuer without trusting transaction text. */
@@ -266,6 +285,8 @@ export type ImportResult = {
   ocrConfidence?: number;
   /** Per-page OCR confidence, retained for diagnostics and review UX. */
   ocrPageConfidences?: number[];
+  /** Template decision retained independently from generic OCR confidence. */
+  templateMatch?: StatementTemplateMatch;
   /**
    * Transient text/OCR stream kept only while the import dialog is open. It is
    * intentionally not part of ImportCommit/Statement so raw PDF text is not
@@ -311,6 +332,7 @@ export type Statement = {
   ocrConfidence?: number;
   /** Per-page OCR confidence retained for audit and reproducible review. */
   ocrPageConfidences?: number[];
+  templateMatch?: StatementTemplateMatch;
 };
 
 export type ImportCommit = {
@@ -335,6 +357,7 @@ export type ImportCommit = {
   sourceDetection?: SourceDetection;
   ocrConfidence?: number;
   ocrPageConfidences?: number[];
+  templateMatch?: StatementTemplateMatch;
   /** User corrections learned from this review, keyed by normalized merchant. */
   categoryRules?: Record<string, string>;
 };

@@ -15,6 +15,9 @@ type DeviceFile = {
   ocrConfidence?: unknown;
   weakestOCRPage?: unknown;
   ocrColumnsCalibrated?: unknown;
+  templateId?: unknown;
+  templateVersion?: unknown;
+  templateAlignmentScore?: unknown;
   reconciliationValid?: unknown;
   duplicate?: unknown;
   errorCode?: unknown;
@@ -82,7 +85,7 @@ export function verifyNativeDeviceReport(report: DeviceReport, expectedReaderVer
   if (Number.isInteger(accepted) && Number.isInteger(blocked) && accepted + blocked !== files.length) {
     errors.push("accepted + blocked no coincide con files");
   }
-  if (!Number.isFinite(precision) || precision < 0.97 || precision > 1) errors.push("precisión automática menor a 97%");
+  if (!Number.isFinite(precision) || precision < 0.99 || precision > 1) errors.push("precisión automática menor a 99%");
   if (unresolvedOCR !== 0) errors.push(`quedan ${Number.isFinite(unresolvedOCR) ? unresolvedOCR : "desconocido"} OCR pendientes`);
   if (report.expectedValid !== files.length) errors.push("expectedValid no coincide con el número de archivos");
   if (report.expectedPending !== 0) errors.push("expectedPending debe ser 0");
@@ -122,6 +125,12 @@ export function verifyNativeDeviceReport(report: DeviceReport, expectedReaderVer
       if (!Number.isFinite(confidence) || confidence < 0.88) errors.push(`${label}: confianza OCR media menor a 88%`);
       if (!Number.isFinite(weakest) || weakest < 0.78) errors.push(`${label}: página OCR menor a 78%`);
       if (row.mode === "vision-ocr" && row.source === "Santander" && row.ocrColumnsCalibrated !== true) errors.push(`${label}: columnas Santander sin calibrar`);
+      if (row.mode === "vision-ocr" && row.source === "Santander") {
+        const alignment = numberValue(row.templateAlignmentScore);
+        if (row.templateId !== "santander-checking" || row.templateVersion !== "1" || alignment < 0.9) {
+          errors.push(`${label}: plantilla Santander v1 sin alineación verificable`);
+        }
+      }
     }
     if (row.status !== "valid" || row.requiresReview !== false || row.reconciliationValid !== true) {
       errors.push(`${label}: el archivo no quedó aceptado por el lector`);

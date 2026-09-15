@@ -38,7 +38,7 @@ test("el resumen nativo pendiente o desactualizado no pasa la certificación", (
   assert.ok(result.errors.some((error) => error.includes("readerVersion")));
   assert.ok(result.errors.some((error) => error.includes("golden(s) pendientes")));
   assert.ok(result.errors.some((error) => error.includes("aceptación(es) falsa(s)")));
-  assert.ok(result.errors.some((error) => error.includes("objetivo 0.97")));
+  assert.ok(result.errors.some((error) => error.includes("objetivo 0.99")));
 });
 
 test("el resumen no se acepta si los conteos estructurales no cuadran", () => {
@@ -76,7 +76,7 @@ test("el resumen nativo rechaza contadores fraccionarios o negativos", () => {
   assert.equal(result.ok, false);
   assert.ok(result.errors.some((error) => error.includes("files no coincide")));
   assert.ok(result.errors.some((error) => error.includes("OCR sin resolver")));
-  assert.ok(result.errors.some((error) => error.includes("objetivo 0.97")));
+  assert.ok(result.errors.some((error) => error.includes("objetivo 0.99")));
 });
 
 test("el resumen nativo exige cubrir todos los archivos con goldens", () => {
@@ -295,6 +295,9 @@ test("el reporte nativo aplica umbrales OCR a estados promovidos", () => {
       ocrConfidence: 0.9,
       weakestOCRPage: 0.8,
       ocrColumnsCalibrated: true,
+      templateId: "santander-checking",
+      templateVersion: "1",
+      templateAlignmentScore: 0.95,
       rows: 43,
       accountKey: "santander:7079",
       expectedAccountKey: "santander:7079",
