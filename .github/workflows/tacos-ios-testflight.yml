@@ -175,11 +175,11 @@ jobs:
         working-directory: apps/mobile
         shell: bash
         run: |
-          set -euo pipefail
-          pnpm exec expo prebuild --platform ios --clean --no-install
-          test -f ios/Tacos.xcworkspace/contents.xcworkspacedata
-          cd ios
-          pod install
+            set -euo pipefail
+            pnpm exec expo prebuild --platform ios --clean --no-install
+            cd ios
+            pod install
+            test -f Tacos.xcworkspace/contents.xcworkspacedata
 
       - name: Preparar firma de distribución
         shell: bash
