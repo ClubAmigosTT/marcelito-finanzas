@@ -730,7 +730,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.14.36"
+    static let readerVersion = "ios-reader-deterministic-2026.09.14.37"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -5671,10 +5671,10 @@ final class FinanceStore {
         for (top, bottom) in zip(centers, centers.dropFirst()) {
             let gap = (bottom - top) / height
             // Normal rows are about 2.6% of the page. Foreign purchases can
-            // include a conversion annotation and become roughly twice as
-            // tall. Wider header/section gaps are recognized but rejected by
-            // the date+signed-amount evidence gate below.
-            guard gap >= 0.018, gap <= 0.075 else { continue }
+            // include a multi-line conversion annotation and become more
+            // than three times as tall. Wider header/section gaps are still
+            // rejected by the exact date+amount evidence gate below.
+            guard gap >= 0.018, gap <= 0.11 else { continue }
             let padding = min(0.0025, gap * 0.08)
             let visionBottom = max(0, 1 - (bottom / height) - padding)
             let visionTop = min(1, 1 - (top / height) + padding)
@@ -5768,13 +5768,31 @@ final class FinanceStore {
         let signedMoneyRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9.,])[+-−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         )
+        let unsignedMoneyRegex = try? NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9.,])\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+        )
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
         let dateMatches = dateRegex?.matches(in: text, range: range) ?? []
         let amountMatches = signedMoneyRegex?.matches(in: text, range: range) ?? []
+        let semanticText = text
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+            .lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+        let issuerCredit = semanticText.contains("pagoporspei")
+            || semanticText.contains("bonificacionconcashback")
+            || semanticText.contains("abonoconcashback")
+        let unsignedMatches = amountMatches.isEmpty && issuerCredit
+            ? (unsignedMoneyRegex?.matches(in: text, range: range) ?? [])
+            : []
         // A band containing several transactions must never be reduced to
         // its first dates and last amount: that silently loses payments.
-        guard dateMatches.count == 2, amountMatches.count == 1,
-              let amountMatch = amountMatches.first else { return nil }
+        // Vision can omit or corrupt only the sign on Rappi's two explicit
+        // credit labels.  Recover that bounded issuer-semantic case when the
+        // band contains exactly one monetary value; unsigned purchases stay
+        // rejected.
+        guard dateMatches.count == 2,
+              amountMatches.count == 1 || (amountMatches.isEmpty && unsignedMatches.count == 1),
+              let amountMatch = amountMatches.first ?? unsignedMatches.first else { return nil }
 
         let dateBoxes = dateMatches.prefix(2).enumerated().compactMap { index, match -> OCRTextBox? in
             guard let matchRange = Range(match.range, in: text) else { return nil }
@@ -5790,8 +5808,10 @@ final class FinanceStore {
         }
         guard dateBoxes.count == 2,
               let amountRange = Range(amountMatch.range, in: text) else { return nil }
+        let rawAmount = String(text[amountRange]).trimmingCharacters(in: .whitespacesAndNewlines)
+        let amountText = amountMatches.isEmpty ? "-\(rawAmount)" : rawAmount
         let amountBox = OCRTextBox(
-            text: String(text[amountRange]),
+            text: amountText,
             boundingBox: CGRect(x: 0.80, y: region.minY, width: 0.15, height: region.height)
         )
         return OCRObservation(
@@ -11324,18 +11344,30 @@ final class FinanceStore {
                 let semanticTitle = compactSemanticTitle(title)
                 let payment = title.range(of: #"^pago\s+por\s+spei\b"#, options: .regularExpression) != nil
                     || semanticTitle.hasPrefix("pagoporspei")
+                let cashbackCredit = semanticTitle.contains("bonificacionconcashback")
+                    || semanticTitle.contains("abonoconcashback")
+                let issuerCredit = payment || cashbackCredit
                 let hasExplicitSign = money.trimmingCharacters(in: .whitespacesAndNewlines)
                     .first.map { $0 == "+" || $0 == "-" } ?? false
-                // Vision occasionally drops the minus glyph at the right edge
-                // of a Rappi payment row. Recover that one issuer-semantic
-                // case only; every other unsigned amount remains rejected.
-                guard hasExplicitSign || payment else { continue }
-                let amount = hasExplicitSign ? parsedAmount : -abs(parsedAmount)
+                // Vision occasionally drops the minus glyph or reads it as a
+                // plus at the right edge of Rappi's payment/cashback rows.
+                // Those labels are explicit issuer credits, so normalize only
+                // those bounded cases. Every unsigned purchase remains
+                // rejected and the complete stream must still reconcile with
+                // the independent cover controls.
+                guard hasExplicitSign || issuerCredit else { continue }
+                let amount = issuerCredit ? -abs(parsedAmount) : parsedAmount
                 let kind: MovementKind = payment ? .cardPayment : amount < 0 ? .refund : .purchase
                 let flow: FlowKind = payment ? .transfer : amount < 0 ? .income : .expense
-                let signReason = hasExplicitSign
-                    ? "importe firmado"
-                    : "signo ausente recuperado únicamente por etiqueta PAGO POR SPEI"
+                let sourceStartsAsCharge = money.trimmingCharacters(in: .whitespacesAndNewlines).first == "+"
+                let signReason: String
+                if issuerCredit && sourceStartsAsCharge {
+                    signReason = "signo OCR corregido por etiqueta inequívoca de abono Rappi"
+                } else if hasExplicitSign {
+                    signReason = "importe firmado"
+                } else {
+                    signReason = "signo ausente recuperado únicamente por etiqueta inequívoca de abono Rappi"
+                }
                 rows.append(Movement(date: date, title: title, account: "Rappi",
                     category: category(for: title, flow: flow), amount: -amount, flow: flow,
                     kind: kind, foreignCurrency: pending.localizedCaseInsensitiveContains("compra en el extranjero"),

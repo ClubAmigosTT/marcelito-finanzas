@@ -400,11 +400,63 @@ final class RappiReaderTests: XCTestCase {
         )
     }
 
+    func testVisualRowBandsIncludeTallForeignPurchase() throws {
+        let width = 612
+        let height = 792
+        let bytesPerPixel = 4
+        let bytesPerRow = width * bytesPerPixel
+        var pixels = [UInt8](repeating: 255, count: bytesPerRow * height)
+        // The second band is 80 px tall (10.1% of the page), matching a
+        // purchase that includes Rappi's multi-line USD conversion detail.
+        for separatorY in [150, 196, 276] {
+            for y in separatorY..<(separatorY + 2) {
+                for x in 30..<582 {
+                    let pixel = (y * bytesPerRow) + (x * bytesPerPixel)
+                    pixels[pixel] = 205
+                    pixels[pixel + 1] = 205
+                    pixels[pixel + 2] = 205
+                    pixels[pixel + 3] = 255
+                }
+            }
+        }
+        let provider = try XCTUnwrap(CGDataProvider(data: Data(pixels) as CFData))
+        let image = try XCTUnwrap(CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 32,
+            bytesPerRow: bytesPerRow,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        ))
+
+        XCTAssertEqual(FinanceStore.rappiTableRowRegionsForTesting(image).count, 2)
+    }
+
     func testIsolatedRowRejectsMergedTransactionsInsteadOfSelectingLastAmount() {
         let merged = "2026-08-01 2026-08-01 PAGO POR SPEI -$500.00 2026-08-02 2026-08-02 COMERCIO +$50.00"
         XCTAssertTrue(FinanceStore.rappiIsolatedRowLinesForTesting([merged]).isEmpty)
         let ambiguous = "2026-08-01 2026-08-01 PAGO POR SPEI -$500.00 COMERCIO +$50.00"
         XCTAssertTrue(FinanceStore.rappiIsolatedRowLinesForTesting([ambiguous]).isEmpty)
+    }
+
+    func testIsolatedRowRecoversUnsignedIssuerCreditsOnly() {
+        let lines = FinanceStore.rappiIsolatedRowLinesForTesting([
+            "2026-05-14 2026-05-14 IVA BONIFICACION CON CASHBACK $5.17",
+            "2026-06-13 2026-06-13 BONIFICACION CON CASHBACK 10.54",
+            "2026-03-05 2026-03-05 PAGO POR SPEI $537.00",
+            "2026-03-20 2026-03-21 AVIANCA SA B8N7NM $5,618.56"
+        ])
+
+        XCTAssertEqual(lines.count, 3)
+        XCTAssertTrue(lines.contains { $0.contains("5.17") })
+        XCTAssertTrue(lines.contains { $0.contains("10.54") })
+        XCTAssertTrue(lines.contains { $0.contains("537.00") })
+        XCTAssertFalse(lines.contains { $0.contains("AVIANCA") })
     }
 
     func testDenseIsolatedRowsKeepTheirOwnDatesAndIdenticalAmounts() {
@@ -461,6 +513,22 @@ final class RappiReaderTests: XCTestCase {
             XCTAssertEqual(payment.flow, .transfer, label)
             XCTAssertEqual(snapshot.movements.first { $0.amount == 10 }?.kind, .refund)
         }
+    }
+
+    func testRappiCorrectsPlusMisreadOnExplicitCreditLabels() throws {
+        let text = fixture
+            .replacingOccurrences(of: "PAGO POR SPEI -$40.00", with: "PAGO POR SPEI +$40.00")
+            .replacingOccurrences(of: "BONIFICACIÓN CON CASHBACK -$10.00", with: "BONIFICACIÓN CON CASHBACK +$10.00")
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "rappi-credit-sign-ocr.pdf")
+
+        XCTAssertEqual(snapshot.movements.first { $0.kind == .cardPayment }?.amount, 40)
+        XCTAssertEqual(snapshot.movements.first { $0.kind == .refund }?.amount, 10)
+        XCTAssertTrue(snapshot.movements.filter { $0.amount > 0 }.allSatisfy {
+            $0.extractionEvidence?.selectionReason?.contains("signo OCR corregido") == true
+        })
+        XCTAssertEqual(FinanceStore.reconcileStatementForTesting(
+            kind: .card, summary: snapshot.summary, movements: snapshot.movements
+        ).status, .valid)
     }
 
     func testRappiOCRRepairsCollapsedLabelsAndMissingSPEISign() throws {
