@@ -13,7 +13,11 @@ la conciliación de PDFs; se reserva para clasificar gastos después.
 3. Pulsa **Ejecutar Vision** y espera a que termine cada PDF.
 4. Solo se acepta un corpus con al menos 10 archivos únicos, todos conciliados,
    emisor verificado, sin revisión pendiente, OCR ≥ 88% y página más débil ≥
-   78%. Para Santander también deben estar calibradas las columnas.
+   78%. La precisión de aceptación automática debe ser ≥99%. Para Santander
+   además deben estar calibradas las columnas con la plantilla
+   `santander-checking` v1, alineación ≥90% y evidencia completa por fila
+   (página, rectángulo normalizado, confianza, texto acotado y columna
+   DEPÓSITO o RETIRO).
 6. Comparte **informe JSON** y guárdalo como
    `docs/native-corpus-certification.json` en el repositorio. El archivo está
    sanitizado: no contiene PDFs, descripciones, saldos ni importes.
@@ -26,7 +30,7 @@ Un PDF duplicado o un estado pendiente bloquea la certificación completa.
 
 El workflow `iOS TestFlight` valida automáticamente ese JSON contra la versión
 actual (`FinanceStore.readerVersion`). Si el informe no coincide, está vencido,
-contiene una fila incompleta o queda por debajo de 97%, la build se detiene.
+contiene una fila incompleta o queda por debajo de 99%, la build se detiene.
 
 La primera build que incluye esta herramienta se ejecuta manualmente con la
 opción **Bootstrap: incluir la herramienta de certificación local**. Esa opción

@@ -126,7 +126,7 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
 ### Fase 6 — Certificación y despliegue
 
 - Ejecutar el corpus completo en macOS/Xcode, incluyendo Vision y simulador.
-- Publicar solo si precisión de aceptación ≥97%, cobertura de plantillas 100%,
+- Publicar solo si precisión de aceptación ≥99%, cobertura de plantillas 100%,
   cero falsos positivos administrativos y todas las identidades contables
   pasan.
 - Mantener canary: nuevas plantillas empiezan en `pending`, se miden durante
@@ -141,7 +141,7 @@ desde el KPI hasta la página, coordenadas y texto que originaron la fila.
 - La corrida nativa admite un modo de publicación explícito mediante
   `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`: la calibración puede dejar
   goldens `pending`, pero una certificación no puede pasar mientras exista
-  alguno, haya lectura visual sin resolver o la precisión automática sea menor a 97%.
+  alguno, haya lectura visual sin resolver o la precisión automática sea menor a 99%.
   El resumen emitido por XCTest se valida además con
   `npm run pdf:native:verify -- --log ... --reader-version ... --require-certified`,
   para que la variable de publicación no pueda sustituir al informe real. Si
