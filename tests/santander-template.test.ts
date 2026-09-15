@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseDeterministicStatement } from "../src/issuerParsers/index.ts";
 import { matchSantanderCheckingTemplate, santanderCheckingTemplateV1, statementTemplateValidationError } from "../src/issuerParsers/templates.ts";
+import { rebuildOcrLayout } from "../src/pdfImport.ts";
 import type { DocumentLayout, DocumentLayoutLine } from "../src/issuerParsers/types.ts";
 
 const words = (page: number, y: number, values: Array<[number, string]>, scale = 1): DocumentLayoutLine => ({
@@ -70,6 +71,20 @@ test("normalized template tolerates scale and vertical crop without using pixels
   }
 });
 
+test("OCR TSV preserves row geometry when normalized against raster page dimensions", () => {
+  const tsv = [
+    "level\tpage_num\tblock_num\tpar_num\tline_num\tword_num\tleft\ttop\twidth\theight\tconf\ttext",
+    "5\t1\t1\t1\t1\t1\t60\t240\t52\t20\t95\tFECHA",
+    "5\t1\t1\t1\t1\t2\t200\t240\t80\t20\t95\tDESCRIPCION",
+    "5\t1\t1\t1\t2\t1\t60\t360\t70\t20\t95\t01-JUL-2026",
+  ].join("\n");
+  const layout = rebuildOcrLayout(tsv, 1, 1000, 1200);
+  const [header, row] = layout.lines;
+  assert.ok((header?.words[0]?.y ?? 0) > (row?.words[0]?.y ?? 1));
+  assert.equal(header?.words[0]?.x, 0.06);
+  assert.equal(row?.words[0]?.y, 0.6833333333333333);
+});
+
 test("Santander v1 reuses the calibrated schema when only the decorative title is unreadable", () => {
   const input = fixture({ title: false });
   const parsed = parseDeterministicStatement({ source: "Santander", fileName: "same-layout.pdf", mode: "ocr", ...input });
@@ -77,6 +92,21 @@ test("Santander v1 reuses the calibrated schema when only the decorative title i
   assert.equal(parsed.templateMatch?.reason, "santander.template-matched-with-verified-header-and-rows");
   assert.equal(parsed.reconciliation.status, "valid");
   assert.deepEqual(parsed.transactions.map((row) => row.amount), [100, -40]);
+});
+
+test("Santander anchors the movement range at the calibrated header, not a decorative preamble title", () => {
+  const input = fixture();
+  // The tolerant three-line header search sees this text immediately before
+  // the table. It must select the actual FECHA...SALDO line, not this summary
+  // line which would otherwise close the range before the first date.
+  input.layout.pages[0]!.lines.splice(2, 0,
+    words(1, 0.84, [[0.20, "Saldo final del periodo"]]),
+  );
+  const parsed = parseDeterministicStatement({ source: "Santander", fileName: "santander-2026.pdf", mode: "ocr", ...input });
+  assert.equal(parsed.templateMatch?.status, "matched");
+  assert.equal(parsed.reconciliation.status, "valid");
+  assert.deepEqual(parsed.transactions.map((row) => row.amount), [100, -40]);
+  assert.deepEqual(parsed.transactions.map((row) => row.extractionEvidence?.page), [1, 1]);
 });
 
 test("title-less Santander header without two dated movement rows remains in review", () => {

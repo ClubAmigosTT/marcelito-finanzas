@@ -90,16 +90,34 @@ export function parseSantander(input: DeterministicParseInput): DeterministicPar
 
   const rows: Transaction[] = [];
   const visualLines = layoutLines(input.layout);
-  const hasPrintedTitle = visualLines.some((line) => fold(lineText(line)).includes(fold(sectionTitle)));
-  const headerLabels = ["fecha", "folio", "descrip", "deposit", "retiro", "saldo"];
-  // The document text may retain the section title while its word-level OCR
-  // boxes do not. In that case start at the already matched visual header,
-  // never at the top of the page and never at a generic date occurrence.
-  const headerStart = hasPrintedTitle ? -1 : visualLines.findIndex((line, start, lines) => {
-    const window = lines.slice(start, start + 3).filter((candidate) => candidate.page === line.page);
-    const text = fold(window.map(lineText).join(" "));
-    return headerLabels.every((label) => text.includes(label));
-  });
+  // FOLIO is retained as evidence when OCR sees it, but it never selects an
+  // amount or verifies the accounting identity.  Requiring an optional
+  // metadata label here would contradict the v1 matcher, which correctly
+  // calibrates the five financial columns without it.
+  const headerLabels = ["fecha", "descrip", "deposit", "retiro", "saldo"];
+  // The template was matched from this exact schema.  The red title may be
+  // read on a cover or a summary page, so it is evidence only and must never
+  // choose the table range.  Always start at the calibrated FECHA...SALDO
+  // header; this remains template-specific and cannot become a date fallback.
+  const headerStart = (() => {
+    for (let start = 0; start < visualLines.length; start += 1) {
+      const line = visualLines[start]!;
+      const window = visualLines.slice(start, start + 3).filter((candidate) => candidate.page === line.page);
+      const text = fold(window.map(lineText).join(" "));
+      if (!headerLabels.every((label) => text.includes(label))) continue;
+      // The three-line window deliberately tolerates OCR line wrapping, but
+      // it can also contain a preceding summary label (for example, "saldo
+      // final").  Start at the line that contributes the most table labels,
+      // never at the first line in the search window.
+      const headerOffset = window.reduce((best, candidate, offset) => {
+        const candidateScore = headerLabels.filter((label) => fold(lineText(candidate)).includes(label)).length;
+        const bestScore = headerLabels.filter((label) => fold(lineText(window[best]!)).includes(label)).length;
+        return candidateScore >= bestScore ? offset : best;
+      }, 0);
+      return start + headerOffset;
+    }
+    return -1;
+  })();
   let active = false;
   let rejectedRowCount = 0;
   const rejectedRows: string[] = [];
@@ -153,10 +171,6 @@ export function parseSantander(input: DeterministicParseInput): DeterministicPar
   for (const [lineIndex, line] of visualLines.entries()) {
     const raw = lineText(line);
     const normalized = fold(raw);
-    if (!active && normalized.includes(fold(sectionTitle))) {
-      active = true;
-      continue;
-    }
     if (!active && lineIndex === headerStart) {
       active = true;
       continue;

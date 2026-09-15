@@ -59,14 +59,21 @@ async function textFromPdf(file: string) {
   try {
     const pages: string[] = [];
     const layoutPages: DocumentLayoutPage[] = [];
+    // Keep the native PDF page dimensions separately from its OCR result.
+    // Tesseract's TSV columns 8/9 describe an individual word, not the page;
+    // using them as the normalisation denominator collapses every OCR row to
+    // the same geometry and makes a valid table appear to have zero rows.
+    const pageSizes: Array<{ width: number; height: number }> = [];
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
+      const viewport = page.getViewport({ scale: 1 });
       const content = await page.getTextContent();
       pages.push(`__PDF_PAGE_${pageNumber}__\n${rebuildPdfText(content.items)}`);
-      layoutPages.push(rebuildPdfLayout(content.items, pageNumber, page.getViewport({ scale: 1 }).width));
+      layoutPages.push(rebuildPdfLayout(content.items, pageNumber, viewport.width, viewport.height));
+      pageSizes.push({ width: viewport.width, height: viewport.height });
       page.cleanup();
     }
-    return { text: pages.join("\n"), layout: { pages: layoutPages }, sourceFingerprint, numPages: document.numPages };
+    return { text: pages.join("\n"), layout: { pages: layoutPages }, sourceFingerprint, numPages: document.numPages, pageSizes };
   } finally {
     // PDF.js 6 exposes lifecycle teardown on the loading task rather than on
     // the resolved PDFDocumentProxy. Keeping this aligned with the app avoids
@@ -75,7 +82,13 @@ async function textFromPdf(file: string) {
   }
 }
 
-async function ocrTextFromPdf(file: string, numPages: number, dpi: number, pdftoppmPath: string) {
+async function ocrTextFromPdf(
+  file: string,
+  numPages: number,
+  dpi: number,
+  pdftoppmPath: string,
+  pageSizes: Array<{ width: number; height: number }>,
+) {
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "marcelito-pdf-ocr-"));
   const outputPrefix = join(temporaryDirectory, "page");
   try {
@@ -107,8 +120,18 @@ async function ocrTextFromPdf(file: string, numPages: number, dpi: number, pdfto
         const image = await readFile(join(temporaryDirectory, imageFiles[index]));
         const result = await worker.recognize(image, {}, { text: true, tsv: true });
         pages.push(`__PDF_PAGE_${index + 1}__\n${result.data.text}`);
-        const pageWidth = Number(result.data.tsv?.split(/\r?\n/)[1]?.split("\t")[8]) || 1;
-        layoutPages.push(rebuildOcrLayout(result.data.tsv, index + 1, pageWidth));
+        const pageSize = pageSizes[index];
+        if (!pageSize || pageSize.width <= 0 || pageSize.height <= 0) {
+          throw new Error(`Faltan dimensiones de la página ${index + 1} para normalizar OCR`);
+        }
+        // `pageSize` is expressed in PDF points, while Tesseract returns
+        // raster pixels.  Both numerator and denominator must use pixels;
+        // otherwise every x/y value is scaled by DPI/72 and a correct header
+        // becomes a false "columnas ausentes" failure.
+        const pixelsPerPoint = dpi / 72;
+        const rasterWidth = pageSize.width * pixelsPerPoint;
+        const rasterHeight = pageSize.height * pixelsPerPoint;
+        layoutPages.push(rebuildOcrLayout(result.data.tsv, index + 1, rasterWidth, rasterHeight));
         pageConfidences.push(Math.max(0, Math.min(1, Number(result.data.confidence) / 100)));
       }
     } finally {
@@ -136,7 +159,7 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
   let ocrConfidence: number | undefined;
   let ocrPageConfidences: number[] | undefined;
   if (requiresOCR && options.ocr) {
-    const ocr = await ocrTextFromPdf(file, extracted.numPages, options.dpi, options.pdftoppmPath);
+    const ocr = await ocrTextFromPdf(file, extracted.numPages, options.dpi, options.pdftoppmPath, extracted.pageSizes);
     text = ocr.text;
     layout = ocr.layout;
     mode = "ocr";
@@ -194,6 +217,19 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
     readerVersion: PDF_READER_VERSION,
     parserId: deterministic?.parserId,
     sourceSection: deterministic?.sourceSection,
+    // Keep the template decision in the local/private evaluator.  Its
+    // identifier, version and matching outcome are implementation metadata,
+    // not statement content, and make a failed closed parser diagnosable
+    // without exporting an OCR text stream or any transaction values.
+    templateMatch: deterministic?.templateMatch ? {
+      templateId: deterministic.templateMatch.templateId,
+      templateVersion: deterministic.templateMatch.templateVersion,
+      status: deterministic.templateMatch.status,
+      alignmentScore: deterministic.templateMatch.alignmentScore,
+      reason: deterministic.templateMatch.reason,
+      calibratedPages: deterministic.templateMatch.calibratedPages,
+      inheritedPages: deterministic.templateMatch.inheritedPages,
+    } : undefined,
     rejectedRowCount: deterministic?.rejectedRowCount ?? 0,
     rejectedRows: deterministic?.rejectedRows ?? [],
     sourceFingerprint: extracted.sourceFingerprint,

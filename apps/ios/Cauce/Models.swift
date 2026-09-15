@@ -753,7 +753,10 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-template-2026.09.15.40"
+    // This migration is intentionally consumed only by the explicit
+    // “Actualizar estados importados” action.  It never reparses every PDF
+    // on launch or on a foreground transition.
+    static let readerVersion = "ios-reader-template-2026.09.15.41"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -9430,7 +9433,11 @@ final class FinanceStore {
             }
             return Calendar.current.component(.year, from: .now)
         }()
-        let requiredLabels = ["fecha", "folio", "descripcion", "deposito", "retiro", "saldo"]
+        // FOLIO is useful evidence but is not a financial column. Vision may
+        // lose that short label while still reading the five columns needed
+        // to reconstruct and reconcile a movement, so keep it optional just
+        // as the shared versioned template does.
+        let requiredLabels = ["fecha", "descripcion", "deposito", "retiro", "saldo"]
         func schemaText(_ value: String) -> String {
             value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
                 .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
@@ -9527,17 +9534,31 @@ final class FinanceStore {
             lineWindows(on: page).compactMap { window -> TableAnchor? in
                 let text = window.map(\.text).joined(separator: " ")
                 guard requiredLabels.allSatisfy({ containsHeaderLabel($0, in: text) }) else { return nil }
+                // The window may include the title or a nearby "saldo final"
+                // summary line before the visual header.  Require one line
+                // to contribute multiple labels, then anchor at that line's
+                // top edge.  A lone word such as SALDO is never enough to
+                // choose the table range.
+                let scoredLines = window.map { line in
+                    (line, requiredLabels.filter { containsHeaderLabel($0, in: line.text) }.count)
+                }
+                guard let strongest = scoredLines.map({ $0.1 }).max(), strongest >= 2 else { return nil }
+                let headerLines = scoredLines.filter { $0.1 == strongest }.map { $0.0 }
                 return TableAnchor(
                     page: page,
                     // Include the detected header itself in the scoped body
                     // so its word boxes can calibrate the document columns.
-                    lowerY: window.map { $0.boundingBox.maxY }.max() ?? 0,
+                    lowerY: headerLines.map { $0.boundingBox.maxY }.max() ?? 0,
                     text: text
                 )
             }.first
         }.first
 
-        guard let tableAnchor = titleAnchor ?? schemaAnchor else {
+        // The title is decorative and may occur in a preamble.  The complete
+        // six-label schema is the document-local proof of the movement table,
+        // so it takes precedence whenever both signals exist.  This is still
+        // a strict Santander-v1 anchor, never a generic OCR fallback.
+        guard let tableAnchor = schemaAnchor ?? titleAnchor else {
             let evidence = diagnosticEvidence(matching: ["detalle", "movim", "cuenta", "cheque", "fecha", "saldo"])
             return SantanderOCRParseResult(
                 movements: [],
@@ -9546,7 +9567,7 @@ final class FinanceStore {
                     page: evidence.page,
                     rawText: evidence.text,
                     selectedColumn: "ENCABEZADO",
-                    reason: "santander.table-title-and-schema-not-found: no se localizó el título ni el esquema FECHA/FOLIO/DESCRIPCIÓN/DEPÓSITO/RETIRO/SALDO",
+                    reason: "santander.table-title-and-schema-not-found: no se localizó el título ni el esquema FECHA/DESCRIPCIÓN/DEPÓSITO/RETIRO/SALDO",
                     accepted: false
                 )],
                 templateMatch: santanderTemplateReviewRecord("santander.table-title-and-schema-not-found")
@@ -9667,7 +9688,7 @@ final class FinanceStore {
                     page: evidence.page,
                     rawText: evidence.text,
                     selectedColumn: "COLUMNAS",
-                    reason: "santander.column-header-not-found: FECHA/FOLIO/DESCRIPCIÓN/DEPÓSITO/RETIRO/SALDO no quedaron demostradas dentro de tres líneas adyacentes",
+                    reason: "santander.column-header-not-found: FECHA/DESCRIPCIÓN/DEPÓSITO/RETIRO/SALDO no quedaron demostradas dentro de tres líneas adyacentes",
                     accepted: false
                 )],
                 templateMatch: santanderTemplateReviewRecord("santander.template-required-columns-not-found")

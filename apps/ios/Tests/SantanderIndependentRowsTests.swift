@@ -108,6 +108,30 @@ final class SantanderIndependentRowsTests: XCTestCase {
         XCTAssertEqual(result.movements.map(\.amount), [-30, -40])
     }
 
+    func testSchemaAnchorWinsOverDecorativeTitleInPreamble() {
+        let preamble = [
+            OCRObservationFixture(page: 0, text: "Detalle de movimientos cuenta de cheques", x: 0.09, y: 0.96, width: 0.42),
+            OCRObservationFixture(page: 0, text: "SALDO FINAL DEL PERIODO", x: 0.20, y: 0.93, width: 0.30),
+        ]
+        let schema = [
+            OCRObservationFixture(page: 0, text: "FECHA", x: 0.06, y: 0.90, width: 0.05),
+            OCRObservationFixture(page: 0, text: "DESCRIPCION", x: 0.20, y: 0.90, width: 0.10),
+            OCRObservationFixture(page: 0, text: "DEPOSITO", x: 0.63, y: 0.90, width: 0.07),
+            OCRObservationFixture(page: 0, text: "RETIRO", x: 0.75, y: 0.90, width: 0.06),
+            OCRObservationFixture(page: 0, text: "SALDO", x: 0.88, y: 0.90, width: 0.05),
+        ]
+        let result = FinanceStore.santanderTableSnapshotForTesting(
+            preamble + schema + row(1, amount: "30.00", balance: "970.00")
+                + row(2, amount: "40.00", balance: "930.00")
+                + [OCRObservationFixture(text: "TOTAL", x: 0.20, y: 0.10, width: 0.10)],
+            fileName: "julio-2026.pdf",
+            openingBalance: 1000
+        )
+        XCTAssertEqual(result.templateMatch?.status, "matched")
+        XCTAssertEqual(result.movements.map(\.amount), [-30, -40])
+        XCTAssertEqual(result.diagnostics.map(\.page), [1, 1])
+    }
+
     func testUnknownOrMisalignedSantanderHeaderStaysInReview() {
         let title = OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.09, y: 0.96, width: 0.42)
         let shiftedHeader = [

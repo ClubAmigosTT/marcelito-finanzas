@@ -62,7 +62,7 @@ export function rebuildPdfLayout(items: unknown[], page: number, pageWidth: numb
   };
 }
 
-export function rebuildOcrLayout(tsv: string | null | undefined, page: number, pageWidth: number, pageHeight = 1): DocumentLayoutPage {
+export function rebuildOcrLayout(tsv: string | null | undefined, page: number, pageWidth: number, pageHeight: number): DocumentLayoutPage {
   const rows = new Map<string, DocumentLayoutLine["words"]>();
   for (const raw of (tsv ?? "").split(/\r?\n/).slice(1)) {
     const fields = raw.split("\t");

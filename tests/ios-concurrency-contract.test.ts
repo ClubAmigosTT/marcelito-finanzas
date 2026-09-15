@@ -249,7 +249,8 @@ test("RappiCard usa tabla dedicada y concilia abonos además de cargos", async (
 test("Santander usa una plantilla versionada y columnas calibradas por documento", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /private static func parseSantanderTable\(/);
-  assert.match(source, /let requiredLabels = \["fecha", "folio", "descripcion", "deposito", "retiro", "saldo"\]/);
+  assert.match(source, /let requiredLabels = \["fecha", "descripcion", "deposito", "retiro", "saldo"\]/);
+  assert.match(source, /guard let tableAnchor = schemaAnchor \?\? titleAnchor else/);
   assert.match(source, /santander\.table-title-and-schema-not-found/);
   assert.match(source, /santander\.template-title-and-row-signal-missing/);
   assert.match(source, /santander\.template-matched-with-verified-header-and-rows/);
