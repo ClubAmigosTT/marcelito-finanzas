@@ -39,6 +39,62 @@ export type StatementTemplate = {
 
 export const santanderCheckingTemplateV1 = santanderCheckingTemplateJson as StatementTemplate;
 
+const requiredTemplateColumns: Array<[TemplateColumnKey, TemplateColumn["role"]]> = [
+  ["FECHA", "date"],
+  ["DESCRIPCION", "description"],
+  ["DEPOSITO", "deposit"],
+  ["RETIRO", "withdrawal"],
+  ["SALDO", "balance"],
+];
+
+/**
+ * JSON Schema covers the serializable shape. This small runtime check covers
+ * cross-field invariants JSON Schema cannot express (for example x + width).
+ * A malformed future template must fail closed rather than silently become a
+ * generic Santander reader.
+ */
+export function statementTemplateValidationError(template: StatementTemplate): string | undefined {
+  const normalizedBounds = (bounds: NormalizedBox | undefined, label: string) => {
+    if (!bounds || ![bounds.x, bounds.y, bounds.width, bounds.height].every(Number.isFinite)) return `${label}: non-finite-bounds`;
+    if (bounds.x < 0 || bounds.y < 0 || bounds.width < 0 || bounds.height < 0
+      || bounds.x + bounds.width > 1 || bounds.y + bounds.height > 1) return `${label}: bounds-out-of-range`;
+    return undefined;
+  };
+  if (template.schemaVersion !== 1 || !template.id || !template.version
+    || template.coordinateSpace !== "normalized-bottom-left") return "template: identity-or-coordinate-space-invalid";
+  if (!template.headerSignature.institutionalAny.length || !template.headerSignature.tableTitleAll.length
+    || !Number.isFinite(template.headerSignature.minimumAlignmentScore)
+    || template.headerSignature.minimumAlignmentScore < 0 || template.headerSignature.minimumAlignmentScore > 1) {
+    return "template: header-signature-invalid";
+  }
+  if (!template.movementRegions.length) return "template: movement-regions-missing";
+  for (const region of template.movementRegions) {
+    const error = normalizedBounds(region.referenceBounds, `region:${region.id}`);
+    if (error) return error;
+  }
+  const keys = new Set<TemplateColumnKey>();
+  for (const column of template.columns) {
+    if (keys.has(column.key) || !column.aliases.length || !Number.isFinite(column.headerAnchorX)
+      || column.headerAnchorX < 0 || column.headerAnchorX > 1) return `column:${column.key}: identity-invalid`;
+    keys.add(column.key);
+    const error = normalizedBounds(column.referenceBounds, `column:${column.key}`);
+    if (error) return error;
+    if (column.headerAnchorX < column.referenceBounds.x
+      || column.headerAnchorX > column.referenceBounds.x + column.referenceBounds.width) {
+      return `column:${column.key}: anchor-outside-bounds`;
+    }
+  }
+  if (!requiredTemplateColumns.every(([key, role]) => template.columns.some((column) => column.key === key && column.role === role))) {
+    return "template: required-columns-missing";
+  }
+  if (template.validation.reconciliationTolerance < 0 || template.validation.reconciliationTolerance > 0.05
+    || !template.validation.requireDate || !template.validation.requireDescription
+    || !template.validation.requireSingleMovementColumn || !template.validation.requireRunningBalanceEvidence) {
+    return "template: validation-contract-invalid";
+  }
+  return undefined;
+}
+
 function clamp(value: number) {
   return Math.max(0, Math.min(1, value));
 }
@@ -179,6 +235,7 @@ function calibratedColumns(template: StatementTemplate, header: HeaderCandidate)
  */
 export function matchSantanderCheckingTemplate(layout: DocumentLayout | undefined, text: string): TemplateMatch {
   const template = santanderCheckingTemplateV1;
+  const templateError = statementTemplateValidationError(template);
   const normalized = fold(text);
   const institutional = template.headerSignature.institutionalAny.some((token) => normalized.includes(fold(token)));
   const title = tableTitlePresent(text, template);
@@ -189,6 +246,9 @@ export function matchSantanderCheckingTemplate(layout: DocumentLayout | undefine
     calibratedPages: header ? [header.page] : [],
     inheritedPages: layout?.pages.map((page) => page.page).filter((page) => page !== header?.page) ?? [],
   };
+  if (templateError) {
+    return { ...base, status: "review", alignmentScore: 0, reason: `santander.template-resource-invalid:${templateError}` };
+  }
   if (!institutional) {
     return { ...base, status: "review", alignmentScore: 0, reason: "santander.template-institutional-header-missing" };
   }

@@ -16,6 +16,19 @@ const decimal = value => (typeof value === 'number' && Number.isFinite(value)) |
   ? cents(String(value)) : null;
 const flag = value => value === true || value === 'true';
 const count = value => /^(0|[1-9]\d*)$/.test(String(value)) ? Number(value) : NaN;
+const normalized = value => String(value ?? '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+const hasNormalizedBounds = bounds => {
+  if (!bounds || typeof bounds !== 'object') return false;
+  const { x, y, width, height } = bounds;
+  const values = [x, y, width, height];
+  return values.every(value => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 1)
+    && x + width <= 1.000001 && y + height <= 1.000001;
+};
+const isSantanderMovementColumn = value => ['deposito', 'retiro'].includes(normalized(value));
+const hasSantanderTemplate = row => row?.templateId === 'santander-checking'
+  && row?.templateVersion === '1'
+  && Number.isFinite(Number(row?.templateAlignmentScore))
+  && Number(row.templateAlignmentScore) >= 0.9;
 
 export function nativeEvidence(log) {
   function one(marker) {
@@ -65,6 +78,7 @@ export function validateBank({ manifest, inventory, native, rows, reference, rea
         if (got.status !== 'valid' || got.sourceStatus !== 'verified' || flag(got.requiresReview) || ![false, 'false'].includes(got.requiresReview)) fail('native-not-accepted');
         if (got.mode !== (file.source === 'Amex' ? 'pdf-text' : 'vision-ocr')) fail('native-wrong-pipeline');
         if (file.source === 'Santander' && !flag(got.ocrColumnsCalibrated)) fail('native-columns');
+        if (file.source === 'Santander' && !hasSantanderTemplate(got)) fail('native-template-provenance');
         if (count(got.rows) !== file.rows) fail('native-row-count');
         for (const field of required) {
           const expected = decimal(file.summary[field]), actual = decimal(got[fields[field]]);
@@ -84,18 +98,38 @@ export function validateBank({ manifest, inventory, native, rows, reference, rea
         const got = found[0];
         if (got.status !== 'valid' || got.mode !== (file.source === 'Amex' ? 'pdf-text' : 'vision-ocr')) fail('row-document-not-valid');
         if (!Array.isArray(got.rows) || got.rows.length !== file.rows || got.rows.some(x => x.accepted !== true || typeof x.rawText !== 'string' || !x.rawText.trim())) fail('row-diagnostics-rejected-or-missing');
+        if (file.source === 'Santander' && Array.isArray(got.rows)) {
+          for (const row of got.rows) {
+            if (!Number.isInteger(row.page) || row.page < 1
+              || !hasNormalizedBounds(row.rowBounds)
+              || !isSantanderMovementColumn(row.selectedColumn)
+              || decimal(row.selectedAmount) === null) {
+              fail('santander-diagnostic-evidence-incomplete');
+              break;
+            }
+          }
+        }
         if (ref.length === 1) {
           const audit = auditNativeRows({ ...reference, files: ref }, { ...rows, files: found }, readerVersion);
           if (!audit.passed) issues.push(...audit.errors.map(x => `row-audit:${x}`));
         }
         if (file.source === 'Santander') {
-          const values = Array.isArray(got.candidateRows) ? got.candidateRows.map(x => cents(x.signedAmount)) : [];
+          const candidates = Array.isArray(got.candidateRows) ? got.candidateRows : [];
+          const values = candidates.map(x => cents(x.signedAmount));
           if (!values.length || values.some(x => x === null)) fail('bank-row-amounts');
           else {
             const deposits = values.filter(x => x > 0n).reduce((s, x) => s + x, 0n);
             const withdrawals = -values.filter(x => x < 0n).reduce((s, x) => s + x, 0n);
             if (deposits !== decimal(file.summary.extractedDepositTotal) || withdrawals !== decimal(file.summary.extractedWithdrawalTotal)) fail('bank-row-totals');
           }
+          if (candidates.length !== file.rows || candidates.some(row =>
+            !/^\d{4}-\d{2}-\d{2}$/.test(String(row.date ?? ''))
+            || !Number.isInteger(row.page) || row.page < 1
+            || !String(row.title ?? '').trim()
+            || !String(row.selectionReason ?? '').trim()
+            || !isSantanderMovementColumn(row.section)
+            || !hasSantanderTemplate(row)
+          )) fail('santander-row-template-evidence-incomplete');
         }
       }
     }

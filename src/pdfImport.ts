@@ -6,7 +6,7 @@ import { parseDeterministicStatement, reconcileExactly } from "./issuerParsers/i
 import type { DocumentLayout, DocumentLayoutLine, DocumentLayoutPage, OCRObservation } from "./issuerParsers/types.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-template-2026.09.14.1";
+export const PDF_READER_VERSION = "web-reader-template-2026.09.14.2";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";

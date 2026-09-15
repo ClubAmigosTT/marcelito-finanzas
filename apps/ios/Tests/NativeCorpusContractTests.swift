@@ -303,6 +303,47 @@ final class NativeCorpusContractTests: XCTestCase {
         return String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), value)
     }
 
+    /// An automatically accepted Santander scan needs per-row evidence from
+    /// the versioned table, not merely controls that happen to add up. This is
+    /// deliberately asserted in the private corpus path as well as in the
+    /// redacted report verifier.
+    private func assertAcceptedSantanderTemplateEvidence(_ result: ImportSummary, file: String) {
+        guard result.source == "Santander",
+              result.reconciliation?.status == .valid,
+              !result.requiresReview else { return }
+
+        XCTAssertEqual(result.ocrColumnsCalibrated, true, file + " aceptó Santander sin columnas calibradas")
+        XCTAssertEqual(result.templateMatch?.templateId, "santander-checking", file + " no registró plantilla Santander v1")
+        XCTAssertEqual(result.templateMatch?.templateVersion, "1", file + " no registró versión de plantilla")
+        XCTAssertGreaterThanOrEqual(result.templateMatch?.alignmentScore ?? 0, 0.9, file + " no tiene alineación de plantilla suficiente")
+        XCTAssertEqual(result.auditRows.count, result.imported, file + " no conserva evidencia por cada movimiento Santander")
+        XCTAssertEqual(result.rowDiagnostics.filter(\.accepted).count, result.imported, file + " no conserva diagnóstico aceptado por cada movimiento Santander")
+
+        let permittedColumns: Set<String> = ["deposito", "retiro"]
+        for row in result.auditRows {
+            let column = (row.section ?? "")
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .replacingOccurrences(of: #"[^a-z]+"#, with: "", options: .regularExpression)
+            XCTAssertTrue(permittedColumns.contains(column), file + " tomó un importe fuera de DEPÓSITO/RETIRO")
+            XCTAssertNotNil(row.page, file + " no conserva página de una fila Santander")
+            XCTAssertFalse(row.selectionReason?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true,
+                           file + " no conserva razón de selección Santander")
+            XCTAssertEqual(row.templateId, "santander-checking", file + " no conserva plantilla en evidencia de fila")
+            XCTAssertEqual(row.templateVersion, "1", file + " no conserva versión en evidencia de fila")
+            XCTAssertGreaterThanOrEqual(row.templateAlignmentScore ?? 0, 0.9, file + " no conserva alineación en evidencia de fila")
+        }
+        for diagnostic in result.rowDiagnostics where diagnostic.accepted {
+            let bounds = diagnostic.rowBounds
+            let values = bounds.map { [$0.x, $0.y, $0.width, $0.height] } ?? []
+            XCTAssertEqual(values.count, 4, file + " no conserva rectángulo de origen Santander")
+            XCTAssertTrue(values.allSatisfy { $0.isFinite && $0 >= 0 && $0 <= 1 }, file + " conserva rectángulo Santander fuera de 0…1")
+            if let bounds {
+                XCTAssertLessThanOrEqual(bounds.x + bounds.width, 1.000001, file + " rectángulo Santander rebasa el ancho")
+                XCTAssertLessThanOrEqual(bounds.y + bounds.height, 1.000001, file + " rectángulo Santander rebasa el alto")
+            }
+        }
+    }
+
     /// Lightweight real-file smoke test for the ten-state corpus supplied
     /// out-of-band on a development device/runner. It intentionally does not
     /// require a golden manifest: its job is to ensure the production reader
@@ -347,10 +388,18 @@ final class NativeCorpusContractTests: XCTestCase {
             if result.reconciliation?.status == .invalid {
                 XCTAssertEqual(result.imported, 0, file.lastPathComponent + " inválido alimentó el libro canónico")
             }
+            assertAcceptedSantanderTemplateEvidence(result, file: file.lastPathComponent)
         }
     }
 
     func testRowDiagnosticsStayPrivateAndCanBeExported() throws {
+        var privateCandidate = Movement(date: .now, title: "private candidate", account: "BBVA", category: "", amount: -120, flow: .expense)
+        privateCandidate.extractionEvidence = MovementExtractionEvidence(
+            method: "vision-ocr", page: 2, confidence: 0.95,
+            sourceText: "private candidate -120.00", bounds: MovementExtractionBounds(rect: CGRect(x: 0.1, y: 0.2, width: 0.5, height: 0.1)),
+            selectedColumn: "RETIRO", selectedAmount: 120, selectionReason: "fecha ancla; retiro calibrado",
+            templateId: "santander-checking", templateVersion: "1", templateAlignmentScore: 0.95
+        )
         let diagnostic = NativeCorpusDiagnosticFile(
             file: "document-01.pdf",
             sourceFileName: "estado-privado.pdf",
@@ -372,7 +421,7 @@ final class NativeCorpusContractTests: XCTestCase {
             sourceFingerprint: String(repeating: "a", count: 64),
             accountKey: "bbva:1234",
             period: "sample-period",
-            candidateRows: [NativeAuditRow(Movement(date: .now, title: "private candidate", account: "BBVA", category: "", amount: -120, flow: .expense))]
+            candidateRows: [NativeAuditRow(privateCandidate)]
         )
         let report = NativeCorpusCertificationReport(files: [], diagnostics: [diagnostic])
         let publicJSON = try XCTUnwrap(report.jsonData)
@@ -399,6 +448,9 @@ final class NativeCorpusContractTests: XCTestCase {
         XCTAssertEqual(candidates.first?["signedAmount"] as? String, "-120")
         XCTAssertEqual(candidates.first?["title"] as? String, "private candidate")
         XCTAssertEqual((candidates.first?["date"] as? String)?.count, 10)
+        XCTAssertEqual(candidates.first?["templateId"] as? String, "santander-checking")
+        XCTAssertEqual(candidates.first?["templateVersion"] as? String, "1")
+        XCTAssertEqual(candidates.first?["templateAlignmentScore"] as? Double, 0.95)
     }
 
     func testValidatedCorpusThroughNativeReaderWhenProvided() throws {
@@ -490,6 +542,7 @@ final class NativeCorpusContractTests: XCTestCase {
                     }
                 }
             }
+            assertAcceptedSantanderTemplateEvidence(result, file: file.lastPathComponent)
 
             // Summary controls are independent of row acceptance. Assert them
             // even while a scan remains pending so a plausible-looking OCR

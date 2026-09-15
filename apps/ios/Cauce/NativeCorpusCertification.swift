@@ -388,6 +388,12 @@ struct NativeCorpusDiagnosticReport: Codable {
                     if let foreign = row.foreignCurrency { fields["foreignCurrency"] = foreign }
                     if let section = row.section { fields["section"] = section }
                     if let reason = row.selectionReason { fields["selectionReason"] = reason }
+                    // Private row diagnostics retain the versioned-template
+                    // proof used for each accepted Santander amount. The
+                    // public report deliberately remains redacted above.
+                    if let templateId = row.templateId { fields["templateId"] = templateId }
+                    if let templateVersion = row.templateVersion { fields["templateVersion"] = templateVersion }
+                    if let alignment = row.templateAlignmentScore { fields["templateAlignmentScore"] = alignment }
                     return fields
                 }
             }

@@ -753,7 +753,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-template-2026.09.14.38"
+    static let readerVersion = "ios-reader-template-2026.09.14.39"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -5471,8 +5471,18 @@ final class FinanceStore {
             let role: String
         }
 
+        struct Validation: Decodable {
+            let requireDate: Bool
+            let requireDescription: Bool
+            let requireSingleMovementColumn: Bool
+            let requireRunningBalanceEvidence: Bool
+            let reconciliationTolerance: Double
+        }
+
+        let schemaVersion: Int
         let id: String
         let version: String
+        let displayName: String
         let issuer: String
         let statementKind: String
         let coordinateSpace: String
@@ -5480,6 +5490,7 @@ final class FinanceStore {
         let movementRegions: [MovementRegion]
         let columns: [Column]
         let excludedTextPatterns: [String]
+        let validation: Validation
     }
 
     private struct SantanderTemplateCalibration {
@@ -5491,6 +5502,62 @@ final class FinanceStore {
         let tableSpan: CGFloat?
     }
 
+    /// The JSON Schema validates the file's serializable shape.  iOS also
+    /// validates these cross-field rules because JSON Schema cannot express
+    /// rectangle containment (`x + width <= 1`).  A malformed resource must
+    /// leave the PDF in review, never downgrade to a generic reader.
+    private static func hasNormalizedTemplateBounds(_ bounds: StatementTemplateResource.Bounds) -> Bool {
+        let values = [bounds.x, bounds.y, bounds.width, bounds.height]
+        return values.allSatisfy { $0.isFinite && $0 >= 0 && $0 <= 1 }
+            && bounds.x + bounds.width <= 1
+            && bounds.y + bounds.height <= 1
+    }
+
+    private static func isValidSantanderCheckingTemplate(_ template: StatementTemplateResource) -> Bool {
+        guard template.schemaVersion == 1,
+              template.id == "santander-checking", template.version == "1",
+              template.displayName == "Santander cuenta de cheques v1",
+              template.issuer.caseInsensitiveCompare("Santander") == .orderedSame,
+              template.statementKind == "bank",
+              template.coordinateSpace == "normalized-bottom-left",
+              !template.headerSignature.institutionalAny.isEmpty,
+              !template.headerSignature.tableTitleAll.isEmpty,
+              template.headerSignature.minimumAlignmentScore.isFinite,
+              template.headerSignature.minimumAlignmentScore >= 0,
+              template.headerSignature.minimumAlignmentScore <= 1,
+              !template.movementRegions.isEmpty,
+              template.movementRegions.allSatisfy({ hasNormalizedTemplateBounds($0.referenceBounds) }),
+              template.validation.requireDate,
+              template.validation.requireDescription,
+              template.validation.requireSingleMovementColumn,
+              template.validation.requireRunningBalanceEvidence,
+              template.validation.reconciliationTolerance.isFinite,
+              template.validation.reconciliationTolerance >= 0,
+              template.validation.reconciliationTolerance <= 0.05
+        else { return false }
+
+        let required: [(key: String, role: String)] = [
+            ("FECHA", "date"), ("DESCRIPCION", "description"),
+            ("DEPOSITO", "deposit"), ("RETIRO", "withdrawal"),
+            ("SALDO", "balance")
+        ]
+        let keys = template.columns.map(\.key)
+        guard Set(keys).count == keys.count,
+              required.allSatisfy({ expected in
+                  template.columns.contains { $0.key == expected.key && $0.role == expected.role }
+              })
+        else { return false }
+        return template.columns.allSatisfy { column in
+            !column.aliases.isEmpty
+                && column.headerAnchorX.isFinite
+                && column.headerAnchorX >= 0
+                && column.headerAnchorX <= 1
+                && hasNormalizedTemplateBounds(column.referenceBounds)
+                && column.headerAnchorX >= column.referenceBounds.x
+                && column.headerAnchorX <= column.referenceBounds.x + column.referenceBounds.width
+        }
+    }
+
     private static let santanderCheckingTemplateV1: StatementTemplateResource? = {
         let bundles = [Bundle.main, Bundle(for: FinanceStore.self)]
         for bundle in bundles {
@@ -5500,8 +5567,7 @@ final class FinanceStore {
             ), let data = try? Data(contentsOf: url),
                let template = try? JSONDecoder().decode(StatementTemplateResource.self, from: data)
             else { continue }
-            guard template.id == "santander-checking", template.version == "1",
-                  template.coordinateSpace == "normalized-bottom-left" else { continue }
+            guard isValidSantanderCheckingTemplate(template) else { continue }
             return template
         }
         return nil

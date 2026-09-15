@@ -13,9 +13,11 @@ function fixture() {
     native: { summary: { readerVersion: 'test-reader', files: 1, accepted: 1, expectedValid: 1, goldenAutoAccepted: 1,
       blocked: 0, expectedPending: 0, goldenFalseAccepted: 0, unresolvedOCR: 0, automaticAcceptancePrecision: 1, certified: false },
       files: [{ ...identity, kind: 'bank', status: 'valid', sourceStatus: 'verified', requiresReview: 'false', mode: 'vision-ocr',
-        ocrColumnsCalibrated: 'true', rows: '1', extractedPreviousBalance: '100', extractedCashBalance: '90', extractedDeposits: '0', extractedWithdrawals: '10' }] },
+        ocrColumnsCalibrated: 'true', templateId: 'santander-checking', templateVersion: '1', templateAlignmentScore: '0.95',
+        rows: '1', extractedPreviousBalance: '100', extractedCashBalance: '90', extractedDeposits: '0', extractedWithdrawals: '10' }] },
     rows: { schemaVersion: 1, readerVersion: 'test-reader', files: [{ ...identity, status: 'valid', mode: 'vision-ocr',
-      rows: [{ accepted: true, rawText: 'sample' }], candidateRows: [{ date: '2026-01-02', page: 1, title: 'sample store', signedAmount: '-10' }] }] },
+      rows: [{ accepted: true, rawText: 'sample', page: 1, rowBounds: { x: 0.1, y: 0.2, width: 0.7, height: 0.1 }, selectedColumn: 'RETIRO', selectedAmount: '10' }],
+      candidateRows: [{ date: '2026-01-02', page: 1, title: 'sample store', signedAmount: '-10', section: 'RETIRO', selectionReason: 'fecha ancla; importe en retiro', templateId: 'santander-checking', templateVersion: '1', templateAlignmentScore: 0.95 }] }] },
     reference: { schemaVersion: 1, referenceMethod: 'visual-independent', files: [{ ...identity,
       rows: [{ date: '2026-01-02', page: 1, titleContains: 'sample', signedAmount: '-10' }] }] },
   };
@@ -53,6 +55,17 @@ test('missing independent reference remains blocked', () => {
 test('row errors cannot be hidden by a valid statement status', () => {
   const f = fixture(); f.rows.files[0].rows[0].accepted = false;
   assert.equal(validateBank(f).passed, false);
+});
+test('Santander requires template provenance and complete row evidence, not just matching totals', () => {
+  for (const mutate of [
+    f => { delete f.native.files[0].templateAlignmentScore; },
+    f => { delete f.rows.files[0].rows[0].rowBounds; },
+    f => { f.rows.files[0].candidateRows[0].templateVersion = '2'; },
+    f => { f.rows.files[0].candidateRows[0].section = 'SALDO'; },
+  ]) {
+    const f = fixture(); mutate(f);
+    assert.equal(validateBank(f).passed, false);
+  }
 });
 test('compensating row errors cannot pass equal totals', () => {
   const f = fixture(); f.manifest.files[0].rows = 2; f.native.files[0].rows = '2';

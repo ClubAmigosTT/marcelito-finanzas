@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseDeterministicStatement } from "../src/issuerParsers/index.ts";
-import { matchSantanderCheckingTemplate } from "../src/issuerParsers/templates.ts";
+import { matchSantanderCheckingTemplate, santanderCheckingTemplateV1, statementTemplateValidationError } from "../src/issuerParsers/templates.ts";
 import type { DocumentLayout, DocumentLayoutLine } from "../src/issuerParsers/types.ts";
 
 const words = (page: number, y: number, values: Array<[number, string]>, scale = 1): DocumentLayoutLine => ({
@@ -66,6 +66,13 @@ test("normalized template tolerates scale and vertical crop without using pixels
     assert.equal(match.status, "matched");
     assert.ok(match.alignmentScore >= 0.9);
   }
+});
+
+test("the canonical Santander template has bounded normalized geometry and strict validation", () => {
+  assert.equal(statementTemplateValidationError(santanderCheckingTemplateV1), undefined);
+  const malformed = structuredClone(santanderCheckingTemplateV1);
+  malformed.columns.find((column) => column.key === "RETIRO")!.referenceBounds.x = 0.99;
+  assert.match(statementTemplateValidationError(malformed), /bounds-out-of-range/);
 });
 
 test("Santander without an essential header remains in review", () => {
