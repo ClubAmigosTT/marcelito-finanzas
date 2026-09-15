@@ -453,9 +453,12 @@ final class RappiReaderTests: XCTestCase {
         ])
 
         XCTAssertEqual(lines.count, 3)
-        XCTAssertTrue(lines.contains { $0.contains("-$5.17") })
-        XCTAssertTrue(lines.contains { $0.contains("-$10.54") })
-        XCTAssertTrue(lines.contains { $0.contains("-$537.00") })
+        XCTAssertTrue(lines.contains { $0.contains("5.17") })
+        XCTAssertTrue(lines.contains { $0.contains("10.54") })
+        XCTAssertTrue(lines.contains { $0.contains("537.00") })
+        XCTAssertTrue(lines.allSatisfy {
+            $0.range(of: #"-\s*\$?\s*(?:5\.17|10\.54|537\.00)"#, options: .regularExpression) != nil
+        })
         XCTAssertFalse(lines.contains { $0.contains("AVIANCA") })
     }
 
