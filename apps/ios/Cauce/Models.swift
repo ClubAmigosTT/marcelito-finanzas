@@ -63,6 +63,7 @@ struct StatementSummaryRecord: Codable {
     var debtBalance: Decimal? = nil
     var newTransactions: Decimal? = nil
     var payments: Decimal? = nil
+    var paymentsCredits: Decimal? = nil
     var credits: Decimal? = nil
     var newCharges: Decimal? = nil
     var interest: Decimal? = nil
@@ -163,6 +164,8 @@ struct MovementExtractionEvidence: Codable {
     var sourceText: String? = nil
     /// Normalized Vision bounding box for the reconstructed row.
     var bounds: MovementExtractionBounds? = nil
+    /// Whether date, description and amount came from one visual row.
+    var sameVisualRow: Bool? = nil
 }
 
 struct Movement: Identifiable, Codable {
@@ -173,6 +176,16 @@ struct Movement: Identifiable, Codable {
     var category: String
     var amount: Decimal
     var flow: FlowKind
+    /// Original merchant text from the PDF, preserved for audit and review.
+    var rawDescription: String
+    /// Stable merchant key for aliases, rules and deduplication.
+    var normalizedMerchant: String
+    /// Readable label shown in the ledger; never replaces rawDescription.
+    var displayMerchant: String
+    /// Second date printed in card tables, when present.
+    var chargeDate: Date?
+    /// Explanation shown when only enrichment is needed or a row is blocked.
+    var reviewReason: String?
     var statementId: UUID?
     var kind: MovementKind?
     var travelRelated: Bool
@@ -191,7 +204,12 @@ struct Movement: Identifiable, Codable {
         kind: MovementKind? = nil,
         travelRelated: Bool = false,
         foreignCurrency: Bool = false,
-        extractionEvidence: MovementExtractionEvidence? = nil
+        extractionEvidence: MovementExtractionEvidence? = nil,
+        rawDescription: String? = nil,
+        normalizedMerchant: String? = nil,
+        displayMerchant: String? = nil,
+        chargeDate: Date? = nil,
+        reviewReason: String? = nil
     ) {
         self.id = id
         self.date = date
@@ -200,6 +218,14 @@ struct Movement: Identifiable, Codable {
         self.category = category
         self.amount = amount
         self.flow = flow
+        self.rawDescription = rawDescription ?? title
+        self.normalizedMerchant = (normalizedMerchant ?? title)
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        self.displayMerchant = displayMerchant ?? title
+        self.chargeDate = chargeDate
+        self.reviewReason = reviewReason
         self.statementId = statementId
         self.kind = kind
         self.travelRelated = travelRelated
@@ -208,7 +234,7 @@ struct Movement: Identifiable, Codable {
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, date, title, account, category, amount, flow, statementId, kind, travelRelated, foreignCurrency, extractionEvidence
+        case id, date, title, account, category, amount, flow, rawDescription, normalizedMerchant, displayMerchant, chargeDate, reviewReason, statementId, kind, travelRelated, foreignCurrency, extractionEvidence
     }
 
     init(from decoder: Decoder) throws {
@@ -220,6 +246,11 @@ struct Movement: Identifiable, Codable {
         category = try container.decode(String.self, forKey: .category)
         amount = try container.decode(Decimal.self, forKey: .amount)
         flow = try container.decode(FlowKind.self, forKey: .flow)
+        rawDescription = try container.decodeIfPresent(String.self, forKey: .rawDescription) ?? title
+        normalizedMerchant = try container.decodeIfPresent(String.self, forKey: .normalizedMerchant) ?? title
+        displayMerchant = try container.decodeIfPresent(String.self, forKey: .displayMerchant) ?? title
+        chargeDate = try container.decodeIfPresent(Date.self, forKey: .chargeDate)
+        reviewReason = try container.decodeIfPresent(String.self, forKey: .reviewReason)
         statementId = try container.decodeIfPresent(UUID.self, forKey: .statementId)
         kind = try container.decodeIfPresent(MovementKind.self, forKey: .kind)
         travelRelated = try container.decodeIfPresent(Bool.self, forKey: .travelRelated) ?? false
@@ -236,6 +267,11 @@ struct Movement: Identifiable, Codable {
         try container.encode(category, forKey: .category)
         try container.encode(amount, forKey: .amount)
         try container.encode(flow, forKey: .flow)
+        try container.encode(rawDescription, forKey: .rawDescription)
+        try container.encode(normalizedMerchant, forKey: .normalizedMerchant)
+        try container.encode(displayMerchant, forKey: .displayMerchant)
+        try container.encodeIfPresent(chargeDate, forKey: .chargeDate)
+        try container.encodeIfPresent(reviewReason, forKey: .reviewReason)
         try container.encodeIfPresent(statementId, forKey: .statementId)
         try container.encodeIfPresent(kind, forKey: .kind)
         try container.encode(travelRelated, forKey: .travelRelated)
@@ -272,10 +308,15 @@ struct StatementRecord: Identifiable, Codable {
     var ocrConfidence: Double? = nil
     /// Mean Vision confidence grouped by page for targeted review.
     var ocrPageConfidences: [Double]? = nil
-    /// Santander OCR only: true when DEPÓSITO/RETIRO/SALDO were calibrated
+    /// Santander/Rappi OCR only: true when movement columns were calibrated
     /// from a co-located visual header. A false value keeps the state
     /// provisional even if its totals happen to reconcile.
     var ocrColumnsCalibrated: Bool? = nil
+    /// OCR table rows discarded because their date, amount or description was unsafe.
+    var ocrRejectedRows: Int? = nil
+    /// Row-level quality split kept separate from statement reconciliation.
+    var blockedMovementCount: Int? = nil
+    var enrichmentMovementCount: Int? = nil
     /// SHA-256 of the original PDF bytes. This is the stable document identity
     /// used to reprocess a UUID-named stored file without relying on its name.
     var sourceFingerprint: String? = nil
@@ -306,6 +347,7 @@ struct ImportSummary {
     let ocrConfidence: Double?
     let ocrPageConfidences: [Double]?
     let ocrColumnsCalibrated: Bool?
+    let ocrRejectedRows: Int?
     var fileSizeBytes: Int? = nil
     var pageCount: Int? = nil
 }
@@ -458,11 +500,14 @@ enum FinanceImportError: LocalizedError {
 
 struct LedgerQuality {
     let statementCount: Int
+    let reconciledStatementCount: Int
     let validatedStatementCount: Int
     let invalidStatementCount: Int
     let pendingStatementCount: Int
     let movementCount: Int
     let reviewMovementCount: Int
+    let blockedMovementCount: Int
+    let enrichmentMovementCount: Int
     let absurdMovementCount: Int
     let reconciledPercent: Double
     let evidencePercent: Double
@@ -499,6 +544,7 @@ private struct PDFImportExtraction: @unchecked Sendable {
     let ocrConfidence: Double?
     let ocrPageConfidences: [Double]?
     let ocrColumnsCalibrated: Bool?
+    let ocrRejectedRows: Int?
     let ocrFallbackNeedsReview: Bool
     let ocrColumnCalibrationNeedsReview: Bool
     let ocrConfidenceNeedsReview: Bool
@@ -553,7 +599,7 @@ private struct LedgerEnvelope: Codable {
 @Observable
 final class FinanceStore {
     /// Bump when native extraction, OCR or reconciliation rules change.
-    static let readerVersion = "ios-reader-2026.08.31.14"
+    static let readerVersion = "ios-reader-2026.09.15.1"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -641,6 +687,30 @@ final class FinanceStore {
             )
         }
         return parseSantanderOCRResult(observations, fileName: fileName).columnsCalibrated
+    }
+
+    /// Runs the Rappi visual-table reader against normalized Vision-like
+    /// observations. The returned tuple keeps the column-calibration result
+    /// visible to contract tests without exposing the private parser type.
+    static func rappiOCRRowsForTesting(
+        _ fixtures: [OCRObservationFixture],
+        fileName: String
+    ) -> (movements: [Movement], columnsCalibrated: Bool) {
+        let observations = fixtures.map { fixture in
+            OCRObservation(
+                page: fixture.page,
+                text: fixture.text,
+                boundingBox: CGRect(
+                    x: fixture.x,
+                    y: fixture.y,
+                    width: fixture.width,
+                    height: fixture.height
+                ),
+                confidence: fixture.confidence
+            )
+        }
+        let result = parseRappiOCRResult(observations, fileName: fileName)
+        return (result.movements, result.columnsCalibrated)
     }
 
     /// Decides whether a PDF's selectable text is structurally usable. Kept
@@ -747,7 +817,14 @@ final class FinanceStore {
         let reviewCount = movements.filter { $0.category == "Por revisar" || $0.category == "Sin categoría" }.count
         let absurdCount = movements.filter { abs($0.amount) >= 10_000_000 || !isValidStoredMovement($0) }.count
         let statementCount = statements.count
+        let reconciledStatementCount = statements.filter { $0.reconciliation?.status == .valid }.count
         let reconciledPercent = statementCount == 0 ? 100 : Double(validated.count) / Double(statementCount) * 100
+        let enrichmentCount = movements.filter { $0.category == "Sin categoría" || $0.category == "Por revisar" || ($0.reviewReason?.localizedCaseInsensitiveContains("comercio") == true) }.count
+        let blockedCount = movements.filter { movement in
+            guard let reason = movement.reviewReason?.lowercased() else { return false }
+            return reason.contains("importe") || reason.contains("fecha") || reason.contains("columna") || reason.contains("fila visual")
+        }.count + movements.filter { !isValidStoredMovement($0) }.count
+            + statements.reduce(0) { $0 + max(0, $1.ocrRejectedRows ?? 0) }
         let evidenceRows = movements.filter { movement in
             guard movement.statementId != nil else { return false }
             return movement.extractionEvidence?.method != "manual"
@@ -774,7 +851,13 @@ final class FinanceStore {
         let spendMismatch = consolidatedRealSpend > canonicalNetSpend + max(Decimal(1), canonicalNetSpend * onePercent)
         let failedChecks = consistencyChecks.filter { !$0.passed }
         let blocking = invalid.count > 0 || pending.count > 0 || absurdCount > 0 || missingEvidenceCount > 0 || spendMismatch || !failedChecks.isEmpty || missingRebuiltStatements
-        let uncalibratedOCR = pending.filter { $0.ocrColumnsCalibrated == false }.count
+        let uncalibratedOCR = pending.filter { statement in
+            let isColumnSensitive = statement.source.localizedCaseInsensitiveContains("Santander")
+                || statement.source.localizedCaseInsensitiveContains("Rappi")
+            return (statement.ocrConfidence != nil || statement.ocrColumnsCalibrated != nil)
+                && isColumnSensitive
+                && statement.ocrColumnsCalibrated != true
+        }.count
         let weakOCR = pending.filter { hasSufficientOCRQuality($0) == false }.count
         let message: String?
         if invalid.count > 0 {
@@ -803,11 +886,14 @@ final class FinanceStore {
         }
         return LedgerQuality(
             statementCount: statementCount,
+            reconciledStatementCount: reconciledStatementCount,
             validatedStatementCount: validated.count,
             invalidStatementCount: invalid.count,
             pendingStatementCount: pending.count,
             movementCount: movements.count,
             reviewMovementCount: reviewCount,
+            blockedMovementCount: blockedCount,
+            enrichmentMovementCount: enrichmentCount,
             absurdMovementCount: absurdCount,
             reconciledPercent: reconciledPercent,
             evidencePercent: evidencePercent,
@@ -1197,7 +1283,8 @@ final class FinanceStore {
 
     private func statementKind(_ statement: StatementRecord) -> StatementKind {
         if let kind = statement.kind { return kind }
-        if statement.source.localizedCaseInsensitiveContains("Amex") { return .card }
+        if statement.source.localizedCaseInsensitiveContains("Amex")
+            || statement.source.localizedCaseInsensitiveContains("Rappi") { return .card }
         if statement.source.localizedCaseInsensitiveContains("Importado") { return .unknown }
         return .bank
     }
@@ -1224,6 +1311,7 @@ final class FinanceStore {
               let pages = statement.ocrPageConfidences,
               !pages.isEmpty,
               pages.allSatisfy({ $0.isFinite && $0 >= 0.78 }) else { return false }
+        guard (statement.ocrRejectedRows ?? 0) == 0 else { return false }
         return true
     }
 
@@ -1250,11 +1338,14 @@ final class FinanceStore {
                 .caseInsensitiveCompare("Desconocido") != .orderedSame
             && statement.kind != .unknown
             && (hasVerifiedSourceEvidence(statement) || statement.issuerConfirmedByUser == true)
-            // A Santander scan must have its visual transaction columns
+            // A Santander/Rappi scan must have its visual transaction columns
             // calibrated. Keep this as an independent gate instead of
             // trusting only `requiresReview`, so stale/corrupt persisted data
             // cannot silently promote an OCR row into a KPI.
-            && statement.ocrColumnsCalibrated != false
+            && (!((statement.ocrConfidence != nil || statement.ocrColumnsCalibrated != nil)
+                && (statement.source.localizedCaseInsensitiveContains("Santander")
+                    || statement.source.localizedCaseInsensitiveContains("Rappi")))
+                || statement.ocrColumnsCalibrated == true)
             && hasSufficientOCRQuality(statement)
             && !statement.requiresReview
     }
@@ -2631,6 +2722,8 @@ final class FinanceStore {
             : nil
         let kind = kindOverride ?? Self.statementKind(from: text, source: source)
         var santanderColumnsCalibrated = true
+        var rappiColumnsCalibrated = true
+        var rappiRejectedRows = 0
         let parsedCandidates: [Movement]
         if usedOCR, source == "Santander" {
             let santanderResult = Self.parseSantanderOCRResult(ocrObservations, fileName: fileName)
@@ -2643,6 +2736,13 @@ final class FinanceStore {
             parsedCandidates = amexCandidates.isEmpty
                 ? Self.parse(text: text, fileName: fileName, sourceHint: source)
                 : amexCandidates
+        } else if usedOCR, source == "Rappi" {
+            let rappiResult = Self.parseRappiOCRResult(ocrObservations, fileName: fileName)
+            rappiColumnsCalibrated = rappiResult.columnsCalibrated
+            rappiRejectedRows = rappiResult.rejectedRows
+            // An uncalibrated/empty visual table must remain empty and
+            // provisional. Do not mix it with the flattened text fallback.
+            parsedCandidates = rappiResult.movements
         } else if usedOCR {
             let genericCandidates = Self.parseGenericOCR(
                 ocrObservations,
@@ -2670,8 +2770,8 @@ final class FinanceStore {
             return evidence.method != "vision-ocr" || evidence.confidence < 0.88
         }
         let ocrColumnCalibrationNeedsReview = usedOCR
-            && source == "Santander"
-            && !santanderColumnsCalibrated
+            && ((source == "Santander" && !santanderColumnsCalibrated)
+                || (source == "Rappi" && !rappiColumnsCalibrated))
         let ocrConfidenceNeedsReview = usedOCR
             && ((ocrConfidence ?? 0) < 0.88 || (ocrPageConfidences?.min() ?? 0) < 0.78)
 
@@ -2690,7 +2790,8 @@ final class FinanceStore {
             usedOCR: usedOCR,
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences,
-            ocrColumnsCalibrated: usedOCR && source == "Santander" ? santanderColumnsCalibrated : nil,
+            ocrColumnsCalibrated: usedOCR && source == "Santander" ? santanderColumnsCalibrated : usedOCR && source == "Rappi" ? rappiColumnsCalibrated : nil,
+            ocrRejectedRows: usedOCR && source == "Rappi" ? rappiRejectedRows : nil,
             ocrFallbackNeedsReview: ocrFallbackNeedsReview,
             ocrColumnCalibrationNeedsReview: ocrColumnCalibrationNeedsReview,
             ocrConfidenceNeedsReview: ocrConfidenceNeedsReview
@@ -2741,6 +2842,7 @@ final class FinanceStore {
         }
         let ocrFallbackNeedsReview = extraction.ocrFallbackNeedsReview
         let ocrColumnCalibrationNeedsReview = extraction.ocrColumnCalibrationNeedsReview
+        let ocrRejectedRows = extraction.ocrRejectedRows ?? 0
         let weakestOCRPage = ocrPageConfidences?.min()
         let ocrConfidenceNeedsReview = extraction.ocrConfidenceNeedsReview
         if ocrFallbackNeedsReview {
@@ -2761,9 +2863,16 @@ final class FinanceStore {
                 message: "\(url.lastPathComponent): OCR provisional (media \(Int(((ocrConfidence ?? 0) * 100).rounded()))%, página más débil \(Int(((weakestOCRPage ?? 0) * 100).rounded()))%)."
             )
         }
+        if ocrRejectedRows > 0 {
+            DiagnosticsRecorder.record(
+                stage: "import.ocr.rows",
+                message: "\(url.lastPathComponent): \(ocrRejectedRows) fila(s) OCR quedaron fuera por evidencia incompleta."
+            )
+        }
         let ocrQualityNeedsReview = ocrFallbackNeedsReview
             || ocrColumnCalibrationNeedsReview
             || ocrConfidenceNeedsReview
+            || ocrRejectedRows > 0
         // Keep the reconciliation status itself provisional when visual
         // evidence is weak. `requiresReview` is a UI flag and can be stale in
         // persisted data; the status is the durable accounting boundary used
@@ -2771,7 +2880,9 @@ final class FinanceStore {
         let gatedReconciliation: StatementReconciliationRecord = {
             guard ocrQualityNeedsReview, reconciliation.status == .valid else { return reconciliation }
             let reason: String
-            if ocrColumnCalibrationNeedsReview {
+            if ocrRejectedRows > 0 {
+                reason = "OCR provisional: \(ocrRejectedRows) fila(s) no conservó(aron) fecha, importe o descripción confiable; revisa el estado antes de aceptar."
+            } else if ocrColumnCalibrationNeedsReview {
                 reason = "OCR provisional: columnas de movimientos sin calibrar; revisa la tabla visual antes de aceptar."
             } else if ocrFallbackNeedsReview {
                 reason = "OCR provisional: alguna fila no conserva evidencia visual suficiente; revisa el estado antes de aceptar."
@@ -2793,12 +2904,17 @@ final class FinanceStore {
                 reason: reason
             )
         }()
+        let blockedMovementCount = fresh.filter { movement in
+            let reason = movement.reviewReason?.lowercased() ?? ""
+            return reason.contains("importe") || reason.contains("fecha") || reason.contains("columna") || reason.contains("fila visual")
+        }.count + ocrRejectedRows
+        let enrichmentMovementCount = fresh.filter { $0.category == "Por revisar" || $0.reviewReason?.localizedCaseInsensitiveContains("comercio") == true }.count
         let needsReview = fresh.isEmpty
             || summary == nil
             || detectedKind == .unknown
             || gatedReconciliation.status != .valid
             || sourceDetection.status != .verified
-            || fresh.contains { $0.category == "Por revisar" }
+            || blockedMovementCount > 0
 
         // Re-importing the exact same bytes must not silently erase a prior
         // human issuer confirmation. The confirmation is scoped to the
@@ -2839,6 +2955,9 @@ final class FinanceStore {
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences,
             ocrColumnsCalibrated: ocrColumnsCalibrated,
+            ocrRejectedRows: ocrRejectedRows > 0 ? ocrRejectedRows : nil,
+            blockedMovementCount: blockedMovementCount,
+            enrichmentMovementCount: enrichmentMovementCount,
             sourceFingerprint: sourceFingerprint,
             readerVersion: Self.readerVersion,
             fileSizeBytes: documentData.count,
@@ -2874,6 +2993,7 @@ final class FinanceStore {
             ocrConfidence: ocrConfidence,
             ocrPageConfidences: ocrPageConfidences,
             ocrColumnsCalibrated: ocrColumnsCalibrated,
+            ocrRejectedRows: ocrRejectedRows > 0 ? ocrRejectedRows : nil,
             fileSizeBytes: documentData.count,
             pageCount: extraction.pageCount
         )
@@ -3062,6 +3182,18 @@ final class FinanceStore {
         let columnsCalibrated: Bool
     }
 
+    private struct RappiOCRColumns {
+        let descriptionStart: CGFloat
+        let amountStart: CGFloat
+        let headerY: CGFloat
+    }
+
+    private struct RappiOCRParseResult {
+        let movements: [Movement]
+        let columnsCalibrated: Bool
+        let rejectedRows: Int
+    }
+
     private static func extractionBounds(for row: [OCRObservation]) -> MovementExtractionBounds? {
         guard let first = row.first else { return nil }
         let rect = row.dropFirst().reduce(first.boundingBox) { $0.union($1.boundingBox) }
@@ -3082,9 +3214,9 @@ final class FinanceStore {
             // tokens are intentionally absent: amounts must come from the
             // visual candidate and reconciliation rules, never a dictionary.
             request.customWords = [
-                "SANTANDER", "BBVA", "BANCOMER", "AMERICAN EXPRESS", "AMEX",
+                "SANTANDER", "BBVA", "BANCOMER", "RAPPI", "RAPPICARD", "AMERICAN EXPRESS", "AMEX",
                 "DEPÓSITOS", "RETIROS", "CARGOS", "ABONOS", "SALDO",
-                "DESCRIPCIÓN", "DETALLE", "MOVIMIENTOS", "FECHA",
+                "DESCRIPCIÓN", "DETALLE", "MOVIMIENTOS", "FECHA", "OPERACIÓN", "MONTO",
                 "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE",
                 "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
             ]
@@ -3369,6 +3501,8 @@ final class FinanceStore {
                 || rawAmount.range(of: #"\d{1,3}(?:[ ,]\d{3})+"#, options: .regularExpression) != nil
             if !hasMoneyShape && digitsOnly.count > 6 { return nil }
             working = working.replacingCharacters(in: Range(amountMatch.range, in: working)!, with: " ")
+            let isRappi = account.localizedCaseInsensitiveContains("rappi")
+            let rawRappiDescription = isRappi ? working : nil
             if bankLikeRow {
                 // A bank row normally carries both the movement amount and a
                 // running balance. The selected token is the former; remove
@@ -3396,10 +3530,11 @@ final class FinanceStore {
             guard title.count >= 3, !isAdministrativeTitle(title) else { return nil }
             guard title.rangeOfCharacter(from: .letters) != nil else { return nil }
 
-            let titleNormalized = title.folding(
-                options: [.diacriticInsensitive, .caseInsensitive],
-                locale: .current
-            )
+            let rappiIdentity = isRappi ? rappiMerchantIdentity(rawRappiDescription ?? title) : nil
+            let visibleTitle = rappiIdentity?.display ?? title
+            let rawDescription = rappiIdentity?.raw ?? title
+            let normalizedMerchant = rappiIdentity?.normalized ?? title.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            let titleNormalized = normalizedMerchant
             let hasCreditMarker = normalized.range(of: #"\b(cr|abono|credito)\b"#, options: .regularExpression) != nil
             let isRefund = titleNormalized.contains("devolucion")
                 || titleNormalized.contains("reembolso")
@@ -3436,7 +3571,8 @@ final class FinanceStore {
                 || amountMatch.text.contains("+")
                 || hasCreditMarker
             guard directionSignal else { return nil }
-            let isStatementCredit = hasCreditMarker && !isCardPayment && !isRefund && !isIncome
+            let isStatementCredit = (hasCreditMarker && !isCardPayment && !isRefund && !isIncome)
+                || (isRappi && rawAmount.hasPrefix("-") && !isCardPayment && !isRefund)
             let flow: FlowKind
             if isRefund || isStatementCredit {
                 flow = .income
@@ -3454,7 +3590,12 @@ final class FinanceStore {
             let displayAccount = flow == .transfer && titleNormalized.contains("amex")
                 ? "Santander a Amex"
                 : account
-            let category = category(for: titleNormalized, flow: flow)
+            let guessedCategory = category(for: titleNormalized, flow: flow)
+            let category = isRappi && (rappiIdentity?.confidence ?? 1) < 0.75 || isRappi && guessedCategory == "Sin categoría"
+                ? "Por revisar"
+                : guessedCategory
+            let reviewReason = rappiIdentity?.reviewReason
+                ?? (isRappi && guessedCategory == "Sin categoría" ? "Comercio legible, pero todavía sin categoría asignada." : nil)
             let kind: MovementKind
             if isStatementCredit {
                 kind = .credit
@@ -3485,7 +3626,7 @@ final class FinanceStore {
 
             return Movement(
                 date: date,
-                title: title,
+                title: visibleTitle,
                 account: displayAccount,
                 category: category,
                 amount: signedAmount,
@@ -3497,10 +3638,205 @@ final class FinanceStore {
                     method: "pdf-text",
                     page: parsedRow.page,
                     confidence: 0.93,
-                    sourceText: String(original.prefix(240))
-                )
+                    sourceText: String(original.prefix(240)),
+                    sameVisualRow: true
+                ),
+                rawDescription: rawDescription,
+                normalizedMerchant: normalizedMerchant,
+                displayMerchant: visibleTitle,
+                reviewReason: reviewReason
             )
         }
+    }
+
+    /// Rappi's table has stable visual columns. OCR rows are reconstructed from
+    /// those ranges; a number in the description column can never become an
+    /// amount just because it is the last token in a text line.
+    private static func parseRappiOCRResult(
+        _ observations: [OCRObservation],
+        fileName: String
+    ) -> RappiOCRParseResult {
+        guard let dateRegex = try? NSRegularExpression(
+            pattern: #"(?<!\d)(?:\d{4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}|\d{1,2}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{4})(?!\d)"#
+        ), let amountRegex = try? NSRegularExpression(
+            pattern: #"[-+]?\s*\$?\s*(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?:\s*CR)?"#
+        ) else {
+            return RappiOCRParseResult(movements: [], columnsCalibrated: false, rejectedRows: 0)
+        }
+
+        let defaultYear: Int = {
+            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+               let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
+                return year
+            }
+            return Calendar.current.component(.year, from: .now)
+        }()
+
+        func normalized(_ value: String) -> String {
+            value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        }
+
+        let observationsByPage = Dictionary(grouping: observations, by: \.page)
+        var movements: [Movement] = []
+        var lastColumns: RappiOCRColumns?
+        var headerFound = false
+        var candidatePages = Set<Int>()
+        var uncalibratedCandidatePages = Set<Int>()
+        var rejectedRows = 0
+
+        for page in observationsByPage.keys.sorted() {
+            let pageObservations = (observationsByPage[page] ?? []).sorted {
+                if abs($0.centerY - $1.centerY) > 0.012 { return $0.centerY > $1.centerY }
+                return $0.centerX < $1.centerX
+            }
+            var groups: [[OCRObservation]] = []
+            for observation in pageObservations {
+                if let last = groups.last,
+                   let reference = last.first,
+                   abs(reference.centerY - observation.centerY) <= 0.012 {
+                    groups[groups.count - 1].append(observation)
+                } else {
+                    groups.append([observation])
+                }
+            }
+            let headerGroup = groups.first { group in
+                let text = normalized(group.map(\.text).joined(separator: " "))
+                return text.contains("fecha")
+                    && (text.contains("descripcion") || text.contains("movimiento"))
+                    && (text.contains("monto") || text.contains("importe"))
+            }
+            let pageColumns: RappiOCRColumns? = {
+                guard let headerGroup,
+                      let description = headerGroup.first(where: { normalized($0.text).contains("descrip") || normalized($0.text).contains("movimiento") }),
+                      let amount = headerGroup.first(where: { normalized($0.text).contains("monto") || normalized($0.text).contains("importe") }),
+                      headerGroup.contains(where: { normalized($0.text).contains("fecha") }),
+                      amount.boundingBox.minX > description.boundingBox.minX else { return nil }
+                let descriptionStart = max(0, description.boundingBox.minX - max(0.025, description.boundingBox.width))
+                let amountStart = max(descriptionStart + 0.12, amount.boundingBox.minX - max(0.025, amount.boundingBox.width))
+                guard amountStart < 1, amountStart > descriptionStart else { return nil }
+                return RappiOCRColumns(descriptionStart: descriptionStart, amountStart: amountStart, headerY: headerGroup.map(\.centerY).reduce(0, +) / CGFloat(headerGroup.count))
+            }()
+            if let pageColumns {
+                lastColumns = pageColumns
+                headerFound = true
+            }
+            guard let columns = pageColumns ?? lastColumns else {
+                let possibleRow = groups.contains { group in
+                    let hasDate = group.contains { firstMatch(in: $0.text, regex: dateRegex) != nil }
+                    let hasAmount = group.contains { !allMatches(in: $0.text, regex: amountRegex).isEmpty }
+                    return hasDate && hasAmount
+                }
+                if possibleRow { uncalibratedCandidatePages.insert(page) }
+                continue
+            }
+
+            struct PendingRappiRow {
+                var dates: [Date]
+                var description: String
+                var rawAmount: String
+                var amount: Decimal
+                var observations: [OCRObservation]
+                var sameVisualRow: Bool
+            }
+            var pending: PendingRappiRow?
+            func flush() {
+                guard let pending else { return }
+                guard let date = pending.dates.first, !pending.description.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    rejectedRows += 1
+                    return
+                }
+                let identity = rappiMerchantIdentity(pending.description)
+                let text = normalized(identity.normalized)
+                let isPayment = text.contains("pago por spei")
+                    || (text.contains("pago") && (text.contains("tarjeta") || text.contains("credito")))
+                let isRefund = text.contains("bonificacion") || text.contains("cashback") || text.contains("devolucion") || text.contains("reembolso") || text.contains("abono")
+                let printedCredit = pending.rawAmount.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("-")
+                let isFee = (text.contains("iva") || text.contains("impuesto") || text.contains("interes") || text.contains("comision")) && !isRefund
+                let flow: FlowKind = isPayment ? .debt : (isRefund || printedCredit || text.contains("credito") ? .income : .expense)
+                let kind: MovementKind = isPayment ? .cardPayment : isRefund ? .refund : isFee ? (text.contains("interes") ? .interest : .fee) : flow == .income ? .credit : .purchase
+                let guessedCategory = kind == .cardPayment ? "Transferencia" : category(for: text, flow: flow)
+                let category = identity.confidence < 0.75 || guessedCategory == "Sin categoría" ? "Por revisar" : guessedCategory
+                let signedAmount = flow == .income ? abs(pending.amount) : -abs(pending.amount)
+                let evidenceConfidence = pending.observations.map(\.confidence).min() ?? 0
+                movements.append(
+                    Movement(
+                        date: date,
+                        title: identity.display,
+                        account: "Rappi",
+                        category: category,
+                        amount: signedAmount,
+                        flow: flow,
+                        kind: kind,
+                        foreignCurrency: false,
+                        extractionEvidence: MovementExtractionEvidence(
+                            method: "vision-ocr",
+                            page: page + 1,
+                            confidence: evidenceConfidence,
+                            sourceText: String(pending.observations.map(\.text).joined(separator: " ").prefix(240)),
+                            bounds: extractionBounds(for: pending.observations),
+                            sameVisualRow: pending.sameVisualRow
+                        ),
+                        rawDescription: identity.raw,
+                        normalizedMerchant: identity.normalized,
+                        displayMerchant: identity.display,
+                        chargeDate: pending.dates.dropFirst().first,
+                        reviewReason: identity.reviewReason ?? (guessedCategory == "Sin categoría" ? "Comercio legible, pero todavía sin categoría asignada." : nil)
+                    )
+                )
+            }
+            for group in groups {
+                let lineY = group.map(\.centerY).reduce(0, +) / CGFloat(max(group.count, 1))
+                if let pageColumns, lineY >= pageColumns.headerY - 0.01 { continue }
+                let lineText = group.sorted { $0.centerX < $1.centerX }.map(\.text).joined(separator: " ")
+                let normalizedLine = normalized(lineText)
+                if normalizedLine.hasPrefix("total") || normalizedLine.hasPrefix("saldo") || normalizedLine.hasPrefix("cargos") || normalizedLine.hasPrefix("abonos") {
+                    flush()
+                    pending = nil
+                    continue
+                }
+                let dateValues = group
+                    .filter { $0.boundingBox.minX < columns.descriptionStart }
+                    .flatMap { allMatches(in: $0.text, regex: dateRegex).compactMap { parseDate($0.text, defaultYear: defaultYear) } }
+                let amountCandidates = group
+                    .filter { $0.boundingBox.minX >= columns.amountStart }
+                    .flatMap { observation in
+                        allMatches(in: observation.text, regex: amountRegex).compactMap { match -> (String, Decimal, OCRObservation)? in
+                            guard let value = parseAmount(match.text), value != 0 else { return nil }
+                            return (match.text, value, observation)
+                        }
+                    }
+                let descriptionWords = group.filter { $0.boundingBox.minX >= columns.descriptionStart && $0.boundingBox.minX < columns.amountStart }
+                if !dateValues.isEmpty && amountCandidates.count == 1 {
+                    flush()
+                    candidatePages.insert(page)
+                    let amount = amountCandidates[0]
+                    pending = PendingRappiRow(
+                        dates: dateValues,
+                        description: descriptionWords.map(\.text).joined(separator: " ").replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines),
+                        rawAmount: amount.0,
+                        amount: amount.1,
+                        observations: group,
+                        sameVisualRow: true
+                    )
+                } else if pending != nil && dateValues.isEmpty && amountCandidates.isEmpty && !descriptionWords.isEmpty {
+                    pending!.description += " " + descriptionWords.map(\.text).joined(separator: " ")
+                    pending!.description = pending!.description.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+                    pending!.observations.append(contentsOf: group)
+                    pending!.sameVisualRow = false
+                } else if !dateValues.isEmpty || !amountCandidates.isEmpty {
+                    flush()
+                    pending = nil
+                    rejectedRows += 1
+                }
+            }
+            flush()
+        }
+
+        return RappiOCRParseResult(
+            movements: movements,
+            columnsCalibrated: headerFound && !candidatePages.isEmpty && uncalibratedCandidatePages.isEmpty,
+            rejectedRows: rejectedRows
+        )
     }
 
     /// Universal OCR fallback for scanned statements that are not one of the
@@ -4498,6 +4834,54 @@ final class FinanceStore {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private struct RappiMerchantIdentity {
+        let raw: String
+        let normalized: String
+        let display: String
+        let confidence: Double
+        let reviewReason: String?
+    }
+
+    /// Conservative merchant cleanup for Rappi only. The raw row remains
+    /// intact while aliases provide a stable rule/deduplication key.
+    private static func rappiMerchantIdentity(_ value: String) -> RappiMerchantIdentity {
+        let raw = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let compact = raw.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        let technical = compact.replacingOccurrences(
+            of: #"(?i)\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizaci[oó]n)?|operaci[oó]n|c[oó]digo|codigo|no\.?\s*de?)\s*[:#./_-]*\s*[a-z0-9-]+"#,
+            with: " ",
+            options: .regularExpression
+        ).replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let folded = compact.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let aliases: [(pattern: String, normalized: String, display: String)] = [
+            (#"apple\s*[./*]?\s*com\s*[./]?\s*bill"#, "apple", "Apple"),
+            (#"google\s*cloud|payu\s*\*?\s*google"#, "google cloud", "Google Cloud"),
+            (#"booking(?:\.com)?|flights\s+on\s+booking"#, "booking.com", "Booking.com"),
+            (#"viva\s*aero?bus|vivaaero?bus"#, "viva aerobus", "Viva Aerobus"),
+            (#"mta\s*\*?\s*lirr|lirr\s+station"#, "mta lirr station", "MTA LIRR Station"),
+            (#"mta\s*\*?\s*nyct\s*paygo"#, "mta nyct paygo", "MTA NYCT Paygo"),
+            (#"pase\s+recur"#, "pase", "PASE"),
+            (#"swappedcom"#, "swappedcom", "Swapped.com"),
+            (#"pago\s+por\s+spei"#, "pago por spei", "Pago por SPEI")
+        ]
+        let alias = aliases.first { folded.range(of: $0.pattern, options: .regularExpression) != nil }
+        let normalized = alias?.normalized ?? technical.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let displayBase = (alias?.display ?? technical).isEmpty ? raw : (alias?.display ?? technical)
+        let display = displayBase.rangeOfCharacter(from: .lowercaseLetters) == nil
+            ? displayBase.lowercased().capitalized
+            : displayBase
+        let letters = normalized.rangeOfCharacter(from: .letters) != nil
+        let confidence: Double = alias != nil ? 0.96 : !letters || raw.count > 100 ? 0.48 : technical.count >= 3 ? 0.88 : 0.58
+        let reason = confidence < 0.75
+            ? (letters ? "El comercio conserva evidencia, pero la normalización no es suficientemente confiable." : "La descripción no conserva un nombre de comercio legible.")
+            : nil
+        return RappiMerchantIdentity(raw: raw, normalized: normalized, display: display, confidence: confidence, reviewReason: reason)
+    }
+
     private static func isAdministrativeTitle(_ value: String) -> Bool {
         let normalized = value
             .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
@@ -4750,6 +5134,12 @@ final class FinanceStore {
         assign(\.payments, amount(after: ["pagos realizados", "pagos efectuados"]))
         assign(\.credits, amount(after: ["pagos y creditos", "creditos", "abonos"]))
         assign(\.newCharges, amount(after: ["nuevos cargos", "total de cargos"]))
+        if source.localizedCaseInsensitiveCompare("Rappi") == .orderedSame {
+            assign(\.newCharges, amount(after: ["total de cargos", "cargos regulares"]))
+            assign(\.paymentsCredits, amount(after: ["pagos y abonos", "total de abonos"]))
+            assign(\.debtBalance, amount(after: ["saldo deudor total", "saldo deudor"]))
+            summary.statementBalance = summary.debtBalance
+        }
         assign(\.interest, amount(after: ["intereses", "interes del periodo"]))
         assign(\.fees, amount(after: ["comisiones", "comision"]))
         if let creditPair = creditControlPair() {
@@ -4861,12 +5251,13 @@ final class FinanceStore {
 
     private static func statementKind(from text: String, source: String) -> StatementKind {
         if source.localizedCaseInsensitiveContains("Amex") { return .card }
+        if source.localizedCaseInsensitiveContains("Rappi") { return .card }
         if source.localizedCaseInsensitiveContains("Santander")
             || source.localizedCaseInsensitiveContains("BBVA")
             || [
                 "Banorte", "HSBC", "Scotiabank", "Citibanamex", "Banamex",
                 "Inbursa", "Banco Azteca", "Banco del Bajío", "Mifel", "INVEX",
-                "Hey Banco", "Nu", "Klar", "Rappi", "Ualá"
+            "Hey Banco", "Nu", "Klar", "Ualá"
             ].contains(where: { source.localizedCaseInsensitiveContains($0) }) {
             return .bank
         }
@@ -4886,7 +5277,7 @@ final class FinanceStore {
             "retiros", "saldo final", "saldo disponible", "cuenta corriente",
             "banorte", "hsbc", "scotiabank", "citibanamex", "banamex",
             "inbursa", "banco azteca", "banco del bajio", "mifel", "invex",
-            "hey banco", "nu mexico", "nu banco", "klar", "rappi", "uala"
+            "hey banco", "nu mexico", "nu banco", "klar", "uala"
         ]
         let cardScore = cardMarkers.reduce(into: 0) { score, marker in
             if normalized.contains(marker) { score += 1 }
@@ -4928,6 +5319,7 @@ final class FinanceStore {
             if normalizedFileName.range(of: #"\bbbva\b|bancomer"#, options: .regularExpression) != nil { return "BBVA" }
             if normalizedFileName.range(of: #"american\s+express|\bamex\b"#, options: .regularExpression) != nil { return "Amex" }
             if normalizedFileName.range(of: #"\bsantander\b"#, options: .regularExpression) != nil { return "Santander" }
+            if normalizedFileName.range(of: #"\brappi(?:card)?\b"#, options: .regularExpression) != nil { return "Rappi" }
             return nil
         }()
         let santanderInstitutional = header.contains("grupo financiero santander")
@@ -4947,6 +5339,7 @@ final class FinanceStore {
             if header.range(of: #"\bsantander\b"#, options: .regularExpression) != nil { return "Santander" }
             if header.range(of: #"\bbbva\b|bancomer"#, options: .regularExpression) != nil { return "BBVA" }
             if header.contains("american express") || header.contains("the platinum credit card") || header.range(of: #"\bamex\b"#, options: .regularExpression) != nil { return "Amex" }
+            if header.range(of: #"\brappi(?:card)?\b"#, options: .regularExpression) != nil { return "Rappi" }
             return nil
         }()
         // OCR may place the legal issuer footer after the movement table. A

@@ -307,7 +307,7 @@ private struct MovementDetailView: View {
     @State private var selectedCategory: String
     @State private var selectedKind: MovementKind
     @State private var isTravel: Bool
-    private let categories = ["Ingresos", "Transferencia", "Alimentos", "Viajes", "Comidas", "Servicios", "Transporte", "Salud", "Compras", "Entretenimiento", "Educación", "Hogar", "Mascotas", "Finanzas", "Sin categoría"]
+    private let categories = ["Ingresos", "Transferencia", "Alimentos", "Viajes", "Comidas", "Servicios", "Transporte", "Salud", "Compras", "Entretenimiento", "Educación", "Hogar", "Mascotas", "Finanzas", "Sin categoría", "Por revisar"]
 
     init(movement: Movement) {
         self.movement = movement
@@ -323,8 +323,31 @@ private struct MovementDetailView: View {
             if let statement = movement.statementId.flatMap({ id in store.statements.first(where: { $0.id == id }) }) {
                 LabeledContent("Estado", value: "\(statement.source) · \(conciseStatementPeriod(statement))")
                 LabeledContent("Archivo", value: statement.fileName)
+                if movement.extractionEvidence != nil {
+                    NavigationLink {
+                        StatementDocumentView(statement: statement, focusedEvidence: movement.extractionEvidence)
+                    } label: {
+                        Label("Abrir página de origen", systemImage: "doc.text.magnifyingglass")
+                    }
+                }
             } else {
                 LabeledContent("Estado", value: "Movimiento manual")
+            }
+            if movement.displayMerchant != movement.rawDescription {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Texto original del estado")
+                        .font(.caption)
+                        .foregroundStyle(Color.marcelitoNavySoft)
+                    Text(movement.rawDescription)
+                        .font(.caption2)
+                        .foregroundStyle(Color.marcelitoNavy)
+                        .textSelection(.enabled)
+                }
+            }
+            if let reviewReason = movement.reviewReason {
+                Label(reviewReason, systemImage: "exclamationmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(Color.marcelitoAmber)
             }
             if let evidence = movement.extractionEvidence {
                 let method = evidence.method == "vision-ocr" ? "OCR visual" : evidence.method == "pdf-text" ? "Texto del PDF" : evidence.method
@@ -808,7 +831,7 @@ struct AccountsView: View {
         var seen = Set<String>()
         var result: [AccountDisplayItem] = []
         for statement in store.statements {
-            let kind = statement.kind ?? (statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank)
+            let kind = statement.kind ?? (statement.source.localizedCaseInsensitiveContains("Amex") || statement.source.localizedCaseInsensitiveContains("Rappi") ? .card : .bank)
             let item = AccountDisplayItem(source: statement.source, kind: kind, accountKey: statement.accountKey)
             if seen.insert(item.id).inserted { result.append(item) }
         }
@@ -1039,7 +1062,7 @@ private struct StatementDocumentTile: View {
     let statement: StatementRecord
 
     private var iconName: String {
-        statement.kind == .card || statement.source.localizedCaseInsensitiveContains("amex")
+        statement.kind == .card || statement.source.localizedCaseInsensitiveContains("amex") || statement.source.localizedCaseInsensitiveContains("rappi")
             ? "creditcard.fill"
             : "building.columns.fill"
     }
@@ -1088,13 +1111,64 @@ private struct StatementDocumentTile: View {
 private struct StatementDocumentView: View {
     @Environment(FinanceStore.self) private var store
     let statement: StatementRecord
+    let focusedEvidence: MovementExtractionEvidence?
+    @State private var pageIndex: Int
+    @State private var zoomScale: CGFloat = 1
+    @State private var fitWidthToken = 0
+
+    init(statement: StatementRecord, focusedEvidence: MovementExtractionEvidence? = nil) {
+        self.statement = statement
+        self.focusedEvidence = focusedEvidence
+        _pageIndex = State(initialValue: max(0, (focusedEvidence?.page ?? 1) - 1))
+    }
 
     var body: some View {
         Group {
             if let url = store.statementFileURL(for: statement),
                let document = PDFDocument(url: url) {
-                PDFDocumentRepresentable(document: document)
-                    .ignoresSafeArea(edges: .bottom)
+                VStack(spacing: 0) {
+                    HStack(spacing: 10) {
+                        Button { pageIndex = max(0, pageIndex - 1) } label: {
+                            Image(systemName: "chevron.left")
+                        }
+                        .disabled(pageIndex <= 0)
+                        Text("Página \(min(pageIndex + 1, document.pageCount)) de \(document.pageCount)")
+                            .font(.caption.monospacedDigit())
+                            .frame(maxWidth: .infinity)
+                        Button { pageIndex = min(max(document.pageCount - 1, 0), pageIndex + 1) } label: {
+                            Image(systemName: "chevron.right")
+                        }
+                        .disabled(pageIndex >= document.pageCount - 1)
+                        Divider().frame(height: 20)
+                        Button { zoomScale = max(0.55, zoomScale - 0.2) } label: {
+                            Image(systemName: "minus.magnifyingglass")
+                        }
+                        Button("Ajustar a ancho") { fitWidthToken += 1 }
+                            .font(.caption.weight(.semibold))
+                        Button { zoomScale = min(6, zoomScale + 0.2) } label: {
+                            Image(systemName: "plus.magnifyingglass")
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(Color.marcelitoCreamSoft)
+                    if statement.ocrConfidence != nil {
+                        Label("Este PDF requirió OCR", systemImage: "text.viewfinder")
+                            .font(.caption2)
+                            .foregroundStyle(Color.marcelitoNavySoft)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 14)
+                            .padding(.bottom, 6)
+                    }
+                    PDFDocumentRepresentable(
+                        document: document,
+                        pageIndex: $pageIndex,
+                        zoomScale: $zoomScale,
+                        fitWidthToken: fitWidthToken,
+                        focusedEvidence: focusedEvidence
+                    )
+                }
             } else {
                 ContentUnavailableView(
                     "Archivo no disponible",
@@ -1112,14 +1186,60 @@ private struct StatementDocumentView: View {
 
 private struct PDFDocumentRepresentable: UIViewRepresentable {
     let document: PDFDocument
+    @Binding var pageIndex: Int
+    @Binding var zoomScale: CGFloat
+    let fitWidthToken: Int
+    let focusedEvidence: MovementExtractionEvidence?
+
+    final class Coordinator: NSObject {
+        var pageIndex: Binding<Int>?
+        var zoomScale: Binding<CGFloat>?
+        var observer: NSObjectProtocol?
+        var didInitialFit = false
+        var lastFitWidthToken = 0
+
+        deinit {
+            if let observer { NotificationCenter.default.removeObserver(observer) }
+        }
+
+        func sync(_ view: PDFView) {
+            if let page = view.currentPage, let document = view.document,
+               let index = (0..<document.pageCount).first(where: { document.page(at: $0) === page }) {
+                pageIndex?.wrappedValue = index
+            }
+            zoomScale?.wrappedValue = view.scaleFactor
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        let coordinator = Coordinator()
+        coordinator.pageIndex = $pageIndex
+        coordinator.zoomScale = $zoomScale
+        return coordinator
+    }
 
     func makeUIView(context: Context) -> PDFView {
         let view = PDFView()
         view.document = document
-        view.autoScales = true
-        view.displayMode = .singlePageContinuous
-        view.displayDirection = .vertical
+        view.autoScales = false
+        view.displayMode = .singlePage
+        view.displayDirection = .horizontal
+        view.usePageViewController(false)
+        view.minScaleFactor = 0.55
+        view.maxScaleFactor = 6
         view.backgroundColor = UIColor(red: 0.96, green: 0.94, blue: 0.88, alpha: 1)
+        context.coordinator.observer = NotificationCenter.default.addObserver(
+            forName: .PDFViewPageChanged,
+            object: view,
+            queue: .main
+        ) { [weak coordinator = context.coordinator, weak view] _ in
+            guard let view else { return }
+            coordinator?.sync(view)
+        }
+        DispatchQueue.main.async {
+            fitWidth(view, coordinator: context.coordinator)
+            focus(view, coordinator: context.coordinator)
+        }
         return view
     }
 
@@ -1127,7 +1247,42 @@ private struct PDFDocumentRepresentable: UIViewRepresentable {
         if view.document !== document {
             view.document = document
         }
-        view.autoScales = true
+        if !context.coordinator.didInitialFit {
+            fitWidth(view, coordinator: context.coordinator)
+        }
+        if context.coordinator.lastFitWidthToken != fitWidthToken {
+            context.coordinator.lastFitWidthToken = fitWidthToken
+            fitWidth(view, coordinator: context.coordinator)
+        }
+        if let page = document.page(at: min(max(pageIndex, 0), max(document.pageCount - 1, 0))), view.currentPage !== page {
+            view.go(to: PDFDestination(page: page, at: CGPoint(x: page.bounds(for: .mediaBox).midX, y: page.bounds(for: .mediaBox).midY)))
+        }
+        if abs(view.scaleFactor - zoomScale) > 0.02, zoomScale > 0 {
+            view.autoScales = false
+            view.scaleFactor = min(view.maxScaleFactor, max(view.minScaleFactor, zoomScale))
+        }
+    }
+
+    private func fitWidth(_ view: PDFView, coordinator: Coordinator) {
+        guard let page = view.currentPage ?? document.page(at: min(max(pageIndex, 0), max(document.pageCount - 1, 0))) else { return }
+        let pageWidth = page.bounds(for: .mediaBox).width
+        guard pageWidth > 0, view.bounds.width > 0 else { return }
+        let scale = (view.bounds.width - 24) / pageWidth
+        view.autoScales = false
+        view.scaleFactor = min(view.maxScaleFactor, max(view.minScaleFactor, scale))
+        coordinator.didInitialFit = true
+        coordinator.zoomScale?.wrappedValue = view.scaleFactor
+    }
+
+    private func focus(_ view: PDFView, coordinator: Coordinator) {
+        guard let evidence = focusedEvidence,
+              let pageNumber = evidence.page,
+              let page = document.page(at: max(0, pageNumber - 1)) else { return }
+        view.go(to: PDFDestination(page: page, at: CGPoint(
+            x: page.bounds(for: .mediaBox).minX + page.bounds(for: .mediaBox).width * CGFloat((evidence.bounds?.x ?? 0.5) + (evidence.bounds?.width ?? 0) / 2),
+            y: page.bounds(for: .mediaBox).minY + page.bounds(for: .mediaBox).height * CGFloat((evidence.bounds?.y ?? 0.5) + (evidence.bounds?.height ?? 0) / 2)
+        )))
+        coordinator.sync(view)
     }
 }
 
@@ -1145,7 +1300,7 @@ private struct StatementSummaryEditor: View {
         self.statement = statement
         _summary = State(initialValue: statement.summary ?? StatementSummaryRecord())
         _source = State(initialValue: statement.source)
-        _statementKind = State(initialValue: statement.kind ?? (statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank))
+        _statementKind = State(initialValue: statement.kind ?? (statement.source.localizedCaseInsensitiveContains("Amex") || statement.source.localizedCaseInsensitiveContains("Rappi") ? .card : .bank))
     }
 
     private func decimalBinding(_ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>) -> Binding<String> {
@@ -1188,6 +1343,9 @@ private struct StatementSummaryEditor: View {
                 decimalField("Saldo anterior", \.previousBalance)
                 decimalField("Nuevas transacciones", \.newTransactions)
                 decimalField("Pagos realizados", \.payments)
+                if source.localizedCaseInsensitiveContains("Rappi") {
+                    decimalField("Pagos y abonos", \.paymentsCredits)
+                }
                 decimalField("Créditos / abonos contables", \.credits)
                 decimalField("Nuevos cargos", \.newCharges)
                 decimalField("Intereses", \.interest)

@@ -350,7 +350,7 @@ function validateTransaction(transaction: Transaction, statements: Statement[]) 
   const reason = !withinDeclaredDirectionTotal
     ? "importe individual supera el total declarado del estado"
     : !validAmount ? "importe inválido o fuera de rango" : !validDescription ? "descripción administrativa o vacía" : !validDate ? "fecha inválida" : !validDirection ? "dirección no clara" : undefined;
-  const status: TransactionValidationStatus = invalid ? "invalid" : transaction.category === "Sin categoría" || (transaction.confidence ?? 1) < 0.75 ? "review" : "valid";
+  const status: TransactionValidationStatus = invalid ? "invalid" : transaction.category === "Sin categoría" || transaction.category === "Por revisar" || (transaction.confidence ?? 1) < 0.75 ? "review" : "valid";
   return { status, reason };
 }
 
@@ -446,6 +446,11 @@ function isRefund(transaction: Transaction) {
   return kindFromText(transaction) === "refund";
 }
 
+function isEnrichmentOnlyReview(transaction: Transaction) {
+  return transaction.category === "Por revisar"
+    || /comercio|categor[ií]a|merchant/i.test(transaction.reviewReason ?? "");
+}
+
 export function hasTraceableEvidence(transaction: Transaction) {
   // Manual rows are intentionally evidence-complete without a PDF page. They
   // are user-entered events and must not lower the import quality score.
@@ -486,7 +491,7 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
   const occurrenceByStatement = new Map<string, number>();
   const normalized = input.map((transaction) => {
     const description = transaction.description.replace(/\s+/g, " ").trim();
-    const normalizedDescription = normalizeConcept(description);
+    const normalizedDescription = transaction.normalizedMerchant || normalizeConcept(description);
     const status = validateTransaction({ ...transaction, description }, statements);
     const baseDeduplicationKey = buildDeduplicationKey({ ...transaction, description, normalizedDescription });
     const occurrenceScope = `${transaction.statementId ?? "manual"}|${baseDeduplicationKey}`;
@@ -495,9 +500,13 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
     const next: Transaction = {
       ...transaction,
       description,
+      rawDescription: transaction.rawDescription ?? description,
+      displayMerchant: transaction.displayMerchant ?? description,
+      normalizedMerchant: transaction.normalizedMerchant ?? normalizedDescription,
       normalizedDescription,
       deduplicationKey: `${baseDeduplicationKey}|ocurrencia:${occurrence}`,
       validationStatus: status.status,
+      reviewReason: transaction.reviewReason ?? status.reason,
     };
     const auditPeriod = ensurePeriod(next);
     auditPeriod.importedCount += 1;
@@ -624,7 +633,7 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
   const classified = canonical.map((transaction) => {
     const reconciled = byId.get(transaction.id) ?? transaction;
     if (reconciled.reconciledAs) return reconciled;
-    const text = reconciled.normalizedDescription || normalizeConcept(reconciled.description);
+    const text = reconciled.normalizedMerchant || reconciled.normalizedDescription || normalizeConcept(reconciled.description);
     let kind = kindFromText(reconciled);
     let flow = reconciled.flow;
     if (hasRefundHint(reconciled)) {
@@ -710,7 +719,7 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
     }
   });
 
-  const reviewTransactions = classified.filter((transaction) => transaction.validationStatus === "review" || transaction.category === "Sin categoría" || (transaction.confidence ?? 1) < 0.75);
+  const reviewTransactions = classified.filter((transaction) => transaction.validationStatus === "review" || transaction.category === "Sin categoría" || transaction.category === "Por revisar" || (transaction.confidence ?? 1) < 0.75);
   const relevantReviewThreshold = 1000;
   // Only rows that are demonstrably imported from a statement participate in
   // provenance coverage. Legacy/manual entries without a statement id are
@@ -735,7 +744,7 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
     cardPaymentAmount,
     ...totals,
     reviewCount: reviewTransactions.length,
-    relevantReviewCount: reviewTransactions.filter((transaction) => absolute(transaction.amount) >= relevantReviewThreshold).length,
+    relevantReviewCount: reviewTransactions.filter((transaction) => absolute(transaction.amount) >= relevantReviewThreshold && !isEnrichmentOnlyReview(transaction)).length,
     // Quality percentages use every imported row as the denominator.  This
     // keeps rejected/admin rows and cross-statement duplicates visible in the
     // score instead of silently making a bad import look healthy.
@@ -745,7 +754,7 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
     missingEvidenceCount,
     criticalIssues: [
       ...(invalidTransactions.length ? [`${invalidTransactions.length} movimiento(s) rechazado(s) por datos inválidos o administrativos`] : []),
-      ...(reviewTransactions.some((transaction) => absolute(transaction.amount) >= relevantReviewThreshold) ? ["Hay movimientos relevantes pendientes de revisión"] : []),
+      ...(reviewTransactions.some((transaction) => absolute(transaction.amount) >= relevantReviewThreshold && !isEnrichmentOnlyReview(transaction)) ? ["Hay movimientos relevantes pendientes de revisión"] : []),
       ...(missingEvidenceCount ? [`${missingEvidenceCount} movimiento(s) importado(s) sin evidencia completa`] : []),
     ],
     periods: Array.from(periods.values()).sort((left, right) => right.key.localeCompare(left.key)),

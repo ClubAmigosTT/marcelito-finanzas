@@ -1,14 +1,32 @@
 import type { ImportResult, SourceDetection, StatementKind, StatementReconciliation, StatementSource, StatementSummary, Transaction, TransactionKind } from "./types.ts";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { isAdministrativeDescription, normalizeConcept } from "./reconciliation.ts";
+import { merchantIdentityFor, normalizeRappiMerchant } from "./merchantNormalization.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-2026.08.31.8";
+export const PDF_READER_VERSION = "web-reader-2026.09.15.1";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
 
 type PdfTextItem = { str: string; transform: number[] };
+
+/** OCR words retained transiently so Rappi rows can be reconstructed by columns. */
+export type OcrWord = {
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  confidence: number;
+};
+
+export type OcrPageLayout = {
+  page: number;
+  width: number;
+  height: number;
+  words: OcrWord[];
+};
 
 /** Rebuilds PDF.js text items into visual lines without losing column order. */
 export function rebuildPdfText(items: unknown[]) {
@@ -66,7 +84,9 @@ export function detectSourceEvidence(text: string, fileName: string): SourceDete
       ? "Amex"
       : /\bsantander\b/.test(normalizedFileName)
         ? "Santander"
-        : undefined;
+        : /\brappi(?:card)?\b/.test(normalizedFileName)
+          ? "Rappi"
+          : undefined;
 
   const normalizedLines = normalizeText(text)
     .split(/\n+/)
@@ -157,11 +177,16 @@ export function detectSourceEvidence(text: string, fileName: string): SourceDete
     ["Hey Banco", /hey banco/],
     ["Nu", /\bnu(?: mexico| banco)?\b/],
     ["Klar", /\bklar\b/],
-    ["Rappi", /\brappi\b/],
+    ["Rappi", /\brappi(?:card)?\b/],
     ["Ualá", /\buala\b/],
   ];
   const detected = otherBanks.find(([, marker]) => marker.test(institutional))?.[0];
-  if (detected) return result(detected, filenameSource === detected ? 0.98 : 0.95, [`marca ${detected} en encabezado`]);
+  if (detected) {
+    const confidence = detected === "Rappi"
+      ? (filenameSource === detected ? 0.999 : 0.99)
+      : filenameSource === detected ? 0.98 : 0.95;
+    return result(detected, confidence, [`marca ${detected} en encabezado`]);
+  }
   if (filenameSource) return result(filenameSource, 0.9, ["nombre de archivo; falta evidencia institucional"]);
   return result("Desconocido", 0, []);
 }
@@ -220,6 +245,7 @@ export function detectAccountKey(text: string, source: StatementSource) {
 function detectStatementKind(text: string, source: StatementSource): StatementKind {
   if (source === "Amex") return "card";
   if (source === "Santander" || source === "BBVA") return "bank";
+  if (source === "Rappi") return "card";
   const normalized = normalizeText(text);
   const cardMarkers = [
     "tarjeta de credito", "tarjetahabiente", "credito disponible",
@@ -230,7 +256,7 @@ function detectStatementKind(text: string, source: StatementSource): StatementKi
     "cuenta de cheques", "cuenta de ahorro", "cuenta clabe", "estado de cuenta nomina",
     "super nomina", "depositos", "retiros", "saldo final", "saldo disponible", "cuenta corriente",
     "banorte", "hsbc", "scotiabank", "citibanamex", "banamex", "inbursa", "banco azteca",
-    "banco del bajio", "mifel", "invex", "hey banco", "nu mexico", "nu banco", "klar", "rappi", "uala",
+    "banco del bajio", "mifel", "invex", "hey banco", "nu mexico", "nu banco", "klar", "uala",
   ];
   const cardScore = cardMarkers.filter((marker) => normalized.includes(marker)).length;
   const bankScore = bankMarkers.filter((marker) => normalized.includes(marker)).length;
@@ -332,7 +358,7 @@ function lineMoneyValues(line: string, allowBareBankAmount = false) {
   }).filter((item) => item.value !== 0 && Math.abs(item.value) < 100_000_000);
 }
 
-function parseStatementSummary(text: string, kind: StatementKind): StatementSummary {
+function parseStatementSummary(text: string, kind: StatementKind, source?: StatementSource): StatementSummary {
   const summary: StatementSummary = {};
   // Card PDFs repeat labels and account identifiers on every movement page.
   // The first summary zone (before the movement table) is the only safe
@@ -559,6 +585,26 @@ function parseStatementSummary(text: string, kind: StatementKind): StatementSumm
     }
     if (foreignSectionTotal) summary.foreignTransactionTotal = parseToken(foreignSectionTotal[1]);
   }
+  if (source === "Rappi") {
+    // Rappi prints card controls with different labels from the legacy card
+    // readers. Read only those explicit controls; table rows are reconciled
+    // separately and never inferred from the last number on a line.
+    const rappiText = normalizeText(text);
+    const rappiAmount = (labels: string[]) => {
+      const value = findSummaryAmount(rappiText, labels);
+      return value === undefined ? undefined : Math.abs(value);
+    };
+    const charges = rappiAmount(["total de cargos", "cargos regulares"]);
+    const paymentsAndCredits = rappiAmount(["pagos y abonos", "total de abonos"]);
+    const debt = rappiAmount(["saldo deudor total", "saldo deudor"]);
+    if (charges !== undefined) summary.newCharges = charges;
+    if (paymentsAndCredits !== undefined) summary.paymentsCredits = paymentsAndCredits;
+    if (debt !== undefined) {
+      summary.debtBalance = debt;
+      summary.statementBalance = debt;
+    }
+  }
+
   // A summary label can be followed by an administrative identifier (account,
   // certificate or tracking number) that happens to look numeric. Keep the
   // parser conservative: values outside the bounded financial domain are not
@@ -717,8 +763,24 @@ export function gateOcrReconciliation(
   mode: ImportResult["mode"],
   confidence?: number,
   pageConfidences?: number[],
+  columnsCalibrated?: boolean,
+  rejectedRows = 0,
 ) {
   if (mode !== "ocr" || reconciliation.status !== "valid") return reconciliation;
+  if (columnsCalibrated === false) {
+    return {
+      ...reconciliation,
+      status: "pending" as const,
+      reason: "OCR provisional: no se pudieron calibrar las columnas de la tabla; revisa el estado antes de aceptar.",
+    };
+  }
+  if (rejectedRows > 0) {
+    return {
+      ...reconciliation,
+      status: "pending" as const,
+      reason: `OCR provisional: ${rejectedRows} fila${rejectedRows === 1 ? "" : "s"} no conservó fecha, importe o descripción confiable; revisa el estado antes de aceptar.`,
+    };
+  }
   const weakestPage = pageConfidences?.length ? Math.min(...pageConfidences) : undefined;
   const weakAverage = (confidence ?? 0) < 0.88;
   const weakPage = weakestPage !== undefined && weakestPage < 0.78;
@@ -766,6 +828,52 @@ function inferImportedKind(description: string, amount: number, isCredit: boolea
   // income. Keep the two ledgers semantically separate from import time.
   if (isCredit || amount > 0) return statementKind === "card" ? "credit" : "income";
   return "purchase";
+}
+
+function classifyRappiMovement(rawDescription: string, rawAmount: string, amountValue: number, fileName: string, index: number, date: string, page?: number, bounds?: { x: number; y: number; width: number; height: number }, confidence = 0.9, sameVisualRow = false, chargeDate?: string): Transaction {
+  const identity = normalizeRappiMerchant(rawDescription);
+  const normalized = normalizeText(rawDescription);
+  const isPayment = /pago\s+(?:por\s+spei|de\s+tarjeta|en\s+linea)|pago.*(?:tarjeta|credito)|tarjeta.*pago/.test(normalized);
+  const isRefund = /bonificacion|cashback|devolucion|reembolso|abono/.test(normalized);
+  const printedCredit = /^\s*-/.test(rawAmount) || /\bcr\b/i.test(rawAmount);
+  const isFee = /iva|impuesto|interes|comision/.test(normalized) && !isRefund;
+  const flow: Transaction["flow"] = isPayment ? "debt" : isRefund || printedCredit || /abono|credito/.test(normalized) ? "income" : "expense";
+  const value = Math.round(Math.abs(amountValue) * 100) / 100 * (flow === "income" ? 1 : -1);
+  const kind: TransactionKind = isPayment
+    ? "cardPayment"
+    : isRefund
+      ? "refund"
+      : isFee
+        ? /interes/.test(normalized) ? "interest" : "fee"
+        : flow === "income" ? "credit" : "purchase";
+  const guessedCategory = kind === "cardPayment" ? "Transferencia" : guessCategory(identity.normalizedMerchant || identity.displayMerchant);
+  const category = identity.confidence < 0.75 || guessedCategory === "Sin categoría" ? "Por revisar" : guessedCategory;
+  const reviewReason = identity.reviewReason ?? (guessedCategory === "Sin categoría" ? "Comercio legible, pero todavía sin categoría asignada." : undefined);
+  const importKey = normalizeText(fileName).replace(/[^a-z0-9]+/g, "-").slice(0, 28) || "estado";
+  return {
+    id: `import-${importKey}-${index}-${value}`,
+    date,
+    chargeDate,
+    description: identity.displayMerchant,
+    rawDescription: identity.rawDescription,
+    normalizedMerchant: identity.normalizedMerchant,
+    displayMerchant: identity.displayMerchant,
+    account: "Rappi",
+    category,
+    amount: value,
+    flow,
+    kind,
+    confidence,
+    reviewReason,
+    extractionEvidence: {
+      method: "pdf-text",
+      page,
+      confidence,
+      sourceText: identity.rawDescription.slice(0, 240),
+      bounds,
+      sameVisualRow,
+    },
+  };
 }
 
 export function extractTransactions(text: string, source: StatementSource, fileName: string, kind: StatementKind): Transaction[] {
@@ -1123,10 +1231,30 @@ export function extractTransactions(text: string, source: StatementSource, fileN
     const importedKind = inferImportedKind(description, value, isCredit, kind, explicitOwnTransfer);
     const category = importedKind === "cardPayment" || importedKind === "bankTransfer" ? "Transferencia" : guessCategory(description);
     const travelRelated = /viaje|hotel|hospedaje|aerolinea|vuelo|avion|transporte|uber|taxi|metro|renta de auto|destino|equipaje|airbnb|aeropuerto/i.test(normalizedDescription);
+    if (source === "Rappi") {
+      const rappi = classifyRappiMovement(
+        rawDescription,
+        amount.raw,
+        amountValue,
+        fileName,
+        index,
+        formatDate(date),
+        rowPage,
+        undefined,
+        0.95,
+        true,
+      );
+      results.push({ ...rappi, travelRelated, foreignCurrency: false, extractionEvidence: { ...rappi.extractionEvidence!, sourceText: line.slice(0, 240) } });
+      return;
+    }
+    const identity = merchantIdentityFor(description, source);
     results.push({
       id: `import-${importKey}-${index}-${value}`,
       date: formatDate(date),
       description: description.slice(0, 54),
+      rawDescription: identity.rawDescription,
+      normalizedMerchant: identity.normalizedMerchant,
+      displayMerchant: description,
       account: source,
       category,
       amount: value,
@@ -1150,6 +1278,210 @@ export function extractTransactions(text: string, source: StatementSource, fileN
   return results;
 }
 
+type RappiOcrColumns = {
+  descriptionStart: number;
+  amountStart: number;
+  headerY: number;
+};
+
+type OcrLine = {
+  words: OcrWord[];
+  y: number;
+};
+
+export type RappiOcrParseResult = {
+  transactions: Transaction[];
+  columnsCalibrated: boolean;
+  rejectedRows: number;
+};
+
+function groupOcrWords(words: OcrWord[]) {
+  const lines: OcrLine[] = [];
+  const ordered = [...words].filter((word) => word.text.trim()).sort((left, right) => (left.y + left.height / 2) - (right.y + right.height / 2) || left.x - right.x);
+  ordered.forEach((word) => {
+    const center = word.y + word.height / 2;
+    const tolerance = Math.max(0.006, word.height * 0.7);
+    const line = lines.find((candidate) => Math.abs(candidate.y - center) <= tolerance);
+    if (line) {
+      line.words.push(word);
+      line.y = (line.y + center) / 2;
+    } else {
+      lines.push({ words: [word], y: center });
+    }
+  });
+  return lines.sort((left, right) => left.y - right.y).map((line) => ({ ...line, words: line.words.sort((left, right) => left.x - right.x) }));
+}
+
+function ocrLineText(line: OcrLine) {
+  return line.words.map((word) => word.text).join(" ").replace(/\s+/g, " ").trim();
+}
+
+function calibrateRappiColumns(lines: OcrLine[]): RappiOcrColumns | undefined {
+  const header = lines.find((line) => {
+    const value = normalizeText(ocrLineText(line));
+    return /fecha/.test(value) && /descrip|movimiento/.test(value) && /monto|importe/.test(value);
+  });
+  if (!header) return undefined;
+  const descriptionWord = header.words.find((word) => /descrip|movimiento/i.test(normalizeText(word.text)));
+  const amountWord = header.words.find((word) => /monto|importe/i.test(normalizeText(word.text)));
+  const dateWords = header.words.filter((word) => /fecha/i.test(normalizeText(word.text)));
+  if (!descriptionWord || !amountWord || !dateWords.length || amountWord.x <= descriptionWord.x) return undefined;
+  const descriptionStart = Math.max(0, descriptionWord.x - Math.max(0.025, descriptionWord.width));
+  const amountStart = Math.max(descriptionStart + 0.12, amountWord.x - Math.max(0.025, amountWord.width));
+  if (amountStart >= 1 || amountStart <= descriptionStart) return undefined;
+  return { descriptionStart, amountStart, headerY: header.y };
+}
+
+function parseRappiDate(value: string) {
+  const compact = value.replace(/\s+/g, "");
+  const iso = compact.match(/^(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+  if (iso) return `${iso[1]}-${String(Number(iso[2])).padStart(2, "0")}-${String(Number(iso[3])).padStart(2, "0")}`;
+  const dmy = compact.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})$/);
+  if (dmy) return `${dmy[3]}-${String(Number(dmy[2])).padStart(2, "0")}-${String(Number(dmy[1])).padStart(2, "0")}`;
+  return undefined;
+}
+
+function dateWordsInRappiRow(words: OcrWord[], columns: RappiOcrColumns) {
+  return words
+    .filter((word) => word.x < columns.descriptionStart)
+    .flatMap((word) => {
+      const value = parseRappiDate(word.text);
+      return value ? [value] : [];
+    });
+}
+
+function amountInRappiColumn(words: OcrWord[], columns: RappiOcrColumns) {
+  const amountText = words.filter((word) => word.x >= columns.amountStart).map((word) => word.text).join(" ");
+  const pattern = /[-+]?\s*\$?\s*(?:\d{1,3}(?:[,.\s]\d{3})+|\d+)(?:[.,]\d{1,2})(?:\s*CR)?/gi;
+  const candidates = Array.from(amountText.matchAll(pattern)).map((match) => match[0].trim()).filter((value) => normalizeAmount(value) !== 0);
+  if (candidates.length !== 1) return undefined;
+  return { raw: candidates[0], value: normalizeAmount(candidates[0]) };
+}
+
+function boundsForOcrWords(words: OcrWord[]) {
+  if (!words.length) return undefined;
+  const left = Math.min(...words.map((word) => word.x));
+  const top = Math.min(...words.map((word) => word.y));
+  const right = Math.max(...words.map((word) => word.x + word.width));
+  const bottom = Math.max(...words.map((word) => word.y + word.height));
+  return { x: left, y: top, width: Math.max(0, right - left), height: Math.max(0, bottom - top) };
+}
+
+/**
+ * Parses Rappi OCR as a visual table. Amounts are accepted only from the
+ * calibrated amount column; description numbers and processor references can
+ * therefore never become the amount merely because they happen to be last.
+ */
+export function parseRappiOcrTransactions(layout: OcrPageLayout[], fileName: string): RappiOcrParseResult {
+  const transactions: Transaction[] = [];
+  let lastColumns: RappiOcrColumns | undefined;
+  let calibratedHeaderFound = false;
+  let pagesWithCandidateRows = 0;
+  let rejectedRows = 0;
+  let sequence = 0;
+
+  layout.forEach((page) => {
+    const lines = groupOcrWords(page.words);
+    const pageColumns = calibrateRappiColumns(lines);
+    if (pageColumns) {
+      lastColumns = pageColumns;
+      calibratedHeaderFound = true;
+    }
+    const columns = pageColumns ?? lastColumns;
+    const firstHeaderY = pageColumns?.headerY ?? 0;
+    if (!columns) {
+      if (lines.some((line) => /\d{4}[-/.]\d{1,2}[-/.]\d{1,2}/.test(ocrLineText(line)))) pagesWithCandidateRows += 1;
+      return;
+    }
+    let pending: { dates: string[]; description: string; amount: { raw: string; value: number }; words: OcrWord[]; confidence: number; sameVisualRow: boolean } | undefined;
+    const flush = () => {
+      if (!pending) return;
+      const date = pending.dates[0];
+      const chargeDate = pending.dates[1];
+      if (date && pending.description.trim()) {
+        const base = classifyRappiMovement(
+          pending.description,
+          pending.amount.raw,
+          pending.amount.value,
+          fileName,
+          sequence,
+          date,
+          page.page,
+          boundsForOcrWords(pending.words),
+          pending.confidence,
+          pending.sameVisualRow,
+          chargeDate,
+        );
+        transactions.push({
+          ...base,
+          rawDescription: pending.description,
+          displayMerchant: base.displayMerchant,
+          description: base.displayMerchant ?? base.description,
+          confidence: pending.confidence,
+          extractionEvidence: {
+            ...(base.extractionEvidence ?? { method: "ocr", confidence: pending.confidence }),
+            method: "ocr",
+            confidence: pending.confidence,
+            sourceText: ocrLineText({ words: pending.words, y: 0 }).slice(0, 240),
+            bounds: boundsForOcrWords(pending.words),
+            sameVisualRow: pending.sameVisualRow,
+          },
+        });
+        sequence += 1;
+      } else {
+        rejectedRows += 1;
+      }
+      pending = undefined;
+    };
+
+    for (const line of lines) {
+      const lineText = ocrLineText(line);
+      const normalizedLine = normalizeText(lineText);
+      if (line.y < firstHeaderY || /fecha.*(?:descrip|movimiento).*monto/.test(normalizedLine)) continue;
+      if (/^(?:total|saldo|cargos|abonos|pago minimo)/.test(normalizedLine)) {
+        flush();
+        continue;
+      }
+      const dates = dateWordsInRappiRow(line.words, columns);
+      const amount = amountInRappiColumn(line.words, columns);
+      const descriptionWords = line.words.filter((word) => word.x >= columns.descriptionStart && word.x < columns.amountStart);
+      if (dates.length && amount) {
+        flush();
+        pagesWithCandidateRows += 1;
+        const rowWords = [...line.words];
+        const confidenceValues = rowWords.map((word) => word.confidence).filter((value) => Number.isFinite(value) && value > 0);
+        pending = {
+          dates,
+          description: descriptionWords.map((word) => word.text).join(" ").replace(/\s+/g, " ").trim(),
+          amount,
+          words: rowWords,
+          confidence: confidenceValues.length ? Math.min(0.99, Math.max(0.01, confidenceValues.reduce((sum, value) => sum + value, 0) / confidenceValues.length)) : 0.75,
+          sameVisualRow: true,
+        };
+        continue;
+      }
+      // A continuation is appended only when it has neither its own date nor
+      // its own amount. A second amount/date starts a new visual decision and
+      // is never silently merged into the previous row.
+      if (pending && !dates.length && !amount && descriptionWords.length) {
+        pending.description = `${pending.description} ${descriptionWords.map((word) => word.text).join(" ")}`.replace(/\s+/g, " ").trim();
+        pending.words.push(...line.words);
+        pending.sameVisualRow = false;
+      } else if (dates.length || amount) {
+        flush();
+        if (dates.length || amount) rejectedRows += 1;
+      }
+    }
+    flush();
+  });
+
+  return {
+    transactions,
+    columnsCalibrated: calibratedHeaderFound && pagesWithCandidateRows > 0,
+    rejectedRows,
+  };
+}
+
 /**
  * Rebuilds the transient import rows with the same evidence annotation used
  * by inspectPdf. This is used only when the reviewer corrects the issuer or
@@ -1163,7 +1495,26 @@ export function parseImportedTransactions(
   kind: StatementKind,
   mode: ImportResult["mode"],
   ocrPageConfidences?: number[],
+  ocrLayout?: OcrPageLayout[],
 ): Transaction[] {
+  if (mode === "ocr" && source === "Rappi" && ocrLayout?.length) {
+    return parseRappiOcrTransactions(ocrLayout, fileName).transactions.map((transaction) => {
+      const page = transaction.extractionEvidence?.page;
+      const pageConfidence = page !== undefined ? ocrPageConfidences?.[page - 1] : undefined;
+      const rowConfidence = pageConfidence === undefined
+        ? transaction.confidence ?? 0.75
+        : Math.min(transaction.confidence ?? pageConfidence, pageConfidence);
+      return {
+        ...transaction,
+        confidence: rowConfidence,
+        extractionEvidence: {
+          ...(transaction.extractionEvidence ?? { method: "ocr" as const, confidence: rowConfidence }),
+          method: "ocr" as const,
+          confidence: rowConfidence,
+        },
+      };
+    });
+  }
   return extractTransactions(text, source, fileName, kind).map((transaction) => {
     const page = transaction.extractionEvidence?.page;
     const pageConfidence = mode === "ocr" && page !== undefined
@@ -1195,6 +1546,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
   });
   const pages: string[] = [];
   const pageConfidences: number[] = [];
+  const layouts: OcrPageLayout[] = [];
   const recognitionTimeoutMs = 45_000;
   const recognizeWithTimeout = async (image: HTMLCanvasElement) => {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
@@ -1234,6 +1586,22 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       const baseResult = await recognizeWithTimeout(canvas);
       let bestText = baseResult.data.text;
       let confidence = Number(baseResult.data.confidence);
+      const normalizedWords = (result: typeof baseResult) => {
+        const words = (result.data as typeof result.data & { words?: Array<{ text: string; confidence?: number; bbox?: { x0: number; y0: number; x1: number; y1: number } }> }).words;
+        if (!Array.isArray(words)) return [];
+        return words.map((word) => {
+          const bbox = word.bbox;
+          return {
+            text: word.text ?? "",
+            x: bbox ? bbox.x0 / canvas.width : 0,
+            y: bbox ? bbox.y0 / canvas.height : 0,
+            width: bbox ? Math.max(0, bbox.x1 - bbox.x0) / canvas.width : 0,
+            height: bbox ? Math.max(0, bbox.y1 - bbox.y0) / canvas.height : 0,
+            confidence: Number.isFinite(Number(word.confidence)) ? Math.max(0, Math.min(1, Number(word.confidence) / 100)) : 0.75,
+          } satisfies OcrWord;
+        }).filter((word) => word.text.trim());
+      };
+      let bestWords = normalizedWords(baseResult);
 
       // Low-confidence scans often have a gray background or faint table
       // rules. Retry only those pages with a contrast-enhanced copy. The
@@ -1262,6 +1630,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
             if (Number.isFinite(enhancedConfidence) && enhancedConfidence > confidence) {
               confidence = enhancedConfidence;
               bestText = enhancedResult.data.text;
+              bestWords = normalizedWords(enhancedResult);
             }
           }
         } catch {
@@ -1277,6 +1646,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
       // Keep explicit page sentinels so row reconstruction cannot cross page
       // boundaries or blend a movement with the following page's summary.
       pages.push(`__PDF_PAGE_${pageNumber}__\n${bestText}`);
+      layouts.push({ page: pageNumber, width: canvas.width, height: canvas.height, words: bestWords });
       onProgress(88 + Math.round((pageNumber / document.numPages) * 10), `Reconociendo página ${pageNumber} de ${document.numPages}`);
       canvas.width = 0;
       canvas.height = 0;
@@ -1289,6 +1659,7 @@ async function recognizePdfText(document: PDFDocumentProxy, onProgress: (value: 
   return {
     text: pages.join("\n"),
     pageConfidences,
+    layouts,
     confidence: pageConfidences.length
       ? pageConfidences.reduce((sum, value) => sum + value, 0) / pageConfidences.length
       : 0,
@@ -1353,8 +1724,11 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   const kind = detectStatementKind(text, source);
   onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
-  const parsed = parseImportedTransactions(text, source, file.name, kind, mode, ocrResult?.pageConfidences);
-  const summary = parseStatementSummary(text, kind);
+  const rappiOcr = mode === "ocr" && source === "Rappi" && ocrResult?.layouts?.length
+    ? parseRappiOcrTransactions(ocrResult.layouts, file.name)
+    : undefined;
+  const parsed = rappiOcr?.transactions ?? parseImportedTransactions(text, source, file.name, kind, mode, ocrResult?.pageConfidences, ocrResult?.layouts);
+  const summary = parseStatementSummary(text, kind, source);
   const baseReconciliation = reconcileStatementImport(kind, summary, parsed);
   // A matching total is necessary but not sufficient for automatic OCR
   // acceptance: a scan can lose one row and still happen to reconcile after
@@ -1366,6 +1740,8 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
     mode,
     ocrResult?.confidence,
     ocrResult?.pageConfidences,
+    source === "Rappi" && mode === "ocr" ? rappiOcr?.columnsCalibrated ?? false : undefined,
+    source === "Rappi" && mode === "ocr" ? rappiOcr?.rejectedRows ?? 0 : 0,
   );
   onProgress(100, "Listo para revisar");
 
@@ -1386,12 +1762,17 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
       reconciliation,
       ocrConfidence: ocrResult?.confidence,
       ocrPageConfidences: ocrResult?.pageConfidences,
+      ocrColumnsCalibrated: source === "Rappi" && mode === "ocr" ? rappiOcr?.columnsCalibrated ?? false : undefined,
+      ocrRejectedRows: source === "Rappi" && mode === "ocr" ? rappiOcr?.rejectedRows ?? 0 : undefined,
+      // Layout is transient and intentionally never persisted in ImportCommit
+      // or Statement; it is used only to open a source page during review.
+      ocrLayout: ocrResult?.layouts,
       extractedText: text,
     };
-    await document.destroy();
+    await (document as unknown as { destroy: () => Promise<void> }).destroy();
     return result;
   } catch (error) {
-    await document.destroy();
+    await (document as unknown as { destroy: () => Promise<void> }).destroy();
     throw error;
   }
 }

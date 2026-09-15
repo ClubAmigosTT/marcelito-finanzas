@@ -6,6 +6,11 @@ artifacts/
 *.log
 *.traineddata
 
+# Private PDF corpus and its local expectations never belong in a public build.
+private-corpus/
+output/
+rappi-page-*.png
+
 # Local secrets and editor state
 .env
 .env.*

@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "purpose": "Expectativas anonimizadas para ejecutar contra el corpus privado local; no contiene PDFs, texto extraído ni huellas de documentos.",
+  "documents": [
+    {
+      "id": "amex-text-01",
+      "issuer": "Amex",
+      "statementKind": "card",
+      "expectedMovementCount": 93,
+      "reconciliationExpected": "valid",
+      "extractionMethod": "text",
+      "requiresColumnCalibration": false,
+      "maxRejectedRows": 0,
+      "maxUncategorizedMovements": 0
+    },
+    {
+      "id": "bbva-text-01",
+      "issuer": "BBVA",
+      "statementKind": "bank",
+      "expectedMovementCount": 11,
+      "reconciliationExpected": "valid",
+      "extractionMethod": "text",
+      "requiresColumnCalibration": false,
+      "maxRejectedRows": 0,
+      "maxUncategorizedMovements": 0
+    },
+    {
+      "id": "santander-ocr-01",
+      "issuer": "Santander",
+      "statementKind": "bank",
+      "expectedMovementCount": 43,
+      "reconciliationExpected": "valid",
+      "extractionMethod": "ocr",
+      "requiresColumnCalibration": true,
+      "maxRejectedRows": 0,
+      "maxUncategorizedMovements": 0
+    },
+    {
+      "id": "santander-ocr-02",
+      "issuer": "Santander",
+      "statementKind": "bank",
+      "expectedMovementCount": 74,
+      "reconciliationExpected": "valid",
+      "extractionMethod": "ocr",
+      "requiresColumnCalibration": true,
+      "maxRejectedRows": 0,
+      "maxUncategorizedMovements": 0
+    },
+    {
+      "id": "santander-ocr-03",
+      "issuer": "Santander",
+      "statementKind": "bank",
+      "expectedMovementCount": 43,
+      "reconciliationExpected": "valid",
+      "extractionMethod": "ocr",
+      "requiresColumnCalibration": true,
+      "maxRejectedRows": 0,
+      "maxUncategorizedMovements": 0
+    },
+    {
+      "id": "rappi-ocr-01",
+      "issuer": "Rappi",
+      "statementKind": "card",
+      "expectedMovementCount": 2,
+      "reconciliationExpected": "valid",
+      "extractionMethod": "ocr",
+      "requiresColumnCalibration": true,
+      "maxRejectedRows": 0,
+      "maxUncategorizedMovements": 1
+    },
+    {
+      "id": "rappi-ocr-02",
+      "issuer": "Rappi",
+      "statementKind": "card",
+      "expectedMovementCount": 2,
+      "reconciliationExpected": "valid",
+      "extractionMethod": "ocr",
+      "requiresColumnCalibration": true,
+      "maxRejectedRows": 0,
+      "maxUncategorizedMovements": 1
+    },
+    {
+      "id": "rappi-ocr-03",
+      "issuer": "Rappi",
+      "statementKind": "card",
+      "expectedMovementCount": 2,
+      "reconciliationExpected": "valid",
+      "extractionMethod": "ocr",
+      "requiresColumnCalibration": true,
+      "maxRejectedRows": 0,
+      "maxUncategorizedMovements": 1
+    },
+    {
+      "id": "unreadable-columns-01",
+      "issuer": "Desconocido",
+      "statementKind": "unknown",
+      "expectedMovementCount": 0,
+      "reconciliationExpected": "pending",
+      "extractionMethod": "ocr",
+      "requiresColumnCalibration": true,
+      "maxRejectedRows": 1,
+      "maxUncategorizedMovements": 0
+    }
+  ]
+}

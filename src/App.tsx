@@ -402,20 +402,24 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
       issuerConfirmedByUser: false,
       ocrConfidence: commit.ocrConfidence,
       ocrPageConfidences: commit.ocrPageConfidences,
+      ocrColumnsCalibrated: commit.ocrColumnsCalibrated,
+      ocrRejectedRows: commit.ocrRejectedRows,
     };
     const nextStatements = previous
       ? statements.map((item) => item.id === statementId ? statement : item)
       : [statement, ...statements];
     const withoutPrevious = previous ? transactions.filter((item) => item.statementId !== statementId) : transactions;
     const importedPipeline = runTransactionPipeline([...importedTransactions, ...withoutPrevious], nextStatements);
-    const needsReview = importedTransactions.some((item) => item.category === "Sin categoría" || (item.confidence ?? 1) < 0.75)
+    const needsReview = importedTransactions.some((item) => item.validationStatus === "invalid" || /importe|fecha|columna|fila visual|direcci[oó]n/i.test(item.reviewReason ?? ""))
       || commit.source === "Desconocido"
       || commit.kind === "unknown"
       || commit.sourceDetection?.status !== "verified"
-      // Browser OCR currently returns flattened text without coordinates;
-      // keep scanned imports provisional until the user confirms their rows.
-      || commit.mode === "ocr"
-      || importedPipeline.audit.criticalIssues.length > 0;
+      // Santander and other legacy OCR paths remain explicitly provisional.
+      // Rappi may enter the ledger when its visual columns and totals passed;
+      // weak/uncalibrated rows are held by reconciliation instead.
+      || (commit.mode === "ocr" && (commit.source !== "Rappi" || commit.ocrColumnsCalibrated !== true))
+      || importedPipeline.audit.invalidCount > 0
+      || importedPipeline.audit.missingEvidenceCount > 0;
     statement.status = importedTransactions.length && !needsReview ? "ready" : "review";
     statement.transactionCount = importedPipeline.transactions.filter((item) => item.statementId === statementId).length;
 
@@ -480,7 +484,7 @@ function AppShell({ user, onSignOut, onDeleteAccount }: { user: string; onSignOu
           <motion.div key={section} className="page" initial={reduceMotion ? false : { opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={reduceMotion ? undefined : { opacity: 0, y: -4 }} transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}>
             {section === "Resumen" && <Home transactions={ledgerTransactions} statements={statements} metrics={metrics} goals={goals} setGoals={setGoals} auditRun={lastAuditRun} onImport={() => setImportOpen(true)} />}
             {section === "Gastos" && <Expenses transactions={ledgerTransactions} statements={statements} metrics={metrics} onImport={() => setImportOpen(true)} />}
-            {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onOpenStatement={(statement) => openImportedPdf(statement.sourceFingerprint)} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
+            {section === "Cuentas" && <Accounts transactions={ledgerTransactions} statements={statements} metrics={metrics} setTransactions={setTransactions} onImport={() => setImportOpen(true)} onMarkReviewed={markStatementReviewed} onOpenStatement={(statement) => openImportedPdf(statement.sourceFingerprint)} onLearnCategory={(description, category) => setCategoryRules((current) => { const key = merchantKey(description); if (!key) return current; if (category === "Sin categoría" || category === "Por revisar") { const next = { ...current }; delete next[key]; return next; } return { ...current, [key]: category }; })} />}
             {section === "Patrimonio" && <NetWorth metrics={metrics} />}
           </motion.div>
         </AnimatePresence>
@@ -805,10 +809,11 @@ function SpendingSplit({ period }: { period?: AnalyticsPeriod }) {
 
 function DataQualityIndicator({ metrics }: { metrics: ReturnType<typeof buildFinanceMetrics> }) {
   const quality = metrics.dataQuality;
-  const alert = quality.relevantReviewCount > 0 || quality.critical;
+  const alert = quality.blockedMovementCount > 0 || quality.critical;
   return <section className={`data-quality${alert ? " has-alert" : ""}`} aria-label="Calidad de datos y conciliación">
-    <div><span>Calidad de datos / conciliación</span><strong>{Math.round(quality.reconciledPercent)}%</strong><small>{Math.round(quality.classifiedPercent)}% clasificado · {Math.round(quality.evidencePercent)}% con evidencia · {quality.classifiedCount} de {quality.totalCount} movimientos clasificados</small></div>
-    {alert ? <p className="quality-alert">{metrics.isProvisional ? "KPI provisionales: " : ""}{quality.relevantReviewCount ? `revisa ${quality.relevantReviewCount} movimiento${quality.relevantReviewCount === 1 ? " relevante" : "s relevantes"}` : "hay filas rechazadas por el parser"}.</p> : <p className="quality-ok">Sin alertas relevantes de clasificación.</p>}
+    <div><span>Calidad del libro</span><strong>{Math.round(quality.reconciledPercent)}%</strong><small>{Math.round(quality.classifiedPercent)}% clasificado · {Math.round(quality.evidencePercent)}% con evidencia</small></div>
+    <div className="data-quality-grid" aria-label="Desglose de calidad"><div className="quality-metric"><span>Estados conciliados</span><strong>{quality.reconciledStatementCount}</strong><small>totales del estado cuadran</small></div><div className="quality-metric"><span>Movimientos bloqueados</span><strong>{quality.blockedMovementCount}</strong><small>importe, fecha o columna</small></div><div className="quality-metric"><span>Por enriquecer</span><strong>{quality.enrichmentCount}</strong><small>comercio o categoría</small></div></div>
+    {alert ? <p className="quality-alert">{metrics.isProvisional ? "KPI provisionales: " : ""}{quality.blockedMovementCount ? `${quality.blockedMovementCount} movimiento${quality.blockedMovementCount === 1 ? " bloqueado" : "s bloqueados"} requiere${quality.blockedMovementCount === 1 ? "" : "n"} revisión.` : "hay una alerta de calidad que requiere revisión."}</p> : quality.enrichmentCount ? <p className="quality-ok">Hay {quality.enrichmentCount} movimiento{quality.enrichmentCount === 1 ? "" : "s"} financieramente válidos por enriquecer.</p> : <p className="quality-ok">Sin alertas relevantes de calidad.</p>}
   </section>;
 }
 
@@ -948,9 +953,9 @@ function Movements({ transactions, statements, setTransactions, onLearnCategory,
   const [query, setQuery] = useState("");
   const filtered = transactions.filter((item) => {
     const statement = statements.find((source) => source.id === item.statementId);
-    return `${item.description} ${item.category} ${item.account} ${statementLabel(statement)} ${statement?.fileName ?? ""}`.toLowerCase().includes(query.toLowerCase());
+    return `${item.description} ${item.rawDescription ?? ""} ${item.normalizedMerchant ?? ""} ${item.category} ${item.account} ${statementLabel(statement)} ${statement?.fileName ?? ""}`.toLowerCase().includes(query.toLowerCase());
   });
-  function updateCategory(id: string, category: string) { setTransactions((items) => items.map((item) => item.id === id ? { ...item, category } : item)); const movement = transactions.find((item) => item.id === id); if (movement) onLearnCategory(movement.description, category); }
+  function updateCategory(id: string, category: string) { setTransactions((items) => items.map((item) => item.id === id ? { ...item, category } : item)); const movement = transactions.find((item) => item.id === id); if (movement) onLearnCategory(movement.normalizedMerchant ?? movement.description, category); }
   return <section className={embedded ? "movements-detail" : undefined}>{!embedded && <PageHeading title="Movimientos" body="Busca, corrige y conecta cada movimiento con su estado de cuenta." action="Importar estado" onAction={onImport} />}<div className="filter-row"><div className="search-box"><ListMagnifyingGlass size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar comercio, banco, periodo o categoría" /></div><span className="result-count">{filtered.length} de {transactions.length}</span></div>{filtered.length ? <div className="movement-list">{filtered.map((item) => { const statement = statements.find((source) => source.id === item.statementId); return <div className="movement-row" key={item.id}><span className={`movement-glyph glyph-${item.flow}`}>{item.flow === "transfer" ? <ArrowsLeftRight size={18} /> : item.flow === "income" ? <ArrowDown size={18} /> : <Receipt size={18} />}</span><div className="movement-name"><strong>{item.description}</strong><span>{item.date} · {item.account} · {statementLabel(statement)}</span></div><select aria-label={`Categoría de ${item.description}`} value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><strong className={item.amount > 0 ? "amount positive" : "amount"}>{moneyPrecise.format(item.amount)}</strong><button className="row-action" aria-label={`Editar ${item.description}`}><PencilSimple size={17} /></button></div>; })}</div> : <EmptyState title="No hay movimientos reales" body="Importa un estado de cuenta o agrega un movimiento manual para empezar." />}</section>;
 }
 
@@ -1217,7 +1222,7 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
       // PDF bytes leave the browser.
       void saveImportedPdf(inspected.sourceFingerprint, file);
       const withLearnedCategories = inspected.transactions.map((item) => {
-        const learned = categoryFromRules(item.description, categoryRules);
+        const learned = categoryFromRules(item.normalizedMerchant ?? item.description, categoryRules);
         return learned ? { ...item, category: learned, confidence: 1 } : item;
       });
       initialCategories.current = Object.fromEntries(withLearnedCategories.map((item) => [item.id, item.category]));
@@ -1245,12 +1250,13 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
       reviewKind,
       result.mode,
       result.ocrPageConfidences,
+      result.ocrLayout,
     );
     const withLearnedCategories = parsed.map((item) => {
-      const learned = categoryFromRules(item.description, categoryRules);
+      const learned = categoryFromRules(item.normalizedMerchant ?? item.description, categoryRules);
       return learned ? { ...item, category: learned, confidence: 1 } : item;
     });
-    const reparsedSummary = parseStatementSummary(result.extractedText, reviewKind);
+    const reparsedSummary = parseStatementSummary(result.extractedText, reviewKind, source);
     const sourceDetection = result.sourceDetection && source !== result.sourceDetection.source
       ? {
         ...result.sourceDetection,
@@ -1291,21 +1297,23 @@ function ImportDialog({ open, onClose, onSave, categoryRules }: { open: boolean;
       result.mode,
       result.ocrConfidence,
       result.ocrPageConfidences,
+      result.ocrColumnsCalibrated,
+      result.ocrRejectedRows,
     )
     : undefined;
   const reconciliationBlocked = Boolean(currentReconciliation && currentReconciliation.status !== "valid");
   const learnedCategories = Object.fromEntries(validItems.flatMap((item) => {
     const previous = initialCategories.current[item.id];
-    const key = merchantKey(item.description);
-    return key && previous && previous !== item.category && item.category !== "Sin categoría" ? [[key, item.category]] : [];
+    const key = merchantKey(item.normalizedMerchant ?? item.description);
+    return key && previous && previous !== item.category && item.category !== "Sin categoría" && item.category !== "Por revisar" ? [[key, item.category]] : [];
   }));
   const selectionChanged = Boolean(result && (reviewKind !== result.kind || reviewSource.trim() !== result.source));
   return <dialog ref={dialog} className="import-dialog" onCancel={(event) => { event.preventDefault(); resetAndClose(); }}><div className="dialog-head"><div><span className="dialog-icon"><FilePdf size={21} /></span><div><h2>Importar estado de cuenta</h2><p>El archivo se procesa localmente y conserva su origen.</p></div></div><button className="icon-button" aria-label="Cerrar" onClick={resetAndClose}><X size={20} /></button></div>
     {stage === "pick" && <label className="drop-zone"><input type="file" accept="application/pdf" onChange={(event) => handleFile(event.target.files?.[0])} /><UploadSimple size={30} /><strong>Selecciona tu PDF mensual</strong><span>Se detectarán banco, periodo y movimientos. Los estados escaneados se leen con OCR y quedan pendientes de confirmación.</span><span className="file-button">Elegir archivo</span></label>}
     {stage === "processing" && <div className="processing-state" role="status" aria-live="polite" aria-busy="true"><div className="loading-orbit" aria-hidden="true"><CircleNotch size={34} className="spinner" /><span className="loading-pulse"><i /><i /><i /></span></div><h3>{progressLabel || "Cargando estado de cuenta…"}</h3><p>Estamos leyendo y conciliando tu estado. No cierres esta ventana.</p><div className="progress-track" aria-hidden="true"><span style={{ width: `${progress}%` }} /></div><small>{progress}% completado</small></div>}
     {stage === "error" && <div className="error-state"><Warning size={34} /><h3>No pudimos completar la importación</h3><p>{error}</p><button className="secondary-button" onClick={() => setStage("pick")}>Intentar de nuevo</button></div>}
-    {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Origen detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.mode === "text" ? "Lectura directa" : "OCR en el dispositivo"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div>{result.mode === "ocr" && <div><span>Confianza OCR</span><strong>{Math.round((result.ocrConfidence ?? 0) * 100)}%</strong></div>}</div><div className={`reconciliation-callout ${currentReconciliation?.status ?? "pending"}`} role="status"><div><strong>{currentReconciliation?.status === "valid" ? "Importación conciliada" : currentReconciliation?.status === "invalid" ? "Importación bloqueada" : "Conciliación pendiente"}</strong><p>{currentReconciliation?.status === "valid" ? "Las filas extraídas coinciden con los totales declarados por el estado." : currentReconciliation?.reason ?? "Completa o revisa los totales declarados antes de guardar."}</p></div><small>{currentReconciliation ? `Tolerancia ±${currentReconciliation.tolerance.toFixed(2)}${reconciliationCountLabel(currentReconciliation)}` : ""}</small></div><div className="review-source-editor"><label><span>Nombre que se guardará</span><input value={reviewSource} onChange={(event) => setReviewSource(event.target.value as StatementSource)} placeholder="Ej. Santander, Nómina o Banco personal" /></label><label><span>Tipo de archivo</span><select value={reviewKind} onChange={(event) => setReviewKind(event.target.value as StatementKind)}><option value="card">Tarjeta de crédito</option><option value="bank">Cuenta bancaria</option><option value="unknown">No identificado</option></select></label>{selectionChanged && <button type="button" className="text-button" onClick={reparseWithSelection}>Releer filas con esta configuración</button>}<p>Corrige el origen aquí si el PDF usa una marca o formato que todavía no conocemos. Las categorías que ajustes se recordarán para el siguiente mes.</p></div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>Marcelito convirtió sus páginas a imagen y ejecutó OCR en tu navegador. Confirma los importes y agrega cualquier movimiento que no se haya reconocido.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
-      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "No se puede guardar hasta conciliar el estado" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: reviewSource.trim() || "Desconocido", accountKey: result.accountKey, kind: reviewKind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, mode: result.mode, transactions: validItems.map((item) => ({ ...item, account: reviewSource.trim() || item.account })) , summary, reconciliation: currentReconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Corregir conciliación para guardar" : validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado conciliado"}</button></div></div>}
+    {stage === "review" && result && <div className="review-state"><div className="review-summary"><div><span>Origen detectado</span><strong>{result.source}</strong></div><div><span>Periodo</span><strong>{result.period}</strong></div><div><span>Método</span><strong>{result.mode === "text" ? "Lectura directa" : "OCR en el dispositivo"}</strong></div><div><span>Movimientos</span><strong>{validItems.length}</strong></div>{result.mode === "ocr" && <div><span>Confianza OCR</span><strong>{Math.round((result.ocrConfidence ?? 0) * 100)}%</strong></div>}</div><div className={`reconciliation-callout ${currentReconciliation?.status ?? "pending"}`} role="status"><div><strong>{currentReconciliation?.status === "valid" ? "Importación conciliada" : currentReconciliation?.status === "invalid" ? "Importación bloqueada" : "Conciliación pendiente"}</strong><p>{currentReconciliation?.status === "valid" ? "Las filas extraídas coinciden con los totales declarados por el estado." : currentReconciliation?.reason ?? "Completa o revisa los totales declarados antes de guardar."}</p></div><small>{currentReconciliation ? `Tolerancia ±${currentReconciliation.tolerance.toFixed(2)}${reconciliationCountLabel(currentReconciliation)}` : ""}</small></div><div className="review-source-editor"><label><span>Nombre que se guardará</span><input value={reviewSource} onChange={(event) => setReviewSource(event.target.value as StatementSource)} placeholder="Ej. Santander, Nómina o Banco personal" /></label><label><span>Tipo de archivo</span><select value={reviewKind} onChange={(event) => setReviewKind(event.target.value as StatementKind)}><option value="card">Tarjeta de crédito</option><option value="bank">Cuenta bancaria</option><option value="unknown">No identificado</option></select></label>{selectionChanged && <button type="button" className="text-button" onClick={reparseWithSelection}>Releer filas con esta configuración</button>}<p>Corrige el origen aquí si el PDF usa una marca o formato que todavía no conocemos. Las categorías que ajustes se recordarán para el siguiente mes.</p></div>{result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Este PDF es una imagen escaneada</strong><p>Marcelito convirtió sus páginas a imagen y ejecutó OCR en tu navegador. Confirma los importes y agrega cualquier movimiento que no se haya reconocido.</p><button className="secondary-button" onClick={addManualItem}><Plus size={16} />Agregar movimiento</button></div></div>}{items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><input aria-label="Descripción" value={item.description} onChange={(event) => updateItem(item.id, "description", event.target.value)} /><small>{item.date} · confianza {Math.round((item.confidence ?? 0) * 100)}%</small>{item.rawDescription && item.rawDescription !== item.description && <small>Original: {item.rawDescription}</small>}{item.reviewReason && <small>{item.reviewReason}</small>}</div><select aria-label="Categoría" value={item.category} onChange={(event) => updateItem(item.id, "category", event.target.value)}>{["Ingresos", "Transferencia", ...categories].map((category) => <option key={category}>{category}</option>)}</select><input className={item.amount > 0 ? "review-amount positive" : "review-amount"} aria-label="Importe" type="number" step="0.01" value={Math.abs(item.amount)} onChange={(event) => updateAmount(item.id, event.target.value)} /></div>)}</div> : <EmptyState title="Estado listo para guardar" body="No detectamos movimientos automáticos, pero sí conservaremos banco, periodo y archivo para que lo completes." />}
+      <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "No se puede guardar hasta conciliar el estado" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: reviewSource.trim() || "Desconocido", accountKey: result.accountKey, kind: reviewKind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, mode: result.mode, transactions: validItems.map((item) => ({ ...item, account: reviewSource.trim() || item.account })) , summary, reconciliation: currentReconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, ocrColumnsCalibrated: result.ocrColumnsCalibrated, ocrRejectedRows: result.ocrRejectedRows, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Corregir conciliación para guardar" : validItems.length ? `Guardar estado y ${validItems.length} movimientos` : "Guardar estado conciliado"}</button></div></div>}
     {stage === "review" && result && <StatementSummaryForm source={reviewSource} kind={reviewKind} summary={summary} onChange={updateSummary} />}
   </dialog>;
 }

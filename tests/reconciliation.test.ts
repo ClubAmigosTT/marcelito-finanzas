@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { adaptiveOcrScale, detectAccountKey, detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
+import { adaptiveOcrScale, detectAccountKey, detectSource, detectSourceEvidence, extractTransactions, gateOcrReconciliation, parseImportedTransactions, parseRappiOcrTransactions, parseStatementSummary, reconcileStatementImport, shouldUseOCR } from "../src/pdfImport.ts";
+import { normalizeRappiMerchant } from "../src/merchantNormalization.ts";
 import { buildDeduplicationKey, parseDate, periodKeyFromLabel, runTransactionPipeline } from "../src/reconciliation.ts";
 import { buildFinanceMetrics, hasVerifiedSourceEvidence, isStatementEligibleForDashboard } from "../src/finance.ts";
 import { canonicalLedgerFingerprint, createAuditRun } from "../src/audit.ts";
@@ -58,6 +59,94 @@ test("el parser rechaza encabezados administrativos con importes", () => {
   assert.equal(rows.length, 1);
   assert.equal(rows[0].description, "CARGO SUPERMERCADO");
   assert.equal(rows[0].amount, -1200);
+});
+
+test("Rappi conserva texto original, alias de comercio y sentido financiero", () => {
+  const text = [
+    "RappiCard",
+    "Tarjeta de crédito",
+    "Cargos regulares (no a meses) 470.11",
+    "Pagos y abonos 100.00",
+    "Saldo deudor total 370.11",
+    "Detalle de movimientos",
+    "2026-06-21 2026-06-23 MTA*LIRR STATION TIX +470.11",
+    "2026-06-22 2026-06-23 PAGO POR SPEI -100.00",
+  ].join("\n");
+  const rows = extractTransactions(text, "Rappi", "RappiCard junio 2026.pdf", "card");
+  assert.equal(rows.length, 2);
+  assert.equal(rows[0].rawDescription?.includes("MTA*LIRR"), true);
+  assert.equal(rows[0].displayMerchant, "MTA LIRR Station");
+  assert.equal(rows[0].normalizedMerchant, "mta lirr station");
+  assert.equal(rows[0].amount, -470.11);
+  assert.equal(rows[1].kind, "cardPayment");
+  assert.equal(rows[1].amount, -100);
+  const summary = parseStatementSummary(text, "card", "Rappi");
+  const reconciliation = reconcileStatementImport("card", summary, rows);
+  assert.equal(reconciliation.status, "valid");
+});
+
+test("Rappi OCR exige columnas y no toma referencias de descripción como importe", () => {
+  const word = (text: string, x: number, y: number, confidence = 0.97) => ({ text, x, y, width: 0.04, height: 0.018, confidence });
+  const layout = [{
+    page: 1,
+    width: 1200,
+    height: 1600,
+    words: [
+      word("Fecha", 0.03, 0.18), word("operación", 0.08, 0.18), word("Fecha", 0.25, 0.18), word("cargo", 0.30, 0.18),
+      word("Descripción", 0.43, 0.18), word("del", 0.53, 0.18), word("movimiento", 0.57, 0.18), word("Monto", 0.90, 0.18),
+      word("2026-06-21", 0.03, 0.28), word("2026-06-23", 0.25, 0.28), word("PASE", 0.43, 0.28), word("RECUR", 0.49, 0.28), word("RFC: CVA041027H80", 0.58, 0.28), word("+$7,999.00", 0.90, 0.28),
+      word("2026-06-22", 0.03, 0.34), word("2026-06-23", 0.25, 0.34), word("PAGO", 0.43, 0.34), word("POR", 0.49, 0.34), word("SPEI", 0.54, 0.34), word("-100.00", 0.90, 0.34),
+    ],
+  }];
+  const parsed = parseRappiOcrTransactions(layout, "Rappi junio 2026.pdf");
+  assert.equal(parsed.columnsCalibrated, true);
+  assert.equal(parsed.transactions.length, 2);
+  assert.equal(parsed.transactions[0].rawDescription, "PASE RECUR RFC: CVA041027H80");
+  assert.equal(parsed.transactions[0].displayMerchant, "PASE");
+  assert.equal(parsed.transactions[0].amount, -7999);
+  assert.equal(parsed.transactions[1].kind, "cardPayment");
+  assert.equal(parsed.transactions[1].amount, -100);
+  assert.equal(parsed.transactions[0].extractionEvidence?.sameVisualRow, true);
+  assert.equal(parsed.transactions[0].extractionEvidence?.page, 1);
+});
+
+test("un comercio Rappi no confiable queda para revisión con evidencia visible", () => {
+  const identity = normalizeRappiMerchant("### 92831 ///");
+  assert.equal(identity.confidence < 0.75, true);
+  assert.equal(identity.reviewReason !== undefined, true);
+  assert.equal(identity.rawDescription, "### 92831 ///");
+});
+
+test("un Rappi conciliado puede quedar por enriquecer sin bloquear sus KPI", () => {
+  const statement = card("rappi-quality", "Rappi", "junio 2026");
+  const transaction = movement({
+    id: "rappi-enrichment",
+    date: "21 jun 2026",
+    description: "MTA LIRR Station",
+    account: "Rappi",
+    amount: -470.11,
+    flow: "expense",
+    category: "Por revisar",
+    statementId: statement.id,
+    rawDescription: "MTA*LIRR STATION TIX RFC: CVA041027H80",
+    normalizedMerchant: "mta lirr station",
+    displayMerchant: "MTA LIRR Station",
+    reviewReason: "Comercio legible, pero todavía sin categoría asignada.",
+    extractionEvidence: { method: "pdf-text", page: 3, confidence: 0.95, sourceText: "MTA*LIRR STATION TIX +$470.11", sameVisualRow: true },
+  });
+  const metrics = buildFinanceMetrics([transaction], [statement]);
+  assert.equal(metrics.dataQuality.reconciledStatementCount, 1);
+  assert.equal(metrics.dataQuality.blockedMovementCount, 0);
+  assert.equal(metrics.dataQuality.enrichmentCount, 1);
+  assert.equal(metrics.dataQuality.critical, false);
+  assert.equal(metrics.isProvisional, false);
+  assert.equal(isStatementEligibleForDashboard({
+    ...statement,
+    mode: "ocr",
+    ocrConfidence: 0.95,
+    ocrPageConfidences: [0.95],
+    ocrColumnsCalibrated: false,
+  }), false);
 });
 
 test("la identidad de cuenta solo toma los últimos cuatro dígitos del encabezado", () => {
@@ -123,6 +212,25 @@ test("la compuerta OCR se conserva al recalcular la vista de revisión", () => {
   assert.equal(gated.status, "pending");
   assert.match(gated.reason ?? "", /OCR provisional/);
   assert.equal(gateOcrReconciliation(base, "text", 0.1).status, "valid");
+});
+
+test("OCR Rappi o Santander sin columnas calibradas queda provisional", () => {
+  const base = reconcileStatementImport("card", { newCharges: 100 }, [
+    movement({ id: "ocr-rappi", date: "01 jun 2026", description: "PASE", account: "Rappi", amount: -100, flow: "expense" }),
+  ]);
+  assert.equal(base.status, "valid");
+  const gated = gateOcrReconciliation(base, "ocr", 0.95, [0.95], false);
+  assert.equal(gated.status, "pending");
+  assert.match(gated.reason ?? "", /calibrar las columnas/);
+});
+
+test("OCR Rappi con filas rechazadas no se acepta automáticamente aunque el total cuadre", () => {
+  const base = reconcileStatementImport("card", { newCharges: 100 }, [
+    movement({ id: "ocr-rappi-row", date: "01 jun 2026", description: "PASE", account: "Rappi", amount: -100, flow: "expense" }),
+  ]);
+  const gated = gateOcrReconciliation(base, "ocr", 0.95, [0.95], true, 1);
+  assert.equal(gated.status, "pending");
+  assert.match(gated.reason ?? "", /fila.*no conservó/);
 });
 
 test("la escala OCR adaptativa mejora páginas bancarias sin desbordar memoria", () => {

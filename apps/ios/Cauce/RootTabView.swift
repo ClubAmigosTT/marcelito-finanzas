@@ -535,7 +535,8 @@ struct LedgerQualityBanner: View {
     let store: FinanceStore
 
     private var percentText: String {
-        "\(Int(store.ledgerQuality.reconciledPercent.rounded()))% conciliado · \(Int(store.ledgerQuality.evidencePercent.rounded()))% con evidencia"
+        let quality = store.ledgerQuality
+        return "\(quality.reconciledStatementCount)/\(quality.statementCount) estados conciliados · \(quality.blockedMovementCount) bloqueados · \(quality.enrichmentMovementCount) por enriquecer"
     }
 
     var body: some View {

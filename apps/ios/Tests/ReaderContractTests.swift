@@ -197,6 +197,46 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(snapshot.summary?.paymentForNoInterest, 39_966.15)
     }
 
+    func testRappiOCRUsesColumnsAndPreservesMerchantEvidence() {
+        let result = FinanceStore.rappiOCRRowsForTesting([
+            OCRObservationFixture(text: "Fecha operación", x: 0.03, y: 0.90, width: 0.16),
+            OCRObservationFixture(text: "Fecha cargo", x: 0.25, y: 0.90, width: 0.14),
+            OCRObservationFixture(text: "Descripción del movimiento", x: 0.43, y: 0.90, width: 0.28),
+            OCRObservationFixture(text: "Monto", x: 0.90, y: 0.90, width: 0.08),
+            OCRObservationFixture(text: "2026-06-21", x: 0.03, y: 0.82, width: 0.15),
+            OCRObservationFixture(text: "2026-06-23", x: 0.25, y: 0.82, width: 0.15),
+            OCRObservationFixture(text: "PASE RECUR RFC: CVA041027H80", x: 0.43, y: 0.82, width: 0.36),
+            OCRObservationFixture(text: "+$7,999.00", x: 0.90, y: 0.82, width: 0.09),
+            OCRObservationFixture(text: "2026-06-22", x: 0.03, y: 0.74, width: 0.15),
+            OCRObservationFixture(text: "2026-06-23", x: 0.25, y: 0.74, width: 0.15),
+            OCRObservationFixture(text: "PAGO POR SPEI", x: 0.43, y: 0.74, width: 0.24),
+            OCRObservationFixture(text: "-$100.00", x: 0.90, y: 0.74, width: 0.09),
+        ], fileName: "Rappi junio 2026.pdf")
+
+        XCTAssertTrue(result.columnsCalibrated)
+        XCTAssertEqual(result.movements.count, 2)
+        XCTAssertEqual(result.movements[0].rawDescription, "PASE RECUR RFC: CVA041027H80")
+        XCTAssertEqual(result.movements[0].displayMerchant, "PASE")
+        XCTAssertEqual(result.movements[0].normalizedMerchant, "pase")
+        XCTAssertEqual(result.movements[0].amount, -7_999)
+        XCTAssertEqual(result.movements[0].extractionEvidence?.method, "vision-ocr")
+        XCTAssertEqual(result.movements[0].extractionEvidence?.page, 1)
+        XCTAssertEqual(result.movements[0].extractionEvidence?.sameVisualRow, true)
+        XCTAssertEqual(result.movements[1].kind, .cardPayment)
+        XCTAssertEqual(result.movements[1].amount, -100)
+    }
+
+    func testRappiOCRWithoutHeaderStaysUncalibratedAndEmpty() {
+        let result = FinanceStore.rappiOCRRowsForTesting([
+            OCRObservationFixture(text: "2026-06-21", x: 0.03, y: 0.82),
+            OCRObservationFixture(text: "PASE RECUR", x: 0.43, y: 0.82),
+            OCRObservationFixture(text: "+$7,999.00", x: 0.90, y: 0.82),
+        ], fileName: "Rappi ilegible.pdf")
+
+        XCTAssertFalse(result.columnsCalibrated)
+        XCTAssertTrue(result.movements.isEmpty)
+    }
+
     func testReaderRejectsAdministrativeNumericRows() {
         let text = """
         Grupo Financiero BBVA

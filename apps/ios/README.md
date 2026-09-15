@@ -59,7 +59,7 @@ cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
   --manifest tests/fixtures/pdf-corpus-attachments.json \
-  --reader-version ios-reader-2026.08.31.14 \
+  --reader-version ios-reader-2026.09.15.1 \
   --require-certified
 ```
 

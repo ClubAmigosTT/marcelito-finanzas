@@ -25,6 +25,12 @@ export function hasSufficientOcrQuality(statement: Statement) {
   const pages = statement.ocrPageConfidences;
   if (average === undefined || !Number.isFinite(average) || average < OCR_MIN_AVERAGE_CONFIDENCE) return false;
   if (!pages?.length || pages.some((page) => !Number.isFinite(page) || page < OCR_MIN_PAGE_CONFIDENCE)) return false;
+  if ((statement.ocrRejectedRows ?? 0) > 0) return false;
+  // Santander and Rappi tables are accepted only when their visual columns
+  // were calibrated. A missing flag is legacy/unknown data, not proof that
+  // the OCR row geometry was safe to use.
+  if ((normalize(statement.source).includes("santander") || normalize(statement.source).includes("rappi"))
+    && statement.ocrColumnsCalibrated !== true) return false;
   return true;
 }
 
@@ -202,6 +208,12 @@ export type DataQualityMetrics = {
   totalCount: number;
   reviewCount: number;
   relevantReviewCount: number;
+  /** Documents whose issuer totals reconcile, independent of categorization. */
+  reconciledStatementCount: number;
+  /** Rows blocked because amount/date/column evidence is unsafe. */
+  blockedMovementCount: number;
+  /** Financially valid rows waiting only for merchant/category enrichment. */
+  enrichmentCount: number;
   reconciledPercent: number;
   evidencePercent: number;
   missingEvidenceCount: number;
@@ -314,11 +326,12 @@ function sumKnown(values: Array<number | undefined>) {
 
 export function defaultStatementKind(source: StatementSource): StatementKind {
   if (source === "Amex") return "card";
+  if (normalize(source).includes("rappi")) return "card";
   const normalized = normalize(source);
   const bankNames = [
     "santander", "bbva", "bancomer", "banorte", "hsbc", "scotiabank",
     "citibanamex", "banamex", "inbursa", "banco azteca", "banco del bajio",
-    "mifel", "invex", "hey banco", "nu", "klar", "rappi", "uala",
+    "mifel", "invex", "hey banco", "nu", "klar", "uala",
   ];
   return bankNames.some((name) => normalized.includes(name)) ? "bank" : "unknown";
 }
@@ -1044,13 +1057,41 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     ? { label: "Gasto extraordinario", current: currentExtraordinary, previous: previousExtraordinary, delta: currentExtraordinary - previousExtraordinary }
     : undefined;
   const primaryCause = bestCategoryCause && extraordinaryCause && extraordinaryCause.delta > bestCategoryCause.delta ? extraordinaryCause : bestCategoryCause ?? extraordinaryCause;
-  const reviewItems = transactions.filter((transaction) => transaction.category === "Sin categoría" || (transaction.confidence ?? 1) < 0.75 || transaction.validationStatus === "review");
+  const reviewItems = transactions.filter((transaction) => transaction.category === "Sin categoría" || transaction.category === "Por revisar" || (transaction.confidence ?? 1) < 0.75 || transaction.validationStatus === "review");
+  const enrichmentItems = reviewItems.filter((transaction) => transaction.category === "Sin categoría"
+    || transaction.category === "Por revisar"
+    || /comercio|categor[ií]a|merchant/i.test(transaction.reviewReason ?? ""));
+  const blockedInputIds = new Set([
+    ...pipeline.invalidTransactions.map((transaction) => transaction.id),
+    ...candidateTransactions
+      .filter((transaction) => {
+        const statement = transaction.statementId
+          ? statements.find((item) => item.id === transaction.statementId)
+          : undefined;
+        const reason = normalize(transaction.reviewReason ?? "");
+        const rowConfidence = Math.min(transaction.confidence ?? 1, transaction.extractionEvidence?.confidence ?? 1);
+        const columnSensitive = statement
+          && statement.mode === "ocr"
+          && (normalize(statement.source).includes("santander") || normalize(statement.source).includes("rappi"))
+          && statement.ocrColumnsCalibrated !== true;
+        return rowConfidence < 0.75
+          || /importe|fecha|columna|fila visual|direccion|evidencia/.test(reason)
+          || Boolean(columnSensitive)
+          || Boolean(transaction.statementId && !hasTraceableEvidence(transaction));
+      })
+      .map((transaction) => transaction.id),
+  ]);
+  const reconciledStatementCount = statements.filter((statement) => statement.reconciliationStatus === "valid" && statement.reconciliation?.status === "valid").length;
+  const rejectedOcrRows = statements.reduce((total, statement) => total + Math.max(0, statement.ocrRejectedRows ?? 0), 0);
   const dataQuality: DataQualityMetrics = {
     classifiedPercent: pipeline.audit.classifiedPercent,
     classifiedCount: Math.max(0, pipeline.audit.validCount - reviewItems.length),
     totalCount: pipeline.audit.importedCount,
     reviewCount: reviewItems.length,
     relevantReviewCount: pipeline.audit.relevantReviewCount,
+    reconciledStatementCount,
+    blockedMovementCount: blockedInputIds.size + rejectedOcrRows,
+    enrichmentCount: enrichmentItems.length,
     // A row-level reconciliation percentage can be 100% even when every row
     // belongs to an OCR statement that is still provisional. Cap it with the
     // statement-level eligibility rate so the visible quality indicator cannot
@@ -1063,7 +1104,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     missingEvidenceCount: pipeline.audit.missingEvidenceCount,
     invalidCount: pipeline.audit.invalidCount,
     duplicateCount: pipeline.audit.duplicateCount,
-    critical: pipeline.audit.criticalIssues.length > 0,
+    critical: pipeline.audit.criticalIssues.length > 0 || blockedInputIds.size > 0,
   };
   if (spendExceedsCanonical) {
     const issue = "El gasto consolidado supera la suma de movimientos canónicos; KPI bloqueado";

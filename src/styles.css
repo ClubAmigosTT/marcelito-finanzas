@@ -513,6 +513,11 @@ body { background: var(--bg); color: var(--ink); }
 .data-quality > div span { color: var(--muted); font-size: 12px; font-weight: 700; }
 .data-quality > div strong { color: var(--navy); font-family: ui-monospace, monospace; font-size: 16px; }
 .data-quality > div small { grid-column: 1 / -1; color: var(--muted); font-size: 10px; }
+.data-quality .data-quality-grid { flex: 1; min-width: 0; display: grid !important; grid-template-columns: repeat(3, minmax(105px, 1fr)) !important; gap: 10px; }
+.data-quality .quality-metric { display: grid; grid-template-columns: 1fr auto; align-items: baseline; gap: 3px 8px; padding-left: 10px; border-left: 1px solid var(--line); }
+.data-quality .quality-metric span { color: var(--muted); font-size: 10px; font-weight: 700; }
+.data-quality .quality-metric strong { color: var(--navy); font-family: ui-monospace, monospace; font-size: 15px; }
+.data-quality .quality-metric small { grid-column: 1 / -1; color: var(--muted); font-size: 9px; }
 .data-quality > p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.35; text-align: right; }
 .data-quality.has-alert { border-color: oklch(0.62 0.08 45); }
 .data-quality .quality-alert { color: var(--expense); font-weight: 700; }
@@ -642,6 +647,7 @@ body { background: var(--bg); color: var(--ink); }
   .category-detail-grid { grid-template-columns: 1fr; gap: 12px; }
   .trend-values { grid-template-columns: repeat(3, minmax(0, 1fr)); row-gap: 12px; }
   .data-quality { align-items: flex-start; flex-direction: column; }
+  .data-quality .data-quality-grid { width: 100%; }
   .data-quality > p { text-align: left; }
   .audit-diagnostics summary { align-items: flex-start; }
   .debt-breakdown { grid-template-columns: 1fr 1fr; }
@@ -658,6 +664,8 @@ body { background: var(--bg); color: var(--ink); }
   .trend-values { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .split-values { gap: 12px; }
   .split-values strong { font-size: 18px; }
+  .data-quality .data-quality-grid { grid-template-columns: 1fr !important; }
+  .data-quality .quality-metric { border-left: 0; border-top: 1px solid var(--line); padding: 8px 0 0; }
   .expense-summary-kpis { grid-template-columns: 1fr 1fr; gap: 9px; }
   .expense-summary-kpis .metric { min-height: 108px; padding: 14px; }
   .expense-summary-kpis .metric:last-child { grid-column: auto; }

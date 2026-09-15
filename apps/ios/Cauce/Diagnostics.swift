@@ -146,7 +146,7 @@ struct DiagnosticsView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
-                    LabeledContent("Estados", value: "\(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount) conciliados")
+                    LabeledContent("Estados conciliados", value: "\(store.ledgerQuality.reconciledStatementCount)/\(store.ledgerQuality.statementCount)")
                     LabeledContent("Movimientos canónicos", value: "\(store.ledgerQuality.movementCount)")
                     LabeledContent("Importes fuera de rango", value: "\(store.ledgerQuality.absurdMovementCount)")
                     LabeledContent("Filas con evidencia", value: "\(Int(store.ledgerQuality.evidencePercent.rounded()))%")
@@ -202,7 +202,7 @@ struct DiagnosticsView: View {
                             }
                             if let summary = statement.summary {
                                 let statementKind = statement.kind
-                                    ?? (statement.source.localizedCaseInsensitiveContains("Amex") ? .card : .bank)
+                                    ?? (statement.source.localizedCaseInsensitiveContains("Amex") || statement.source.localizedCaseInsensitiveContains("Rappi") ? .card : .bank)
                                 VStack(alignment: .leading, spacing: 2) {
                                     if statementKind == .card {
                                         if let limit = summary.creditLimit,

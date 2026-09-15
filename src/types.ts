@@ -50,6 +50,8 @@ export type TransactionExtractionEvidence = {
   sourceText?: string;
   /** Bounding box when the extraction method provides visual coordinates. */
   bounds?: ExtractionBounds;
+  /** True only when date, description and amount came from one visual row. */
+  sameVisualRow?: boolean;
 };
 
 /** Evidence used to identify the issuer without trusting transaction text. */
@@ -91,6 +93,16 @@ export type Transaction = {
   category: string;
   amount: number;
   flow: FlowType;
+  /** Original merchant text extracted from the statement, kept for audit. */
+  rawDescription?: string;
+  /** Stable merchant key used for aliases, rules and deduplication. */
+  normalizedMerchant?: string;
+  /** Human-readable merchant label; never replaces rawDescription. */
+  displayMerchant?: string;
+  /** Second date printed by card tables when available. */
+  chargeDate?: string;
+  /** Why this row should be shown to a reviewer, without blocking valid finance. */
+  reviewReason?: string;
   kind?: TransactionKind;
   travelRelated?: boolean;
   /** Marks rows reconstructed from an issuer's foreign-currency section. */
@@ -171,6 +183,17 @@ export type ImportResult = {
   ocrConfidence?: number;
   /** Per-page OCR confidence, retained for diagnostics and review UX. */
   ocrPageConfidences?: number[];
+  /** Whether OCR found and calibrated the Rappi table columns. */
+  ocrColumnsCalibrated?: boolean;
+  /** Number of OCR table rows rejected because their date/amount/description was unsafe. */
+  ocrRejectedRows?: number;
+  /** Transient OCR geometry used by the review viewer; never persisted. */
+  ocrLayout?: Array<{
+    page: number;
+    width: number;
+    height: number;
+    words: Array<{ text: string; x: number; y: number; width: number; height: number; confidence: number }>;
+  }>;
   /**
    * Transient text/OCR stream kept only while the import dialog is open. It is
    * intentionally not part of ImportCommit/Statement so raw PDF text is not
@@ -208,6 +231,10 @@ export type Statement = {
   ocrConfidence?: number;
   /** Per-page OCR confidence retained for audit and reproducible review. */
   ocrPageConfidences?: number[];
+  /** Whether OCR found and calibrated the Rappi table columns. */
+  ocrColumnsCalibrated?: boolean;
+  /** Number of OCR table rows rejected before they could enter the ledger. */
+  ocrRejectedRows?: number;
 };
 
 export type ImportCommit = {
@@ -227,6 +254,8 @@ export type ImportCommit = {
   sourceDetection?: SourceDetection;
   ocrConfidence?: number;
   ocrPageConfidences?: number[];
+  ocrColumnsCalibrated?: boolean;
+  ocrRejectedRows?: number;
   /** User corrections learned from this review, keyed by normalized merchant. */
   categoryRules?: Record<string, string>;
 };

@@ -35,7 +35,7 @@ function argument(name: string) {
 }
 
 function kindFor(source: StatementSource): StatementKind {
-  return source === "Amex" ? "card" : source === "Desconocido" ? "unknown" : "bank";
+  return source === "Amex" || source === "Rappi" ? "card" : source === "Desconocido" ? "unknown" : "bank";
 }
 
 function closeEnough(actual: unknown, expected: unknown, tolerance: number) {
@@ -130,7 +130,7 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
   const transactions = kind === "unknown" ? [] : mode === "ocr"
     ? parseImportedTransactions(text, sourceDetection.source, fileName, kind, "ocr", ocrPageConfidences)
     : extractTransactions(text, sourceDetection.source, fileName, kind);
-  const summary = kind === "unknown" ? undefined : parseStatementSummary(text, kind);
+  const summary = kind === "unknown" ? undefined : parseStatementSummary(text, kind, sourceDetection.source);
   const creditUsed = summary?.creditLimit !== undefined && summary.creditAvailable !== undefined
     ? Math.max(0, summary.creditLimit - summary.creditAvailable)
     : summary?.debtBalance;
