@@ -1,0 +1,296 @@
+name: Tacos iOS TestFlight (public runner)
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_note:
+        description: "Nota interna para identificar la ejecución"
+        required: false
+        default: "Tacos iOS release"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tacos-ios-testflight-public-runner
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: "24"
+  PNPM_VERSION: "11.19.0"
+
+jobs:
+  preflight:
+    name: Validar catálogo de Tacos
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      EXPO_PUBLIC_API_URL: ${{ vars.TACOS_EXPO_PUBLIC_API_URL }}
+      EXPO_PUBLIC_DEMO_MODE: "false"
+      EAS_BUILD_PROFILE: production
+      EAS_BUILD_PLATFORM: ios
+    steps:
+      - name: Descargar Tacos privado
+        uses: actions/checkout@v4
+        with:
+          repository: ClubAmigosTT/tacos
+          ref: main
+          ssh-key: ${{ secrets.TACOS_REPO_DEPLOY_KEY }}
+          fetch-depth: 1
+
+      - name: Configurar pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Instalar dependencias
+        run: pnpm install --frozen-lockfile
+
+      - name: Validar API de producción
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${EXPO_PUBLIC_API_URL:-}" || "$EXPO_PUBLIC_API_URL" != https://* ]]; then
+            echo "::error title=API de producción inválida::Configura TACOS_EXPO_PUBLIC_API_URL con una URL HTTPS."
+            exit 1
+          fi
+
+      - name: Typecheck y smoke tests
+        run: |
+          pnpm typecheck
+          pnpm smoke:config
+          pnpm smoke:inputs
+
+      - name: Validar identidad del binario
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_json="$(pnpm --filter @tacos/mobile exec expo config --type public --json)"
+          node -e '
+            const c = JSON.parse(process.argv[1]);
+            if (c.ios?.bundleIdentifier !== "com.clubamigostt.tacos") throw new Error("Bundle ID de Tacos inesperado");
+            if (c.owner !== "clubamigostt") throw new Error("Propietario Expo inesperado");
+            if (c.extra?.eas?.projectId !== "155a5800-f93e-4680-9cc4-02450eb830b6") throw new Error("Proyecto EAS inesperado");
+          ' "$config_json"
+
+      - name: Validar catálogo y fotos
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s apps/mobile/data/catalog.ts
+          photos="$(find apps/mobile/assets/catalog-dummies -type f -name '*.jpg' | wc -l | tr -d ' ')"
+          if ((photos < 27)); then
+            echo "::error title=Faltan fotos locales::Se encontraron $photos."
+            exit 1
+          fi
+
+      - name: Exportar bundle web
+        run: pnpm --filter @tacos/mobile exec expo export --platform web
+
+  build-and-submit:
+    name: Compilar Tacos y subir a TestFlight
+    needs: preflight
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      TACOS_APPLE_TEAM_ID: ${{ secrets.TACOS_APPLE_TEAM_ID }}
+      TACOS_APPSTORE_ISSUER_ID: ${{ secrets.TACOS_APPSTORE_ISSUER_ID }}
+      TACOS_APPSTORE_API_KEY_ID: ${{ secrets.TACOS_APPSTORE_API_KEY_ID }}
+      TACOS_APPSTORE_API_PRIVATE_KEY: ${{ secrets.TACOS_APPSTORE_API_PRIVATE_KEY }}
+      TACOS_APPLE_DISTRIBUTION_P12: ${{ secrets.TACOS_APPLE_DISTRIBUTION_P12 }}
+      TACOS_APPLE_DISTRIBUTION_P12_PASSWORD: ${{ secrets.TACOS_APPLE_DISTRIBUTION_P12_PASSWORD }}
+      TACOS_APPLE_PROVISIONING_PROFILE: ${{ secrets.TACOS_APPLE_PROVISIONING_PROFILE }}
+      EXPO_PUBLIC_API_URL: ${{ vars.TACOS_EXPO_PUBLIC_API_URL }}
+      EXPO_PUBLIC_DEMO_MODE: "false"
+      EAS_BUILD_PROFILE: production
+      EAS_BUILD_PLATFORM: ios
+      RELEASE_NOTE: ${{ inputs.release_note }}
+    steps:
+      - name: Descargar Tacos privado
+        uses: actions/checkout@v4
+        with:
+          repository: ClubAmigosTT/tacos
+          ref: main
+          ssh-key: ${{ secrets.TACOS_REPO_DEPLOY_KEY }}
+          fetch-depth: 1
+
+      - name: Configurar pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Configurar Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Instalar dependencias
+        run: pnpm install --frozen-lockfile
+
+      - name: Validar toolchain Apple y secretos
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          sdk_major="${sdk_version%%.*}"
+          if ((sdk_major < 26)); then
+            echo "::error title=SDK de iOS no compatible::Se requiere iOS 26 o posterior."
+            exit 1
+          fi
+          missing=()
+          for name in TACOS_APPLE_TEAM_ID TACOS_APPSTORE_ISSUER_ID TACOS_APPSTORE_API_KEY_ID TACOS_APPSTORE_API_PRIVATE_KEY TACOS_APPLE_DISTRIBUTION_P12 TACOS_APPLE_DISTRIBUTION_P12_PASSWORD TACOS_APPLE_PROVISIONING_PROFILE; do
+            if [[ -z "${!name:-}" ]]; then missing+=("$name"); fi
+          done
+          if ((${#missing[@]} > 0)); then
+            printf "::error title=Faltan secretos de Tacos::%s$n" "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Resolver versión y build
+        shell: bash
+        run: |
+          set -euo pipefail
+          config_json="$(pnpm --filter @tacos/mobile exec expo config --type public --json)"
+          marketing_version="$(node -e 'const c=JSON.parse(process.argv[1]); process.stdout.write(c.version || "")' "$config_json")"
+          if [[ ! "$marketing_version" =~ ^[0-9]+($.[0-9]+){0,2}$ ]]; then
+            echo "::error title=Versión inválida::$marketing_version"
+            exit 1
+          fi
+          build_number="$(date +%s)$GITHUB_RUN_NUMBER"
+          echo "MARKETING_VERSION=$marketing_version" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
+
+      - name: Generar proyecto nativo con Expo
+        working-directory: apps/mobile
+        shell: bash
+        run: |
+          set -euo pipefail
+          pnpm exec expo prebuild --platform ios --clean --no-install
+          test -f ios/Tacos.xcworkspace/contents.xcworkspacedata
+          cd ios
+          pod install
+
+      - name: Preparar firma de distribución
+        shell: bash
+        run: |
+          set -euo pipefail
+          keychain_path="$RUNNER_TEMP/tacos-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          p12_path="$RUNNER_TEMP/tacos-distribution.p12"
+          profile_path="$RUNNER_TEMP/tacos.mobileprovision"
+          profile_plist="$RUNNER_TEMP/tacos-profile.plist"
+          profile_dir="$HOME/Library/MobileDevice/Provisioning Profiles"
+          printf "%s" "$TACOS_APPLE_DISTRIBUTION_P12" | base64 -D > "$p12_path"
+          printf "%s" "$TACOS_APPLE_PROVISIONING_PROFILE" | base64 -D > "$profile_path"
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$p12_path" -P "$TACOS_APPLE_DISTRIBUTION_P12_PASSWORD" -A -t cert -f pkcs12 -k "$keychain_path"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$keychain_password" "$keychain_path"
+          security list-keychains -d user -s "$keychain_path"
+          security default-keychain -s "$keychain_path"
+          mkdir -p "$profile_dir"
+          security cms -D -i "$profile_path" > "$profile_plist"
+          profile_uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$profile_plist")"
+          profile_name="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$profile_plist")"
+          cp "$profile_path" "$profile_dir/$profile_uuid.mobileprovision"
+          echo "SIGNING_KEYCHAIN_PATH=$keychain_path" >> "$GITHUB_ENV"
+          echo "PROVISIONING_PROFILE_UUID=$profile_uuid" >> "$GITHUB_ENV"
+          echo "PROVISIONING_PROFILE_NAME=$profile_name" >> "$GITHUB_ENV"
+
+      - name: Archivar aplicación
+        working-directory: apps/mobile
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -workspace ios/Tacos.xcworkspace \
+            -scheme Tacos \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination "generic/platform=iOS" \
+            -archivePath "$RUNNER_TEMP/Tacos.xcarchive" \
+            -derivedDataPath "$RUNNER_TEMP/TacosDerivedData" \
+            DEVELOPMENT_TEAM="$TACOS_APPLE_TEAM_ID" \
+            CODE_SIGN_STYLE=Manual \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_UUID" \
+            PRODUCT_BUNDLE_IDENTIFIER="com.clubamigostt.tacos" \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" \
+            MARKETING_VERSION="$MARKETING_VERSION" \
+            clean archive
+
+      - name: Exportar IPA y subirlo a TestFlight
+        working-directory: apps/mobile
+        shell: bash
+        run: |
+          set -euo pipefail
+          export_options="$RUNNER_TEMP/ExportOptions.plist"
+          cat > "$export_options" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0"><dict>
+            <key>method</key><string>app-store</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Apple Distribution</string>
+            <key>teamID</key><string>$TACOS_APPLE_TEAM_ID</string>
+            <key>provisioningProfiles</key><dict>
+              <key>com.clubamigostt.tacos</key><string>$PROVISIONING_PROFILE_NAME</string>
+            </dict>
+            <key>uploadSymbols</key><true/>
+          </dict></plist>
+          EOF
+          rm -rf "$RUNNER_TEMP/TacosExport"
+          mkdir -p "$RUNNER_TEMP/TacosExport"
+          xcodebuild -exportArchive \
+            -archivePath "$RUNNER_TEMP/Tacos.xcarchive" \
+            -exportPath "$RUNNER_TEMP/TacosExport" \
+            -exportOptionsPlist "$export_options"
+          ipa_path="$RUNNER_TEMP/TacosExport/Tacos.ipa"
+          if [[ ! -f "$ipa_path" ]]; then
+            ipa_path="$(find "$RUNNER_TEMP/TacosExport" -maxdepth 1 -name "*.ipa" -print -quit)"
+          fi
+          test -n "$ipa_path" && test -f "$ipa_path"
+          echo "IPA_PATH=$ipa_path" >> "$GITHUB_ENV"
+
+      - name: Subir build a TestFlight
+        uses: apple-actions/upload-testflight-build@v4
+        with:
+          app-path: ${{ env.IPA_PATH }}
+          issuer-id: ${{ secrets.TACOS_APPSTORE_ISSUER_ID }}
+          api-key-id: ${{ secrets.TACOS_APPSTORE_API_KEY_ID }}
+          api-private-key: ${{ secrets.TACOS_APPSTORE_API_PRIVATE_KEY }}
+          uses-non-exempt-encryption: "false"
+          wait-for-processing: "false"
+
+      - name: Resumen
+        if: success()
+        shell: bash
+        run: |
+          {
+            echo "## Tacos iOS"
+            echo ""
+            echo "Versión: $MARKETING_VERSION"
+            echo "Build: $BUILD_NUMBER"
+            echo "IPA compilado en macOS y enviado a App Store Connect."
+            echo "Nota: $RELEASE_NOTE"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Limpiar llavero temporal
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${SIGNING_KEYCHAIN_PATH:-}" && -f "$SIGNING_KEYCHAIN_PATH" ]]; then
+            security delete-keychain "$SIGNING_KEYCHAIN_PATH" || true
+          fi
