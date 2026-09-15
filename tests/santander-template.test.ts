@@ -17,15 +17,17 @@ const words = (page: number, y: number, values: Array<[number, string]>, scale =
   })),
 });
 
-function fixture(options: { header?: boolean; shift?: number; withdrawal?: string; balance?: string; scale?: number; cropY?: number } = {}) {
+function fixture(options: { title?: boolean; header?: boolean; shift?: number; withdrawal?: string; balance?: string; scale?: number; cropY?: number } = {}) {
   const shift = options.shift ?? 0;
   const scale = options.scale ?? 1;
   const y = options.cropY ?? 0.72;
   const x = (value: number) => value + shift;
   const lines: DocumentLayoutLine[] = [
     words(1, 0.94, [[x(0.08), "Banco Santander México, S.A."], [x(0.43), "Grupo Financiero Santander México"]], scale),
-    words(1, 0.86, [[x(0.10), "Detalle de movimientos cuenta de cheques"]], scale),
   ];
+  if (options.title !== false) {
+    lines.push(words(1, 0.86, [[x(0.10), "Detalle de movimientos cuenta de cheques"]], scale));
+  }
   if (options.header !== false) {
     lines.push(words(1, y + 0.08, [[x(0.06), "FECHA"], [x(0.14), "FOLIO"], [x(0.20), "DESCRIPCION"], [x(0.63), "DEPOSITO"], [x(0.75), "RETIRO"], [x(0.88), "SALDO"]], scale));
   }
@@ -35,15 +37,15 @@ function fixture(options: { header?: boolean; shift?: number; withdrawal?: strin
     words(1, y - 0.12, [[x(0.20), "TOTAL"], [x(0.63), "100.00"], [x(0.75), "40.00"]], scale),
   );
   const layout: DocumentLayout = { pages: [{ page: 1, lines }] };
-  const text = [
+  let text = [
     "Banco Santander México, S.A. Institución de Banca Múltiple",
     "Grupo Financiero Santander México",
     "Saldo inicial 1,000.00",
     "+ Depósitos 100.00",
     "- Retiros 40.00",
     "= Saldo final 1,060.00",
-    "Detalle de movimientos cuenta de cheques",
   ].join("\n");
+  if (options.title !== false) text += "\nDetalle de movimientos cuenta de cheques";
   return { text, layout };
 }
 
@@ -66,6 +68,23 @@ test("normalized template tolerates scale and vertical crop without using pixels
     assert.equal(match.status, "matched");
     assert.ok(match.alignmentScore >= 0.9);
   }
+});
+
+test("Santander v1 reuses the calibrated schema when only the decorative title is unreadable", () => {
+  const input = fixture({ title: false });
+  const parsed = parseDeterministicStatement({ source: "Santander", fileName: "same-layout.pdf", mode: "ocr", ...input });
+  assert.equal(parsed.templateMatch?.status, "matched");
+  assert.equal(parsed.templateMatch?.reason, "santander.template-matched-with-verified-header-and-rows");
+  assert.equal(parsed.reconciliation.status, "valid");
+  assert.deepEqual(parsed.transactions.map((row) => row.amount), [100, -40]);
+});
+
+test("title-less Santander header without two dated movement rows remains in review", () => {
+  const input = fixture({ title: false });
+  input.layout.pages[0]!.lines = input.layout.pages[0]!.lines.slice(0, 3);
+  const match = matchSantanderCheckingTemplate(input.layout, input.text);
+  assert.equal(match.status, "review");
+  assert.equal(match.reason, "santander.template-title-and-row-signal-missing");
 });
 
 test("the canonical Santander template has bounded normalized geometry and strict validation", () => {
@@ -104,5 +123,5 @@ test("an unknown Santander document is not classified as a valid v1 statement", 
   const layout: DocumentLayout = { pages: [{ page: 1, lines: [words(1, 0.9, [[0.1, "Banco Santander México, S.A."], [0.3, "TARJETA EMPRESARIAL"]])] }] };
   const match = matchSantanderCheckingTemplate(layout, "Banco Santander México, S.A. Estado de tarjeta empresarial");
   assert.equal(match.status, "review");
-  assert.equal(match.reason, "santander.template-movement-title-missing");
+  assert.equal(match.reason, "santander.template-required-columns-missing");
 });

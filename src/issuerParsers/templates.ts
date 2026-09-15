@@ -23,6 +23,12 @@ export type StatementTemplate = {
   headerSignature: {
     institutionalAny: string[];
     tableTitleAll: string[];
+    /**
+     * A decorative section title is OCR-fragile. A template may explicitly
+     * allow its absence only when the institutional header, complete
+     * calibrated table schema and at least two dated table rows are present.
+     */
+    allowMissingTitleWhenColumnsVerified: boolean;
     minimumAlignmentScore: number;
   };
   movementRegions: Array<{ id: string; pageRole: string; referenceBounds: NormalizedBox }>;
@@ -63,6 +69,7 @@ export function statementTemplateValidationError(template: StatementTemplate): s
   if (template.schemaVersion !== 1 || !template.id || !template.version
     || template.coordinateSpace !== "normalized-bottom-left") return "template: identity-or-coordinate-space-invalid";
   if (!template.headerSignature.institutionalAny.length || !template.headerSignature.tableTitleAll.length
+    || typeof template.headerSignature.allowMissingTitleWhenColumnsVerified !== "boolean"
     || !Number.isFinite(template.headerSignature.minimumAlignmentScore)
     || template.headerSignature.minimumAlignmentScore < 0 || template.headerSignature.minimumAlignmentScore > 1) {
     return "template: header-signature-invalid";
@@ -204,6 +211,26 @@ function candidateHeader(layout: DocumentLayout | undefined, template: Statement
   return candidates.sort((left, right) => right.score - left.score)[0];
 }
 
+/**
+ * This is deliberately a table-local signal, not a generic date search. It
+ * proves that the recognised headers are followed by at least two candidate
+ * movement rows in the FECHA region on the same page. It is only used when
+ * the printed section title itself was not readable by OCR.
+ */
+function hasVerifiedTableRows(layout: DocumentLayout | undefined, header: HeaderCandidate): boolean {
+  const page = layout?.pages.find((candidate) => candidate.page === header.page);
+  if (!page) return false;
+  const headerBounds = lineBounds(header.line, { x: 0, y: 0, width: 1, height: 1 });
+  const dateBoundary = header.anchors.DESCRIPCION;
+  const dateToken = /(?:^|\s)[0-9OBI]{1,3}\s*[./-]\s*(?:\d{1,2}|[a-záéíóúñ]{3})(?:\s*[./-]\s*\d{2,4})?(?:\s|$)/i;
+  const rows = page.lines.filter((line) => {
+    const bounds = lineBounds(line, { x: 0, y: 0, width: 1, height: 1 });
+    if (bounds.y >= headerBounds.y - 0.006) return false;
+    return line.words.some((word) => word.x < dateBoundary && dateToken.test(word.text));
+  });
+  return rows.length >= 2;
+}
+
 function calibratedColumns(template: StatementTemplate, header: HeaderCandidate): TemplateMatch["columns"] {
   const anchor = header.anchors;
   const column = (key: TemplateColumnKey) => template.columns.find((item) => item.key === key)!;
@@ -252,16 +279,21 @@ export function matchSantanderCheckingTemplate(layout: DocumentLayout | undefine
   if (!institutional) {
     return { ...base, status: "review", alignmentScore: 0, reason: "santander.template-institutional-header-missing" };
   }
-  if (!title) {
-    return { ...base, status: "review", alignmentScore: 0.25, reason: "santander.template-movement-title-missing" };
-  }
   if (!header) {
     return { ...base, status: "review", alignmentScore: 0.5, reason: "santander.template-required-columns-missing" };
   }
-  // Header geometry earns 60% of the score; issuer and title are independent
-  // evidence and each earn 20%. This prevents a coincidental header-looking
-  // table from being accepted without Santander's institutional signature.
-  const alignmentScore = Number((0.4 + header.score * 0.6).toFixed(4));
+  const verifiedRows = hasVerifiedTableRows(layout, header);
+  if (!title && !template.headerSignature.allowMissingTitleWhenColumnsVerified) {
+    return { ...base, status: "review", alignmentScore: 0.5, reason: "santander.template-movement-title-missing" };
+  }
+  if (!title && !verifiedRows) {
+    return { ...base, status: "review", alignmentScore: 0.5, reason: "santander.template-title-and-row-signal-missing" };
+  }
+  // With a title, geometry earns 60% and issuer/title 20% each. Without the
+  // decorative title, the same v1 template can still match, but geometry
+  // earns 80% and must be correspondingly tighter; the verified rows above
+  // prove this is a real movement table, not an unrelated header.
+  const alignmentScore = Number(((title ? 0.4 + header.score * 0.6 : 0.2 + header.score * 0.8)).toFixed(4));
   if (alignmentScore < template.headerSignature.minimumAlignmentScore) {
     return { ...base, status: "review", alignmentScore, reason: "santander.template-geometry-misaligned" };
   }
@@ -269,7 +301,9 @@ export function matchSantanderCheckingTemplate(layout: DocumentLayout | undefine
     ...base,
     status: "matched",
     alignmentScore,
-    reason: "santander.template-matched-and-calibrated",
+    reason: title
+      ? "santander.template-matched-and-calibrated"
+      : "santander.template-matched-with-verified-header-and-rows",
     columns: calibratedColumns(template, header),
   };
 }

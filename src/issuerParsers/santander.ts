@@ -89,6 +89,17 @@ export function parseSantander(input: DeterministicParseInput): DeterministicPar
   if (templateMatch.status !== "matched") return rejected(templateMatch, summary);
 
   const rows: Transaction[] = [];
+  const visualLines = layoutLines(input.layout);
+  const hasPrintedTitle = visualLines.some((line) => fold(lineText(line)).includes(fold(sectionTitle)));
+  const headerLabels = ["fecha", "folio", "descrip", "deposit", "retiro", "saldo"];
+  // The document text may retain the section title while its word-level OCR
+  // boxes do not. In that case start at the already matched visual header,
+  // never at the top of the page and never at a generic date occurrence.
+  const headerStart = hasPrintedTitle ? -1 : visualLines.findIndex((line, start, lines) => {
+    const window = lines.slice(start, start + 3).filter((candidate) => candidate.page === line.page);
+    const text = fold(window.map(lineText).join(" "));
+    return headerLabels.every((label) => text.includes(label));
+  });
   let active = false;
   let rejectedRowCount = 0;
   const rejectedRows: string[] = [];
@@ -139,10 +150,14 @@ export function parseSantander(input: DeterministicParseInput): DeterministicPar
     pending = undefined;
   };
 
-  for (const line of layoutLines(input.layout)) {
+  for (const [lineIndex, line] of visualLines.entries()) {
     const raw = lineText(line);
     const normalized = fold(raw);
     if (!active && normalized.includes(fold(sectionTitle))) {
+      active = true;
+      continue;
+    }
+    if (!active && lineIndex === headerStart) {
       active = true;
       continue;
     }

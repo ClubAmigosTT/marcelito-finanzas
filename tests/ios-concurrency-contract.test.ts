@@ -250,7 +250,9 @@ test("Santander usa una plantilla versionada y columnas calibradas por documento
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /private static func parseSantanderTable\(/);
   assert.match(source, /let requiredLabels = \["fecha", "folio", "descripcion", "deposito", "retiro", "saldo"\]/);
-  assert.match(source, /santander\.table-title-not-found/);
+  assert.match(source, /santander\.table-title-and-schema-not-found/);
+  assert.match(source, /santander\.template-title-and-row-signal-missing/);
+  assert.match(source, /santander\.template-matched-with-verified-header-and-rows/);
   assert.match(source, /santander\.column-header-not-found/);
   assert.match(source, /lineWindows\(on: page\)/);
   assert.match(source, /if normalized\.contains\("saldo final del periodo anterior"\) \{ return false \}/);

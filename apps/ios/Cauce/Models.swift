@@ -5447,6 +5447,7 @@ final class FinanceStore {
         struct HeaderSignature: Decodable {
             let institutionalAny: [String]
             let tableTitleAll: [String]
+            let allowMissingTitleWhenColumnsVerified: Bool
             let minimumAlignmentScore: Double
         }
 
@@ -5522,6 +5523,7 @@ final class FinanceStore {
               template.coordinateSpace == "normalized-bottom-left",
               !template.headerSignature.institutionalAny.isEmpty,
               !template.headerSignature.tableTitleAll.isEmpty,
+              template.headerSignature.allowMissingTitleWhenColumnsVerified,
               template.headerSignature.minimumAlignmentScore.isFinite,
               template.headerSignature.minimumAlignmentScore >= 0,
               template.headerSignature.minimumAlignmentScore <= 1,
@@ -9196,8 +9198,9 @@ final class FinanceStore {
     /// fixed-coordinate fallback when the columns themselves move.
     private static func calibrateSantanderCheckingTemplate(
         institutionalText: String,
-        tableTitle: String,
+        tableTitle: String?,
         header: [OCRObservation],
+        hasVerifiedTableRows: Bool,
         movementPages: [Int]
     ) -> SantanderTemplateCalibration {
         guard let template = santanderCheckingTemplateV1,
@@ -9238,12 +9241,26 @@ final class FinanceStore {
             )
         }
 
-        let normalizedTitle = normalized(tableTitle)
-        guard template.headerSignature.tableTitleAll.allSatisfy({ normalizedTitle.contains(normalized($0)) }) else {
+        let normalizedTitle = normalized(tableTitle ?? "")
+        let titleMatched = template.headerSignature.tableTitleAll.allSatisfy({ normalizedTitle.contains(normalized($0)) })
+        guard titleMatched || template.headerSignature.allowMissingTitleWhenColumnsVerified else {
             return SantanderTemplateCalibration(
                 record: StatementTemplateMatchRecord(
                     templateId: template.id, templateVersion: template.version, status: "review",
                     alignmentScore: 0, reason: "santander.template-table-title-not-matched",
+                    calibratedPages: [], inheritedPages: []
+                ), columns: nil, dateMaxX: nil, titleBounds: nil, tableLeft: nil, tableSpan: nil
+            )
+        }
+        // The red printed title is decorative and Vision can miss it. The v1
+        // template may proceed without it only after this document has shown
+        // the institutional signature, the full calibrated column schema and
+        // two independently dated rows immediately below that schema.
+        guard titleMatched || hasVerifiedTableRows else {
+            return SantanderTemplateCalibration(
+                record: StatementTemplateMatchRecord(
+                    templateId: template.id, templateVersion: template.version, status: "review",
+                    alignmentScore: 0.5, reason: "santander.template-title-and-row-signal-missing",
                     calibratedPages: [], inheritedPages: []
                 ), columns: nil, dateMaxX: nil, titleBounds: nil, tableLeft: nil, tableSpan: nil
             )
@@ -9319,7 +9336,10 @@ final class FinanceStore {
             return abs(observedRelative - expectedRelative)
         }
         let geometryScore = max(0, 1 - (geometryErrors.reduce(0, +) / Double(geometryErrors.count)) / 0.10)
-        let alignmentScore = 0.4 + geometryScore * 0.6
+        // Without the decorative title, make geometry stricter rather than
+        // lowering the quality bar: issuer + geometry must still clear the
+        // template's declared minimum alignment score.
+        let alignmentScore = titleMatched ? 0.4 + geometryScore * 0.6 : 0.2 + geometryScore * 0.8
         guard alignmentScore >= template.headerSignature.minimumAlignmentScore else {
             return SantanderTemplateCalibration(
                 record: StatementTemplateMatchRecord(
@@ -9352,7 +9372,9 @@ final class FinanceStore {
             record: StatementTemplateMatchRecord(
                 templateId: template.id, templateVersion: template.version, status: "matched",
                 alignmentScore: alignmentScore,
-                reason: "santander.template-matched; encabezado y columnas calibrados dinámicamente",
+                reason: titleMatched
+                    ? "santander.template-matched; encabezado y columnas calibrados dinámicamente"
+                    : "santander.template-matched-with-verified-header-and-rows",
                 calibratedPages: [headerPage + 1],
                 inheritedPages: movementPages.filter { $0 != headerPage }.map { $0 + 1 }
             ),
@@ -9496,8 +9518,27 @@ final class FinanceStore {
             }.first
         }.first
 
-        guard let titleAnchor else {
-            let evidence = diagnosticEvidence(matching: ["detalle", "movim", "cuenta", "cheque"])
+        // The heading is a useful issuer-specific signal, but it is printed
+        // in a decorative red font and can be the only unreadable part of an
+        // otherwise ordinary Santander v1 table.  Before rejecting it, look
+        // for the full six-label schema in adjacent OCR lines.  This anchor
+        // is still template-specific and is never a generic fallback.
+        let schemaAnchor: TableAnchor? = pages.compactMap { page in
+            lineWindows(on: page).compactMap { window -> TableAnchor? in
+                let text = window.map(\.text).joined(separator: " ")
+                guard requiredLabels.allSatisfy({ containsHeaderLabel($0, in: text) }) else { return nil }
+                return TableAnchor(
+                    page: page,
+                    // Include the detected header itself in the scoped body
+                    // so its word boxes can calibrate the document columns.
+                    lowerY: window.map { $0.boundingBox.maxY }.max() ?? 0,
+                    text: text
+                )
+            }.first
+        }.first
+
+        guard let tableAnchor = titleAnchor ?? schemaAnchor else {
+            let evidence = diagnosticEvidence(matching: ["detalle", "movim", "cuenta", "cheque", "fecha", "saldo"])
             return SantanderOCRParseResult(
                 movements: [],
                 columnsCalibrated: false,
@@ -9505,17 +9546,17 @@ final class FinanceStore {
                     page: evidence.page,
                     rawText: evidence.text,
                     selectedColumn: "ENCABEZADO",
-                    reason: "santander.table-title-not-found: no se localizaron juntos los términos del título dentro de tres líneas adyacentes",
+                    reason: "santander.table-title-and-schema-not-found: no se localizó el título ni el esquema FECHA/FOLIO/DESCRIPCIÓN/DEPÓSITO/RETIRO/SALDO",
                     accepted: false
                 )],
-                templateMatch: santanderTemplateReviewRecord("santander.table-title-not-found")
+                templateMatch: santanderTemplateReviewRecord("santander.table-title-and-schema-not-found")
             )
         }
 
         func isAfterTitle(_ observation: OCRObservation) -> Bool {
-            observation.page > titleAnchor.page
-                || (observation.page == titleAnchor.page
-                    && observation.boundingBox.maxY <= titleAnchor.lowerY + 0.012)
+            observation.page > tableAnchor.page
+                || (observation.page == tableAnchor.page
+                    && observation.boundingBox.maxY <= tableAnchor.lowerY + 0.012)
         }
 
         func isTotalBoundary(_ observation: OCRObservation) -> Bool {
@@ -9567,8 +9608,8 @@ final class FinanceStore {
                 movements: [],
                 columnsCalibrated: false,
                 diagnostics: [OCRRowDiagnostic(
-                    page: titleAnchor.page + 1,
-                    rawText: titleAnchor.text,
+                    page: tableAnchor.page + 1,
+                    rawText: tableAnchor.text,
                     selectedColumn: "RECTÁNGULO",
                     reason: "santander.table-empty: el rectángulo entre el título y el total no contiene observaciones OCR",
                     accepted: false
@@ -9633,11 +9674,31 @@ final class FinanceStore {
             )
         }
 
+        // A title-less match is deliberately stricter: two distinct rows
+        // with a valid date at the left edge must follow the recognised
+        // header on the same page. This proves that the schema belongs to a
+        // movement table before the versioned template is allowed to parse.
+        let headerPage = header.first?.page ?? -1
+        let headerBottom = header.map { $0.boundingBox.minY }.min() ?? 0
+        let descriptionStart = header.first(where: {
+            containsHeaderLabel("descripcion", in: $0.text) && $0.boundingBox.width < 0.45
+        })?.boundingBox.minX ?? 0.20
+        let dateRowCount = scopedLines.filter { line in
+            guard line.page == headerPage,
+                  line.centerY < headerBottom - 0.012,
+                  line.boundingBox.minX < descriptionStart,
+                  firstMatch(in: line.text, regex: dateRegex) != nil
+            else { return false }
+            return true
+        }.count
+        let hasVerifiedTableRows = dateRowCount >= 2
+
         let byPage = Dictionary(grouping: scoped, by: \.page)
         let calibration = calibrateSantanderCheckingTemplate(
             institutionalText: institutionalText,
-            tableTitle: titleAnchor.text,
+            tableTitle: titleAnchor?.text,
             header: header,
+            hasVerifiedTableRows: hasVerifiedTableRows,
             movementPages: byPage.keys.sorted()
         )
         guard calibration.record.status == "matched",
@@ -9878,8 +9939,8 @@ final class FinanceStore {
         }
         if diagnostics.isEmpty {
             diagnostics.append(OCRRowDiagnostic(
-                page: titleAnchor.page + 1,
-                rawText: titleAnchor.text,
+                page: tableAnchor.page + 1,
+                rawText: tableAnchor.text,
                 selectedColumn: "FECHA",
                 reason: "santander.no-date-rows: la tabla y sus columnas fueron localizadas, pero no se detectaron filas con fecha dentro de la columna fija",
                 accepted: false

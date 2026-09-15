@@ -10,6 +10,7 @@
   "headerSignature": {
     "institutionalAny": ["banco santander mexico", "grupo financiero santander", "santander.com"],
     "tableTitleAll": ["detalle", "movimientos", "cuenta", "cheques"],
+    "allowMissingTitleWhenColumnsVerified": true,
     "minimumAlignmentScore": 0.9
   },
   "movementRegions": [{

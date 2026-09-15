@@ -84,6 +84,30 @@ final class SantanderIndependentRowsTests: XCTestCase {
         XCTAssertEqual(result.movements.first?.extractionEvidence?.templateVersion, "1")
     }
 
+    func testTemplateReusesVerifiedSchemaWhenDecorativeTitleIsUnreadable() {
+        // The title is intentionally absent. The institutional default used
+        // by this test seam, all six calibrated labels and two dated rows are
+        // still required before Santander v1 may parse anything.
+        let schema = [
+            OCRObservationFixture(text: "FECHA", x: 0.06, y: 0.90, width: 0.05),
+            OCRObservationFixture(text: "FOLIO", x: 0.14, y: 0.90, width: 0.05),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.20, y: 0.90, width: 0.10),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.63, y: 0.90, width: 0.07),
+            OCRObservationFixture(text: "RETIRO", x: 0.75, y: 0.90, width: 0.06),
+            OCRObservationFixture(text: "SALDO", x: 0.88, y: 0.90, width: 0.05),
+        ]
+        let result = FinanceStore.santanderTableSnapshotForTesting(
+            schema + row(1, amount: "30.00", balance: "970.00")
+                + row(2, amount: "40.00", balance: "930.00")
+                + [OCRObservationFixture(text: "TOTAL", x: 0.20, y: 0.10, width: 0.10)],
+            fileName: "same-layout.pdf",
+            openingBalance: 1000
+        )
+        XCTAssertEqual(result.templateMatch?.status, "matched")
+        XCTAssertEqual(result.templateMatch?.reason, "santander.template-matched-with-verified-header-and-rows")
+        XCTAssertEqual(result.movements.map(\.amount), [-30, -40])
+    }
+
     func testUnknownOrMisalignedSantanderHeaderStaysInReview() {
         let title = OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.09, y: 0.96, width: 0.42)
         let shiftedHeader = [
