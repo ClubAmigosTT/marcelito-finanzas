@@ -9543,7 +9543,12 @@ final class FinanceStore {
                     (line, requiredLabels.filter { containsHeaderLabel($0, in: line.text) }.count)
                 }
                 guard let strongest = scoredLines.map({ $0.1 }).max(), strongest >= 2 else { return nil }
-                let headerLines = scoredLines.filter { $0.1 == strongest }.map { $0.0 }
+                // A printed Santander heading can wrap the financial labels
+                // over two baselines (for example FECHA/DESCRIPCIÓN above
+                // DEPÓSITO/RETIRO/SALDO). Keep every contributing header
+                // line, while rejecting a nearby preamble that merely says
+                // SALDO FINAL and contributes a single label.
+                let headerLines = scoredLines.filter { $0.1 >= 2 }.map { $0.0 }
                 return TableAnchor(
                     page: page,
                     // Include the detected header itself in the scoped body
