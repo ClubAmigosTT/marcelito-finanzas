@@ -170,6 +170,7 @@ jobs:
           build_number="$(date +%s)$GITHUB_RUN_NUMBER"
           echo "MARKETING_VERSION=$marketing_version" >> "$GITHUB_ENV"
           echo "BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
+          echo "IOS_BUILD_NUMBER=$build_number" >> "$GITHUB_ENV"
 
       - name: Generar proyecto nativo con Expo
         working-directory: apps/mobile
