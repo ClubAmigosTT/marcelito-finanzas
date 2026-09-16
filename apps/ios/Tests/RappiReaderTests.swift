@@ -267,6 +267,23 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertNil(snapshot.movements.first?.merchantReviewReason)
     }
 
+    func testMerchantIdentityKeepsDescriptionSeparateFromFullRowEvidence() {
+        let text = fixture.replacingOccurrences(
+            of: "COMERCIO EJEMPLO +$50.00",
+            with: "COMERCIO EJEMPLO RFC: ABC010203AB1 +$50.00"
+        )
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "rappi-merchant-evidence.pdf"
+        )
+
+        let movement = snapshot.movements.first
+        XCTAssertEqual(movement?.rawDescription, "COMERCIO EJEMPLO RFC: ABC010203AB1")
+        XCTAssertEqual(movement?.extractionEvidence?.sourceText, "2026-08-01 2026-08-02 COMERCIO EJEMPLO RFC: ABC010203AB1 +$50.00")
+        XCTAssertEqual(movement?.displayMerchant, "Comercio Ejemplo")
+        XCTAssertEqual(movement?.normalizedMerchant, "comercio ejemplo")
+    }
+
     func testOCRRowCarriesPageAndBoundsForPDFReview() throws {
         let rows = [
             "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",

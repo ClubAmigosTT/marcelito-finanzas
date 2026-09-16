@@ -5098,11 +5098,7 @@ final class FinanceStore {
         // a rejected visual row must remain in diagnostics/quarantine. A
         // merchant-only review reason is deliberately not included here: a
         // financially valid row may still enter the book with its evidence.
-        let ocrQualityNeedsReview = usedOCR && (
-            ocrFallbackNeedsReview
-                || ocrColumnCalibrationNeedsReview
-                || ocrConfidenceNeedsReview
-        )
+        let ocrQualityNeedsReview = usedOCR && Self.ocrQualityNeedsReview(extraction)
         let gatedReconciliation = Self.santanderRowGate(reconciliation, source: source, diagnostics: extraction.rowDiagnostics)
         let needsReview = fresh.isEmpty
             || summary == nil
@@ -5412,11 +5408,17 @@ final class FinanceStore {
             movements: fresh
         )
         let gatedReconciliation = Self.santanderRowGate(reconciliation, source: extraction.source, diagnostics: extraction.rowDiagnostics)
+        // The non-mutating inspection path is also used by the device corpus
+        // certifier. It must apply the exact same OCR gates as a real import;
+        // otherwise a weak/rejected row could be reported as certified simply
+        // because the inspection did not persist it.
+        let ocrQualityNeedsReview = Self.ocrQualityNeedsReview(extraction)
         let requiresReview = fresh.isEmpty
             || extraction.summary == nil
             || extraction.kind == .unknown
             || gatedReconciliation.status != .valid
             || extraction.sourceDetection.status != .verified
+            || ocrQualityNeedsReview
 
         return ImportSummary(
             source: extraction.source,
@@ -5444,6 +5446,14 @@ final class FinanceStore {
             multimodalFallbackAttempted: extraction.multimodalFallbackAttempted,
             multimodalFallbackError: extraction.multimodalFallbackError
         )
+    }
+
+    private static func ocrQualityNeedsReview(_ extraction: PDFImportExtraction) -> Bool {
+        guard extraction.usedOCR else { return false }
+        return extraction.ocrFallbackNeedsReview
+            || extraction.ocrColumnCalibrationNeedsReview
+            || extraction.ocrConfidenceNeedsReview
+            || extraction.rowDiagnostics.contains { !$0.accepted }
     }
 
     private func invalidateDerivedProjections() {
@@ -11830,7 +11840,11 @@ final class FinanceStore {
                     .replacingOccurrences(of: #"[;,:]+\s*$"#, with: "", options: .regularExpression)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !title.isEmpty else { continue }
-                let merchant = rappiMerchantIdentity(titleBody, rawDescription: segment)
+                // `sourceText` keeps the complete visual row (dates, amount
+                // and any foreign-purchase metadata). `rawDescription` is the
+                // original merchant fragment only, so the UI can show useful
+                // evidence without presenting accounting tokens as a merchant.
+                let merchant = rappiMerchantIdentity(titleBody, rawDescription: titleBody)
                 // PDF extraction may split the payment label across lines or
                 // insert repeated spaces. Match whole words, not a prefix that
                 // would also accept an unrelated merchant such as SPEIStore.

@@ -195,6 +195,16 @@ test("Rappi conserva evidencia cuando el comercio no es confiable", async () => 
   assert.doesNotMatch(source, /repaired\.title = "Movimiento Rappi sin concepto/);
 });
 
+test("la inspección nativa aplica los mismos bloqueos OCR que la importación", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /private static func ocrQualityNeedsReview\(_ extraction: PDFImportExtraction\)/);
+  assert.match(source, /let ocrQualityNeedsReview = (?:usedOCR|extraction\.usedOCR) && Self\.ocrQualityNeedsReview\(extraction\)/);
+  assert.match(source, /extraction\.ocrFallbackNeedsReview\s*\|\|\s*extraction\.ocrColumnCalibrationNeedsReview\s*\|\|\s*extraction\.ocrConfidenceNeedsReview/);
+  assert.match(source, /extraction\.rowDiagnostics\.contains \{ !\$0\.accepted \}/);
+  assert.match(source, /let merchant = rappiMerchantIdentity\(titleBody, rawDescription: titleBody\)/);
+  assert.match(source, /sourceText: pending, bounds: evidenceBounds/);
+});
+
 test("Rappi deja diagnóstico rechazado para filas OCR visuales no seleccionadas", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /private static func rappiOCRRowDiagnostics\(/);
