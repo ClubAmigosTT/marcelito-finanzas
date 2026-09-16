@@ -12,7 +12,7 @@ Luna debe continuar desde este estado y no desde una build anterior:
 
 - Rama: `codex/testflight-rappi-current-2026-09-15`.
 - Head del código funcional del build 204: `c58d51a7d0ea68b96cbec60e45c11bd6947a8b7e`.
-- Head actual de la rama para continuar el trabajo: `c58d51a` (preserva la confianza OCR real de cada fila Rappi también en la ruta nativa y fija la versión `.2`).
+- Base funcional de la build 204: `c58d51a` (preserva la confianza OCR real de cada fila Rappi también en la ruta nativa y fija la versión `.2`). Los commits posteriores de esta guía solo documentan el mismo artefacto.
 - Tag de entrega: `ios-v1.0.6-bootstrap`, apuntando exactamente a `c58d51a`.
 - Workflow de GitHub Actions: [iOS TestFlight 35094875672](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35094875672).
 - TestFlight: versión `1.0.6`, build `204`, estado `VALID`, asignado al grupo interno `Marcelito - Pruebas internas`.
