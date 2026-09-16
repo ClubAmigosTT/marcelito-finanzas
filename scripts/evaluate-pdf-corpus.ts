@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
-import { detectAccountKey, detectPeriod, detectSourceEvidence, gateOcrReconciliation, PDF_READER_VERSION, rebuildOcrLayout, rebuildPdfLayout, rebuildPdfText, shouldUseOCR } from "../src/pdfImport.ts";
+import { detectAccountKey, detectPeriod, detectSourceEvidence, gateOcrReconciliation, PDF_READER_VERSION, rappiTextLayerReconciles, rebuildOcrLayout, rebuildPdfLayout, rebuildPdfText, shouldUseOCR } from "../src/pdfImport.ts";
 import { parseDeterministicStatement } from "../src/issuerParsers/index.ts";
 import { cents } from "../src/issuerParsers/shared.ts";
 import type { DocumentLayoutPage } from "../src/issuerParsers/types.ts";
@@ -139,7 +139,13 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
   // Keep corpus diagnostics on the exact same text/OCR decision as the app;
   // otherwise a hidden administrative layer could be certified as text here
   // while the product correctly falls back to visual OCR (or vice versa).
-  const requiresOCR = shouldUseOCR(text);
+  // Rappi statements can have a valid selectable table even when the generic
+  // scan heuristic asks for OCR. Prove that issuer-specific text set against
+  // its independent controls first; OCR remains the recovery path. This is
+  // deliberately scoped to Rappi so the Amex/BBVA/Santander contracts do not
+  // change as a side effect.
+  const selectableRappiReconciles = rappiTextLayerReconciles(text, fileName, layout);
+  const requiresOCR = !selectableRappiReconciles && shouldUseOCR(text);
   let mode: "ocr-required" | "pdf-text" | "ocr" = requiresOCR ? "ocr-required" : "pdf-text";
   let ocrConfidence: number | undefined;
   let ocrPageConfidences: number[] | undefined;

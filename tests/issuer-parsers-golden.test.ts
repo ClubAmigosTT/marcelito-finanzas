@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { parseDeterministicStatement } from "../src/issuerParsers/index.ts";
+import { rappiTextLayerReconciles } from "../src/pdfImport.ts";
 import type { DocumentLayout, DocumentLayoutLine } from "../src/issuerParsers/types.ts";
 import { rappiCategoryFor } from "../src/merchantNormalization.ts";
 
@@ -201,6 +202,7 @@ test("golden RappiCard conserva el emisor Banorte como evidencia legal y concili
   assert.equal(parsed.reconciliation.extractedPaymentTotal, 28_000);
   assert.equal(parsed.reconciliation.extractedCreditTotal, 441.11);
   assert.equal(parsed.transactions[0]?.extractionEvidence?.sameVisualRow, undefined);
+  assert.equal(rappiTextLayerReconciles(text, "Rappi-julio.pdf", { pages: [] }), true);
   assert.ok(parsed.transactions.some((row) => row.kind === "cardPayment"));
   assert.ok(parsed.transactions.some((row) => row.foreignCurrency));
   const apple = parsed.transactions.find((row) => row.description.includes("APPLE.COM/BILL"));

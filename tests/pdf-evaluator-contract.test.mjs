@@ -33,6 +33,14 @@ test("el evaluador privado usa la misma compuerta de confianza OCR que la import
   assert.match(source, /ocrConfidence,\s*ocrPageConfidences/);
 });
 
+test("Rappi prueba primero si su capa de texto concilia antes de activar OCR", async () => {
+  const evaluator = await readFile(new URL("../scripts/evaluate-pdf-corpus.ts", import.meta.url), "utf8");
+  const importer = await readFile(new URL("../src/pdfImport.ts", import.meta.url), "utf8");
+  assert.match(evaluator, /const selectableRappiReconciles = rappiTextLayerReconciles\(text, fileName, layout\)/);
+  assert.match(evaluator, /const requiresOCR = !selectableRappiReconciles && shouldUseOCR\(text\)/);
+  assert.match(importer, /const mode = selectableRappiReconciles \|\| !shouldUseOCR\(extractedText\) \? "text" : "ocr"/);
+});
+
 test("la calidad Rappi mide categorías solo en gastos y conserva cobertura de identidad", async () => {
   const source = await readFile(new URL("../scripts/evaluate-pdf-corpus.ts", import.meta.url), "utf8");
   assert.match(source, /if \(row\.flow !== "expense"\) return false/);

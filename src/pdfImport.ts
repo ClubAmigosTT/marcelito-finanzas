@@ -382,6 +382,34 @@ export function shouldUseOCR(extractedText: string) {
   return !hasDateSignal || !hasTableSignal || !hasMovementRowSignal;
 }
 
+/**
+ * Proves Rappi's selectable layer against its own printed controls. Some
+ * Rappi exports contain a complete PDF text table but still trip the generic
+ * scan heuristic; sending those pages through OCR can lose one row on dense
+ * continuation pages. This helper is intentionally issuer-scoped so the
+ * existing Amex, BBVA and Santander extraction contracts remain unchanged.
+ */
+export function rappiTextLayerReconciles(
+  text: string,
+  fileName: string,
+  layout: DocumentLayout,
+) {
+  const sourceDetection = detectSourceEvidence(text, fileName);
+  if (sourceDetection.source !== "Rappi" || sourceDetection.status !== "verified") return false;
+  try {
+    const parsed = parseDeterministicStatement({
+      source: "Rappi",
+      fileName,
+      mode: "text",
+      text,
+      layout,
+    });
+    return parsed.transactions.length > 0 && parsed.reconciliation.status === "valid";
+  } catch {
+    return false;
+  }
+}
+
 function normalizeBareBankSummaryAmount(raw: string, parsed: number) {
   const compact = raw.replace(/\s/g, "");
   // Bank scans can lose both decimal separators (example: 6416111). Only
@@ -1514,7 +1542,18 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   }
 
   const extractedText = pageTexts.join("\n");
-  const mode = shouldUseOCR(extractedText) ? "ocr" : "text";
+  // Rappi exports can contain a perfectly usable selectable layer even when
+  // the generic scan heuristic sees an ISO date shape or a long cover and
+  // asks for OCR. Prove that layer against the issuer controls first. This
+  // keeps OCR as a recovery path, instead of allowing a lossy OCR pass to
+  // replace a complete, auditable text table. The probe is intentionally
+  // Rappi-only so Amex, BBVA and Santander keep their existing contracts.
+  const selectableRappiReconciles = rappiTextLayerReconciles(
+    extractedText,
+    file.name,
+    { pages: textLayoutPages },
+  );
+  const mode = selectableRappiReconciles || !shouldUseOCR(extractedText) ? "text" : "ocr";
   const ocrResult = mode === "ocr" ? await recognizePdfText(document, onProgress) : undefined;
   const text = ocrResult?.text ?? extractedText;
   const layout = ocrResult?.layout ?? { pages: textLayoutPages };
