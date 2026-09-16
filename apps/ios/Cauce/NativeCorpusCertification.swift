@@ -3,9 +3,9 @@ import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// Redacted, device-generated evidence for the Vision reader. The report
-/// contains hashes, quality signals and reconciliation status, never PDF
-/// bytes, descriptions, balances or transaction amounts.
+/// Redacted, device-generated evidence for the local PDFKit/Vision reader.
+/// The report contains hashes, quality signals and reconciliation status,
+/// never PDF bytes, descriptions, balances or transaction amounts.
 struct NativeCorpusFileReport: Codable, Identifiable {
     let file: String
     let sourceFingerprint: String
@@ -411,8 +411,10 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
     let certified: Bool
     /// The general release corpus remains 10+ files. A focused regression can
     /// use the explicit Rappi profile only when every selected file is a
-    /// verified Rappi card read; the profile is exported so CI cannot infer a
-    /// weaker threshold from the file count alone.
+    /// verified Rappi card read using one of the two supported local methods:
+    /// PDF text or Vision OCR. The profile is exported so CI cannot infer a
+    /// weaker threshold from the file count alone. The private golden manifest
+    /// remains responsible for asserting the exact method expected per PDF.
     let certificationScope: String
     /// A machine-readable promise consumed by the GitHub verifier.
     let financialDataRedacted: Bool
@@ -452,7 +454,7 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
             && files.allSatisfy {
                 $0.source.localizedCaseInsensitiveCompare("Rappi") == .orderedSame
                     && $0.kind == StatementKind.card.rawValue
-                    && $0.mode == "vision-ocr"
+                    && ["pdf-text", "vision-ocr"].contains($0.mode)
             }
         certificationScope = isFocusedRappi ? "rappi-focused" : "general"
         let requiredFileCount = isFocusedRappi
@@ -658,7 +660,7 @@ struct NativeCorpusCertificationView: View {
             Text("El lector usa PDFKit y Vision dentro del iPhone. El proveedor de IA seleccionado no recibe PDFs: se usa opcionalmente después para clasificar gastos ya conciliados. El informe exportado contiene únicamente hashes y resultados de calidad.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            Text("La compuerta general requiere al menos \(NativeCorpusCertificationReport.minimumFileCount) archivos. El perfil enfocado Rappi requiere \(NativeCorpusCertificationReport.focusedRappiMinimumFileCount) estados Rappi leídos con Vision.")
+            Text("La compuerta general requiere al menos \(NativeCorpusCertificationReport.minimumFileCount) archivos. El perfil enfocado Rappi requiere \(NativeCorpusCertificationReport.focusedRappiMinimumFileCount) estados Rappi leídos localmente con texto nativo u OCR de Vision.")
                 .font(.caption)
                 .foregroundStyle(Color.marcelitoNavyMid)
         }
@@ -694,7 +696,7 @@ struct NativeCorpusCertificationView: View {
                 Button {
                     runCertification()
                 } label: {
-                    Label("Ejecutar Vision", systemImage: "viewfinder")
+                    Label("Ejecutar lector", systemImage: "viewfinder")
                         .frame(maxWidth: .infinity, minHeight: 42)
                         // The parent card sets a navy foreground style. Keep
                         // the prominent action legible on its navy fill on
@@ -825,7 +827,7 @@ struct NativeCorpusCertificationView: View {
             report = nil
             exportURL = nil
             diagnosticExportURL = nil
-            status = urls.isEmpty ? "No seleccionaste archivos." : "Listo para ejecutar Vision sobre \(urls.count) PDF(s)."
+            status = urls.isEmpty ? "No seleccionaste archivos." : "Listo para ejecutar el lector local sobre \(urls.count) PDF(s)."
         case .failure(let error):
             errorMessage = error.localizedDescription
         }
@@ -844,7 +846,7 @@ struct NativeCorpusCertificationView: View {
                 from: selectedFiles
             ) { completed, total, fileName in
                 progress = total == 0 ? 0 : Double(completed) / Double(total)
-                status = "Leyendo \(fileName) con Vision…"
+                status = "Leyendo \(fileName) con PDFKit/Vision…"
             }
             report = result
             progress = 1

@@ -68,7 +68,24 @@ test("el perfil rappi-focused pasa con seis estados Rappi OCR", () => {
   assert.deepEqual(result.errors, []);
 });
 
-test("el perfil rappi-focused rechaza un conjunto Rappi incompleto o no visual", () => {
+test("el perfil rappi-focused también acepta texto nativo conciliado", () => {
+  const rows = Array.from({ length: 6 }, (_, index) => row(index + 1, {
+    source: "Rappi",
+    accountKey: "rappi:9040",
+    kind: "card",
+    mode: index === 0 ? "pdf-text" : "vision-ocr",
+    ...(index === 0 ? {} : { ocrConfidence: 0.94, weakestOCRPage: 0.84 }),
+  }));
+  const result = verifyNativeDeviceReport(
+    { ...report(rows), certificationScope: "rappi-focused" },
+    "ios-reader-2026.08.31.14",
+    10,
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.errors, []);
+});
+
+test("el perfil rappi-focused rechaza un conjunto Rappi incompleto o no local", () => {
   const rows = Array.from({ length: 6 }, (_, index) => row(index + 1, {
     source: "Rappi",
     accountKey: "rappi:9040",
@@ -81,7 +98,7 @@ test("el perfil rappi-focused rechaza un conjunto Rappi incompleto o no visual",
     source: "Rappi",
     accountKey: "rappi:9040",
     kind: "card",
-    mode: "pdf-text",
+    mode: "multimodal-ai",
   });
   const result = verifyNativeDeviceReport(
     { ...report(rows), certificationScope: "rappi-focused" },

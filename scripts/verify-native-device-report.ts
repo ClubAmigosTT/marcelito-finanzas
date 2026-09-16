@@ -86,9 +86,9 @@ export function verifyNativeDeviceReport(report: DeviceReport, expectedReaderVer
   if (files.length < effectiveMinimumFiles) errors.push(`el informe contiene ${files.length} archivo(s); se requieren al menos ${effectiveMinimumFiles} para ${certificationScope}`);
   if (focusedRappi && files.some((raw) => {
     const row = raw && typeof raw === "object" ? raw as DeviceFile : {};
-    return row.source !== "Rappi" || row.kind !== "card" || row.mode !== "vision-ocr";
+    return row.source !== "Rappi" || row.kind !== "card" || !["pdf-text", "vision-ocr"].includes(String(row.mode));
   })) {
-    errors.push("el perfil rappi-focused solo permite archivos Rappi de tarjeta procesados con vision-ocr");
+    errors.push("el perfil rappi-focused solo permite archivos Rappi de tarjeta procesados con texto nativo u OCR visual");
   }
   if (!Number.isInteger(accepted) || accepted < 0) errors.push("accepted no es un entero válido");
   if (!Number.isInteger(blocked) || blocked < 0) errors.push("blocked no es un entero válido");

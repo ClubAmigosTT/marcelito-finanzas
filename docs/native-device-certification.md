@@ -9,19 +9,21 @@ la conciliación de PDFs; se reserva para clasificar gastos después.
 ## Ejecutar en el iPhone
 
 Esta herramienta ofrece dos perfiles de certificación: el general, con 10
-archivos o más, y `rappi-focused`, con seis o más tarjetas Rappi procesadas
-con Vision. Para una auditoría de filas y controles exactos, usa además el
-runner de XCTest con el manifiesto privado descrito más abajo.
+archivos o más, y `rappi-focused`, con seis o más tarjetas Rappi procesadas por
+el lector local. Un archivo puede usar texto nativo de PDFKit u OCR de Vision;
+el manifiesto privado descrito más abajo fija el método exacto esperado por
+cada PDF cuando se necesita esa comprobación.
 
 1. Abre **Resumen → Opciones → Diagnóstico → Certificar estados con Vision**.
 2. Selecciona seis estados Rappi para el perfil `rappi-focused`, o diez estados
    de cualquier emisor para el perfil general.
-3. Pulsa **Ejecutar Vision** y espera a que termine cada PDF.
+3. Pulsa **Ejecutar lector** y espera a que termine cada PDF.
 4. El perfil Rappi solo se acepta si todos los archivos son tarjetas Rappi,
-   usan `vision-ocr`, están conciliados, tienen emisor verificado, no tienen
-   revisión pendiente, OCR ≥ 88% y página más débil ≥ 78%. El perfil general
-   conserva las mismas reglas y requiere al menos 10 archivos; para Santander
-   también deben estar calibradas las columnas.
+   usan `pdf-text` o `vision-ocr`, están conciliados, tienen emisor verificado
+   y no tienen revisión pendiente. Cuando un archivo usa OCR, además exige
+   OCR ≥ 88% y página más débil ≥ 78%. El perfil general conserva las mismas
+   reglas y requiere al menos 10 archivos; para Santander también deben estar
+   calibradas las columnas.
 5. Comparte **informe JSON** y guárdalo como
    `docs/native-corpus-certification.json` en el repositorio. El archivo está
    sanitizado: no contiene PDFs, descripciones, saldos ni importes.

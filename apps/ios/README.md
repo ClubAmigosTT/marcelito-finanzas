@@ -122,7 +122,7 @@ texto OCR necesario para depurar una extracción. Guárdalo como
 publicar. La primera build que instala esta herramienta se ejecuta con la
 opción de bootstrap del workflow; después la compuerta acepta el perfil
 general de al menos 10 estados o el perfil `rappi-focused` de al menos seis
-tarjetas Rappi procesadas con `vision-ocr`.
+tarjetas Rappi procesadas con texto nativo o `vision-ocr`.
 
 Para una auditoría con expectativas doradas, el runner nativo admite además
 `MARCELITO_PDF_CORPUS_MANIFEST` apuntando a un JSON privado fuera del checkout.
