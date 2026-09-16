@@ -113,6 +113,11 @@ jobs:
           echo "Se compilará Marcelito $version"
 
       - name: Evitar una versión de marketing obsoleta
+        env:
+          ASC_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          ASC_BUNDLE_ID: mx.marcelito.personal
         shell: bash
         run: |
           set -euo pipefail

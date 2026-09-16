@@ -20,6 +20,10 @@ test("el release tag bootstrap permite instalar el certificador sin certificar e
 
 test("TestFlight rechaza una versión de marketing menor a la ya publicada", () => {
   assert.match(workflow, /scripts\/validate-testflight-marketing-version\.mjs/);
+  assert.match(workflow, /ASC_ISSUER_ID: \$\{\{ secrets\.APPSTORE_ISSUER_ID \}\}/);
+  assert.match(workflow, /ASC_KEY_ID: \$\{\{ secrets\.APPSTORE_API_KEY_ID \}\}/);
+  assert.match(workflow, /ASC_PRIVATE_KEY: \$\{\{ secrets\.APPSTORE_API_PRIVATE_KEY \}\}/);
+  assert.match(workflow, /ASC_BUNDLE_ID: mx\.marcelito\.personal/);
   const versionGuard = workflow.indexOf("Evitar una versión de marketing obsoleta");
   const xcodegen = workflow.indexOf("Instalar XcodeGen");
   assert.ok(versionGuard >= 0, "falta la compuerta de versión de marketing");
