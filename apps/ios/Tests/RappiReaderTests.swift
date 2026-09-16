@@ -324,7 +324,7 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(movement?.rawDescription, "MERPAGO*SRCLEAN; RFC: MAG2105031W3")
         XCTAssertEqual(movement?.normalizedMerchant, "srclean")
         XCTAssertEqual(movement?.displayMerchant, "Srclean")
-        XCTAssertEqual(movement?.merchantConfidence, 0.88, accuracy: 0.001)
+        XCTAssertEqual(movement?.merchantConfidence ?? -1, 0.88, accuracy: 0.001)
         XCTAssertNil(movement?.merchantReviewReason)
         XCTAssertEqual(movement?.category, "Otros / Por revisar")
         XCTAssertEqual(
