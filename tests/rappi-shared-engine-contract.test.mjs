@@ -97,6 +97,7 @@ test("iOS empaqueta y usa el puente compartido para ambos extractores Rappi", ()
   assert.match(bridge, /import JavaScriptCore/);
   assert.match(bridge, /rappi-engine/);
   assert.match(bridge, /source\.selectionReason/);
+  assert.match(bridge, /result\.reconciliation\?\.status == "valid"/);
   assert.match(models, /evidenceMethod == "pdf-text" \|\| evidenceMethod == "vision-ocr"/);
   assert.match(projectSpec, /Cauce\/Resources\/rappi-engine\.js/);
 });

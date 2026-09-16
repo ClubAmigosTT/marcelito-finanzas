@@ -37,8 +37,13 @@ private struct RappiEngineResult: Decodable {
     let parserId: String
     let sourceSection: String
     let transactions: [RappiEngineTransaction]
+    let reconciliation: RappiEngineReconciliation?
     let rejectedRowCount: Int
     let rejectedRows: [String]?
+}
+
+private struct RappiEngineReconciliation: Decodable {
+    let status: String?
 }
 
 private struct RappiEngineTransaction: Decodable {
@@ -139,6 +144,13 @@ final class RappiSharedEngine: @unchecked Sendable {
         ) else {
             return nil
         }
+        // The native reader still owns PDFKit/Vision extraction and candidate
+        // selection. Use the shared interpretation only when its complete
+        // stream proves the independent Rappi controls. For a malformed or
+        // extraction-specific fixture, returning nil deliberately hands the
+        // stream to the native recovery parser instead of exposing a partial
+        // shared result or mixing rows from both readers.
+        guard result.reconciliation?.status == "valid" else { return nil }
         return result.transactions.compactMap {
             Self.makeMovement(from: $0, evidenceMethod: evidenceMethod)
         }
