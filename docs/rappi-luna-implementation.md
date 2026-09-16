@@ -13,6 +13,7 @@ Luna debe continuar desde este estado y no desde una build anterior:
 - Rama: `codex/testflight-rappi-current-2026-09-15`.
 - Head funcional del lector incluido en el build 202: `544d7ae` (`docs: pin Luna handoff to validated head`).
 - Corrección web/evaluador más reciente: `51a195b` (`fix: prefer reconciled Rappi text layer before OCR`).
+- Regresión nativa de selección texto/OCR: `6f09856` (`test: cover Rappi text-layer reconciliation gate`).
 - El head actual de la rama incorpora ese cambio y sus pruebas; la build 202 sigue siendo el artefacto nativo bootstrap.
 - Cambios funcionales de confianza financiera: `00c6cfe`; fixture corregido en `4d57dee`.
 - Runtime iOS validado para el artefacto actual: `6584fc3` (`fix: keep signed Rappi credits out of OCR review`).
@@ -20,7 +21,7 @@ Luna debe continuar desde este estado y no desde una build anterior:
 - Workflow de GitHub Actions: `35076838703`.
 - TestFlight: versión `1.0.4`, build `202`, estado `VALID`, asignado al grupo interno `Marcelito - Pruebas internas`.
 - Versión del lector que debe aparecer en los informes: `ios-reader-deterministic-2026.09.15.39`.
-- Validaciones del head funcional: [Web Reader Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35083581565) y [iOS Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35083581549), ambos en verde.
+- Validaciones del head funcional: [Web Reader Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35085063543) y [iOS Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35085063523), ambos en verde.
 - Auditoría local repetida el 16-sep-2026: `317/317` pruebas públicas, TypeScript, build Vite y auditoría pública en verde; la corrida privada web de los seis Rappi devolvió `6/6` válidos, `0` filas rechazadas, `0` fallas de manifiesto y `nativeOCRPending: 0`.
 
 El build 202 contiene la recuperación de filas Rappi cuando Vision detecta solo parte de las líneas horizontales, la deduplicación por región/importe, la evidencia por página y zona, la separación entre conciliación y enriquecimiento, el visor móvil y la corrección para no mandar créditos/pagos con signo válido a revisión por comparar signo contra magnitud. También separa la confianza financiera de fecha/importe de la confianza general del comercio, y deja conservadora la inferencia de importes sin signo: no se inventa un cargo positivo si OCR perdió el signo. El build está distribuido como bootstrap para probar el lector actual, pero todavía no se debe declarar certificación nativa completa: falta ejecutar los seis PDFs privados con PDFKit/Vision en macOS y confirmar el flujo completo en un iPhone físico.
@@ -45,6 +46,7 @@ No subir los PDFs, capturas ni un reporte con comercios/importes reales al repos
 - La detección visual de filas combina las reglas horizontales impresas con anclas independientes de fecha. Si sobreviven solo algunas reglas, las bandas faltantes se recuperan por fecha y las bandas solapadas se deduplican antes de invocar Vision.
 - La inspección PDF web aplica `gateOcrReconciliation` antes de mostrar el resultado como guardable: una conciliación aritmética con OCR de baja confianza queda provisional y no puede entrar al libro hasta revisión.
 - La extracción web de Rappi prueba primero si la capa de texto seleccionable completa concilia con sus controles impresos. Solo si esa prueba falla se activa OCR; la heurística genérica no puede reemplazar una tabla Rappi completa por una lectura OCR más débil. Esta excepción queda aislada de American Express, BBVA y Santander.
+- La suite nativa prueba la misma frontera: una tabla Rappi seleccionable que concilia evita Vision y una fila faltante no pasa el probe. El caso usa datos sintéticos, no PDFs privados.
 - El evaluador privado del corpus usa la misma compuerta para no convertir un reporte OCR débil en una certificación; `qualityGate.applied` solo es verdadero cuando la compuerta cambia el resultado.
 - El lector se versionó para forzar la reconstrucción de estados previos después de instalar la nueva build. La reconstrucción reemplaza filas de forma atómica y conserva el PDF original.
 - El dashboard iOS separa estados conciliados, movimientos bloqueados y movimientos por enriquecer. Los bloqueados no entran al libro financiero; los comercios inciertos sí pueden entrar si fecha, importe, signo y conciliación son confiables.
