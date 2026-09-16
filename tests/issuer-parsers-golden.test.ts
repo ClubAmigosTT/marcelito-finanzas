@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { parseDeterministicStatement } from "../src/issuerParsers/index.ts";
 import { rappiTextLayerReconciles } from "../src/pdfImport.ts";
 import type { DocumentLayout, DocumentLayoutLine } from "../src/issuerParsers/types.ts";
-import { rappiCategoryFor } from "../src/merchantNormalization.ts";
+import { normalizeRappiMerchant, rappiCategoryFor } from "../src/merchantNormalization.ts";
 
 const line = (page: number, words: Array<[number, string]>): DocumentLayoutLine => ({
   page,
@@ -303,6 +303,26 @@ test("Rappi clasifica descriptores compactados de alta confianza sin adivinar ME
 test("las categorías Rappi mantienen AVIANCA como viaje en web y nativo", () => {
   assert.equal(rappiCategoryFor("AVIANCA MX", "avianca", "expense", "purchase"), "Viajes");
   assert.equal(rappiCategoryFor("AVIANCA MX", "avianca", "transfer", "cardPayment"), undefined);
+});
+
+test("Rappi separa el procesador del comercio y conserva evidencia para revisión", () => {
+  const processor = normalizeRappiMerchant("MERPAGO*SRCLEAN; RFC: MAG2105031W3");
+  assert.equal(processor.rawDescription, "MERPAGO*SRCLEAN; RFC: MAG2105031W3");
+  assert.equal(processor.normalizedMerchant, "srclean");
+  assert.equal(processor.displayMerchant, "Srclean");
+  assert.equal(processor.confidence, 0.88);
+  assert.equal(processor.reviewReason, undefined);
+
+  const opaque = normalizeRappiMerchant("MERPAGO*LA701; RFC: MAG2105031W3");
+  assert.equal(opaque.normalizedMerchant, "la701");
+  assert.equal(opaque.rawDescription, "MERPAGO*LA701; RFC: MAG2105031W3");
+  assert.equal(opaque.confidence, 0.70);
+  assert.match(opaque.reviewReason ?? "", /identificador de procesador/);
+
+  assert.equal(
+    rappiCategoryFor("MERPAGO*CAFETERIAVANN; RFC: MAG2105031W3", "cafeteriavann", "expense", "purchase"),
+    "Restaurantes y bares",
+  );
 });
 
 test("Rappi conserva evidencia original y separa dos filas aplanadas solo por una segunda fila fechada", () => {

@@ -781,7 +781,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.15.39"
+    static let readerVersion = "ios-reader-deterministic-2026.09.16.1"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -11614,11 +11614,24 @@ final class FinanceStore {
             .replacingOccurrences(of: #"\s*[/;|]\s*$"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // A processor prefix is useful evidence but is not the merchant
+        // identity. Remove it only from the searchable/display core; the raw
+        // description above remains untouched for review and audit.
+        let merchantCore = withoutTechnical
+            .replacingOccurrences(
+                of: #"(?i)^(?:merpago|mercadopago|payu|paypal|conekta|clip(?:\s+mx)?|bpk|d\s+local|pgb|com\s+rap)\s*[*:/-]?\s*"#,
+                with: "", options: .regularExpression
+            )
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let processorDerived = merchantCore != withoutTechnical
         let normalized: String
         if let alias {
             normalized = alias.key
         } else {
-            normalized = folded
+            normalized = merchantCore
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
                 .replacingOccurrences(of: #"\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizacion)?|operacion|codigo|no\.?\s*de?)\b\s*[:#./_-]*\s*[a-z0-9-]+"#, with: " ", options: .regularExpression)
                 .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
                 .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
@@ -11627,9 +11640,9 @@ final class FinanceStore {
         let display: String
         if let alias {
             display = alias.display
-        } else if !withoutTechnical.isEmpty {
-            let hasLowercase = withoutTechnical.rangeOfCharacter(from: .lowercaseLetters) != nil
-            display = hasLowercase ? withoutTechnical : withoutTechnical
+        } else if !merchantCore.isEmpty {
+            let hasLowercase = merchantCore.rangeOfCharacter(from: .lowercaseLetters) != nil
+            display = hasLowercase ? merchantCore : merchantCore
                 .lowercased()
                 .split(separator: " ")
                 .map { token in
@@ -11642,8 +11655,11 @@ final class FinanceStore {
         }
         let letters = normalized.filter { $0.isLetter }.count
         let noisy = raw.filter { "|*_#".contains($0) }.count >= 2
-        let confidence: Double = alias != nil ? 0.96 : letters == 0 || raw.count > 100 ? 0.48 : noisy ? 0.70 : withoutTechnical.count >= 3 ? 0.88 : 0.58
-        let reviewReason: String? = confidence < 0.75
+        let likelyOpaqueProcessorDescriptor = processorDerived && (merchantCore.rangeOfCharacter(from: .decimalDigits) != nil || merchantCore.count < 4)
+        let confidence: Double = alias != nil ? 0.96 : letters == 0 || raw.count > 100 ? 0.48 : likelyOpaqueProcessorDescriptor || noisy ? 0.70 : merchantCore.count >= 3 ? 0.88 : 0.58
+        let reviewReason: String? = likelyOpaqueProcessorDescriptor
+            ? "El texto conserva un identificador de procesador; confirma el comercio con la descripción original."
+            : confidence < 0.75
             ? letters == 0
                 ? "La descripción no conserva un nombre de comercio legible."
                 : "El comercio conserva evidencia, pero la normalización no es suficientemente confiable."
@@ -11689,10 +11705,10 @@ final class FinanceStore {
             return "Compras personales"
         }
         let foodWord = words.contains { $0.hasPrefix("rest") }
-        if foodWord || text.contains("cafe") || text.contains("shake shack") || text.contains("serena horneando")
+        if foodWord || text.contains("cafe") || text.contains("cafeteria") || text.contains("sazonjarocho") || text.contains("mezcaleria") || text.contains("barbacoa") || text.contains("shake shack") || text.contains("serena horneando")
             || text.contains("los gueros") || text.contains("taco") || text.contains("torta")
             || text.contains("crepa") || text.contains("mcdonald") || text.contains("chili s")
-            || text.contains("casa de tono") || text.contains("maison kayser") || text.contains("cevicheria")
+            || text.contains("casa de tono") || text.contains("casadetono") || text.contains("maison kayser") || text.contains("cevicheria")
             || text.contains("la pancita") || text.contains("volovaneria") || text.contains("el globo")
             || text.contains("fastfood") {
             return "Restaurantes y bares"

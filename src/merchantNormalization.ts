@@ -20,7 +20,7 @@ const rappiCategoryRules: ReadonlyArray<{ category: string; pattern: RegExp }> =
   { category: "Entretenimiento", pattern: /\b(?:lucha\s+libre|cinetec|flix|pingpod|aerodiverti)\b/ },
   { category: "Viajes", pattern: /\b(?:avianca|ado\s+web)\b/ },
   { category: "Compras personales", pattern: /\b(?:shein|fraiche|juguete|bout\b|lib\s+rosario)\b/ },
-  { category: "Restaurantes y bares", pattern: /\b(?:cafe|cafeteria|cafesitio|shake\s+shack|serena\s+horneando|los\s+gueros|tacos?|tortas?|crepas?|mcdonald|chili\s*s|casa\s+de\s+tono|maison\s+kayser|cevicheria|la\s+pancita|volovaneria|el\s+globo|fastfood|restaurant|rest\b)\b/ },
+  { category: "Restaurantes y bares", pattern: /\b(?:cafe|cafeteria|cafesitio|shake\s+shack|serena\s+horneando|los\s+gueros|tacos?|tortas?|crepas?|mcdonalds?|chili\s*s|casa\s*de\s*tono|maison\s+kayser|cevicheria|la\s+pancita|volovaneria|el\s+globo|fastfood|restaurant|rest\b|rest[a-z]{3,}|mezcaleria|barbacoa)\b|(?:cafeteria|cafesitio|mcdonalds?|sazonjarocho|tortasin|barbacoawtc|gajrest|resttonal|casadetono)/ },
 ];
 
 function fold(value: string) {
@@ -44,6 +44,10 @@ const aliasRules = [
 ];
 
 const technicalToken = /\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizaci[oó]n)?|operaci[oó]n|c[oó]digo|codigo|no\.?\s*de?)\s*[:#./_-]*\s*[a-z0-9-]+/gi;
+// These prefixes identify the payment processor, not necessarily the actual
+// merchant. Strip them only from the rule/search identity; rawDescription and
+// the review evidence must keep the original token intact.
+const processorPrefix = /^(?:merpago|mercadopago|payu|paypal|conekta|clip(?:\s+mx)?|bpk|d\s+local|pgb|com\s+rap)\s*[*:/-]?\s*/i;
 
 function removeTechnicalFragments(value: string) {
   return compact(value
@@ -78,22 +82,28 @@ export function normalizeRappiMerchant(value: string): MerchantIdentity {
   const rawDescription = value.trim();
   const compactDescription = compact(rawDescription);
   const withoutTechnical = removeTechnicalFragments(compactDescription);
+  const merchantCore = compact(withoutTechnical.replace(processorPrefix, ""));
+  const processorDerived = merchantCore !== withoutTechnical;
   const alias = aliasRules.find((rule) => rule.pattern.test(compactDescription));
-  const normalizedMerchant = alias?.merchant ?? stableKey(withoutTechnical);
-  const displayMerchant = alias?.display ?? displayCase(withoutTechnical || rawDescription);
+  const normalizedMerchant = alias?.merchant ?? stableKey(merchantCore);
+  const displayMerchant = alias?.display ?? displayCase(merchantCore || rawDescription);
   const letters = (normalizedMerchant.match(/[a-z]{2,}/g) ?? []).join("");
   const noisy = (rawDescription.match(/[|*_#]{2,}/g) ?? []).length > 0;
   const tooLong = rawDescription.length > 100;
+  const likelyOpaqueProcessorDescriptor = processorDerived
+    && (/[0-9]/.test(merchantCore) || merchantCore.length < 4);
   const confidence = alias
     ? 0.96
     : !letters || tooLong
       ? 0.48
-      : noisy
+      : likelyOpaqueProcessorDescriptor || noisy
         ? 0.70
-        : withoutTechnical.length >= 3
+        : merchantCore.length >= 3
           ? 0.88
           : 0.58;
-  const reviewReason = confidence < 0.75
+  const reviewReason = likelyOpaqueProcessorDescriptor
+    ? "El texto conserva un identificador de procesador; confirma el comercio con la descripción original."
+    : confidence < 0.75
     ? !letters
       ? "La descripción no conserva un nombre de comercio legible."
       : "El comercio conserva evidencia, pero la normalización no es suficientemente confiable."

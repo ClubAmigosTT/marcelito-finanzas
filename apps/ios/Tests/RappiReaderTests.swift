@@ -310,6 +310,31 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertNil(snapshot.movements.first?.merchantReviewReason)
     }
 
+    func testProcessorPrefixSeparatesMerchantAndKeepsRawEvidence() {
+        let text = fixture.replacingOccurrences(
+            of: "COMERCIO EJEMPLO",
+            with: "MERPAGO*SRCLEAN; RFC: MAG2105031W3"
+        )
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "rappi-processor-identity.pdf"
+        )
+
+        let movement = snapshot.movements.first
+        XCTAssertEqual(movement?.rawDescription, "MERPAGO*SRCLEAN; RFC: MAG2105031W3")
+        XCTAssertEqual(movement?.normalizedMerchant, "srclean")
+        XCTAssertEqual(movement?.displayMerchant, "Srclean")
+        XCTAssertEqual(movement?.merchantConfidence, 0.88, accuracy: 0.001)
+        XCTAssertNil(movement?.merchantReviewReason)
+        XCTAssertEqual(movement?.category, "Otros / Por revisar")
+        XCTAssertEqual(
+            FinanceStore.reconcileStatementForTesting(
+                kind: .card, summary: snapshot.summary, movements: snapshot.movements
+            ).status,
+            .valid
+        )
+    }
+
     func testMerchantIdentityKeepsDescriptionSeparateFromFullRowEvidence() {
         let text = fixture.replacingOccurrences(
             of: "COMERCIO EJEMPLO +$50.00",
