@@ -52,14 +52,15 @@ function parseSummary(text: string): StatementSummary {
 
 type PendingRow = { raw: string; page: number; foreignCurrency: boolean };
 
-function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean | null = null) {
+function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean | null = null, rowConfidences: number[] = []) {
   const rows: Transaction[] = [];
   const rejectedRows: string[] = [];
   let page = 1;
   let active = false;
   let pending: PendingRow | undefined;
+  let rowConfidenceIndex = 0;
 
-  const finishRow = (rawValue: string, rowPage: number, rowForeignCurrency: boolean) => {
+  const finishRow = (rawValue: string, rowPage: number, rowForeignCurrency: boolean, rowConfidence?: number) => {
     const raw = rawValue.replace(/\s+/g, " ").trim();
     const match = raw.match(rowStart);
     if (!match) {
@@ -140,7 +141,11 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
       kind,
       page: rowPage,
       mode: input.mode,
-      confidence: input.mode === "ocr" ? 0.9 : 1,
+      confidence: Number.isFinite(rowConfidence)
+        ? Math.max(0, Math.min(1, rowConfidence as number))
+        : input.mode === "ocr"
+          ? Math.max(0, Math.min(1, input.pageConfidences?.[rowPage - 1] ?? 0.9))
+          : 1,
       foreignCurrency: rowForeignCurrency,
       sourceText: raw,
       rawDescription,
@@ -163,7 +168,10 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
     // only at a second complete ISO date pair, never at an arbitrary number;
     // a reference such as `REF2026` therefore remains part of the merchant.
     const rowSegments = raw.split(/(?=\d{4}-\d{2}-\d{2}\s+\d{4}-\d{2}-\d{2}\s+)/);
-    for (const segment of rowSegments) finishRow(segment, rowPage, rowForeignCurrency);
+    for (const segment of rowSegments) {
+      const confidence = rowConfidences.length ? rowConfidences[rowConfidenceIndex++] : undefined;
+      finishRow(segment, rowPage, rowForeignCurrency, confidence);
+    }
   };
 
   for (const rawLine of input.text.split(/\r?\n/)) {
@@ -210,8 +218,8 @@ function parseLayoutRows(input: DeterministicParseInput) {
   let active = false;
   let amountStart = 0.78;
   let descriptionStart = 0.28;
-  const selectedRows: Array<{ page: number; text: string }> = [];
-  let pending: { page: number; dates: string[]; description: string; amount?: string } | undefined;
+  const selectedRows: Array<{ page: number; text: string; confidence: number }> = [];
+  let pending: { page: number; dates: string[]; description: string; amount?: string; confidence: number } | undefined;
   const normalizeDate = (token: string) => {
     const iso = token.match(/^(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})$/);
     return iso
@@ -236,6 +244,7 @@ function parseLayoutRows(input: DeterministicParseInput) {
     selectedRows.push({
       page: pending.page,
       text: `${firstDate} ${secondDate} ${pending.description.trim()} ${pending.amount}`,
+      confidence: pending.confidence,
     });
     pending = undefined;
   };
@@ -264,20 +273,30 @@ function parseLayoutRows(input: DeterministicParseInput) {
       .map((word) => word.text.replace(/\s+/g, "").trim());
     const amountCell = line.words.filter((word) => word.x >= amountStart).map((word) => word.text).join("").replace(/\s+/g, "");
     const amountMatch = amountCell.match(/[+-]\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}/);
+    const lineConfidence = line.words.length
+      ? Math.max(0, Math.min(1, Math.min(...line.words.map((word) => word.confidence))))
+      : 0;
     if (dateWords.length) {
       finish();
       const description = line.words.filter((word) => word.x >= descriptionStart && word.x < amountStart).map((word) => word.text).join(" ");
-      pending = { page: line.page, dates: dateWords.slice(0, 2), description, amount: amountMatch?.[0] };
+      pending = { page: line.page, dates: dateWords.slice(0, 2), description, amount: amountMatch?.[0], confidence: lineConfidence };
       continue;
     }
     if (pending && !amountMatch) {
       const continuation = line.words.filter((word) => word.x >= descriptionStart && word.x < amountStart).map((word) => word.text).join(" ").trim();
-      if (continuation) pending.description = `${pending.description} ${continuation}`.trim();
+      if (continuation) {
+        pending.description = `${pending.description} ${continuation}`.trim();
+        pending.confidence = Math.min(pending.confidence, lineConfidence);
+      }
     }
   }
   finish();
   if (!selectedRows.length) return undefined;
-  return parseMoneyRows({ ...input, text: `${sectionTitle}\n${selectedRows.map((row) => `__PDF_PAGE_${row.page}__\n${row.text}`).join("\n")}` }, true);
+  return parseMoneyRows(
+    { ...input, text: `${sectionTitle}\n${selectedRows.map((row) => `__PDF_PAGE_${row.page}__\n${row.text}`).join("\n")}` },
+    true,
+    selectedRows.map((row) => row.confidence),
+  );
 }
 
 export function parseRappi(input: DeterministicParseInput): DeterministicParseResult {

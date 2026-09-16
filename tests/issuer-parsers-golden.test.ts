@@ -5,9 +5,9 @@ import { rappiTextLayerReconciles } from "../src/pdfImport.ts";
 import type { DocumentLayout, DocumentLayoutLine } from "../src/issuerParsers/types.ts";
 import { normalizeRappiMerchant, rappiCategoryFor } from "../src/merchantNormalization.ts";
 
-const line = (page: number, words: Array<[number, string]>): DocumentLayoutLine => ({
+const line = (page: number, words: Array<[number, string, number?]>): DocumentLayoutLine => ({
   page,
-  words: words.map(([x, text]) => ({ x, text, confidence: 1 })),
+  words: words.map(([x, text, confidence = 1]) => ({ x, text, confidence })),
 });
 
 const layout = (...lines: DocumentLayoutLine[]): DocumentLayout => ({ pages: [{ page: 1, lines }] });
@@ -270,6 +270,30 @@ test("Rappi OCR selecciona el importe por columna y no por la última cifra de l
   assert.equal(parsed.transactions[0]?.extractionEvidence?.sameVisualRow, true);
   assert.equal(parsed.reconciliation.status, "valid", parsed.reconciliation.reason);
   assert.match(parsed.transactions[0]?.description ?? "", /123\.45/);
+});
+
+test("Rappi OCR conserva la confianza real de la fila y no una constante global", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Adeudo del periodo anterior = $0.00",
+    "Cargos regulares (no a meses) + $100.00",
+    "Cargos compras a meses (capital) + $0.00",
+    "Pagos y abonos - $0.00",
+    "Saldo deudor total $100.00",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({
+    source: "Rappi",
+    fileName: "rappi-ocr-confidence.pdf",
+    mode: "ocr",
+    text,
+    layout: layout(
+      line(1, [[0.05, "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)"], [0.84, "MONTO"]]),
+      line(1, [[0.05, "2026-08-01", 0.99], [0.18, "2026-08-02", 0.99], [0.34, "COMERCIO", 0.74], [0.84, "+$100.00", 0.99]]),
+    ),
+  });
+  assert.equal(parsed.reconciliation.status, "valid", parsed.reconciliation.reason);
+  assert.equal(parsed.transactions[0]?.confidence, 0.74);
+  assert.equal(parsed.transactions[0]?.extractionEvidence?.confidence, 0.74);
 });
 
 test("Rappi clasifica descriptores compactados de alta confianza sin adivinar MERPAGO", () => {

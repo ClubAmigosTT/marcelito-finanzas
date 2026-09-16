@@ -6,7 +6,7 @@ import { parseDeterministicStatement, reconcileExactly } from "./issuerParsers/i
 import type { DocumentLayout, DocumentLayoutLine, DocumentLayoutPage } from "./issuerParsers/types.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-deterministic-2026.09.16.1";
+export const PDF_READER_VERSION = "web-reader-deterministic-2026.09.16.2";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
@@ -1564,7 +1564,14 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
   const deterministic = source === "Santander" || source === "BBVA" || source === "Amex" || source === "Rappi"
-    ? parseDeterministicStatement({ source, fileName: file.name, mode, text, layout })
+    ? parseDeterministicStatement({
+      source,
+      fileName: file.name,
+      mode,
+      text,
+      layout,
+      pageConfidences: ocrResult?.pageConfidences,
+    })
     : undefined;
   const parsed = deterministic?.transactions ?? [];
   const summary = deterministic?.summary;
