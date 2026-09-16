@@ -6,6 +6,24 @@ Implementar la lectura fiable de los seis estados Rappi proporcionados y prepara
 
 Este documento acompaña la implementación actual en la rama de trabajo. No es una certificación de PDFKit/Vision: esa parte debe ejecutarse en macOS, simulador y un iPhone físico. No crear otra tarea ni publicar automáticamente por leer estas instrucciones. Respetar la autorización vigente de la conversación para commits, GitHub y TestFlight.
 
+## Punto de partida verificado
+
+Luna debe continuar desde este estado y no desde una build anterior:
+
+- Rama: `codex/testflight-rappi-current-2026-09-15`.
+- Commit: `b0aef49` (`fix: preserve Rappi recovery when OCR is sparse`).
+- Tag de iOS: `ios-v1.0.110`.
+- Workflow de GitHub Actions: `35063336931`.
+- TestFlight: versión `1.0.2`, build `197`, estado `VALID`, asignado al grupo interno `Marcelito - Pruebas internas`.
+- Versión del lector que debe aparecer en los informes: `ios-reader-deterministic-2026.09.15.39`.
+
+El build 197 contiene la recuperación de filas Rappi cuando Vision detecta solo parte de las líneas horizontales, la deduplicación por región/importe, la evidencia por página y zona, la separación entre conciliación y enriquecimiento, y el visor móvil. El build está distribuido, pero todavía no se debe declarar certificación nativa completa: falta ejecutar los seis PDFs privados con PDFKit/Vision en macOS y en un iPhone físico.
+
+En GitHub, el enlace de referencia de esa ejecución es:
+`https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35063336931`
+
+No subir los PDFs, capturas ni un reporte con comercios/importes reales al repositorio. El manifiesto privado y los informes detallados deben permanecer fuera del repositorio público o dentro de rutas ignoradas.
+
 ## Cambios ya incorporados en esta rama
 
 - La ruta OCR Rappi conserva la lectura de página completa aun cuando la detección por bandas encuentra algunas filas; las alternativas se deduplican por importe y posición vertical, preservando compras iguales en posiciones distintas.
