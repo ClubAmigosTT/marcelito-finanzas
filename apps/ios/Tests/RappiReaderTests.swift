@@ -360,7 +360,7 @@ final class RappiReaderTests: XCTestCase {
             "2026-08-03 2026-08-03 BONIFICACIÓN CON CASHBACK -$10.00",
         ]
         let bounds = [
-            "__RAPPI_ROW_BOUNDS__ 3 0.050000 0.710000 0.900000 0.028000",
+            "__RAPPI_ROW_BOUNDS__ 3 0.050000 0.710000 0.900000 0.028000 0.740000",
             "__RAPPI_ROW_BOUNDS__ 3 0.050000 0.675000 0.900000 0.028000",
             "__RAPPI_ROW_BOUNDS__ 3 0.050000 0.640000 0.900000 0.028000",
             "__RAPPI_ROW_BOUNDS__ 3 0.050000 0.605000 0.900000 0.028000",
@@ -378,6 +378,7 @@ final class RappiReaderTests: XCTestCase {
         let first = snapshot.movements[0].extractionEvidence
         XCTAssertEqual(first?.page, 3)
         XCTAssertEqual(first?.sameVisualRow, true)
+        XCTAssertEqual(first?.confidence ?? -1, 0.74, accuracy: 0.001)
         let firstBounds = try XCTUnwrap(first?.bounds)
         XCTAssertEqual(firstBounds.x, 0.05, accuracy: 0.0001)
         XCTAssertEqual(firstBounds.y, 0.71, accuracy: 0.0001)

@@ -7076,7 +7076,8 @@ final class FinanceStore {
                     for movementLine in movementLines {
                         lines.append(rappiRowBoundsMarker(
                             page: page + 1,
-                            bounds: movementLine.bounds
+                            bounds: movementLine.bounds,
+                            confidence: movementLine.financialConfidence
                         ))
                         lines.append(movementLine.text)
                     }
@@ -7361,21 +7362,30 @@ final class FinanceStore {
 
     private static let rappiRowBoundsPrefix = "__RAPPI_ROW_BOUNDS__"
 
-    private static func rappiRowBoundsMarker(page: Int, bounds: CGRect) -> String {
+    private static func rappiRowBoundsMarker(
+        page: Int,
+        bounds: CGRect,
+        confidence: Double? = nil
+    ) -> String {
         let locale = Locale(identifier: "en_US_POSIX")
-        let values = [
+        var values = [
             String(page),
             String(format: "%.6f", locale: locale, bounds.minX),
             String(format: "%.6f", locale: locale, bounds.minY),
             String(format: "%.6f", locale: locale, bounds.width),
             String(format: "%.6f", locale: locale, bounds.height),
         ]
+        if let confidence, confidence.isFinite {
+            values.append(String(format: "%.6f", locale: locale, max(0, min(1, confidence))))
+        }
         return ([rappiRowBoundsPrefix] + values).joined(separator: " ")
     }
 
-    private static func parseRappiRowBoundsMarker(_ line: String) -> MovementExtractionBounds? {
+    private static func parseRappiRowBoundsMarker(
+        _ line: String
+    ) -> (bounds: MovementExtractionBounds, confidence: Double?)? {
         let parts = line.split(whereSeparator: { $0 == " " || $0 == "\t" }).map(String.init)
-        guard parts.count == 6,
+        guard parts.count == 6 || parts.count == 7,
               parts[0].caseInsensitiveCompare(rappiRowBoundsPrefix) == .orderedSame,
               let x = Double(parts[2]),
               let y = Double(parts[3]),
@@ -7384,7 +7394,13 @@ final class FinanceStore {
               (0...1).contains(x), (0...1).contains(y),
               width > 0, height > 0,
               x + width <= 1.001, y + height <= 1.001 else { return nil }
-        return MovementExtractionBounds(x: x, y: y, width: width, height: height)
+        let confidence = parts.count == 7
+            ? Double(parts[6]).map { max(0, min(1, $0)) }
+            : nil
+        return (
+            bounds: MovementExtractionBounds(x: x, y: y, width: width, height: height),
+            confidence: confidence
+        )
     }
 
     private static func amountToken(from rawValue: String, title: String? = nil) -> String? {
@@ -12059,6 +12075,8 @@ final class FinanceStore {
         var pending = ""
         var rowBounds: MovementExtractionBounds? = nil
         var nextRowBounds: MovementExtractionBounds? = nil
+        var rowConfidence: Double? = nil
+        var nextRowConfidence: Double? = nil
         func compactSemanticTitle(_ value: String) -> String {
             value
                 .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
@@ -12084,9 +12102,11 @@ final class FinanceStore {
         )
         func flush() {
             let evidenceBounds = rowBounds
+            let evidenceConfidence = rowConfidence
             defer {
                 pending = ""
                 rowBounds = nil
+                rowConfidence = nil
             }
             guard let rowPrefixRegex,
                   let match = rowPrefixRegex.firstMatch(
@@ -12189,7 +12209,9 @@ final class FinanceStore {
                     category: merchant.reviewReason == nil ? (rappiCategoryHint ?? category(for: merchant.normalizedMerchant, flow: flow)) : (payment ? "Transferencia" : "Por revisar"), amount: -amount, flow: flow,
                     kind: kind, foreignCurrency: pending.localizedCaseInsensitiveContains("compra en el extranjero"),
                     extractionEvidence: MovementExtractionEvidence(method: evidenceMethod, page: rowPage,
-                        confidence: evidenceMethod == "vision-ocr" ? (confidenceByPage[rowPage ?? 0] ?? 0) : 1,
+                        confidence: evidenceMethod == "vision-ocr"
+                            ? max(0, min(1, evidenceConfidence ?? confidenceByPage[rowPage ?? 0] ?? 0))
+                            : 1,
                         sourceText: pending, bounds: evidenceBounds, selectedColumn: "MONTO MXN",
                         selectedAmount: abs(amount), selectionReason: "RappiCard: \(signReason); fechas operación y cargo conservadas en evidencia",
                         reviewReason: merchant.reviewReason, sameVisualRow: evidenceBounds != nil ? true : nil),
@@ -12205,11 +12227,12 @@ final class FinanceStore {
             let lower = line.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
             let compactLower = lower.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
             if lower.hasPrefix("__pdf_page_") {
-                flush(); nextRowBounds = nil; page = Int(lower.filter(\.isNumber)); continue
+                flush(); nextRowBounds = nil; nextRowConfidence = nil; page = Int(lower.filter(\.isNumber)); continue
             }
-            if let bounds = parseRappiRowBoundsMarker(line) {
+            if let marker = parseRappiRowBoundsMarker(line) {
                 flush()
-                nextRowBounds = bounds
+                nextRowBounds = marker.bounds
+                nextRowConfidence = marker.confidence
                 continue
             }
             if lower.contains("cargos, abonos y compras regulares")
@@ -12236,7 +12259,13 @@ final class FinanceStore {
                 if pendingIsSingleDate && lineIsSingleDate {
                     pending += " " + line
                 } else {
-                    flush(); pending = line; rowPage = page; rowBounds = nextRowBounds; nextRowBounds = nil
+                    flush()
+                    pending = line
+                    rowPage = page
+                    rowBounds = nextRowBounds
+                    rowConfidence = nextRowConfidence
+                    nextRowBounds = nil
+                    nextRowConfidence = nil
                 }
             } else if !pending.isEmpty,
                       !lower.hasPrefix("numero de cuenta"), !compactLower.hasPrefix("numerodecuenta"), !lower.hasPrefix("pagina"),
