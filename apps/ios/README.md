@@ -53,7 +53,8 @@ el corpus no cumpla el 97%:
 ```bash
 MARCELITO_PDF_CORPUS_VERIFY=1 \
 MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1 \
-MARCELITO_PDF_CORPUS_DIR="/ruta/a/estados-validados" \
+MARCELITO_PDF_CORPUS_DIR="/ruta/privada/estados-rappi" \
+MARCELITO_PDF_CORPUS_MANIFEST="/ruta/privada/rappi-regression-manifest.json" \
   ./scripts/run-native-corpus.sh
 ```
 
@@ -66,17 +67,17 @@ hay falsos positivos o la precisión cae por debajo de 97%:
 cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
-  --manifest tests/fixtures/pdf-corpus-attachments.json \
-  --reader-version ios-reader-2026.09.03.31 \
+  --manifest /ruta/privada/rappi-regression-manifest.json \
+  --reader-version ios-reader-deterministic-2026.09.15.39 \
   --require-certified
 ```
 
 El reporte incluye controles esperados y extraídos de saldo inicial, saldo
 final, depósitos, retiros, cargos y pagos, además de confianza del emisor,
 confianza OCR media y página OCR más débil. Todos los archivos deben identificar el emisor con estado
-`verified`; los cuatro estados de texto validan también filas y totales como
-aserciones duras. Los escaneos Santander se reportan para calibración mientras
-permanezcan en `pending`.
+`verified`; los archivos con expectativas doradas validan también filas y
+totales como aserciones duras. Los escaneos Santander se reportan para
+calibración mientras permanezcan en `pending`.
 
 El verificador también exige el `NATIVE_CORPUS_REPORT` por archivo: comprueba
 que no falte ningún PDF, que no haya archivos repetidos, que el conjunto de
