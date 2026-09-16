@@ -95,7 +95,7 @@ Después de ejecutar el certificador en el iPhone, usar **Compartir diagnóstico
 por fila** y comparar localmente:
 
 ```powershell
-node scripts/audit-native-rows.mjs private-corpus/independent-rows.json <exportacion-privada.json> ios-reader-deterministic-2026.09.16.1
+node scripts/audit-native-rows.mjs private-corpus/independent-rows.json <exportacion-privada.json> ios-reader-deterministic-2026.09.16.2
 ```
 
 La comparación se hace por huella, no por nombre. Exige coincidencia de filas,
