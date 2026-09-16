@@ -12,7 +12,7 @@ Luna debe continuar desde este estado y no desde una build anterior:
 
 - Rama: `codex/testflight-rappi-current-2026-09-15`.
 - Head del código funcional del build 203: `4739437b5b7f4e418b1c7474212d90939953bfba`.
-- Head actual de la rama para continuar el trabajo: `0d961ae` (preserva la confianza OCR real de cada fila Rappi también en la ruta nativa).
+- Head actual de la rama para continuar el trabajo: `cf5a822` (preserva la confianza OCR real de cada fila Rappi también en la ruta nativa y fija la versión `.2`).
 - Tag de entrega: `ios-v1.0.5-bootstrap`, apuntando exactamente al código funcional `4739437`.
 - Workflow de GitHub Actions: [iOS TestFlight 35088718321](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35088718321).
 - TestFlight: versión `1.0.5`, build `203`, estado `VALID`, asignado al grupo interno `Marcelito - Pruebas internas`.
@@ -21,7 +21,7 @@ Luna debe continuar desde este estado y no desde una build anterior:
 - Validaciones de código en verde: [Web Reader Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35087995876) y [iOS Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35087995992).
 - Auditoría local repetida el 16-sep-2026: `319/319` pruebas públicas, TypeScript, build Vite y auditoría pública en verde; la corrida privada web de los seis Rappi devolvió `6/6` válidos, `0` filas rechazadas, `0` fallas de manifiesto y `nativeOCRPending: 0`.
 
-El build 203 es el bootstrap anterior para instalar/probar el certificador; contiene la normalización de prefijos de procesador, la separación de evidencia y el visor móvil, pero usa la versión nativa `.1`. La siguiente build de TestFlight debe generarse desde `0d961ae` para certificar la versión nativa `.2`; no debe confundirse con el build 202, que es histórico y no contiene la normalización nueva.
+El build 203 es el bootstrap anterior para instalar/probar el certificador; contiene la normalización de prefijos de procesador, la separación de evidencia y el visor móvil, pero usa la versión nativa `.1`. La siguiente build de TestFlight debe generarse desde `cf5a822` para certificar la versión nativa `.2`; no debe confundirse con el build 202, que es histórico y no contiene la normalización nueva.
 
 El build 203 contiene la recuperación de filas Rappi cuando Vision detecta solo parte de las líneas horizontales, la deduplicación por región/importe, la evidencia por página y zona, la separación entre conciliación y enriquecimiento, el visor móvil y la corrección para no mandar créditos/pagos con signo válido a revisión por comparar signo contra magnitud. También separa la confianza financiera de fecha/importe de la confianza general del comercio, deja conservadora la inferencia de importes sin signo y separa prefijos de procesador únicamente de la identidad visible/reglas. Todavía no se debe declarar certificación nativa completa: falta ejecutar los seis PDFs privados con PDFKit/Vision en macOS y confirmar el flujo completo en un iPhone físico.
 
