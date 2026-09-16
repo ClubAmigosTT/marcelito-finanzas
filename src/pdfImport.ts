@@ -6,7 +6,7 @@ import { parseDeterministicStatement, reconcileExactly } from "./issuerParsers/i
 import type { DocumentLayout, DocumentLayoutLine, DocumentLayoutPage } from "./issuerParsers/types.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-deterministic-2026.09.12.2";
+export const PDF_READER_VERSION = "web-reader-deterministic-2026.09.15.3";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
@@ -252,6 +252,14 @@ export function detectAccountKey(text: string, source: StatementSource) {
     headerLines.push(line);
   }
   const header = headerLines.join(" ");
+  // RappiCard exposes a 20-digit account number in its administrative cover.
+  // Keep only its last four digits, just like the native reader; the generic
+  // bank patterns below intentionally cap shorter account/CLABE variants.
+  if (source === "Rappi") {
+    const rappiAccount = header.match(/(?:no\.?|numero)\s+de\s+cuenta\D{0,12}([0-9][0-9\s-]{18,30})/i)?.[1];
+    const digits = rappiAccount?.replace(/\D/g, "");
+    if (digits && digits.length >= 20 && digits.length <= 24) return `rappi:${digits.slice(-4)}`;
+  }
   const patterns = [
     /(?:no\.?|numero)\s+de\s+cuenta(?:\s+clabe)?\D{0,12}([0-9][0-9\s-]{3,24})/i,
     /cuenta\s+(?:clabe|de\s+(?:cheques|ahorro|corriente))\D{0,12}([0-9][0-9\s-]{3,24})/i,
@@ -1521,12 +1529,22 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
     : undefined;
   const parsed = deterministic?.transactions ?? [];
   const summary = deterministic?.summary;
-  const reconciliation = deterministic?.reconciliation ?? {
+  const baseReconciliation = deterministic?.reconciliation ?? {
     status: "invalid" as const,
     tolerance: 0,
     extractedMovementCount: 0,
     reason: "No existe un parser determinista para el emisor identificado",
   };
+  // A valid arithmetic match is not enough to auto-accept a browser OCR read.
+  // Apply the same confidence gate used by the review/save boundary before the
+  // result reaches the dialog, so a low-confidence OCR statement cannot look
+  // conciliado merely because its totals happened to match.
+  const reconciliation = gateOcrReconciliation(
+    baseReconciliation,
+    mode,
+    ocrResult?.confidence,
+    ocrResult?.pageConfidences,
+  );
   onProgress(100, "Listo para revisar");
 
     const result: ImportResult = {

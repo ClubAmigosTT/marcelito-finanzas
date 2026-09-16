@@ -93,6 +93,10 @@ export function makeTransaction(options: {
   displayMerchant?: string;
   merchantConfidence?: number;
   merchantReviewReason?: string;
+  category?: string;
+  /** True only when the parser has row-level visual evidence. */
+  /** Use null when the parser cannot prove visual co-location. */
+  sameVisualRow?: boolean | null;
 }) : Transaction {
   const amount = options.amountCents / 100;
   const flow: Transaction["flow"] = options.kind === "cardPayment" ? "debt" : amount > 0 ? "income" : "expense";
@@ -102,9 +106,9 @@ export function makeTransaction(options: {
     date: options.date,
     description: options.description.replace(/\s+/g, " ").trim().slice(0, 120),
     account: options.account,
-    category: options.merchantReviewReason
+    category: options.category ?? (options.merchantReviewReason
       ? "Por revisar"
-      : options.kind === "cardPayment" || options.kind === "bankTransfer" ? "Transferencia" : "Sin categoría",
+      : options.kind === "cardPayment" || options.kind === "bankTransfer" ? "Transferencia" : "Sin categoría"),
     amount,
     flow,
     kind: options.kind,
@@ -120,7 +124,7 @@ export function makeTransaction(options: {
       page: options.page,
       confidence: options.confidence,
       sourceText: options.sourceText.slice(0, 240),
-      sameVisualRow: true,
+      sameVisualRow: options.sameVisualRow === null ? undefined : options.sameVisualRow ?? true,
       reviewReason: options.merchantReviewReason,
     },
   };

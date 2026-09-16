@@ -129,7 +129,11 @@ Ese manifiesto puede reutilizar el formato de
 `tests/fixtures/pdf-corpus-attachments.json` (SHA-256, `emisor:últimos4`, tipo,
 estado, filas y controles); la versión declarada debe ser igual a
 `FinanceStore.readerVersion`. El script resuelve la ruta, exige que el conjunto
-de nombres coincida con los PDFs y valida los controles con PDFKit + Vision:
+de nombres coincida con los PDFs y valida los controles con PDFKit + Vision. La
+certificación se determina por el conjunto exacto del manifiesto, no por el
+mínimo de 10 archivos de la herramienta general del iPhone; esto permite
+certificar un corpus enfocado como los seis PDFs Rappi sin debilitar la
+compuerta de publicación del certificador general:
 
 ```bash
 MARCELITO_PDF_CORPUS_DIR=/ruta/privada/estados \

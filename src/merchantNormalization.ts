@@ -6,6 +6,23 @@ export type MerchantIdentity = {
   reviewReason?: string;
 };
 
+const rappiCategoryRules: ReadonlyArray<{ category: string; pattern: RegExp }> = [
+  // These are issuer-specific descriptors.  They are deliberately kept out
+  // of the global taxonomy so a terse Rappi token cannot change the meaning
+  // of an Amex, BBVA or Santander row.
+  { category: "Software y suscripciones", pattern: /\b(?:google\s*cloud|apple(?:\s*com)?\s*bill)\b/ },
+  { category: "Comisiones y finanzas", pattern: /\bswappedcom\b/ },
+  { category: "Transporte", pattern: /\b(?:pase\s+recur|ado\s+web)\b/ },
+  { category: "Salud", pattern: /\b(?:farm(?:acia|\s+san\s+pablo|\s+dr\s+ahorro|\s+guad)|f\s+ahorro|multifarmacias|dr\s+ismael)\b/ },
+  { category: "Tiendita", pattern: /^(?:oxxo|7\s*eleven|7eleven)/ },
+  { category: "Despensa / supermercado", pattern: /\b(?:sumesa|super\s+fasti|marcas\s+nestle|wildfork)\b/ },
+  { category: "Deporte", pattern: /\b(?:decathlon|paddeo\s+sport|estadio\s+azul)\b/ },
+  { category: "Entretenimiento", pattern: /\b(?:lucha\s+libre|cinetec|flix|pingpod|aerodiverti)\b/ },
+  { category: "Viajes", pattern: /\b(?:avianca|ado\s+web)\b/ },
+  { category: "Compras personales", pattern: /\b(?:shein|fraiche|juguete|bout\b|lib\s+rosario)\b/ },
+  { category: "Restaurantes y bares", pattern: /\b(?:cafe|cafeteria|cafesitio|shake\s+shack|serena\s+horneando|los\s+gueros|tacos?|tortas?|crepas?|mcdonald|chili\s*s|casa\s+de\s+tono|maison\s+kayser|cevicheria|la\s+pancita|volovaneria|el\s+globo|fastfood|restaurant|rest\b)\b/ },
+];
+
 function fold(value: string) {
   return value.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
 }
@@ -31,7 +48,7 @@ const technicalToken = /\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizaci[oó]n)?|ope
 function removeTechnicalFragments(value: string) {
   return compact(value
     .replace(technicalToken, " ")
-    .replace(/(?:^|\s)[\/#*;|]+(?=\s|$)/g, " ")
+    .replace(/(?:^|\s)[/#*;|]+(?=\s|$)/g, " ")
     .replace(/\s*[/;|]\s*$/g, "")
     .replace(/^\s*[/;|]+\s*/g, ""));
 }
@@ -82,6 +99,27 @@ export function normalizeRappiMerchant(value: string): MerchantIdentity {
       : "El comercio conserva evidencia, pero la normalización no es suficientemente confiable."
     : undefined;
   return { rawDescription, normalizedMerchant, displayMerchant, confidence, reviewReason };
+}
+
+/**
+ * Applies only high-signal Rappi category hints.  A processor descriptor such
+ * as MERPAGO*... is intentionally absent: it may be readable while still not
+ * proving the underlying merchant or its category.
+ */
+export function rappiCategoryFor(
+  value: string,
+  normalizedMerchant: string,
+  flow: string,
+  kind?: string,
+) {
+  if (flow !== "expense" || ["cardPayment", "bankTransfer", "income", "credit", "refund", "msi"].includes(kind ?? "")) {
+    return undefined;
+  }
+  const text = fold(`${value} ${normalizedMerchant}`)
+    .replace(/[^a-z0-9]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return rappiCategoryRules.find((rule) => rule.pattern.test(text))?.category;
 }
 
 export function merchantIdentityFor(value: string, source: string): MerchantIdentity {

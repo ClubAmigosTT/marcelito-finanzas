@@ -345,3 +345,53 @@ test("el reporte nativo acepta respaldo multimodal conciliado sin exigir columna
   }], 1);
   assert.equal(result.ok, true);
 });
+
+test("el reporte nativo compara método, calibración y límites de revisión", () => {
+  const expected = [{
+    file: "rappi.pdf",
+    accountKey: "rappi:9040",
+    sourceFingerprint: "d".repeat(64),
+    source: "Rappi",
+    kind: "card",
+    status: "pending",
+    rows: 17,
+    expectedMethod: "vision-ocr",
+    columnsCalibrated: false,
+    maxRejectedRows: 0,
+    maxUncategorized: 3,
+  }];
+  const base = {
+    file: "rappi.pdf",
+    sourceFingerprint: "d".repeat(64),
+    source: "Rappi",
+    kind: "card",
+    status: "pending",
+    mode: "vision-ocr",
+    sourceStatus: "verified",
+    sourceConfidence: 0.998,
+    requiresReview: true,
+    ocrConfidence: 0.9,
+    weakestOCRPage: 0.8,
+    ocrColumnsCalibrated: false,
+    rows: 17,
+    accountKey: "rappi:9040",
+    expectedAccountKey: "rappi:9040",
+    rejectedRows: 0,
+    uncategorizedRows: 3,
+  };
+  const valid = verifyNativeCorpusReport([base], 1, expected);
+  assert.equal(valid.ok, true, valid.errors.join("; "));
+
+  const invalid = verifyNativeCorpusReport([{
+    ...base,
+    mode: "pdf-text",
+    ocrColumnsCalibrated: true,
+    rejectedRows: 1,
+    uncategorizedRows: 4,
+  }], 1, expected);
+  assert.equal(invalid.ok, false);
+  assert.ok(invalid.errors.some((error) => error.includes("método")));
+  assert.ok(invalid.errors.some((error) => error.includes("calibración")));
+  assert.ok(invalid.errors.some((error) => error.includes("filas rechazadas")));
+  assert.ok(invalid.errors.some((error) => error.includes("filas sin categoría")));
+});

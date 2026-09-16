@@ -267,6 +267,38 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertNil(snapshot.movements.first?.merchantReviewReason)
     }
 
+    func testOCRRowCarriesPageAndBoundsForPDFReview() throws {
+        let rows = [
+            "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
+            "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
+            "2026-08-02 2026-08-02 PAGO POR SPEI -$40.00",
+            "2026-08-03 2026-08-03 BONIFICACIÓN CON CASHBACK -$10.00",
+        ]
+        let bounds = [
+            "__RAPPI_ROW_BOUNDS__ 3 0.050000 0.710000 0.900000 0.028000",
+            "__RAPPI_ROW_BOUNDS__ 3 0.050000 0.675000 0.900000 0.028000",
+            "__RAPPI_ROW_BOUNDS__ 3 0.050000 0.640000 0.900000 0.028000",
+            "__RAPPI_ROW_BOUNDS__ 3 0.050000 0.605000 0.900000 0.028000",
+        ]
+        let ocrText = "__PDF_PAGE_3__\nCARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)\n"
+            + zip(bounds, rows).map { "\($0.0)\n\($0.1)" }.joined(separator: "\n")
+        let snapshot = FinanceStore.rappiHybridSelectionForTesting(
+            ocrText: ocrText,
+            selectableText: "",
+            layoutText: "",
+            summaryText: fixture
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 4)
+        let first = snapshot.movements[0].extractionEvidence
+        XCTAssertEqual(first?.page, 3)
+        XCTAssertEqual(first?.sameVisualRow, true)
+        let firstBounds = try XCTUnwrap(first?.bounds)
+        XCTAssertEqual(firstBounds.x, 0.05, accuracy: 0.0001)
+        XCTAssertEqual(firstBounds.y, 0.71, accuracy: 0.0001)
+        XCTAssertEqual(firstBounds.width, 0.9, accuracy: 0.0001)
+    }
+
     func testHybridRecoveryPrefersOrderedSelectableMerchantRows() {
         let collapsedOCR = fixture.replacingOccurrences(
             of: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00\n2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
@@ -303,10 +335,13 @@ final class RappiReaderTests: XCTestCase {
         )
 
         XCTAssertEqual(snapshot.movements.count, 4)
-        XCTAssertEqual(
-            snapshot.movements.filter { $0.title.hasPrefix("Movimiento Rappi sin concepto") }.count,
-            2
-        )
+        XCTAssertEqual(snapshot.movements.filter { $0.title.hasPrefix("Movimiento Rappi sin concepto") }.count, 0)
+        let reviewRows = snapshot.movements.filter { $0.merchantReviewReason != nil }
+        XCTAssertEqual(reviewRows.count, 2)
+        XCTAssertTrue(reviewRows.allSatisfy { $0.category == "Por revisar" })
+        XCTAssertTrue(reviewRows.allSatisfy {
+            ($0.displayMerchant ?? "").contains("50.00") || ($0.rawDescription ?? "").contains("50.00")
+        })
         let result = FinanceStore.reconcileStatementForTesting(
             kind: .card, summary: snapshot.summary, movements: snapshot.movements
         )
@@ -481,6 +516,23 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertTrue(lines.first?.hasPrefix("2026-08-01 2026-08-02") == true)
         XCTAssertTrue(lines.last?.hasPrefix("2026-08-03 2026-08-04") == true)
         XCTAssertTrue(lines.last?.contains("COMERCIO DOS") == true)
+    }
+
+    func testVisualRowCoverageMarksAnUnselectedRappiRowForReview() {
+        let diagnostics = FinanceStore.rappiOCRRowDiagnosticsForTesting(
+            allRows: [
+                "2026-08-01 2026-08-02 COMERCIO UNO +$50.00",
+                "2026-08-03 2026-08-04 COMERCIO DOS +$50.00"
+            ],
+            selectedRows: ["2026-08-01 2026-08-02 COMERCIO UNO +$50.00"]
+        )
+
+        XCTAssertEqual(diagnostics.filter { $0.accepted == false }.count, 1)
+        XCTAssertTrue(diagnostics.contains {
+            !$0.accepted
+                && $0.reason.hasPrefix("rappi.visual-row-rejected")
+                && $0.rawText.contains("COMERCIO DOS")
+        })
     }
 
     func testVisualRowOCRReadsPixelsAndKeepsPaymentSeparateFromPurchase() throws {

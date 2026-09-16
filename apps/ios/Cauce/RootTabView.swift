@@ -670,7 +670,13 @@ struct LedgerQualityBanner: View {
                 if isWarning || store.ledgerQuality.reviewMovementCount > 0 {
                     LedgerBlockerDetailsButton().environment(store)
                 }
-                Text("\(Int(store.ledgerQuality.reviewPercent.rounded()))% por revisar en el libro canónico · \(store.ledgerQuality.reviewMovementCount) movimientos · \(money(store.ledgerQuality.reviewAmount))")
+                Text("Estados conciliados: \(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Text("Movimientos bloqueados: \(store.ledgerQuality.blockedMovementCount) · por enriquecer: \(store.ledgerQuality.enrichmentMovementCount)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(store.ledgerQuality.blockedMovementCount > 0 || store.ledgerQuality.enrichmentMovementCount > 0 ? Color.marcelitoAmber : .secondary)
+                Text("Por enriquecer en el libro: \(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) movimientos · \(money(store.ledgerQuality.reviewAmount))")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(store.ledgerQuality.reviewMovementCount > 0 ? Color.marcelitoAmber : .secondary)
                 Text("\(store.ledgerQuality.quarantinedMovementCount) en cuarentena · \(money(store.ledgerQuality.quarantinedAmount)) · \(store.ledgerQuality.quarantinedStatementCount) estado(s) bloqueado(s)")

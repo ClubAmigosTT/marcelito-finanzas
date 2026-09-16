@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { parseDeterministicStatement } from "../src/issuerParsers/index.ts";
 import type { DocumentLayout, DocumentLayoutLine } from "../src/issuerParsers/types.ts";
+import { rappiCategoryFor } from "../src/merchantNormalization.ts";
 
 const line = (page: number, words: Array<[number, string]>): DocumentLayoutLine => ({
   page,
@@ -199,6 +200,7 @@ test("golden RappiCard conserva el emisor Banorte como evidencia legal y concili
   assert.equal(parsed.reconciliation.extractedChargeTotal, 28_494.66);
   assert.equal(parsed.reconciliation.extractedPaymentTotal, 28_000);
   assert.equal(parsed.reconciliation.extractedCreditTotal, 441.11);
+  assert.equal(parsed.transactions[0]?.extractionEvidence?.sameVisualRow, undefined);
   assert.ok(parsed.transactions.some((row) => row.kind === "cardPayment"));
   assert.ok(parsed.transactions.some((row) => row.foreignCurrency));
   const apple = parsed.transactions.find((row) => row.description.includes("APPLE.COM/BILL"));
@@ -206,6 +208,11 @@ test("golden RappiCard conserva el emisor Banorte como evidencia legal y concili
   assert.equal(apple?.normalizedMerchant, "apple");
   assert.equal(apple?.displayMerchant, "Apple");
   assert.equal(apple?.merchantReviewReason, undefined);
+  assert.equal(apple?.category, "Software y suscripciones");
+  const foreign = parsed.transactions.find((row) => row.description.includes("MTA*LIRR"));
+  assert.equal(foreign?.rawDescription, "MTA*LIRR STATION TIX Compra en el extranjero USD $27");
+  assert.equal(foreign?.displayMerchant, "MTA LIRR Station");
+  assert.equal(foreign?.category, "Transporte");
 });
 
 test("RappiCard conserva la tabla cuando los movimientos cruzan un salto de página", () => {
@@ -258,8 +265,83 @@ test("Rappi OCR selecciona el importe por columna y no por la última cifra de l
   });
   assert.equal(parsed.transactions.length, 2);
   assert.deepEqual(parsed.transactions.map((row) => row.amount), [-50, -50]);
+  assert.equal(parsed.transactions[0]?.extractionEvidence?.sameVisualRow, true);
   assert.equal(parsed.reconciliation.status, "valid", parsed.reconciliation.reason);
   assert.match(parsed.transactions[0]?.description ?? "", /123\.45/);
+});
+
+test("Rappi clasifica descriptores compactados de alta confianza sin adivinar MERPAGO", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Adeudo del periodo anterior = $0.00",
+    "Cargos regulares (no a meses) + $400.00",
+    "Cargos compras a meses (capital) + $0.00",
+    "Pagos y abonos - $0.00",
+    "Saldo deudor total $400.00",
+    "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+    "2026-08-01 2026-08-02 OXXOPONTAN; RFC: CCO8605231N4 +$100.00",
+    "2026-08-02 2026-08-02 ALIM CAFESITIO; RFC: RRA1202026E4 +$100.00",
+    "2026-08-03 2026-08-03 PAYU *GOOGLE CLOUD; RFC: GCM221031837 +$100.00",
+    "2026-08-04 2026-08-04 MERPAGO*SAVUCONDESA; RFC: MAG2105031W3 +$100.00",
+    "Total de cargos +$400.00",
+    "Total de abonos -$0.00",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({ source: "Rappi", fileName: "rappi-categories.pdf", mode: "text", text });
+  assert.equal(parsed.reconciliation.status, "valid", parsed.reconciliation.reason);
+  assert.deepEqual(parsed.transactions.map((row) => row.category), [
+    "Tiendita",
+    "Restaurantes y bares",
+    "Software y suscripciones",
+    "Otros / Por revisar",
+  ]);
+  assert.match(parsed.transactions[3]?.displayMerchant ?? "", /savucondesa/i);
+  assert.equal(parsed.transactions[3]?.merchantReviewReason, undefined);
+});
+
+test("las categorías Rappi mantienen AVIANCA como viaje en web y nativo", () => {
+  assert.equal(rappiCategoryFor("AVIANCA MX", "avianca", "expense", "purchase"), "Viajes");
+  assert.equal(rappiCategoryFor("AVIANCA MX", "avianca", "transfer", "cardPayment"), undefined);
+});
+
+test("Rappi conserva evidencia original y separa dos filas aplanadas solo por una segunda fila fechada", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Adeudo del periodo anterior = $0.00",
+    "Cargos regulares (no a meses) + $100.00",
+    "Cargos compras a meses (capital) + $0.00",
+    "Pagos y abonos - $0.00",
+    "Saldo deudor total $100.00",
+    "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+    "2026-08-01 2026-08-02 COMERCIO / RFC: ABC010203AB1 / REF2026 +$50.00 2026-08-03 2026-08-04 OTRO COMERCIO +$50.00",
+    "Total de cargos +$100.00",
+    "Total de abonos -$0.00",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({ source: "Rappi", fileName: "rappi-aplanado.pdf", mode: "text", text });
+  assert.equal(parsed.transactions.length, 2);
+  assert.equal(parsed.reconciliation.status, "valid", parsed.reconciliation.reason);
+  assert.equal(parsed.transactions[0]?.rawDescription, "COMERCIO / RFC: ABC010203AB1 / REF2026");
+  assert.equal(parsed.transactions[0]?.normalizedMerchant, "comercio");
+  assert.equal(parsed.transactions[0]?.displayMerchant, "Comercio");
+  assert.equal(parsed.transactions[1]?.rawDescription, "OTRO COMERCIO");
+});
+
+test("Rappi no adivina el importe cuando una línea textual contiene dos importes firmados", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Adeudo del periodo anterior = $0.00",
+    "Cargos regulares (no a meses) + $50.00",
+    "Cargos compras a meses (capital) + $0.00",
+    "Pagos y abonos - $0.00",
+    "Saldo deudor total $50.00",
+    "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+    "2026-08-01 2026-08-02 COMERCIO REF +12.34 +$50.00",
+    "Total de cargos +$50.00",
+    "Total de abonos -$0.00",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({ source: "Rappi", fileName: "rappi-ambiguous.pdf", mode: "text", text });
+  assert.equal(parsed.transactions.length, 0);
+  assert.equal(parsed.reconciliation.status, "invalid");
+  assert.equal(parsed.rejectedRowCount, 1);
 });
 
 test("ningún parser acepta números globales ni filas fuera de su sección", () => {

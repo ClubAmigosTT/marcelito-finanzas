@@ -37,6 +37,8 @@ type NativeCorpusReportRow = {
   rows?: string | number;
   accountKey?: string;
   expectedAccountKey?: string;
+  rejectedRows?: string | number;
+  uncategorizedRows?: string | number;
 };
 
 type ReportVerification = {
@@ -53,6 +55,10 @@ type ExpectedReportEntry = {
   kind?: string;
   status?: string;
   rows?: number;
+  expectedMethod?: string;
+  columnsCalibrated?: boolean;
+  maxRejectedRows?: number;
+  maxUncategorized?: number;
 };
 
 function numberField(summary: NativeCorpusSummary, key: keyof NativeCorpusSummary) {
@@ -285,6 +291,37 @@ export function verifyNativeCorpusReport(
           errors.push(`${expectedFile}: rows ${Number.isFinite(actualRows) ? actualRows : "ausentes"} no coincide con el manifiesto (${entry.rows})`);
         }
       }
+      if (entry.expectedMethod) {
+        const actualMethod = typeof row.mode === "string" ? row.mode.trim() : "";
+        if (actualMethod !== entry.expectedMethod) {
+          errors.push(`${expectedFile}: método ${actualMethod || "ausente"} no coincide con el manifiesto (${entry.expectedMethod})`);
+        }
+      }
+      if (entry.columnsCalibrated !== undefined) {
+        const token = typeof row.ocrColumnsCalibrated === "string"
+          ? row.ocrColumnsCalibrated.trim().toLowerCase()
+          : row.ocrColumnsCalibrated;
+        const actualColumns = token === true || token === "true" || token === "1"
+          ? true
+          : token === false || token === "false" || token === "0" || token === ""
+            ? false
+            : undefined;
+        if (actualColumns !== entry.columnsCalibrated) {
+          errors.push(`${expectedFile}: calibración ${actualColumns ?? "ausente"} no coincide con el manifiesto (${entry.columnsCalibrated})`);
+        }
+      }
+      if (entry.maxRejectedRows !== undefined) {
+        const actualRejected = numericValue(row.rejectedRows);
+        if (!Number.isInteger(actualRejected) || actualRejected > entry.maxRejectedRows) {
+          errors.push(`${expectedFile}: filas rechazadas ${Number.isFinite(actualRejected) ? actualRejected : "ausentes"} superan el máximo ${entry.maxRejectedRows}`);
+        }
+      }
+      if (entry.maxUncategorized !== undefined) {
+        const actualUncategorized = numericValue(row.uncategorizedRows);
+        if (!Number.isInteger(actualUncategorized) || actualUncategorized > entry.maxUncategorized) {
+          errors.push(`${expectedFile}: filas sin categoría ${Number.isFinite(actualUncategorized) ? actualUncategorized : "ausentes"} superan el máximo ${entry.maxUncategorized}`);
+        }
+      }
     });
   }
   return { ok: errors.length === 0, errors, rows };
@@ -337,6 +374,10 @@ async function main() {
             kind?: string;
             status?: string;
             rows?: number;
+            expectedMethod?: string;
+            columnsCalibrated?: boolean;
+            maxRejectedRows?: number;
+            maxUncategorized?: number;
           }>;
         };
       expectedEntries = (manifest.files ?? [])
@@ -348,6 +389,10 @@ async function main() {
           kind?: string;
           status?: string;
           rows?: number;
+          expectedMethod?: string;
+          columnsCalibrated?: boolean;
+          maxRejectedRows?: number;
+          maxUncategorized?: number;
         } => typeof entry?.file === "string")
         .map((entry) => ({
           file: entry.file,
@@ -357,6 +402,10 @@ async function main() {
           kind: entry.kind,
           status: entry.status,
           rows: entry.rows,
+          expectedMethod: entry.expectedMethod,
+          columnsCalibrated: entry.columnsCalibrated,
+          maxRejectedRows: entry.maxRejectedRows,
+          maxUncategorized: entry.maxUncategorized,
         }));
       if (!expectedEntries.length) manifestErrors.push("el manifiesto no contiene files");
       expectedEntries.forEach((entry) => {
@@ -378,6 +427,18 @@ async function main() {
         }
         if (entry.status === "valid" && (!Number.isInteger(entry.rows) || (entry.rows ?? -1) < 0)) {
           manifestErrors.push(`${label}: un golden valid necesita rows entero no negativo`);
+        }
+        if (entry.expectedMethod && !["pdf-text", "vision-ocr"].includes(entry.expectedMethod)) {
+          manifestErrors.push(`${label}: expectedMethod inválido`);
+        }
+        if (entry.columnsCalibrated !== undefined && typeof entry.columnsCalibrated !== "boolean") {
+          manifestErrors.push(`${label}: columnsCalibrated debe ser booleano`);
+        }
+        if (entry.maxRejectedRows !== undefined && (!Number.isInteger(entry.maxRejectedRows) || entry.maxRejectedRows < 0)) {
+          manifestErrors.push(`${label}: maxRejectedRows debe ser entero no negativo`);
+        }
+        if (entry.maxUncategorized !== undefined && (!Number.isInteger(entry.maxUncategorized) || entry.maxUncategorized < 0)) {
+          manifestErrors.push(`${label}: maxUncategorized debe ser entero no negativo`);
         }
       });
     } catch {

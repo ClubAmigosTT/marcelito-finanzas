@@ -2006,7 +2006,10 @@ private struct PDFDocumentRepresentable: UIViewRepresentable {
             let bounds = page.bounds(for: .mediaBox)
             let point = CGPoint(
                 x: bounds.minX + CGFloat(initialBounds.x + initialBounds.width / 2) * bounds.width,
-                y: bounds.maxY - CGFloat(initialBounds.y + initialBounds.height / 2) * bounds.height
+                // Vision's normalized boxes and PDFKit's page coordinates
+                // both use a bottom-left origin. Do not flip this value as if
+                // it came from a top-left UIKit image coordinate system.
+                y: bounds.minY + CGFloat(initialBounds.y + initialBounds.height / 2) * bounds.height
             )
             view.go(to: PDFDestination(page: page, at: point))
         }

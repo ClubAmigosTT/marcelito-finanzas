@@ -59,6 +59,45 @@ const movement = (overrides: Partial<Transaction> & Pick<Transaction, "id" | "da
     : undefined),
 });
 
+test("Rappi agrupa alias por normalizedMerchant y muestra displayMerchant", () => {
+  const statement = card("rappi-ago", "Rappi", "agosto 2026", 150);
+  const rows = [
+    movement({
+      id: "rappi-apple-1",
+      date: "10 ago 2026",
+      description: "APPLE.COM/BILL; RFC: AAA010101AA1",
+      account: "Rappi",
+      amount: -100,
+      flow: "expense",
+      kind: "purchase",
+      category: "Software y suscripciones",
+      statementId: statement.id,
+      normalizedMerchant: "apple",
+      displayMerchant: "Apple",
+    }),
+    movement({
+      id: "rappi-apple-2",
+      date: "11 ago 2026",
+      description: "PAYU *APPLE.COM/BILL",
+      account: "Rappi",
+      amount: -50,
+      flow: "expense",
+      kind: "purchase",
+      category: "Software y suscripciones",
+      statementId: statement.id,
+      normalizedMerchant: "apple",
+      displayMerchant: "Apple",
+    }),
+  ];
+
+  const metrics = buildFinanceMetrics(rows, [statement]);
+  assert.equal(metrics.topMerchants.length, 1);
+  assert.equal(metrics.topMerchants[0].name, "Apple");
+  assert.equal(metrics.topMerchants[0].count, 2);
+  assert.equal(metrics.topMerchants[0].total, 150);
+  assert.equal(metrics.topMovements[0].description, "Apple");
+});
+
 test("el parser rechaza encabezados administrativos con importes", () => {
   const text = [
     "Fecha Descripción Cargos Abonos Saldo",
@@ -84,6 +123,16 @@ test("la identidad de cuenta solo toma los últimos cuatro dígitos del encabeza
   ].join("\n");
   assert.equal(detectAccountKey(text, "BBVA"), "bbva:8901");
   assert.equal(detectAccountKey(text, "Desconocido"), undefined);
+});
+
+test("Rappi conserva la identidad enmascarada de su cuenta de 20 dígitos", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Número de cuenta 00190001000002279040",
+    "Número de tarjeta **** **** **** 4500",
+    "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+  ].join("\n");
+  assert.equal(detectAccountKey(text, "Rappi"), "rappi:9040");
 });
 
 test("los encabezados administrativos parametrizados nunca se convierten en movimientos", () => {
@@ -144,6 +193,18 @@ test("la extracción multimodal no puede saltarse el umbral visual usando modo t
     extractionProvider: "multimodal",
     // A remote reader can preserve mode=text for compatibility; its own
     // confidence and page evidence must still pass the visual gate.
+    ocrConfidence: 0.87,
+    ocrPageConfidences: [0.99],
+  };
+  assert.equal(hasSufficientOcrQuality(statement), false);
+  assert.equal(hasSufficientOcrQuality({ ...statement, ocrConfidence: 0.90, ocrPageConfidences: [0.80] }), true);
+});
+
+test("Rappi OCR débil no se vuelve elegible por tener parser determinista", () => {
+  const statement: Statement = {
+    ...card("rappi-ocr-quality", "Rappi", "agosto 2026"),
+    parserId: "rappicard-operations-v1",
+    mode: "ocr",
     ocrConfidence: 0.87,
     ocrPageConfidences: [0.99],
   };

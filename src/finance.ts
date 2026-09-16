@@ -17,9 +17,6 @@ const OCR_MIN_PAGE_CONFIDENCE = 0.78;
  * older build, so every KPI boundary must re-check the same thresholds.
  */
 export function hasSufficientOcrQuality(statement: Statement) {
-  if (["santander-checking-v1", "bbva-movements-v1", "amex-operations-v1", "rappicard-operations-v1"].includes(statement.parserId ?? "")) {
-    return true;
-  }
   // Treat malformed/legacy runtime data as unsafe instead of assuming that a
   // missing mode means a trustworthy text-layer extraction.
   // A legacy multimodal import is visual/model-assisted even when the old
@@ -32,6 +29,10 @@ export function hasSufficientOcrQuality(statement: Statement) {
     if (!pages?.length || pages.some((page) => !Number.isFinite(page) || page < OCR_MIN_PAGE_CONFIDENCE)) return false;
     return true;
   }
+  // A deterministic parser is not a substitute for OCR quality.  Only a
+  // genuinely selectable text layer can skip the visual-confidence gate;
+  // persisted OCR imports must carry both an average and a per-page score,
+  // including when their parserId is issuer-specific and deterministic.
   if (statement.mode === "text") return true;
   if (statement.mode !== "ocr") return false;
   const average = statement.ocrConfidence;
@@ -413,7 +414,7 @@ export function isCategorizedSpendTransaction(transaction: Transaction) {
 
 function isTravelTransaction(transaction: Transaction) {
   if (transaction.travelRelated || transaction.foreignCurrency) return true;
-  const text = normalize(`${transaction.description} ${transaction.category}`);
+  const text = normalize(`${transaction.displayMerchant ?? transaction.description} ${transaction.normalizedMerchant ?? ""} ${transaction.category}`);
   return normalize(transaction.category) === "viajes"
     || /viaje|hotel|hospedaje|airbnb|aerolinea|aeropuerto|vuelo|avion|renta de auto|destino|equipaje/.test(text);
 }
@@ -421,7 +422,7 @@ function isTravelTransaction(transaction: Transaction) {
 function isExtraordinaryTransaction(transaction: Transaction) {
   if (isTravelTransaction(transaction)) return false;
   if (transaction.extraordinary) return true;
-  const text = normalize(`${transaction.description} ${transaction.category}`);
+  const text = normalize(`${transaction.displayMerchant ?? transaction.description} ${transaction.normalizedMerchant ?? ""} ${transaction.category}`);
   return /evento|boda|fiesta|concierto|festival|mueble|electrodomestico|reparacion|hospital|impuesto|seguro|regalo|celebracion|mudanza|matricula|colegiatura|anualidad|emergencia|atipic/.test(text);
 }
 
@@ -431,6 +432,16 @@ function merchantLabel(description: string) {
     .replace(/\b(?:aut\.?|ref\.?|folio|no\.?|num\.?)[\s:#-]*[a-z0-9-]+/gi, "")
     .trim()
     .slice(0, 46) || "Sin descripción";
+}
+
+function merchantDisplayLabel(transaction: Transaction) {
+  const display = transaction.displayMerchant?.replace(/\s+/g, " ").trim();
+  return (display || merchantLabel(transaction.description)).slice(0, 46) || "Sin descripción";
+}
+
+function merchantAnalyticsKey(transaction: Transaction, display: string) {
+  const normalized = transaction.normalizedMerchant?.replace(/\s+/g, " ").trim();
+  return normalizeConcept(normalized || display) || normalize(display);
 }
 
 function dateValue(value: string, fallbackPeriod?: string) {
@@ -1035,8 +1046,8 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
 
   const merchantMap = new Map<string, { name: string; total: number; count: number }>();
   currentSpendTransactions.forEach((transaction) => {
-    const name = merchantLabel(transaction.description);
-    const key = normalizeConcept(name) || normalize(name);
+    const name = merchantDisplayLabel(transaction);
+    const key = merchantAnalyticsKey(transaction, name);
     const previous = merchantMap.get(key);
     merchantMap.set(key, { name: previous?.name ?? name, total: (previous?.total ?? 0) + absolute(transaction.amount), count: (previous?.count ?? 0) + 1 });
   });
@@ -1051,7 +1062,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
     .slice(0, 5)
     .map((transaction) => ({
       id: transaction.id,
-      description: merchantLabel(transaction.description),
+      description: merchantDisplayLabel(transaction),
       amount: transaction.amount,
       date: transaction.date,
       category: transaction.category,
@@ -1079,7 +1090,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   const travelTrips = travelGroups.map((group, index) => {
     const movements = group.map((transaction) => ({
       id: transaction.id,
-      description: merchantLabel(transaction.description),
+      description: merchantDisplayLabel(transaction),
       amount: transaction.amount,
       date: transaction.date,
       category: transaction.category,
@@ -1087,7 +1098,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
       share: sum(group.map((item) => absolute(item.amount))) ? absolute(transaction.amount) / sum(group.map((item) => absolute(item.amount))) : 0,
     } satisfies MovementSpend));
     const dates = group.map((transaction) => transaction.date).filter((date) => date !== "Sin fecha");
-    const firstMerchant = merchantLabel(group[0]?.description ?? "");
+    const firstMerchant = group[0] ? merchantDisplayLabel(group[0]) : "Sin descripción";
     return {
       id: `travel-${currentPeriodKey ?? "manual"}-${index}`,
       name: firstMerchant && firstMerchant !== "Sin descripción" ? `Viaje · ${firstMerchant}` : `Viaje ${index + 1}`,
@@ -1128,7 +1139,16 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   ).values());
   const quarantinedTransactions = observedTransactions.filter((transaction) => Boolean(transaction.statementId && blockedStatementIds.has(transaction.statementId)));
   const eligibleMovementCount = transactions.length;
-  const eligibleReviewItems = transactions.filter((transaction) => ["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"].includes(transaction.category) || (transaction.confidence ?? 1) < 0.75 || transaction.validationStatus === "review");
+  const eligibleReviewItems = transactions.filter((transaction) => {
+    const categoryNeedsReview = isCategorizedSpendTransaction(transaction)
+      && ["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"].includes(transaction.category);
+    const merchantNeedsReview = Boolean(transaction.merchantReviewReason)
+      || (transaction.merchantConfidence !== undefined && transaction.merchantConfidence < 0.75);
+    return categoryNeedsReview
+      || merchantNeedsReview
+      || (transaction.confidence ?? 1) < 0.75
+      || transaction.validationStatus === "review";
+  });
   const eligibleClassifiedCount = Math.max(0, eligibleMovementCount - eligibleReviewItems.length);
   const eligibleClassifiedPercent = eligibleMovementCount ? (eligibleClassifiedCount / eligibleMovementCount) * 100 : 100;
   const eligibleEvidenceRows = transactions.filter((transaction) => Boolean(transaction.statementId) || transaction.extractionEvidence?.method === "pdf-text" || transaction.extractionEvidence?.method === "ocr");

@@ -103,6 +103,10 @@ final class NativeCorpusContractTests: XCTestCase {
             let status: String
             let rows: Int?
             let summary: Summary?
+            let expectedMethod: String?
+            let columnsCalibrated: Bool?
+            let maxRejectedRows: Int?
+            let maxUncategorized: Int?
         }
 
         let schemaVersion: Int?
@@ -129,6 +133,10 @@ final class NativeCorpusContractTests: XCTestCase {
         let paymentForNoInterest: Decimal?
         let minimumPlusMsi: Decimal?
         let msiPending: Decimal?
+        let expectedMethod: String?
+        let columnsCalibrated: Bool?
+        let maxRejectedRows: Int?
+        let maxUncategorized: Int?
 
         init(
             sourceFingerprint: String,
@@ -148,7 +156,11 @@ final class NativeCorpusContractTests: XCTestCase {
             debtBalance: Decimal? = nil,
             paymentForNoInterest: Decimal? = nil,
             minimumPlusMsi: Decimal? = nil,
-            msiPending: Decimal? = nil
+            msiPending: Decimal? = nil,
+            expectedMethod: String? = nil,
+            columnsCalibrated: Bool? = nil,
+            maxRejectedRows: Int? = nil,
+            maxUncategorized: Int? = nil
         ) {
             self.sourceFingerprint = sourceFingerprint
             self.source = source
@@ -168,6 +180,10 @@ final class NativeCorpusContractTests: XCTestCase {
             self.paymentForNoInterest = paymentForNoInterest
             self.minimumPlusMsi = minimumPlusMsi
             self.msiPending = msiPending
+            self.expectedMethod = expectedMethod
+            self.columnsCalibrated = columnsCalibrated
+            self.maxRejectedRows = maxRejectedRows
+            self.maxUncategorized = maxUncategorized
         }
     }
 
@@ -255,6 +271,28 @@ final class NativeCorpusContractTests: XCTestCase {
                     userInfo: [NSLocalizedDescriptionKey: "Un golden válido necesita rows entero en \(entry.file)."]
                 )
             }
+            if let expectedMethod = entry.expectedMethod,
+               !["pdf-text", "vision-ocr"].contains(expectedMethod) {
+                throw NSError(
+                    domain: "NativeCorpusManifest",
+                    code: 8,
+                    userInfo: [NSLocalizedDescriptionKey: "expectedMethod inválido en \(entry.file)."]
+                )
+            }
+            if let maxRejectedRows = entry.maxRejectedRows, maxRejectedRows < 0 {
+                throw NSError(
+                    domain: "NativeCorpusManifest",
+                    code: 9,
+                    userInfo: [NSLocalizedDescriptionKey: "Los límites de revisión no pueden ser negativos en \(entry.file)."]
+                )
+            }
+            if let maxUncategorized = entry.maxUncategorized, maxUncategorized < 0 {
+                throw NSError(
+                    domain: "NativeCorpusManifest",
+                    code: 10,
+                    userInfo: [NSLocalizedDescriptionKey: "Los límites de revisión no pueden ser negativos en \(entry.file)."]
+                )
+            }
             let summary = entry.summary
             decoded[file] = Expectation(
                 sourceFingerprint: fingerprint,
@@ -274,7 +312,11 @@ final class NativeCorpusContractTests: XCTestCase {
                 debtBalance: summary?.debtBalance,
                 paymentForNoInterest: summary?.paymentForNoInterest,
                 minimumPlusMsi: summary?.minimumPlusMsi,
-                msiPending: summary?.msiPending
+                msiPending: summary?.msiPending,
+                expectedMethod: entry.expectedMethod,
+                columnsCalibrated: entry.columnsCalibrated,
+                maxRejectedRows: entry.maxRejectedRows,
+                maxUncategorized: entry.maxUncategorized
             )
         }
         return decoded
@@ -303,8 +345,8 @@ final class NativeCorpusContractTests: XCTestCase {
         return String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), value)
     }
 
-    /// Lightweight real-file smoke test for the ten-state corpus supplied
-    /// out-of-band on a development device/runner. It intentionally does not
+    /// Lightweight real-file smoke test for a corpus supplied out-of-band on
+    /// a development device/runner. It intentionally does not
     /// require a golden manifest: its job is to ensure the production reader
     /// never emits an absurd amount or an accepted OCR row without row-level
     /// provenance before someone attempts certification/publication.
@@ -464,6 +506,35 @@ final class NativeCorpusContractTests: XCTestCase {
             // or certificate number was silently selected as the movement.
             let diagnostics = result.rowDiagnostics
             let extractedRows = result.reconciliation?.extractedMovementCount ?? result.imported
+            let actualMethod = result.usedOCR ? "vision-ocr" : "pdf-text"
+            let rejectedRows = diagnostics.filter { !$0.accepted }.count
+            let statementID = store.statements.first(where: { $0.sourceFingerprint == actualFingerprint })?.id
+            let uncategorizedRows = statementID.map { id in
+                store.movements
+                    .filter { $0.statementId == id }
+                    .filter {
+                        guard $0.flow == .expense else { return false }
+                        if let kind = $0.kind,
+                           [.cardPayment, .bankTransfer, .income, .credit, .refund, .msi].contains(kind) {
+                            return false
+                        }
+                        return true
+                    }
+                    .filter { ["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"].contains($0.category) }
+                    .count
+            } ?? 0
+            if let expectedMethod = expected.expectedMethod {
+                XCTAssertEqual(actualMethod, expectedMethod, file.lastPathComponent + " método de extracción")
+            }
+            if let columnsCalibrated = expected.columnsCalibrated {
+                XCTAssertEqual(result.ocrColumnsCalibrated ?? false, columnsCalibrated, file.lastPathComponent + " calibración de columnas")
+            }
+            if let maxRejectedRows = expected.maxRejectedRows {
+                XCTAssertLessThanOrEqual(rejectedRows, maxRejectedRows, file.lastPathComponent + " filas rechazadas")
+            }
+            if let maxUncategorized = expected.maxUncategorized {
+                XCTAssertLessThanOrEqual(uncategorizedRows, maxUncategorized, file.lastPathComponent + " movimientos sin categoría")
+            }
             XCTAssertGreaterThanOrEqual(
                 diagnostics.count,
                 extractedRows,
@@ -591,7 +662,7 @@ final class NativeCorpusContractTests: XCTestCase {
                 "accountKey": result.accountKey ?? "",
                 "expectedAccountKey": expected.accountKey,
                 "kind": result.kind.rawValue,
-                "mode": result.usedOCR ? "vision-ocr" : "pdf-text",
+                "mode": actualMethod,
                 "sourceStatus": result.sourceDetection.status.rawValue,
                 "sourceConfidence": percentText(result.sourceDetection.confidence),
                 "status": result.reconciliation?.status.rawValue ?? "pending",
@@ -602,6 +673,8 @@ final class NativeCorpusContractTests: XCTestCase {
                 "ocrColumnsCalibrated": result.ocrColumnsCalibrated.map { $0 ? "true" : "false" } ?? "",
                 "diagnosticRows": String(result.rowDiagnostics.count),
                 "acceptedDiagnosticRows": String(result.rowDiagnostics.filter(\.accepted).count),
+                "rejectedRows": String(rejectedRows),
+                "uncategorizedRows": String(uncategorizedRows),
                 "expectedPreviousBalance": decimalText(expected.previousBalance),
                 "extractedPreviousBalance": decimalText(result.summary?.previousBalance),
                 "expectedCashBalance": decimalText(expected.cashBalance),
@@ -643,7 +716,12 @@ final class NativeCorpusContractTests: XCTestCase {
         let expectedValidCount = runExpectations.values.filter { $0.status == .valid }.count
         let expectedPendingCount = runExpectations.values.filter { $0.status != .valid }.count
         let exactCorpus = Set(files.map(\.lastPathComponent)) == Set(runExpectations.keys)
-        let certified = runExpectations.count >= 10
+        // The private manifest is the scope of certification.  Do not impose
+        // an unrelated fixed corpus size here: a focused Rappi regression
+        // corpus currently contains six PDFs, while a broader release corpus
+        // may contain more.  Exact file membership, fingerprints and every
+        // golden expectation are checked above and by the external verifier.
+        let certified = !runExpectations.isEmpty
             && exactCorpus
             && expectedPendingCount == 0
             && goldenFalseAccepted == 0

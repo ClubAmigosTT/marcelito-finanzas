@@ -11,12 +11,33 @@ const settingsPath = new URL("../apps/ios/Cauce/Settings.swift", import.meta.url
 test("el lector nativo separa diagnóstico de libro operativo", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /var rowDiagnostics: \[OCRRowDiagnostic\]\? = nil/);
-  assert.match(source, /static let readerVersion = "ios-reader-deterministic-2026\.09\.14\.37"/);
+  assert.match(source, /static let readerVersion = "ios-reader-deterministic-2026\.09\.15\.39"/);
   assert.match(source, /let canonicalFresh = Self\.shouldPersistCanonicalRowsForTesting/);
+  assert.match(source, /let ocrQualityNeedsReview = usedOCR/);
+  assert.doesNotMatch(source, /let ocrQualityNeedsReview = false/);
+  assert.match(source, /\|\| ocrQualityNeedsReview/);
+  assert.doesNotMatch(source, /if \(isCurrentReader\(statement\), statement\.reconciliation\?\.status == \.valid\)/);
   assert.match(source, /movements\.insert\(contentsOf: canonicalFresh\.reversed\(\), at: 0\)/);
   assert.match(source, /rowDiagnostics: extraction\.rowDiagnostics/);
   assert.match(source, /columnas CARGOS\/ABONOS\/SALDO calibradas por encabezado distribuido/);
   assert.match(source, /fila colapsada/);
+  assert.match(source, /let blockedCount = statements\.reduce/);
+  assert.match(source, /blockedMovementCount: blockedCount/);
+  assert.match(source, /enrichmentMovementCount: reviewCount/);
+});
+
+test("el dashboard separa estados conciliados, filas bloqueadas y enriquecimiento", async () => {
+  const [rootTab, diagnostics, models] = await Promise.all([
+    readFile(new URL("../apps/ios/Cauce/RootTabView.swift", import.meta.url), "utf8"),
+    readFile(new URL("../apps/ios/Cauce/Diagnostics.swift", import.meta.url), "utf8"),
+    readFile(modelsPath, "utf8"),
+  ]);
+  assert.match(rootTab, /Estados conciliados:/);
+  assert.match(rootTab, /Movimientos bloqueados:/);
+  assert.match(rootTab, /por enriquecer:/);
+  assert.match(diagnostics, /audit\.blockedRows/);
+  assert.match(diagnostics, /Por enriquecer/);
+  assert.match(models, /let blockedRows: Int/);
 });
 
 test("Zen solo recibe gastos canónicos y falla cerrado", async () => {

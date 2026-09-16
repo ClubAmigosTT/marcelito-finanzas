@@ -318,10 +318,10 @@ struct DiagnosticsView: View {
                                         .font(.caption2.weight(.semibold))
                                         .foregroundStyle(audit.reconciliation == .invalid ? Color.marcelitoDanger : (audit.requiresReview ? Color.marcelitoAmber : Color.marcelitoSuccess))
                                 }
-                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas · \(audit.rejectedRows) rechazadas · \(audit.diagnosticRows) diagnosticadas · \(audit.quarantinedRows) en cuarentena\(duplicateSuffix)")
+                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas · \(audit.blockedRows) bloqueadas · \(audit.rejectedRows) rechazadas · \(audit.diagnosticRows) diagnosticadas · \(audit.quarantinedRows) en cuarentena\(duplicateSuffix)")
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(.secondary)
-                                Text("Por revisar \(audit.reviewRows) · \(money(audit.reviewTotal))")
+                                Text("Por enriquecer \(audit.reviewRows) · \(money(audit.reviewTotal))")
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(audit.reviewRows > 0 ? Color.marcelitoAmber : .secondary)
                                 Text("Ingresos \(money(audit.incomeTotal)) · Gasto \(money(audit.expenseTotal)) · Reembolsos \(money(audit.refundTotal))")

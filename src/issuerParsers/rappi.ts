@@ -1,12 +1,16 @@
 import type { StatementSummary, Transaction, TransactionKind } from "../types.ts";
 import type { DeterministicParseInput, DeterministicParseResult } from "./types.ts";
 import { cents, fold, layoutLines, lineText, makeTransaction, money, parseIssuerDate, reconcileExactly } from "./shared.ts";
-import { normalizeRappiMerchant } from "../merchantNormalization.ts";
+import { deterministicExpenseClassification } from "../categoryRules.ts";
+import { normalizeRappiMerchant, rappiCategoryFor } from "../merchantNormalization.ts";
 
 const sectionTitle = "Cargos, abonos y compras regulares (no a meses)";
 const pageMarker = /^__pdf_page_(\d+)__$/;
 const rowStart = /^(\d{4}-\d{2}-\d{2})\s+(\d{4}-\d{2}-\d{2})\s+(.+)$/;
-const signedMoney = /([+-])\s*\$?\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})/g;
+// A signed token is a financial candidate only when it is not embedded in a
+// reference/code. The old expression could read `REF+12.34A` as the amount
+// and then trust the last numeric-looking fragment in the line.
+const signedMoney = /(?<![A-Za-z0-9.,])([+-])\s*\$?\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})(?![A-Za-z0-9.,])/g;
 
 function amountAfter(text: string, label: RegExp) {
   const match = text.match(new RegExp(`${label.source}[^$\\n]{0,100}\\$\\s*([\\d,]+\\.\\d{2})`, "i"));
@@ -48,30 +52,30 @@ function parseSummary(text: string): StatementSummary {
 
 type PendingRow = { raw: string; page: number; foreignCurrency: boolean };
 
-function parseMoneyRows(input: DeterministicParseInput) {
+function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean | null = null) {
   const rows: Transaction[] = [];
   const rejectedRows: string[] = [];
   let page = 1;
   let active = false;
   let pending: PendingRow | undefined;
 
-  const finish = () => {
-    if (!pending) return;
-    const rowPage = pending.page;
-    const rowForeignCurrency = pending.foreignCurrency;
-    const raw = pending.raw.replace(/\s+/g, " ").trim();
-    pending = undefined;
+  const finishRow = (rawValue: string, rowPage: number, rowForeignCurrency: boolean) => {
+    const raw = rawValue.replace(/\s+/g, " ").trim();
     const match = raw.match(rowStart);
     if (!match) {
       rejectedRows.push(raw.slice(0, 240));
       return;
     }
     const moneyMatches = [...raw.matchAll(signedMoney)];
-    const selected = moneyMatches.at(-1);
-    if (!selected) {
+    // A text line with more than one signed financial token is structurally
+    // ambiguous: one may belong to a reference or to a flattened adjacent
+    // row. Never use "the last number" as a global amount rule; the layout
+    // reader must prove the amount column or OCR must reconstruct the rows.
+    if (moneyMatches.length !== 1) {
       rejectedRows.push(raw.slice(0, 240));
       return;
     }
+    const selected = moneyMatches[0];
     const amountCents = cents(selected[2]);
     if (amountCents === undefined || amountCents <= 0) {
       rejectedRows.push(raw.slice(0, 240));
@@ -80,8 +84,15 @@ function parseMoneyRows(input: DeterministicParseInput) {
 
     const signedValue = selected[1] === "-" ? -amountCents : amountCents;
     const descriptionEnd = selected.index ?? raw.length;
-    const description = raw
-      .slice(match[0].length - match[3].length, descriptionEnd)
+    const descriptionStart = match[0].length - match[3].length;
+    // Keep this before removing foreign-currency annotations. It is the
+    // bounded source evidence shown in diagnostics; merchant cleanup receives
+    // a separate, conservative view below.
+    const rawDescription = raw
+      .slice(descriptionStart, descriptionEnd)
+      .replace(/\s+/g, " ")
+      .trim();
+    const description = rawDescription
       .replace(/compra\s+en\s+el\s+extranjero/ig, "")
       .replace(/tasa\s+de\s+conversi[oó]n\s+[^ ]+/ig, "")
       .replace(/usd\s+\$?\s*[\d,.]+/ig, "")
@@ -105,6 +116,19 @@ function parseMoneyRows(input: DeterministicParseInput) {
       kind = /bonificaci[oó]n|cashback|devoluci[oó]n|reembolso/.test(normalizedDescription) ? "refund" : "credit";
       ledgerAmountCents = Math.abs(signedValue);
     }
+    const rappiCategory = rappiCategoryFor(
+      description,
+      merchant.normalizedMerchant,
+      isPayment ? "transfer" : ledgerAmountCents > 0 ? "income" : "expense",
+      kind,
+    );
+    const localCategory = isPayment
+      ? "Transferencia"
+      : merchant.reviewReason
+        ? "Por revisar"
+        : rappiCategory
+          ?? deterministicExpenseClassification(description, kind === "cardPayment" ? "debt" : ledgerAmountCents > 0 ? "income" : "expense", kind)?.category
+          ?? "Otros / Por revisar";
     rows.push(makeTransaction({
       parser: "rappicard-operations-v1",
       fileName: input.fileName,
@@ -119,12 +143,27 @@ function parseMoneyRows(input: DeterministicParseInput) {
       confidence: input.mode === "ocr" ? 0.9 : 1,
       foreignCurrency: rowForeignCurrency,
       sourceText: raw,
-      rawDescription: merchant.rawDescription,
+      rawDescription,
       normalizedMerchant: merchant.normalizedMerchant,
       displayMerchant: merchant.displayMerchant,
       merchantConfidence: merchant.confidence,
       merchantReviewReason: merchant.reviewReason,
+      category: localCategory,
+      sameVisualRow,
     }));
+  };
+
+  const finish = () => {
+    if (!pending) return;
+    const rowPage = pending.page;
+    const rowForeignCurrency = pending.foreignCurrency;
+    const raw = pending.raw.replace(/\s+/g, " ").trim();
+    pending = undefined;
+    // PDF text can flatten two visual rows into one physical line. Split
+    // only at a second complete ISO date pair, never at an arbitrary number;
+    // a reference such as `REF2026` therefore remains part of the merchant.
+    const rowSegments = raw.split(/(?=\d{4}-\d{2}-\d{2}\s+\d{4}-\d{2}-\d{2}\s+)/);
+    for (const segment of rowSegments) finishRow(segment, rowPage, rowForeignCurrency);
   };
 
   for (const rawLine of input.text.split(/\r?\n/)) {
@@ -238,7 +277,7 @@ function parseLayoutRows(input: DeterministicParseInput) {
   }
   finish();
   if (!selectedRows.length) return undefined;
-  return parseMoneyRows({ ...input, text: `${sectionTitle}\n${selectedRows.map((row) => `__PDF_PAGE_${row.page}__\n${row.text}`).join("\n")}` });
+  return parseMoneyRows({ ...input, text: `${sectionTitle}\n${selectedRows.map((row) => `__PDF_PAGE_${row.page}__\n${row.text}`).join("\n")}` }, true);
 }
 
 export function parseRappi(input: DeterministicParseInput): DeterministicParseResult {

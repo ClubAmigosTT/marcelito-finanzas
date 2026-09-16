@@ -8,6 +8,12 @@ la conciliación de PDFs; se reserva para clasificar gastos después.
 
 ## Ejecutar en el iPhone
 
+Esta herramienta es el certificador general del release y conserva una
+compuerta amplia de 10 archivos. Para el corpus enfocado de Rappi de seis
+PDFs, usa el runner de XCTest con el manifiesto privado descrito más abajo:
+ese runner certifica exactamente el conjunto del manifiesto y no aplica un
+mínimo artificial.
+
 1. Abre **Resumen → Opciones → Diagnóstico → Certificar estados con Vision**.
 2. Selecciona los 10 estados validados desde Archivos.
 3. Pulsa **Ejecutar Vision** y espera a que termine cada PDF.
