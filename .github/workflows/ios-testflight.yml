@@ -112,6 +112,13 @@ jobs:
           echo "MARKETING_VERSION=$version" >> "$GITHUB_ENV"
           echo "Se compilará Marcelito $version"
 
+      - name: Evitar una versión de marketing obsoleta
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_MARKETING_VERSION="$MARKETING_VERSION" \
+            node scripts/validate-testflight-marketing-version.mjs
+
       - name: Instalar XcodeGen
         shell: bash
         run: brew install xcodegen

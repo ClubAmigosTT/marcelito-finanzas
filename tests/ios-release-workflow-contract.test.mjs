@@ -17,3 +17,11 @@ test("el release tag bootstrap permite instalar el certificador sin certificar e
   assert.ok(bootstrapGate >= 0, "falta la compuerta explícita de bootstrap");
   assert.ok(certificationGate > bootstrapGate, "la compuerta de certificación debe seguir después del bootstrap");
 });
+
+test("TestFlight rechaza una versión de marketing menor a la ya publicada", () => {
+  assert.match(workflow, /scripts\/validate-testflight-marketing-version\.mjs/);
+  const versionGuard = workflow.indexOf("Evitar una versión de marketing obsoleta");
+  const xcodegen = workflow.indexOf("Instalar XcodeGen");
+  assert.ok(versionGuard >= 0, "falta la compuerta de versión de marketing");
+  assert.ok(versionGuard < xcodegen, "la versión debe validarse antes de compilar y subir");
+});
