@@ -547,20 +547,20 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertFalse(lines.contains { $0.contains("AVIANCA") })
     }
 
-    func testFinancialConfidenceIgnoresMerchantOnlyWeakness() {
+    func testFinancialConfidenceIgnoresMerchantOnlyWeakness() throws {
         let strongFinancialFields = FinanceStore.rappiFinancialConfidenceForTesting(
             observationConfidence: 0.42,
             dateConfidence: 0.97,
             amountConfidence: 0.96
         )
-        XCTAssertEqual(strongFinancialFields, 0.96, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(strongFinancialFields), 0.96, accuracy: 0.0001)
 
         let weakAmount = FinanceStore.rappiFinancialConfidenceForTesting(
             observationConfidence: 0.99,
             dateConfidence: 0.97,
             amountConfidence: 0.70
         )
-        XCTAssertEqual(weakAmount, 0.70, accuracy: 0.0001)
+        XCTAssertEqual(try XCTUnwrap(weakAmount), 0.70, accuracy: 0.0001)
     }
 
     func testDenseIsolatedRowsKeepTheirOwnDatesAndIdenticalAmounts() {
