@@ -68,6 +68,30 @@ test("el perfil rappi-focused pasa con seis estados Rappi OCR", () => {
   assert.deepEqual(result.errors, []);
 });
 
+test("el perfil rappi-focused rechaza un conjunto Rappi incompleto o no visual", () => {
+  const rows = Array.from({ length: 6 }, (_, index) => row(index + 1, {
+    source: "Rappi",
+    accountKey: "rappi:9040",
+    kind: "card",
+    mode: "vision-ocr",
+    ocrConfidence: 0.94,
+    weakestOCRPage: 0.84,
+  }));
+  rows[5] = row(6, {
+    source: "Rappi",
+    accountKey: "rappi:9040",
+    kind: "card",
+    mode: "pdf-text",
+  });
+  const result = verifyNativeDeviceReport(
+    { ...report(rows), certificationScope: "rappi-focused" },
+    "ios-reader-2026.08.31.14",
+    10,
+  );
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("solo permite archivos Rappi")));
+});
+
 test("el informe del dispositivo bloquea duplicados y estados pendientes", () => {
   const rows = Array.from({ length: 9 }, (_, index) => row(index + 1));
   rows.push(row(10, {

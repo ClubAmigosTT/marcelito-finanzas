@@ -32,8 +32,8 @@ El workflow `.github/workflows/ios-testflight.yml` compila Marcelito en un runne
 4. El entorno protegido `testflight` solo permite `main` y tags `ios-v*`. Para probar una rama de trabajo, crea un tag sobre el commit exacto y usa ese tag como **Run workflow > Use workflow from**. Para el bootstrap inicial marca `corpus_certifier=true`; para una publicación final usa `false` y solo después de certificar el corpus. Ejemplo:
 
    ```bash
-   git tag ios-v1.0.104
-   git push origin ios-v1.0.104
+   git tag ios-v1.0.105
+   git push origin ios-v1.0.105
    ```
 
    También puedes ejecutar **Actions > iOS TestFlight > Run workflow** seleccionando ese tag, escribiendo la versión (por ejemplo `1.0.1`) y eligiendo el valor de bootstrap correspondiente.
