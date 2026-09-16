@@ -1210,7 +1210,12 @@ final class FinanceStore {
         let detection = sourceDetection(from: text, fileName: fileName)
         let source = detection.source
         let confidenceByPage = Dictionary(grouping: observations, by: { $0.page + 1 })
-            .mapValues { $0.map(\.confidence).min() ?? 0 }
+            .mapValues { pageObservations in
+                rappiFinancialConfidence(
+                    for: pageObservations,
+                    pageIndex: pageObservations.first?.page ?? 0
+                ) ?? 0
+            }
         return ReaderParseSnapshot(
             sourceDetection: detection,
             source: source,
@@ -4742,6 +4747,9 @@ final class FinanceStore {
             let pages = relevantPages.isEmpty ? Array(grouped.keys) : relevantPages
             let values = pages.sorted().compactMap { page -> Double? in
                 guard let observations = grouped[page], !observations.isEmpty else { return nil }
+                if selectableSource.localizedCaseInsensitiveCompare("Rappi") == .orderedSame {
+                    return Self.rappiFinancialConfidence(for: observations, pageIndex: page)
+                }
                 return observations.map(\.confidence).reduce(0, +) / Double(observations.count)
             }
             return values.isEmpty ? nil : values
@@ -4812,7 +4820,12 @@ final class FinanceStore {
             parsedCandidates = bbvaResult.movements
         } else if usedOCR, source == "Rappi" {
             let confidenceByPage = Dictionary(grouping: ocrObservations, by: { $0.page + 1 })
-                .mapValues { $0.map(\.confidence).min() ?? 0 }
+                .mapValues { observations in
+                    Self.rappiFinancialConfidence(
+                        for: observations,
+                        pageIndex: observations.first?.page ?? 0
+                    ) ?? 0
+                }
             let ocrCandidates = Self.parseRappiText(
                 text,
                 evidenceMethod: "vision-ocr",
@@ -4877,7 +4890,12 @@ final class FinanceStore {
                 )
                 let retryText = Self.rappiOCRText(from: retryObservations)
                 let retryConfidenceByPage = Dictionary(grouping: retryObservations, by: { $0.page + 1 })
-                    .mapValues { $0.map(\.confidence).min() ?? 0 }
+                    .mapValues { observations in
+                        Self.rappiFinancialConfidence(
+                            for: observations,
+                            pageIndex: observations.first?.page ?? 0
+                        ) ?? 0
+                    }
                 let retryCandidates = Self.parseRappiText(
                     retryText,
                     evidenceMethod: "vision-ocr",
@@ -5524,6 +5542,18 @@ final class FinanceStore {
     private struct OCRTextBox {
         let text: String
         let boundingBox: CGRect
+        /// Vision confidence for this exact substring when available. A
+        /// row-level observation can contain a weak merchant and a strong
+        /// amount; retaining the token confidence lets Rappi gate the
+        /// financial fields without treating merchant quality as accounting
+        /// uncertainty.
+        let confidence: Double?
+
+        init(text: String, boundingBox: CGRect, confidence: Double? = nil) {
+            self.text = text
+            self.boundingBox = boundingBox
+            self.confidence = confidence
+        }
 
         var centerX: CGFloat { boundingBox.midX }
         var centerY: CGFloat { boundingBox.midY }
@@ -5537,6 +5567,10 @@ final class FinanceStore {
         /// propagated to every movement instead of using a fixed optimistic
         /// value, so a visually weak row cannot pass the automatic gate.
         let confidence: Double
+        /// Confidence of the date/amount tokens specifically. This is kept
+        /// separate from `confidence` because a merchant word can be weak
+        /// while the financial fields remain readable and reconciled.
+        let financialConfidence: Double?
         /// Vision substring boxes preserve the real column even when it
         /// recognizes the full printed row as one observation.
         let dateBoxes: [OCRTextBox]
@@ -5550,12 +5584,14 @@ final class FinanceStore {
             confidence: Double,
             dateBoxes: [OCRTextBox] = [],
             amountBoxes: [OCRTextBox] = [],
-            isolatedRappiRow: Bool = false
+            isolatedRappiRow: Bool = false,
+            financialConfidence: Double? = nil
         ) {
             self.page = page
             self.text = text
             self.boundingBox = boundingBox
             self.confidence = confidence
+            self.financialConfidence = financialConfidence
             self.dateBoxes = dateBoxes
             self.amountBoxes = amountBoxes
             self.isolatedRappiRow = isolatedRappiRow
@@ -5574,6 +5610,7 @@ final class FinanceStore {
         let bounds: CGRect
         let amount: String
         let isolated: Bool
+        let financialConfidence: Double?
     }
 
     private struct OCRAmountCandidate {
@@ -6088,7 +6125,8 @@ final class FinanceStore {
         page: Int,
         text: String,
         region: CGRect,
-        confidence: Double
+        confidence: Double,
+        financialConfidence: Double? = nil
     ) -> OCRObservation? {
         let dateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
@@ -6131,7 +6169,8 @@ final class FinanceStore {
                     y: region.minY,
                     width: 0.14,
                     height: region.height
-                )
+                ),
+                confidence: financialConfidence ?? confidence
             )
         }
         guard dateBoxes.count == 2,
@@ -6140,7 +6179,8 @@ final class FinanceStore {
         let amountText = amountMatches.isEmpty ? "-\(rawAmount)" : rawAmount
         let amountBox = OCRTextBox(
             text: amountText,
-            boundingBox: CGRect(x: 0.80, y: region.minY, width: 0.15, height: region.height)
+            boundingBox: CGRect(x: 0.80, y: region.minY, width: 0.15, height: region.height),
+            confidence: financialConfidence ?? confidence
         )
         return OCRObservation(
             page: page,
@@ -6149,7 +6189,8 @@ final class FinanceStore {
             confidence: confidence,
             dateBoxes: dateBoxes,
             amountBoxes: [amountBox],
-            isolatedRappiRow: true
+            isolatedRappiRow: true,
+            financialConfidence: financialConfidence ?? confidence
         )
     }
 
@@ -6221,6 +6262,10 @@ final class FinanceStore {
             }
             guard !values.isEmpty else { return nil }
             let text = values.map { $0.0 }.joined(separator: " ")
+            let financialConfidence = values.compactMap { value -> Double? in
+                let evidence = evidenceCounts(value.0)
+                return evidence.dates > 0 || evidence.amounts > 0 ? value.2 : nil
+            }.min()
             return rappiIsolatedRowObservation(
                 page: page,
                 text: text,
@@ -6229,7 +6274,8 @@ final class FinanceStore {
                 // Vision revision reports result boxes in full-image or
                 // ROI-relative space.
                 region: region,
-                confidence: values.map { $0.2 }.min() ?? 0
+                confidence: values.map { $0.2 }.min() ?? 0,
+                financialConfidence: financialConfidence
             )
         }
 
@@ -6299,6 +6345,43 @@ final class FinanceStore {
             )
         }
         return rappiOCRMovementLines(from: observations)
+    }
+
+    /// Exercises the field-level Rappi quality signal without rendering a
+    /// private PDF. The observation confidence stands in for a weak merchant
+    /// word, while the date/amount substring boxes carry the financial
+    /// confidence used by the import gate.
+    static func rappiFinancialConfidenceForTesting(
+        observationConfidence: Double,
+        dateConfidence: Double,
+        amountConfidence: Double
+    ) -> Double? {
+        let row = OCRObservation(
+            page: 1,
+            text: "2026-08-01 2026-08-02 COMERCIO +$50.00",
+            boundingBox: CGRect(x: 0.05, y: 0.70, width: 0.90, height: 0.03),
+            confidence: observationConfidence,
+            dateBoxes: [
+                OCRTextBox(
+                    text: "2026-08-01",
+                    boundingBox: CGRect(x: 0.08, y: 0.70, width: 0.14, height: 0.02),
+                    confidence: dateConfidence
+                ),
+                OCRTextBox(
+                    text: "2026-08-02",
+                    boundingBox: CGRect(x: 0.27, y: 0.70, width: 0.14, height: 0.02),
+                    confidence: dateConfidence
+                ),
+            ],
+            amountBoxes: [
+                OCRTextBox(
+                    text: "+$50.00",
+                    boundingBox: CGRect(x: 0.80, y: 0.70, width: 0.15, height: 0.02),
+                    confidence: amountConfidence
+                ),
+            ]
+        )
+        return rappiFinancialConfidence(for: [row], pageIndex: 1)
     }
 
     /// Verifies the production coverage diagnostic without requiring a private
@@ -6468,7 +6551,8 @@ final class FinanceStore {
                         }
                         return OCRTextBox(
                             text: String(text[stringRange]),
-                            boundingBox: rectangle.boundingBox
+                            boundingBox: rectangle.boundingBox,
+                            confidence: Double(candidate.confidence)
                         )
                     }
                 }
@@ -6479,13 +6563,19 @@ final class FinanceStore {
                         return nil
                     }
                     let text = candidate.string
+                    let dateBoxes = substringBoxes(in: candidate, text: text, regex: substringPatterns.date)
+                    let amountBoxes = substringBoxes(in: candidate, text: text, regex: substringPatterns.amount)
+                    let financialBoxes = dateBoxes + amountBoxes
+                    let financialConfidence: Double? = financialBoxes.compactMap(\.confidence).min()
+                        ?? (financialBoxes.isEmpty ? nil : Double(candidate.confidence))
                     return OCRObservation(
                         page: page,
                         text: text,
                         boundingBox: result.boundingBox,
                         confidence: Double(candidate.confidence),
-                        dateBoxes: substringBoxes(in: candidate, text: text, regex: substringPatterns.date),
-                        amountBoxes: substringBoxes(in: candidate, text: text, regex: substringPatterns.amount)
+                        dateBoxes: dateBoxes,
+                        amountBoxes: amountBoxes,
+                        financialConfidence: financialConfidence
                     )
                 }
                 .sorted {
@@ -6593,7 +6683,8 @@ final class FinanceStore {
                         text: box.text,
                         boundingBox: box.boundingBox,
                         confidence: observation.confidence,
-                        dateBoxes: [box]
+                        dateBoxes: [box],
+                        financialConfidence: box.confidence ?? observation.financialConfidence ?? observation.confidence
                     )
                 } + observation.amountBoxes.map { box in
                     OCRObservation(
@@ -6601,7 +6692,8 @@ final class FinanceStore {
                         text: box.text,
                         boundingBox: box.boundingBox,
                         confidence: observation.confidence,
-                        amountBoxes: [box]
+                        amountBoxes: [box],
+                        financialConfidence: box.confidence ?? observation.financialConfidence ?? observation.confidence
                     )
                 }
             }
@@ -6643,7 +6735,8 @@ final class FinanceStore {
                     page: observation.page,
                     text: isCurrencyOrSign ? normalizedSign : raw,
                     boundingBox: observation.boundingBox,
-                    confidence: observation.confidence
+                    confidence: observation.confidence,
+                    financialConfidence: observation.confidence
                 )
             }
         }
@@ -6725,7 +6818,8 @@ final class FinanceStore {
                 // only an ordering anchor for `ocrLines`, not a financial
                 // column selection.
                 boundingBox: CGRect(x: 0.44, y: 0.68, width: 0.54, height: 0.27),
-                confidence: best.map(\.confidence).min() ?? 0
+                confidence: best.map(\.confidence).min() ?? 0,
+                financialConfidence: best.map(\.confidence).min() ?? 0
             )
         }
 
@@ -7175,12 +7269,15 @@ final class FinanceStore {
             let isolated = observations.contains {
                 $0.isolatedRappiRow && abs($0.centerY - row.y) <= dateTolerance
             }
+            let financialConfidences = matchingDates.compactMap(\.confidence)
+                + [row.amount.confidence].compactMap { $0 }
             return RappiOCRMovementLine(
                 text: (dates + [title, amount]).joined(separator: " "),
                 y: row.y,
                 bounds: rowBounds,
                 amount: amount,
-                isolated: isolated
+                isolated: isolated,
+                financialConfidence: financialConfidences.min()
             )
         }
 
@@ -7201,6 +7298,30 @@ final class FinanceStore {
             }
         }
         return unique
+    }
+
+    /// Returns the confidence that should guard Rappi's financial fields for
+    /// one rendered page. For movement pages, use the date/amount tokens from
+    /// the deduplicated visual rows and ignore merchant-only Vision tokens.
+    /// The cover remains page-level because its controls are not represented
+    /// as movement rows. If token geometry is unavailable, fall back to the
+    /// observation confidence so the gate stays conservative.
+    private static func rappiFinancialConfidence(
+        for observations: [OCRObservation],
+        pageIndex: Int
+    ) -> Double? {
+        guard !observations.isEmpty else { return nil }
+        if pageIndex == 0 {
+            return observations.map(\.confidence).reduce(0, +) / Double(observations.count)
+        }
+        let rowConfidences = rappiOCRMovementLineRecords(from: observations)
+            .compactMap(\.financialConfidence)
+        if let minimum = rowConfidences.min() { return minimum }
+        let tokenConfidences = observations
+            .flatMap { $0.dateBoxes + $0.amountBoxes }
+            .compactMap(\.confidence)
+        if let minimum = tokenConfidences.min() { return minimum }
+        return observations.map(\.confidence).min()
     }
 
     private static let rappiRowBoundsPrefix = "__RAPPI_ROW_BOUNDS__"
