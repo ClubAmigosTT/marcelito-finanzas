@@ -1,0 +1,19 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
+import { test } from "node:test";
+
+const testsDirectory = dirname(fileURLToPath(import.meta.url));
+const workflowPath = resolve(testsDirectory, "..", ".github", "workflows", "ios-testflight.yml");
+const workflow = await readFile(workflowPath, "utf8");
+
+test("el release tag bootstrap permite instalar el certificador sin certificar el corpus", () => {
+  assert.match(workflow, /endsWith\(github\.ref_name, '-bootstrap'\)/);
+  assert.match(workflow, /version="\$\{version%-bootstrap\}"/);
+
+  const bootstrapGate = workflow.indexOf("if [[ \"${CORPUS_CERTIFIER_BOOTSTRAP:-false}\" == \"true\" ]]");
+  const certificationGate = workflow.indexOf("native_corpus_certified_normalized=");
+  assert.ok(bootstrapGate >= 0, "falta la compuerta explícita de bootstrap");
+  assert.ok(certificationGate > bootstrapGate, "la compuerta de certificación debe seguir después del bootstrap");
+});

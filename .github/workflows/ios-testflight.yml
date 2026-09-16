@@ -99,6 +99,10 @@ jobs:
           version="${REQUESTED_MARKETING_VERSION:-}"
           if [[ -z "$version" && "$GITHUB_REF" == refs/tags/ios-v* ]]; then
             version="${GITHUB_REF_NAME#ios-v}"
+            # A protected release tag ending in -bootstrap is the explicit
+            # path for installing the on-device certifier before the real
+            # corpus report exists. Keep the suffix out of CFBundleShortVersionString.
+            version="${version%-bootstrap}"
           fi
           version="${version:-1.0.0}"
           if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
@@ -142,7 +146,11 @@ jobs:
         env:
           NATIVE_CORPUS_CERTIFIED: ${{ vars.MARCELITO_NATIVE_CORPUS_CERTIFIED }}
           NATIVE_CORPUS_READER_VERSION: ${{ vars.MARCELITO_NATIVE_CORPUS_READER_VERSION }}
-          CORPUS_CERTIFIER_BOOTSTRAP: ${{ inputs.corpus_certifier }}
+          # Environment protection only permits the release tag path in this
+          # repository. A -bootstrap suffix is therefore an explicit, visible
+          # equivalent of the workflow_dispatch boolean input; it never marks
+          # the native corpus as certified.
+          CORPUS_CERTIFIER_BOOTSTRAP: ${{ inputs.corpus_certifier == true || endsWith(github.ref_name, '-bootstrap') }}
         shell: bash
         run: |
           set -euo pipefail
