@@ -1,4 +1,6 @@
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 type DeviceFile = {
   file?: unknown;
@@ -166,7 +168,8 @@ async function main() {
   if (!result.ok) process.exitCode = 1;
 }
 
-const invokedPath = process.argv[1]?.replaceAll("\\", "/");
-if (invokedPath && import.meta.url.endsWith(invokedPath)) {
+const invokedPath = process.argv[1];
+const invokedUrl = invokedPath ? pathToFileURL(resolve(invokedPath)).href : undefined;
+if (invokedUrl && import.meta.url === invokedUrl) {
   await main();
 }
