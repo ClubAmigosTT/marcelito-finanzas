@@ -7302,7 +7302,10 @@ final class FinanceStore {
 
     /// Returns the confidence that should guard Rappi's financial fields for
     /// one rendered page. For movement pages, use the date/amount tokens from
-    /// the deduplicated visual rows and ignore merchant-only Vision tokens.
+    /// the OCR streams and ignore merchant-only Vision tokens. This is kept
+    /// deliberately cheaper than rebuilding movement rows: the row builder
+    /// is needed for parsing, but it scans nearby observations for every
+    /// amount and is not appropriate for a page-level quality metric.
     /// The cover remains page-level because its controls are not represented
     /// as movement rows. If token geometry is unavailable, fall back to the
     /// observation confidence so the gate stays conservative.
@@ -7314,13 +7317,45 @@ final class FinanceStore {
         if pageIndex == 0 {
             return observations.map(\.confidence).reduce(0, +) / Double(observations.count)
         }
-        let rowConfidences = rappiOCRMovementLineRecords(from: observations)
-            .compactMap(\.financialConfidence)
-        if let minimum = rowConfidences.min() { return minimum }
-        let tokenConfidences = observations
-            .flatMap { $0.dateBoxes + $0.amountBoxes }
-            .compactMap(\.confidence)
-        if let minimum = tokenConfidences.min() { return minimum }
+
+        // Full-page and cropped recovery passes often report the same
+        // financial token twice. Keep the strongest observation for a token
+        // at a nearby coordinate, so a weak merchant word in a broad row box
+        // cannot lower the confidence of a readable date or amount recovered
+        // by the isolated-row pass. The quantized coordinate also avoids the
+        // O(n²) row reconstruction that made large OCR pages unreasonably
+        // slow during the quality-gate calculation.
+        struct FinancialTokenKey: Hashable {
+            let text: String
+            let x: Int
+            let y: Int
+        }
+
+        func normalized(_ value: String) -> String {
+            value
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+                .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+        }
+
+        var bestTokenConfidence: [FinancialTokenKey: Double] = [:]
+        for box in observations.flatMap({ $0.dateBoxes + $0.amountBoxes }) {
+            guard let confidence = box.confidence,
+                  !box.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            let key = FinancialTokenKey(
+                text: normalized(box.text),
+                x: Int((box.centerX / 0.02).rounded()),
+                y: Int((box.centerY / 0.014).rounded())
+            )
+            bestTokenConfidence[key] = max(bestTokenConfidence[key] ?? 0, confidence)
+        }
+        if let minimum = bestTokenConfidence.values.min() { return minimum }
+
+        // Numeric-component recovery has no substring boxes, but it marks
+        // the observation as financial. Merchant-only observations do not.
+        if let minimum = observations.compactMap(\.financialConfidence).min() {
+            return minimum
+        }
         return observations.map(\.confidence).min()
     }
 
