@@ -19,7 +19,7 @@ Luna debe continuar desde este estado y no desde una build anterior:
 
 El build 197 contiene la recuperación de filas Rappi cuando Vision detecta solo parte de las líneas horizontales, la deduplicación por región/importe, la evidencia por página y zona, la separación entre conciliación y enriquecimiento, y el visor móvil. El build está distribuido, pero todavía no se debe declarar certificación nativa completa: falta ejecutar los seis PDFs privados con PDFKit/Vision en macOS y en un iPhone físico.
 
-Los commits posteriores a `b0aef49` en esta rama contienen documentación del handoff y el ajuste de los verificadores nativos para que sus comandos sí se ejecuten en Windows. No cambian el runtime de la app iOS; la referencia de la app que corresponde al build 197 sigue siendo `b0aef49`. Antes de compilar, Luna debe comprobarlo con `git diff --stat b0aef49..HEAD` y revisar cualquier cambio fuera de `docs/` y `scripts/verify-native-*.ts`.
+Los commits posteriores a `b0aef49` en esta rama contienen documentación del handoff, el ajuste de los verificadores nativos para que sus comandos sí se ejecuten en Windows y una prueba de regresión para esos entrypoints. No cambian el runtime de la app iOS; la referencia de la app que corresponde al build 197 sigue siendo `b0aef49`. Antes de compilar, Luna debe comprobarlo con `git diff --stat b0aef49..HEAD` y revisar cualquier cambio fuera de `docs/`, `package.json`, `scripts/verify-native-*.ts` y `tests/native-verifier-cli-contract.test.mjs`.
 
 En GitHub, el enlace de referencia de esa ejecución es:
 `https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35063336931`
