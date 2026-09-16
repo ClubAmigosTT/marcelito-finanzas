@@ -11850,16 +11850,16 @@ final class FinanceStore {
                 rows.append(Movement(date: date, title: title, account: "Rappi",
                     category: merchant.reviewReason == nil ? (rappiCategoryHint ?? category(for: merchant.normalizedMerchant, flow: flow)) : (payment ? "Transferencia" : "Por revisar"), amount: -amount, flow: flow,
                     kind: kind, foreignCurrency: pending.localizedCaseInsensitiveContains("compra en el extranjero"),
-                    rawDescription: merchant.rawDescription,
-                    normalizedMerchant: merchant.normalizedMerchant,
-                    displayMerchant: merchant.displayMerchant,
-                    merchantConfidence: merchant.confidence,
-                    merchantReviewReason: merchant.reviewReason,
                     extractionEvidence: MovementExtractionEvidence(method: evidenceMethod, page: rowPage,
                         confidence: evidenceMethod == "vision-ocr" ? (confidenceByPage[rowPage ?? 0] ?? 0) : 1,
                         sourceText: pending, bounds: evidenceBounds, selectedColumn: "MONTO MXN",
                         selectedAmount: abs(amount), selectionReason: "RappiCard: \(signReason); fechas operación y cargo conservadas en evidencia",
-                        reviewReason: merchant.reviewReason, sameVisualRow: evidenceBounds != nil ? true : nil)))
+                        reviewReason: merchant.reviewReason, sameVisualRow: evidenceBounds != nil ? true : nil),
+                    rawDescription: merchant.rawDescription,
+                    normalizedMerchant: merchant.normalizedMerchant,
+                    displayMerchant: merchant.displayMerchant,
+                    merchantConfidence: merchant.confidence,
+                    merchantReviewReason: merchant.reviewReason))
             }
         }
         for raw in structuredText.components(separatedBy: .newlines) {
