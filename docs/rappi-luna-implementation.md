@@ -18,7 +18,7 @@ Luna debe continuar desde este estado y no desde una build anterior:
 - TestFlight: versión `1.0.6`, build `204`, estado `VALID`, asignado al grupo interno `Marcelito - Pruebas internas`.
 - Versión del lector que debe aparecer en los informes: `ios-reader-deterministic-2026.09.16.2`.
 - Versión web equivalente: `web-reader-deterministic-2026.09.16.2`.
-- Validaciones de código en verde: [Web Reader Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35087995876) y [iOS Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35087995992).
+- Validaciones de código en verde sobre el head documentado: [Web Reader Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35096875411) y [iOS Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35096875442).
 - Auditoría local repetida el 16-sep-2026: `319/319` pruebas públicas, TypeScript, build Vite y auditoría pública en verde; la corrida privada web de los seis Rappi devolvió `6/6` válidos, `0` filas rechazadas, `0` fallas de manifiesto y `nativeOCRPending: 0`.
 
 El build 204 es el bootstrap vigente para instalar/probar el certificador; contiene la normalización de prefijos de procesador, la separación de evidencia, la confianza por fila y el visor móvil, y usa la versión nativa `.2`. El build 203 usa la versión `.1` y queda como histórico; no debe confundirse con el build 202, que tampoco contiene la normalización nueva.
