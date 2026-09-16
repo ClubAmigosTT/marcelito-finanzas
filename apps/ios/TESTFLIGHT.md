@@ -29,12 +29,14 @@ El workflow `.github/workflows/ios-testflight.yml` compila Marcelito en un runne
    - `APPLE_DISTRIBUTION_P12`: certificado de distribución en Base64.
    - `APPLE_DISTRIBUTION_P12_PASSWORD`: contraseña del certificado P12.
    - `APPLE_PROVISIONING_PROFILE`: perfil App Store en Base64 para `mx.marcelito.personal`.
-4. En GitHub abre **Actions > iOS TestFlight > Run workflow**, escribe la versión (por ejemplo `1.0.1`) y ejecuta. Alternativamente, desde una terminal:
+4. El entorno protegido `testflight` solo permite `main` y tags `ios-v*`. Para probar una rama de trabajo, crea un tag sobre el commit exacto y usa ese tag como **Run workflow > Use workflow from**. Para el bootstrap inicial marca `corpus_certifier=true`; para una publicación final usa `false` y solo después de certificar el corpus. Ejemplo:
 
    ```bash
-   git tag ios-v1.0.1
-   git push origin ios-v1.0.1
+   git tag ios-v1.0.104
+   git push origin ios-v1.0.104
    ```
+
+   También puedes ejecutar **Actions > iOS TestFlight > Run workflow** seleccionando ese tag, escribiendo la versión (por ejemplo `1.0.1`) y eligiendo el valor de bootstrap correspondiente.
 
 5. Antes de publicar, certifica todos los estados con Vision. Para esta corrección Rappi, la ruta obligatoria es el runner nativo con el manifiesto privado exacto de los seis PDFs, siguiendo `docs/rappi-luna-implementation.md` y `apps/ios/README.md`. Ese runner valida los nombres anonimizados, huellas, filas, controles y versión del lector sin copiar documentos al repositorio. Solo después de que `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1` termine con `certified=true`, y después de comprobar el flujo en un iPhone físico, registra en **Settings > Secrets and variables > Actions > Variables**:
    - `MARCELITO_NATIVE_CORPUS_CERTIFIED=true`.
