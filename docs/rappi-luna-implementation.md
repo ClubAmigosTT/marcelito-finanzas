@@ -11,7 +11,8 @@ Este documento acompaña la implementación actual en la rama de trabajo. No es 
 Luna debe continuar desde este estado y no desde una build anterior:
 
 - Rama: `codex/testflight-rappi-current-2026-09-15`.
-- Commit: `b0aef49` (`fix: preserve Rappi recovery when OCR is sparse`).
+- HEAD de la rama: `49f5c52` (los commits posteriores a `b0aef49` son documentación del handoff).
+- Base de código iOS validada: `b0aef49` (`fix: preserve Rappi recovery when OCR is sparse`).
 - Tag de iOS: `ios-v1.0.110`.
 - Workflow de GitHub Actions: `35063336931`.
 - TestFlight: versión `1.0.2`, build `197`, estado `VALID`, asignado al grupo interno `Marcelito - Pruebas internas`.
