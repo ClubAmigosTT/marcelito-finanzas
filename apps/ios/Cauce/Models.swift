@@ -6053,15 +6053,28 @@ final class FinanceStore {
         let ruleRegions = rappiRuleRowRegions(in: image)
         let observedDateRegions = rappiDateAnchoredRowRegions(from: fullPageObservations)
         let dateRegions: [CGRect]
-        if !observedDateRegions.isEmpty,
-           (ruleRegions.isEmpty || observedDateRegions.count >= ruleRegions.count) {
+        if ruleRegions.isEmpty {
+            // With no printed rules, date anchors are the only bounded way to
+            // discover visual rows. Reuse the full-page pass when possible;
+            // otherwise pay for the isolated date-anchor pass.
+            dateRegions = observedDateRegions.isEmpty
+                ? rappiDateAnchoredRowRegions(in: image)
+                : observedDateRegions
+        } else if !observedDateRegions.isEmpty,
+                  observedDateRegions.count >= ruleRegions.count {
             dateRegions = observedDateRegions
-        } else {
+        } else if !fullPageObservations.isEmpty {
             // A short full-page inventory is itself a signal that the first
             // pass missed numeric rows. Pay for one bounded retry only in
             // that case; the retry remains independent from the rule bands.
             let retriedDateRegions = rappiDateAnchoredRowRegions(in: image)
             dateRegions = retriedDateRegions.isEmpty ? observedDateRegions : retriedDateRegions
+        } else {
+            // Rules already provide complete row boundaries when the caller
+            // has no full-page observations (for example, a lightweight
+            // geometry probe). Do not run another full-page OCR request just
+            // to prove what the pixels already show.
+            dateRegions = []
         }
         return mergedRappiRowRegions(ruleRegions: ruleRegions, dateRegions: dateRegions)
     }
