@@ -46,6 +46,26 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements).status, .valid)
     }
 
+    func testReconciledSelectableRappiLayerAvoidsVisionAndMissingRowDoesNotPass() {
+        XCTAssertTrue(
+            FinanceStore.selectableTextLayerReconcilesForTesting(
+                text: fixture,
+                fileName: "rappi-text-layer.pdf"
+            )
+        )
+
+        let missingRow = fixture.replacingOccurrences(
+            of: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00\n2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",
+            with: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00"
+        )
+        XCTAssertFalse(
+            FinanceStore.selectableTextLayerReconcilesForTesting(
+                text: missingRow,
+                fileName: "rappi-missing-row.pdf"
+            )
+        )
+    }
+
     func testPeriodSurvivesPDFKitSpacingAndDashVariants() {
         let variants = [
             "Período\n22 - jun - 2026\nal\n21 - ago - 2026",
