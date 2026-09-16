@@ -6048,7 +6048,8 @@ final class FinanceStore {
 
     private static func rappiTableRowRegions(
         in image: CGImage,
-        fullPageObservations: [OCRObservation] = []
+        fullPageObservations: [OCRObservation] = [],
+        retryDateAnchorsWhenUnobserved: Bool = true
     ) -> [CGRect] {
         let ruleRegions = rappiRuleRowRegions(in: image)
         let observedDateRegions = rappiDateAnchoredRowRegions(from: fullPageObservations)
@@ -6063,7 +6064,7 @@ final class FinanceStore {
         } else if !observedDateRegions.isEmpty,
                   observedDateRegions.count >= ruleRegions.count {
             dateRegions = observedDateRegions
-        } else if !fullPageObservations.isEmpty {
+        } else if !fullPageObservations.isEmpty || retryDateAnchorsWhenUnobserved {
             // A short full-page inventory is itself a signal that the first
             // pass missed numeric rows. Pay for one bounded retry only in
             // that case; the retry remains independent from the rule bands.
@@ -6155,7 +6156,8 @@ final class FinanceStore {
     private static func rappiVisualRowObservations(
         from image: CGImage,
         page: Int,
-        fullPageObservations: [OCRObservation] = []
+        fullPageObservations: [OCRObservation] = [],
+        retryDateAnchorsWhenUnobserved: Bool = true
     ) -> [OCRObservation] {
         let dateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
@@ -6217,7 +6219,11 @@ final class FinanceStore {
         }
 
         var rows: [OCRObservation] = []
-        for region in rappiTableRowRegions(in: image, fullPageObservations: fullPageObservations) {
+        for region in rappiTableRowRegions(
+            in: image,
+            fullPageObservations: fullPageObservations,
+            retryDateAnchorsWhenUnobserved: retryDateAnchorsWhenUnobserved
+        ) {
             var candidates: [OCRObservation] = []
             let passes: [([String]?, Bool)] = [
                 (["es-MX", "en-US"], true),
@@ -6257,11 +6263,15 @@ final class FinanceStore {
     }
 
     static func rappiTableRowRegionsForTesting(_ image: CGImage) -> [CGRect] {
-        rappiTableRowRegions(in: image)
+        rappiTableRowRegions(in: image, retryDateAnchorsWhenUnobserved: false)
     }
 
     static func rappiVisualRowTextsForTesting(_ image: CGImage, page: Int = 2) -> [String] {
-        rappiVisualRowObservations(from: image, page: page).map(\.text)
+        rappiVisualRowObservations(
+            from: image,
+            page: page,
+            retryDateAnchorsWhenUnobserved: false
+        ).map(\.text)
     }
 
     static func rappiIsolatedRowLinesForTesting(_ texts: [String], page: Int = 2, spacing: CGFloat = 0.04) -> [String] {

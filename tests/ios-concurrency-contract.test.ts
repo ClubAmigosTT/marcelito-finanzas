@@ -185,6 +185,8 @@ test("Rappi combina bandas de regla y anclas de fecha sin duplicarlas", async ()
   assert.match(source, /overlapRatio >= 0\.35/);
   assert.match(source, /fullPageObservations: \[OCRObservation\] = \[\]/);
   assert.match(source, /observedDateRegions\.count >= ruleRegions\.count/);
+  assert.match(source, /retryDateAnchorsWhenUnobserved: Bool = true/);
+  assert.match(source, /rappiTableRowRegions\(in: image, retryDateAnchorsWhenUnobserved: false\)/);
 });
 
 test("Rappi guarda página y región visual de cada fila OCR", async () => {
