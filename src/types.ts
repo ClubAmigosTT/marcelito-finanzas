@@ -60,6 +60,10 @@ export type TransactionExtractionEvidence = {
   sourceText?: string;
   /** Bounding box when the extraction method provides visual coordinates. */
   bounds?: ExtractionBounds;
+  /** Whether the date, amount and description came from one visual row. */
+  sameVisualRow?: boolean;
+  /** Why this row needs human attention, without blocking financial import. */
+  reviewReason?: string;
 };
 
 /** Evidence used to identify the issuer without trusting transaction text. */
@@ -116,6 +120,16 @@ export type Transaction = {
   duplicateOf?: string;
   /** Raw description as displayed by a bank app, before normalization. */
   displayDescription?: string;
+  /** Original merchant text from the statement, retained as audit evidence. */
+  rawDescription?: string;
+  /** Stable merchant identity used for matching and category rules. */
+  normalizedMerchant?: string;
+  /** Human-readable merchant label; never replaces rawDescription. */
+  displayMerchant?: string;
+  /** Merchant-only confidence, independent from amount/date extraction confidence. */
+  merchantConfidence?: number;
+  /** Merchant-specific review reason; does not block a financially valid row. */
+  merchantReviewReason?: string;
   /** The app visibly truncated the description with an ellipsis. */
   descriptionTruncated?: boolean;
   /** Current state in the source app, especially useful for Amex pending rows. */

@@ -535,7 +535,7 @@ enum ExpenseAIClassifier {
         let input = movements.map { movement in
             [
                 "id": movement.id.uuidString,
-                "comercio": String(movement.title.prefix(180)),
+                "comercio": String((movement.normalizedMerchant ?? movement.displayMerchant ?? movement.title).prefix(180)),
                 "importe_mxn": NSDecimalNumber(decimal: movement.amount < 0 ? -movement.amount : movement.amount).stringValue,
                 "fecha": ISO8601DateFormatter().string(from: movement.date)
             ]

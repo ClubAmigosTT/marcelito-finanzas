@@ -150,8 +150,8 @@ struct DiagnosticsView: View {
                     }
                     LabeledContent("Estados", value: "\(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount) conciliados")
                     LabeledContent("Movimientos canónicos", value: "\(store.ledgerQuality.movementCount)")
-                    LabeledContent("Por revisar (canónicos)", value: "\(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) · \(money(store.ledgerQuality.reviewAmount))")
-                    LabeledContent("Movimientos en cuarentena", value: "\(store.ledgerQuality.quarantinedMovementCount) · \(money(store.ledgerQuality.quarantinedAmount))")
+                    LabeledContent("Movimientos por enriquecer", value: "\(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) · \(money(store.ledgerQuality.reviewAmount))")
+                    LabeledContent("Movimientos bloqueados", value: "\(store.ledgerQuality.quarantinedMovementCount) · \(money(store.ledgerQuality.quarantinedAmount))")
                     LabeledContent("Estados en cuarentena", value: "\(store.ledgerQuality.quarantinedStatementCount)")
                     LabeledContent("Importes fuera de rango", value: "\(store.ledgerQuality.absurdMovementCount)")
                     LabeledContent("Filas con evidencia", value: "\(Int(store.ledgerQuality.evidencePercent.rounded()))%")

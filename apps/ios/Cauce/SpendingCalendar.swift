@@ -821,7 +821,7 @@ struct SpendingCalendarView: View {
                     NavigationLink { MovementDetailView(movement: movement) } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(movement.title).lineLimit(1)
+                                Text(movement.displayMerchant ?? movement.title).lineLimit(1)
                                 Text("\(movement.category) · \(movement.account)").font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
@@ -1155,7 +1155,8 @@ private func spendingMovement(_ movement: Movement, matches filters: SpendingCal
         if status == .identified && isReview { return false }
     }
     let query = filters.merchantQuery.trimmingCharacters(in: .whitespacesAndNewlines)
-    return query.isEmpty || movement.title.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+    let searchableMerchant = [movement.displayMerchant, movement.rawDescription, movement.title].compactMap { $0 }.joined(separator: " ")
+    return query.isEmpty || searchableMerchant.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
 }
 
 private struct SpendingMiniMetric: View {
@@ -1618,7 +1619,7 @@ private struct SpendingPeriodDetailView: View {
                             } label: {
                                 VStack(alignment: .leading, spacing: 3) {
                                     HStack {
-                                        Text(movement.title).lineLimit(1)
+                                        Text(movement.displayMerchant ?? movement.title).lineLimit(1)
                                         Spacer()
                                         Text(movement.expenseContribution, format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
                                     }
@@ -1707,7 +1708,7 @@ private struct SpendingDayDetailView: View {
                             } label: {
                                 VStack(alignment: .leading, spacing: 4) {
                                     HStack {
-                                        Text(movement.title).lineLimit(1)
+                                        Text(movement.displayMerchant ?? movement.title).lineLimit(1)
                                         Spacer()
                                         Text(movement.expenseContribution, format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
                                     }
@@ -1723,7 +1724,7 @@ private struct SpendingDayDetailView: View {
                                     MovementDetailView(movement: movement)
                                 } label: {
                                     HStack {
-                                        Text(movement.title).lineLimit(1)
+                                        Text(movement.displayMerchant ?? movement.title).lineLimit(1)
                                         Spacer()
                                         Text(movement.expenseContribution, format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
                                     }

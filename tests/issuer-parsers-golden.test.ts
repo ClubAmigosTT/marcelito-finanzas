@@ -201,6 +201,11 @@ test("golden RappiCard conserva el emisor Banorte como evidencia legal y concili
   assert.equal(parsed.reconciliation.extractedCreditTotal, 441.11);
   assert.ok(parsed.transactions.some((row) => row.kind === "cardPayment"));
   assert.ok(parsed.transactions.some((row) => row.foreignCurrency));
+  const apple = parsed.transactions.find((row) => row.description.includes("APPLE.COM/BILL"));
+  assert.equal(apple?.rawDescription, "APPLE.COM/BILL");
+  assert.equal(apple?.normalizedMerchant, "apple");
+  assert.equal(apple?.displayMerchant, "Apple");
+  assert.equal(apple?.merchantReviewReason, undefined);
 });
 
 test("RappiCard conserva la tabla cuando los movimientos cruzan un salto de página", () => {
@@ -229,6 +234,32 @@ test("RappiCard conserva la tabla cuando los movimientos cruzan un salto de pág
   assert.equal(parsed.reconciliation.extractedChargeTotal, 100);
   assert.equal(parsed.reconciliation.extractedPaymentTotal, 40);
   assert.equal(parsed.reconciliation.extractedCreditTotal, 10);
+});
+
+test("Rappi OCR selecciona el importe por columna y no por la última cifra de la descripción", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Adeudo del periodo anterior = $0.00",
+    "Cargos regulares (no a meses) + $100.00",
+    "Cargos compras a meses (capital) + $0.00",
+    "Pagos y abonos - $0.00",
+    "Saldo deudor total $100.00",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({
+    source: "Rappi",
+    fileName: "rappi-ocr-columnas.pdf",
+    mode: "ocr",
+    text,
+    layout: layout(
+      line(1, [[0.05, "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)"], [0.84, "MONTO"]]),
+      line(1, [[0.05, "2026-08-01"], [0.18, "2026-08-02"], [0.34, "COMERCIO"], [0.48, "REF2026"], [0.58, "123.45"], [0.84, "+$50.00"]]),
+      line(1, [[0.05, "2026-08-03"], [0.18, "2026-08-04"], [0.34, "OTRO COMERCIO"], [0.84, "+$50.00"]]),
+    ),
+  });
+  assert.equal(parsed.transactions.length, 2);
+  assert.deepEqual(parsed.transactions.map((row) => row.amount), [-50, -50]);
+  assert.equal(parsed.reconciliation.status, "valid", parsed.reconciliation.reason);
+  assert.match(parsed.transactions[0]?.description ?? "", /123\.45/);
 });
 
 test("ningún parser acepta números globales ni filas fuera de su sección", () => {

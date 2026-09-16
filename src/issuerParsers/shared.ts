@@ -88,6 +88,11 @@ export function makeTransaction(options: {
   confidence: number;
   foreignCurrency?: boolean;
   sourceText: string;
+  rawDescription?: string;
+  normalizedMerchant?: string;
+  displayMerchant?: string;
+  merchantConfidence?: number;
+  merchantReviewReason?: string;
 }) : Transaction {
   const amount = options.amountCents / 100;
   const flow: Transaction["flow"] = options.kind === "cardPayment" ? "debt" : amount > 0 ? "income" : "expense";
@@ -97,17 +102,26 @@ export function makeTransaction(options: {
     date: options.date,
     description: options.description.replace(/\s+/g, " ").trim().slice(0, 120),
     account: options.account,
-    category: options.kind === "cardPayment" || options.kind === "bankTransfer" ? "Transferencia" : "Sin categoría",
+    category: options.merchantReviewReason
+      ? "Por revisar"
+      : options.kind === "cardPayment" || options.kind === "bankTransfer" ? "Transferencia" : "Sin categoría",
     amount,
     flow,
     kind: options.kind,
     foreignCurrency: options.foreignCurrency,
     confidence: options.confidence,
+    rawDescription: options.rawDescription ?? options.description,
+    normalizedMerchant: options.normalizedMerchant,
+    displayMerchant: options.displayMerchant,
+    merchantConfidence: options.merchantConfidence,
+    merchantReviewReason: options.merchantReviewReason,
     extractionEvidence: {
       method: options.mode === "ocr" ? "ocr" : "pdf-text",
       page: options.page,
       confidence: options.confidence,
       sourceText: options.sourceText.slice(0, 240),
+      sameVisualRow: true,
+      reviewReason: options.merchantReviewReason,
     },
   };
 }

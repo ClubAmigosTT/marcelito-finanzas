@@ -1220,7 +1220,7 @@ struct MetricDetailSheet: View {
                                             .foregroundStyle(.secondary)
                                             .frame(width: 20)
                                         VStack(alignment: .leading, spacing: 3) {
-                                            Text(movement.title)
+                                            Text(movement.displayMerchant ?? movement.title)
                                                 .font(.subheadline.weight(.semibold))
                                                 .lineLimit(2)
                                             Text("\(movement.category) · \(movement.date.formatted(.dateTime.day().month(.abbreviated).year()))")
@@ -1255,7 +1255,7 @@ struct MetricDetailSheet: View {
                                 List(allSupportingMovements) { movement in
                                     NavigationLink { MovementDetailView(movement: movement) } label: {
                                         VStack(alignment: .leading) {
-                                            Text(movement.title)
+                                            Text(movement.displayMerchant ?? movement.title)
                                             Text(metric == .expense ? movement.expenseContribution : movement.amount, format: .currency(code: "MXN"))
                                         }
                                     }

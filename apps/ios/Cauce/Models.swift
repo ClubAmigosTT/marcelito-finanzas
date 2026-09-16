@@ -173,6 +173,10 @@ struct MovementExtractionEvidence: Codable, Equatable, Sendable {
     var selectedAmount: Decimal? = nil
     /// Short explanation of the deterministic selection rule used for the row.
     var selectionReason: String? = nil
+    /// Optional row-level issue that is safe to import but needs enrichment.
+    var reviewReason: String? = nil
+    /// True when date, description and amount came from one visual row.
+    var sameVisualRow: Bool? = nil
 }
 /// Private row-level evidence used to debug a visual import. It is exported
 /// only through the explicit diagnostic share action; the public corpus
@@ -264,6 +268,16 @@ struct Movement: Identifiable, Codable {
     var reconciliationConfidence: Int?
     var reconciliationReason: String?
     var manuallyReviewed: Bool = false
+    /// Original merchant text retained as evidence; never replaced by cleanup.
+    var rawDescription: String?
+    /// Stable merchant key for rules and deduplication.
+    var normalizedMerchant: String?
+    /// Human-readable merchant label for lists and detail views.
+    var displayMerchant: String?
+    /// Merchant-only confidence, independent from amount/date extraction.
+    var merchantConfidence: Double?
+    /// Non-blocking merchant issue shown as “comercio por confirmar”.
+    var merchantReviewReason: String?
 
     /// Signed contribution to net spending. Refunds reduce spend on their
     /// posting date; neither their identity nor their original amount changes.
@@ -285,7 +299,12 @@ struct Movement: Identifiable, Codable {
         extractionEvidence: MovementExtractionEvidence? = nil,
         matchedMovementId: UUID? = nil,
         reconciliationConfidence: Int? = nil,
-        reconciliationReason: String? = nil
+        reconciliationReason: String? = nil,
+        rawDescription: String? = nil,
+        normalizedMerchant: String? = nil,
+        displayMerchant: String? = nil,
+        merchantConfidence: Double? = nil,
+        merchantReviewReason: String? = nil
     ) {
         self.id = id
         self.date = date
@@ -303,11 +322,17 @@ struct Movement: Identifiable, Codable {
         self.matchedMovementId = matchedMovementId
         self.reconciliationConfidence = reconciliationConfidence
         self.reconciliationReason = reconciliationReason
+        self.rawDescription = rawDescription
+        self.normalizedMerchant = normalizedMerchant
+        self.displayMerchant = displayMerchant
+        self.merchantConfidence = merchantConfidence
+        self.merchantReviewReason = merchantReviewReason
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, date, title, account, category, amount, flow, statementId, kind, travelRelated, foreignCurrency, classificationTags, extractionEvidence
         case matchedMovementId, reconciliationConfidence, reconciliationReason, manuallyReviewed
+        case rawDescription, normalizedMerchant, displayMerchant, merchantConfidence, merchantReviewReason
     }
 
     init(from decoder: Decoder) throws {
@@ -329,6 +354,11 @@ struct Movement: Identifiable, Codable {
         reconciliationConfidence = try container.decodeIfPresent(Int.self, forKey: .reconciliationConfidence)
         reconciliationReason = try container.decodeIfPresent(String.self, forKey: .reconciliationReason)
         manuallyReviewed = try container.decodeIfPresent(Bool.self, forKey: .manuallyReviewed) ?? false
+        rawDescription = try container.decodeIfPresent(String.self, forKey: .rawDescription)
+        normalizedMerchant = try container.decodeIfPresent(String.self, forKey: .normalizedMerchant)
+        displayMerchant = try container.decodeIfPresent(String.self, forKey: .displayMerchant)
+        merchantConfidence = try container.decodeIfPresent(Double.self, forKey: .merchantConfidence)
+        merchantReviewReason = try container.decodeIfPresent(String.self, forKey: .merchantReviewReason)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -350,6 +380,11 @@ struct Movement: Identifiable, Codable {
         try container.encodeIfPresent(reconciliationConfidence, forKey: .reconciliationConfidence)
         try container.encodeIfPresent(reconciliationReason, forKey: .reconciliationReason)
         try container.encode(manuallyReviewed, forKey: .manuallyReviewed)
+        try container.encodeIfPresent(rawDescription, forKey: .rawDescription)
+        try container.encodeIfPresent(normalizedMerchant, forKey: .normalizedMerchant)
+        try container.encodeIfPresent(displayMerchant, forKey: .displayMerchant)
+        try container.encodeIfPresent(merchantConfidence, forKey: .merchantConfidence)
+        try container.encodeIfPresent(merchantReviewReason, forKey: .merchantReviewReason)
     }
 }
 
@@ -2469,7 +2504,7 @@ final class FinanceStore {
         // identity across PDF parsers and repeated uploads.
         let amount = NSDecimalNumber(decimal: absolute(movement.amount) * Decimal(100)).intValue.description
         let identity = financialAccountKey(movement) ?? movement.statementId?.uuidString ?? movement.id.uuidString
-        return [identity, movement.amount < 0 ? "out" : "in", normalizedDate(movement.date), amount, normalizedConcept(movement.title), movementKind(movement).rawValue].joined(separator: "|")
+        return [identity, movement.amount < 0 ? "out" : "in", normalizedDate(movement.date), amount, normalizedConcept(movement.normalizedMerchant ?? movement.title), movementKind(movement).rawValue].joined(separator: "|")
     }
 
     private func amountsMatch(_ left: Decimal, _ right: Decimal) -> Bool {
@@ -2930,8 +2965,9 @@ final class FinanceStore {
                [.cardPayment, .bankTransfer, .income, .credit, .refund, .msi].contains(kind) {
                 continue
             }
-            let key = Self.categoryRuleKey(movement.title)
-            let normalizedTitle = Self.categoryText(movement.title)
+            let merchantText = movement.normalizedMerchant ?? movement.title
+            let key = Self.categoryRuleKey(merchantText)
+            let normalizedTitle = Self.categoryText(merchantText)
             let manualCategory = manualOverrides[key]
             // Explicit user choices always win. Everything else is refreshed,
             // including legacy rows that were prematurely labelled with a
@@ -10916,6 +10952,91 @@ final class FinanceStore {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private struct RappiMerchantIdentity {
+        let rawDescription: String
+        let normalizedMerchant: String
+        let displayMerchant: String
+        let confidence: Double
+        let reviewReason: String?
+    }
+
+    /// Conservative Rappi-only merchant cleanup. The extracted title remains
+    /// in rawDescription so a weak normalization never hides source evidence.
+    private static func rappiMerchantIdentity(_ value: String) -> RappiMerchantIdentity {
+        let raw = value
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let folded = raw
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+            .lowercased()
+        let compact = folded.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+        let alias: (key: String, display: String)? = if compact.contains("applecombill") {
+            ("apple", "Apple")
+        } else if compact.contains("googlecloud") || compact.contains("payugoogle") {
+            ("google cloud", "Google Cloud")
+        } else if compact.contains("booking") {
+            ("booking.com", "Booking.com")
+        } else if compact.contains("vivaaerobus") {
+            ("viva aerobus", "Viva Aerobus")
+        } else if compact.contains("mtalirr") || compact.contains("lirrstation") {
+            ("mta lirr station", "MTA LIRR Station")
+        } else if compact.contains("mtanyctpaygo") {
+            ("mta nyct paygo", "MTA NYCT Paygo")
+        } else if compact.contains("paserecur") {
+            ("pase", "PASE")
+        } else if compact.contains("swappedcom") {
+            ("swappedcom", "Swapped.com")
+        } else if compact.contains("pagoporspei") {
+            ("pago por spei", "Pago por SPEI")
+        } else {
+            nil
+        }
+        let withoutTechnical = raw
+            .replacingOccurrences(
+                of: #"(?i)\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizaci[oó]n)?|operaci[oó]n|c[oó]digo|codigo|no\.?\s*de?)\s*[:#./_-]*\s*[a-z0-9-]+"#,
+                with: " ", options: .regularExpression
+            )
+            .replacingOccurrences(of: #"(?:^|\s)[/#*;|]+(?=\s|$)"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s*[/;|]\s*$"#, with: "", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized: String
+        if let alias {
+            normalized = alias.key
+        } else {
+            normalized = folded
+                .replacingOccurrences(of: #"\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizacion)?|operacion|codigo|no\.?\s*de?)\b\s*[:#./_-]*\s*[a-z0-9-]+"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let display: String
+        if let alias {
+            display = alias.display
+        } else if !withoutTechnical.isEmpty {
+            let hasLowercase = withoutTechnical.rangeOfCharacter(from: .lowercaseLetters) != nil
+            display = hasLowercase ? withoutTechnical : withoutTechnical
+                .lowercased()
+                .split(separator: " ")
+                .map { token in
+                    guard let first = token.first else { return "" }
+                    return String(first).uppercased() + token.dropFirst()
+                }
+                .joined(separator: " ")
+        } else {
+            display = raw
+        }
+        let letters = normalized.filter { $0.isLetter }.count
+        let noisy = raw.filter { "|*_#".contains($0) }.count >= 2
+        let confidence: Double = alias != nil ? 0.96 : letters == 0 || raw.count > 100 ? 0.48 : noisy ? 0.70 : withoutTechnical.count >= 3 ? 0.88 : 0.58
+        let reviewReason: String? = confidence < 0.75
+            ? letters == 0
+                ? "La descripción no conserva un nombre de comercio legible."
+                : "El comercio conserva evidencia, pero la normalización no es suficientemente confiable."
+            : nil
+        return RappiMerchantIdentity(rawDescription: raw, normalizedMerchant: normalized, displayMerchant: display, confidence: confidence, reviewReason: reviewReason)
+    }
+
     private static func isAdministrativeTitle(_ value: String) -> Bool {
         let normalized = value
             .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
@@ -11338,6 +11459,7 @@ final class FinanceStore {
                     .replacingOccurrences(of: #"[;,:]+\s*$"#, with: "", options: .regularExpression)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
                 guard !title.isEmpty else { continue }
+                let merchant = rappiMerchantIdentity(titleBody)
                 // PDF extraction may split the payment label across lines or
                 // insert repeated spaces. Match whole words, not a prefix that
                 // would also accept an unrelated merchant such as SPEIStore.
@@ -11369,12 +11491,18 @@ final class FinanceStore {
                     signReason = "signo ausente recuperado únicamente por etiqueta inequívoca de abono Rappi"
                 }
                 rows.append(Movement(date: date, title: title, account: "Rappi",
-                    category: category(for: title, flow: flow), amount: -amount, flow: flow,
+                    category: merchant.reviewReason == nil ? category(for: merchant.normalizedMerchant, flow: flow) : (payment ? "Transferencia" : "Por revisar"), amount: -amount, flow: flow,
                     kind: kind, foreignCurrency: pending.localizedCaseInsensitiveContains("compra en el extranjero"),
+                    rawDescription: merchant.rawDescription,
+                    normalizedMerchant: merchant.normalizedMerchant,
+                    displayMerchant: merchant.displayMerchant,
+                    merchantConfidence: merchant.confidence,
+                    merchantReviewReason: merchant.reviewReason,
                     extractionEvidence: MovementExtractionEvidence(method: evidenceMethod, page: rowPage,
                         confidence: evidenceMethod == "vision-ocr" ? (confidenceByPage[rowPage ?? 0] ?? 0) : 1,
                         sourceText: pending, selectedColumn: "MONTO MXN",
-                        selectedAmount: abs(amount), selectionReason: "RappiCard: \(signReason); fechas operación y cargo conservadas en evidencia")))
+                        selectedAmount: abs(amount), selectionReason: "RappiCard: \(signReason); fechas operación y cargo conservadas en evidencia",
+                        reviewReason: merchant.reviewReason, sameVisualRow: true)))
             }
         }
         for raw in structuredText.components(separatedBy: .newlines) {

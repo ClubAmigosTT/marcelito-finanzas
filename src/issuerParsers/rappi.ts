@@ -1,6 +1,7 @@
 import type { StatementSummary, Transaction, TransactionKind } from "../types.ts";
 import type { DeterministicParseInput, DeterministicParseResult } from "./types.ts";
-import { cents, fold, makeTransaction, money, reconcileExactly } from "./shared.ts";
+import { cents, fold, layoutLines, lineText, makeTransaction, money, parseIssuerDate, reconcileExactly } from "./shared.ts";
+import { normalizeRappiMerchant } from "../merchantNormalization.ts";
 
 const sectionTitle = "Cargos, abonos y compras regulares (no a meses)";
 const pageMarker = /^__pdf_page_(\d+)__$/;
@@ -92,6 +93,7 @@ function parseMoneyRows(input: DeterministicParseInput) {
     }
 
     const normalizedDescription = fold(description);
+    const merchant = normalizeRappiMerchant(description);
     const isPayment = /^pago\s+por\s+spei\b/.test(normalizedDescription);
     const isRefund = !isPayment && signedValue < 0;
     let kind: TransactionKind = "purchase";
@@ -117,6 +119,11 @@ function parseMoneyRows(input: DeterministicParseInput) {
       confidence: input.mode === "ocr" ? 0.9 : 1,
       foreignCurrency: rowForeignCurrency,
       sourceText: raw,
+      rawDescription: merchant.rawDescription,
+      normalizedMerchant: merchant.normalizedMerchant,
+      displayMerchant: merchant.displayMerchant,
+      merchantConfidence: merchant.confidence,
+      merchantReviewReason: merchant.reviewReason,
     }));
   };
 
@@ -158,9 +165,90 @@ function parseMoneyRows(input: DeterministicParseInput) {
   return { rows, rejectedRows };
 }
 
+function parseLayoutRows(input: DeterministicParseInput) {
+  const lines = layoutLines(input.layout);
+  if (!lines.length) return undefined;
+  let active = false;
+  let amountStart = 0.78;
+  let descriptionStart = 0.28;
+  const selectedRows: Array<{ page: number; text: string }> = [];
+  let pending: { page: number; dates: string[]; description: string; amount?: string } | undefined;
+  const normalizeDate = (token: string) => {
+    const iso = token.match(/^(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+    return iso
+      ? `${iso[1]}-${iso[2].padStart(2, "0")}-${iso[3].padStart(2, "0")}`
+      : parseIssuerDate(token, input.text, input.fileName);
+  };
+
+  const finish = () => {
+    if (!pending || !pending.amount || !pending.dates.length || !pending.description.trim()) {
+      pending = undefined;
+      return;
+    }
+    const firstDate = normalizeDate(pending.dates[0]);
+    const secondDate = normalizeDate(pending.dates[1] ?? pending.dates[0]);
+    if (!firstDate || !secondDate) {
+      pending = undefined;
+      return;
+    }
+    // Serialize only the calibrated cells. The downstream parser still owns
+    // signs/kinds/reconciliation, but it can no longer mistake a reference
+    // number in the description for the amount column.
+    selectedRows.push({
+      page: pending.page,
+      text: `${firstDate} ${secondDate} ${pending.description.trim()} ${pending.amount}`,
+    });
+    pending = undefined;
+  };
+
+  const datePattern = /^(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.][a-z]{3,12}[-/.]20\d{2}|\d{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+20\d{2})$/i;
+  for (const line of lines) {
+    const raw = lineText(line);
+    const normalized = fold(raw);
+    if (!active && normalized.includes(fold(sectionTitle))) {
+      active = true;
+      continue;
+    }
+    if (!active) continue;
+    if (/^total\s+de\s+(?:cargos|abonos)\b|^cargos\s+no\s+reconocidos|^atenci[oó]n\s+de\s+quejas|^notas\s+aclaratorias/.test(normalized)) {
+      finish();
+      active = false;
+      continue;
+    }
+    const headerAmount = line.words.find((word) => /^(?:monto|importe|cantidad)$/i.test(fold(word.text)));
+    const headerDescription = line.words.find((word) => /^(?:descripci[oó]n|concepto)$/i.test(fold(word.text)));
+    if (headerAmount) amountStart = Math.max(0.6, headerAmount.x - 0.06);
+    if (headerDescription) descriptionStart = Math.max(0.16, headerDescription.x - 0.02);
+
+    const dateWords = line.words
+      .filter((word) => word.x < descriptionStart && datePattern.test(word.text.replace(/\s+/g, "").trim()))
+      .map((word) => word.text.replace(/\s+/g, "").trim());
+    const amountCell = line.words.filter((word) => word.x >= amountStart).map((word) => word.text).join("").replace(/\s+/g, "");
+    const amountMatch = amountCell.match(/[+-]\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}/);
+    if (dateWords.length) {
+      finish();
+      const description = line.words.filter((word) => word.x >= descriptionStart && word.x < amountStart).map((word) => word.text).join(" ");
+      pending = { page: line.page, dates: dateWords.slice(0, 2), description, amount: amountMatch?.[0] };
+      continue;
+    }
+    if (pending && !amountMatch) {
+      const continuation = line.words.filter((word) => word.x >= descriptionStart && word.x < amountStart).map((word) => word.text).join(" ").trim();
+      if (continuation) pending.description = `${pending.description} ${continuation}`.trim();
+    }
+  }
+  finish();
+  if (!selectedRows.length) return undefined;
+  return parseMoneyRows({ ...input, text: `${sectionTitle}\n${selectedRows.map((row) => `__PDF_PAGE_${row.page}__\n${row.text}`).join("\n")}` });
+}
+
 export function parseRappi(input: DeterministicParseInput): DeterministicParseResult {
   const summary = parseSummary(input.text);
-  const parsed = parseMoneyRows(input);
+  const layoutParsed = input.mode === "ocr" ? parseLayoutRows(input) : undefined;
+  const layoutReconciliation = layoutParsed ? reconcileExactly("card", summary, layoutParsed.rows) : undefined;
+  // OCR rows are accepted as a complete set only when the calibrated-column
+  // result itself reconciles. Otherwise retain the text fallback as one set;
+  // rows are never mixed across extraction strategies.
+  const parsed = layoutParsed && layoutReconciliation?.status === "valid" ? layoutParsed : parseMoneyRows(input);
   const reconciliation = reconcileExactly("card", summary, parsed.rows);
   return {
     parserId: "rappicard-operations-v1",

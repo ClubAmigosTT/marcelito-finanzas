@@ -1055,8 +1055,8 @@ function DataQualityIndicator({ metrics }: { metrics: ReturnType<typeof buildFin
     <div className="quality-primary-metrics">
       <div><span>Estados conciliados</span><strong>{Math.round(quality.reconciledPercent)}%</strong><small>{quality.eligibleStatementCount} de {quality.eligibleStatementCount + quality.quarantinedStatementCount} estados aptos para KPI</small></div>
       <div><span>Movimientos canónicos</span><strong>{Math.round(quality.classifiedPercent)}%</strong><small>{quality.classifiedCount} de {quality.totalCount} clasificados · evidencia {Math.round(quality.eligibleEvidencePercent)}%</small></div>
-      <div><span>Por revisar (canónicos)</span><strong>{Math.round(quality.reviewPercent)}%</strong><small>{quality.reviewCount} movimientos · {displayMoney(quality.reviewAmount)} · {quality.relevantReviewCount} relevantes</small></div>
-      <div><span>En cuarentena</span><strong>{quality.quarantinedMovementCount}</strong><small>{displayMoney(quality.quarantinedMovementAmount)} · {quality.quarantinedStatementCount} estados bloqueados</small></div>
+      <div><span>Movimientos por enriquecer</span><strong>{Math.round(quality.reviewPercent)}%</strong><small>{quality.reviewCount} movimientos · {displayMoney(quality.reviewAmount)} · {quality.relevantReviewCount} relevantes</small></div>
+      <div><span>Movimientos bloqueados</span><strong>{quality.quarantinedMovementCount}</strong><small>{displayMoney(quality.quarantinedMovementAmount)} · {quality.quarantinedStatementCount} estados bloqueados</small></div>
     </div>
     <div className="quality-secondary"><span>{Math.round(quality.canonicalCoveragePercent)}% de filas importadas llegó al libro canónico</span><span>Conciliación fila a fila: {Math.round(quality.rawReconciledPercent)}%</span><span>{quality.rawReviewCount} filas requieren revisión en la ingestión completa</span>{blockedReasonText && <span>Bloqueos por causa (pueden superponerse): {blockedReasonText}</span>}</div>
     {alert ? <p className="quality-alert">{metrics.isProvisional ? "KPI provisionales: " : ""}{quality.relevantReviewCount ? `revisa ${quality.relevantReviewCount} movimiento${quality.relevantReviewCount === 1 ? " relevante" : "s relevantes"}` : quality.quarantinedStatementCount ? `${quality.quarantinedStatementCount} estado${quality.quarantinedStatementCount === 1 ? " está" : "s están"} en cuarentena y no alimenta${quality.quarantinedStatementCount === 1 ? "" : "n"} los KPI` : "hay filas rechazadas por el parser"}.</p> : <p className="quality-ok">Sin alertas relevantes de clasificación.</p>}
@@ -1564,7 +1564,9 @@ function ImportDialog({ open, initialMode, onClose, onSave, onSaveScreenshot, ca
       // PDF bytes leave the browser.
       void saveImportedPdf(inspected.sourceFingerprint, file);
       const withLearnedCategories = inspected.transactions.map((item) => {
-        const learned = categoryFromRules(item.description, categoryRules);
+        const merchantNeedsReview = item.account === "Rappi" && Boolean(item.merchantReviewReason);
+        const classificationText = item.normalizedMerchant || item.description;
+        const learned = merchantNeedsReview ? undefined : categoryFromRules(classificationText, categoryRules);
         if (learned) {
           return {
             ...item,
@@ -1575,7 +1577,16 @@ function ImportDialog({ open, initialMode, onClose, onSave, onSaveScreenshot, ca
             confidence: 1,
           };
         }
-        const deterministic = deterministicExpenseClassification(item.description, item.flow, item.kind);
+        if (merchantNeedsReview) {
+          return {
+            ...item,
+            category: item.kind === "cardPayment" ? "Transferencia" : "Por revisar",
+            classificationProvider: "rules" as const,
+            classificationConfidence: item.merchantConfidence ?? 0,
+            classificationReason: item.merchantReviewReason,
+          };
+        }
+        const deterministic = deterministicExpenseClassification(classificationText, item.flow, item.kind);
         if (!deterministic) return item;
         return {
           ...item,
@@ -1699,7 +1710,7 @@ function ImportDialog({ open, initialMode, onClose, onSave, onSaveScreenshot, ca
       </div>
       {transactionClassifierEndpoint && currentReconciliation?.status === "valid" && validItems.length > 0 && <div className="classifier-callout"><div><strong>Clasificación opcional con Zen</strong><small>Solo enriquece filas ya conciliadas; no puede cambiar importes, emisor ni aceptación.</small></div><button type="button" className="secondary-button" onClick={classifyExpensesWithZen} disabled={classificationBusy || !readerPreflightReady}>{classificationBusy ? "Clasificando…" : "Clasificar gastos"}</button>{classificationMessage && <span role="status">{classificationMessage}</span>}</div>}
       {result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Lectura OCR con plantilla fija</strong><p>Solo se aceptaron filas dentro de la sección contractual del emisor. No se permiten correcciones manuales de importes; si el archivo no concilia, debe reimportarse.</p></div></div>}
-      {items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><strong>{item.description}</strong><small>{item.date} · página {item.extractionEvidence?.page ?? "—"}</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)} disabled={reconciliationBlocked}>{["Ingresos", "Transferencia", ...expenseCategories].map((category) => <option key={category}>{category}</option>)}</select><span className={item.amount > 0 ? "review-amount positive" : "review-amount"}>{moneyPrecise.format(item.amount)}</span></div>)}</div> : <EmptyState title="Importación rechazada" body="No se extrajeron movimientos contractuales. Este archivo no puede guardarse ni afectar los KPI." />}
+      {items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><strong title={item.rawDescription ?? item.description}>{item.displayMerchant ?? item.description}</strong>{item.merchantReviewReason && <small className="merchant-review-warning">Comercio por confirmar · {item.rawDescription ?? item.description}</small>}<small>{item.date} · página {item.extractionEvidence?.page ?? "—"}{item.extractionEvidence?.method ? ` · ${item.extractionEvidence.method === "ocr" ? "OCR" : "texto nativo"}` : ""}</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)} disabled={reconciliationBlocked}>{["Ingresos", "Transferencia", ...expenseCategories].map((category) => <option key={category}>{category}</option>)}</select><span className={item.amount > 0 ? "review-amount positive" : "review-amount"}>{moneyPrecise.format(item.amount)}</span></div>)}</div> : <EmptyState title="Importación rechazada" body="No se extrajeron movimientos contractuales. Este archivo no puede guardarse ni afectar los KPI." />}
       <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "El parser rechazó el estado; no admite desbloqueo manual" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: result.source, accountKey: result.accountKey, kind: result.kind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, parserId: result.parserId, sourceSection: result.sourceSection, extractionProvider: result.extractionProvider, extractionModel: result.extractionModel, extractionPromptVersion: result.extractionPromptVersion, mode: result.mode, transactions: validItems, summary: result.summary, reconciliation: result.reconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Estado rechazado" : `Guardar estado y ${validItems.length} movimientos`}</button></div>
     </div>}
     {stage === "review" && importMode === "screenshots" && screenshotResult && <div className="review-state screenshot-review-state">

@@ -254,6 +254,19 @@ final class RappiReaderTests: XCTestCase {
         )
     }
 
+    func testMerchantIdentityKeepsRawTextAndReadableAlias() {
+        let text = fixture.replacingOccurrences(of: "COMERCIO EJEMPLO", with: "APPLE.COM/BILL")
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "rappi-merchant-identity.pdf"
+        )
+
+        XCTAssertEqual(snapshot.movements.first?.normalizedMerchant, "apple")
+        XCTAssertEqual(snapshot.movements.first?.displayMerchant, "Apple")
+        XCTAssertEqual(snapshot.movements.first?.rawDescription, "APPLE.COM/BILL")
+        XCTAssertNil(snapshot.movements.first?.merchantReviewReason)
+    }
+
     func testHybridRecoveryPrefersOrderedSelectableMerchantRows() {
         let collapsedOCR = fixture.replacingOccurrences(
             of: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00\n2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",

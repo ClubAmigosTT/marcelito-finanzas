@@ -87,8 +87,8 @@ test("la auditoría iOS separa revisión canónica de cuarentena", async () => {
   assert.match(models, /let reviewRows = canonical\.filter/);
   assert.match(models, /quarantinedMovementCount: quarantined\.count/);
   assert.match(models, /reviewTotal: review\.reduce/);
-  assert.match(diagnostics, /Por revisar \(canónicos\)/);
-  assert.match(diagnostics, /Movimientos en cuarentena/);
+  assert.match(diagnostics, /Movimientos por enriquecer/);
+  assert.match(diagnostics, /Movimientos bloqueados/);
   assert.match(diagnostics, /audit\.quarantinedRows/);
   assert.match(rootTab, /por revisar en el libro canónico/);
 });
