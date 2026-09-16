@@ -103,12 +103,12 @@ Ejecutar el corpus completo con el código actual en macOS/iOS antes de cambiar 
 
 Registrar versión del lector, commit, build e iOS. Si la versión actual ya pasa, comprobar relectura de documentos almacenados y versión instalada antes de atribuirlo al parser.
 
-Revisar específicamente estos riesgos observados en el código, confirmando que siguen presentes:
+Revisar específicamente estos riesgos observados en el diagnóstico, confirmando que sigan corregidos:
 
-- `ocrObservations` no debe devolver las filas visuales cuando encuentra cualquier resultado. La implementación actual conserva la pasada completa y deja la selección final al agrupador/deduplicador.
-- `rappiTableRowRegions` usa las líneas horizontales si encuentra alguna; el respaldo por fechas solo entra si no encuentra ninguna. Un resultado parcial no demuestra cobertura.
-- La reconstrucción OCR limpia el comercio antes de construir la evidencia. Comprobar que `rawDescription` conserva el original anterior a esa limpieza.
-- `sameVisualRow` no debe marcarse verdadero por defecto cuando el origen es una línea reconstruida sin geometría demostrable.
+- `ocrObservations` debe conservar la pasada completa aunque existan filas visuales; la selección final queda al agrupador/deduplicador.
+- `rappiTableRowRegions` debe combinar líneas horizontales parciales con anclas independientes de fecha y deduplicar bandas solapadas.
+- La reconstrucción OCR debe conservar `rawDescription` antes de limpiar el comercio y guardar la fila completa en `sourceText`.
+- `sameVisualRow` solo debe ser verdadero cuando existe una caja geométrica demostrable; una línea reconstruida sin geometría debe quedar en estado desconocido.
 
 Entrega de esta etapa: causa reproducida o límites concretos del diagnóstico, fila/página afectada cuando se pueda demostrar, y prueba que falle antes de corregir. No afirmar que falta una fila específica solo por la diferencia de conteos.
 
