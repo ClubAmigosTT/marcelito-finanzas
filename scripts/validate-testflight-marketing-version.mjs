@@ -120,10 +120,13 @@ export async function validateMarketingVersion({
   const app = apps[0];
   if (!app) throw new Error(`No se encontró la app con bundle ${bundleId}`);
 
-  const builds = await collection(
-    `/v1/builds?filter[app]=${encodeURIComponent(app.id)}&sort=-uploadedDate&limit=200`,
+  // Build.attributes.version is CFBundleVersion (the internal build number,
+  // e.g. 204), not CFBundleShortVersionString. Marketing versions live on
+  // App Store Connect's preReleaseVersion resources.
+  const preReleaseVersions = await collection(
+    `/v1/preReleaseVersions?filter[app]=${encodeURIComponent(app.id)}&limit=200`,
   );
-  const existingVersions = builds.map((build) => build.attributes?.version);
+  const existingVersions = preReleaseVersions.map((release) => release.attributes?.version);
   const highest = highestMarketingVersion(existingVersions);
   if (highest && compareMarketingVersions(targetVersion, highest) < 0) {
     throw new Error(
