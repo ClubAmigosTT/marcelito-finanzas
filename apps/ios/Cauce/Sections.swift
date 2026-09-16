@@ -1513,7 +1513,9 @@ struct AccountsView: View {
     private var accountsScrollView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 22) {
-                if store.dashboardIsBlocked || store.dashboardIsProvisional {
+                if store.dashboardIsBlocked
+                    || store.dashboardIsProvisional
+                    || store.ledgerQuality.reviewMovementCount > 0 {
                     LedgerQualityBanner(store: store)
                 }
                 accountsHeading

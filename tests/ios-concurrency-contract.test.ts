@@ -177,6 +177,16 @@ test("Rappi conserva OCR completo cuando la detección por bandas es parcial", a
   assert.doesNotMatch(source, /if !visualRows\.isEmpty \{[\s\S]{0,260}observations\.append\(contentsOf: visualRows\)\s*return/);
 });
 
+test("Rappi combina bandas de regla y anclas de fecha sin duplicarlas", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /private static func mergedRappiRowRegions\(/);
+  assert.match(source, /let retriedDateRegions = rappiDateAnchoredRowRegions\(in: image\)/);
+  assert.match(source, /return mergedRappiRowRegions\(ruleRegions: ruleRegions, dateRegions: dateRegions\)/);
+  assert.match(source, /overlapRatio >= 0\.35/);
+  assert.match(source, /fullPageObservations: \[OCRObservation\] = \[\]/);
+  assert.match(source, /observedDateRegions\.count >= ruleRegions\.count/);
+});
+
 test("Rappi guarda página y región visual de cada fila OCR", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /private static let rappiRowBoundsPrefix = "__RAPPI_ROW_BOUNDS__"/);

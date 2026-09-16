@@ -650,7 +650,10 @@ struct LedgerQualityBanner: View {
     let store: FinanceStore
 
     private var isWarning: Bool {
-        store.dashboardIsBlocked || store.dashboardIsProvisional || store.operationalMetricsBlocked
+        store.dashboardIsBlocked
+            || store.dashboardIsProvisional
+            || store.operationalMetricsBlocked
+            || store.ledgerQuality.reviewMovementCount > 0
     }
 
     private var percentText: String {

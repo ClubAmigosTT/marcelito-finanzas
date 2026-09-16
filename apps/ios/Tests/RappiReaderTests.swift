@@ -254,6 +254,29 @@ final class RappiReaderTests: XCTestCase {
         )
     }
 
+    func testPartialRuleDetectionKeepsMissingDateAnchoredRows() {
+        let ruleRegions = [
+            CGRect(x: 0.045, y: 0.70, width: 0.91, height: 0.028),
+            CGRect(x: 0.045, y: 0.62, width: 0.91, height: 0.028)
+        ]
+        let dateRegions = [
+            // Same visual row as the first printed rule: this must not be
+            // recognized twice.
+            CGRect(x: 0.045, y: 0.698, width: 0.91, height: 0.032),
+            // No horizontal rule survived for this row: retain the date
+            // anchor so its isolated OCR pass can recover it.
+            CGRect(x: 0.045, y: 0.575, width: 0.91, height: 0.032)
+        ]
+
+        let merged = FinanceStore.rappiMergedRowRegionsForTesting(
+            ruleRegions: ruleRegions,
+            dateRegions: dateRegions
+        )
+
+        XCTAssertEqual(merged.count, 3)
+        XCTAssertTrue(merged.contains { abs($0.midY - dateRegions[1].midY) < 0.001 })
+    }
+
     func testMerchantIdentityKeepsRawTextAndReadableAlias() {
         let text = fixture.replacingOccurrences(of: "COMERCIO EJEMPLO", with: "APPLE.COM/BILL")
         let snapshot = FinanceStore.readerParseSnapshotForTesting(

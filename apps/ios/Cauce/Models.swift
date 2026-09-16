@@ -5928,32 +5928,12 @@ final class FinanceStore {
     /// background. The two printed dates still form a stable positional
     /// anchor for every transaction, so use one full-page Vision pass to
     /// recover row centers and construct non-overlapping bands around them.
-    private static func rappiDateAnchoredRowRegions(in image: CGImage) -> [CGRect] {
-        let dateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
-        )
-        let request = VNRecognizeTextRequest()
-        request.recognitionLevel = .accurate
-        request.recognitionLanguages = ["es-MX", "en-US"]
-        request.usesLanguageCorrection = false
-        request.minimumTextHeight = 0.003
-        do {
-            try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
-        } catch {
-            return []
-        }
-
-        let anchors = (request.results ?? []).compactMap { result -> CGFloat? in
-            guard let text = result.topCandidates(1).first?.string else { return nil }
-            let range = NSRange(text.startIndex..<text.endIndex, in: text)
-            guard (dateRegex?.numberOfMatches(in: text, range: range) ?? 0) > 0 else { return nil }
-            return result.boundingBox.midY
-        }.sorted(by: >)
+    private static func rappiDateAnchoredRowRegions(from anchors: [CGFloat]) -> [CGRect] {
         guard !anchors.isEmpty else { return [] }
 
         var centers: [CGFloat] = []
         var groups: [[CGFloat]] = []
-        for anchor in anchors {
+        for anchor in anchors.sorted(by: >) {
             if let last = groups.last?.last, abs(last - anchor) <= 0.010 {
                 groups[groups.count - 1].append(anchor)
             } else {
@@ -5982,9 +5962,108 @@ final class FinanceStore {
         }
     }
 
-    private static func rappiTableRowRegions(in image: CGImage) -> [CGRect] {
+    /// Reuses the already completed full-page Vision pass whenever it has
+    /// date substring boxes. This avoids paying for a second full-page OCR
+    /// request on every Rappi page just to discover fallback row centers.
+    private static func rappiDateAnchoredRowRegions(from observations: [OCRObservation]) -> [CGRect] {
+        let anchors = observations
+            .flatMap(\.dateBoxes)
+            .filter { $0.centerX < 0.48 }
+            .map(\.centerY)
+        return rappiDateAnchoredRowRegions(from: anchors)
+    }
+
+    private static func rappiDateAnchoredRowRegions(in image: CGImage) -> [CGRect] {
+        let dateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
+        )
+        let request = VNRecognizeTextRequest()
+        request.recognitionLevel = .accurate
+        request.recognitionLanguages = ["es-MX", "en-US"]
+        request.usesLanguageCorrection = false
+        request.minimumTextHeight = 0.003
+        do {
+            try VNImageRequestHandler(cgImage: image, options: [:]).perform([request])
+        } catch {
+            return []
+        }
+
+        let anchors = (request.results ?? []).compactMap { result -> CGFloat? in
+            guard let text = result.topCandidates(1).first?.string else { return nil }
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            guard (dateRegex?.numberOfMatches(in: text, range: range) ?? 0) > 0 else { return nil }
+            return result.boundingBox.midY
+        }.sorted(by: >)
+        guard !anchors.isEmpty else { return [] }
+
+        return rappiDateAnchoredRowRegions(from: anchors)
+    }
+
+    /// Combines the two independent row inventories without treating either
+    /// one as a complete coverage proof. Faint exports can preserve only a
+    /// subset of the printed rules; discarding date anchors in that case
+    /// silently loses rows. Conversely, retaining both copies verbatim makes
+    /// Vision read the same row twice. A date band is therefore added only
+    /// when it does not describe the same vertical row as a rule band.
+    private static func mergedRappiRowRegions(
+        ruleRegions: [CGRect],
+        dateRegions: [CGRect]
+    ) -> [CGRect] {
+        func describesSameRow(_ left: CGRect, _ right: CGRect) -> Bool {
+            let overlap = max(
+                0,
+                min(left.maxY, right.maxY) - max(left.minY, right.minY)
+            )
+            let smallestHeight = max(min(left.height, right.height), 0.001)
+            let overlapRatio = overlap / smallestHeight
+            let centerTolerance = max(
+                0.012,
+                min(left.height, right.height) * 0.75
+            )
+            return overlapRatio >= 0.35
+                || abs(left.midY - right.midY) <= centerTolerance
+        }
+
+        var merged = ruleRegions
+        for dateRegion in dateRegions {
+            guard !merged.contains(where: { describesSameRow($0, dateRegion) }) else {
+                continue
+            }
+            merged.append(dateRegion)
+        }
+        return merged.sorted { left, right in
+            if abs(left.maxY - right.maxY) > 0.002 {
+                return left.maxY > right.maxY
+            }
+            return left.minX < right.minX
+        }
+    }
+
+    static func rappiMergedRowRegionsForTesting(
+        ruleRegions: [CGRect],
+        dateRegions: [CGRect]
+    ) -> [CGRect] {
+        mergedRappiRowRegions(ruleRegions: ruleRegions, dateRegions: dateRegions)
+    }
+
+    private static func rappiTableRowRegions(
+        in image: CGImage,
+        fullPageObservations: [OCRObservation] = []
+    ) -> [CGRect] {
         let ruleRegions = rappiRuleRowRegions(in: image)
-        return ruleRegions.isEmpty ? rappiDateAnchoredRowRegions(in: image) : ruleRegions
+        let observedDateRegions = rappiDateAnchoredRowRegions(from: fullPageObservations)
+        let dateRegions: [CGRect]
+        if !observedDateRegions.isEmpty,
+           (ruleRegions.isEmpty || observedDateRegions.count >= ruleRegions.count) {
+            dateRegions = observedDateRegions
+        } else {
+            // A short full-page inventory is itself a signal that the first
+            // pass missed numeric rows. Pay for one bounded retry only in
+            // that case; the retry remains independent from the rule bands.
+            let retriedDateRegions = rappiDateAnchoredRowRegions(in: image)
+            dateRegions = retriedDateRegions.isEmpty ? observedDateRegions : retriedDateRegions
+        }
+        return mergedRappiRowRegions(ruleRegions: ruleRegions, dateRegions: dateRegions)
     }
 
     /// Converts the OCR text from one isolated visual band into the same
@@ -6062,7 +6141,8 @@ final class FinanceStore {
 
     private static func rappiVisualRowObservations(
         from image: CGImage,
-        page: Int
+        page: Int,
+        fullPageObservations: [OCRObservation] = []
     ) -> [OCRObservation] {
         let dateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
@@ -6124,7 +6204,7 @@ final class FinanceStore {
         }
 
         var rows: [OCRObservation] = []
-        for region in rappiTableRowRegions(in: image) {
+        for region in rappiTableRowRegions(in: image, fullPageObservations: fullPageObservations) {
             var candidates: [OCRObservation] = []
             let passes: [([String]?, Bool)] = [
                 (["es-MX", "en-US"], true),
@@ -6654,7 +6734,8 @@ final class FinanceStore {
                 if prioritizeNumericEvidence, pageIndex > 0 {
                     let visualRows = Self.rappiVisualRowObservations(
                         from: selectedImage,
-                        page: pageIndex
+                        page: pageIndex,
+                        fullPageObservations: selectedObservations
                     )
                     if !visualRows.isEmpty {
                         // One isolated observation represents one printed row,
