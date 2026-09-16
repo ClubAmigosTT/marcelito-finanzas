@@ -5737,7 +5737,7 @@ final class FinanceStore {
             guard let evidence = movement.extractionEvidence,
                   evidence.method == "vision-ocr",
                   evidence.page == line.page,
-                  decimalEquals(evidence.selectedAmount, parseRappiMoney(line.line.amount)) else {
+                  decimalEquals(evidence.selectedAmount, parseRappiMoney(line.line.amount).map(absoluteDecimal)) else {
                 return false
             }
             guard let bounds = evidence.bounds else { return false }
@@ -5752,7 +5752,7 @@ final class FinanceStore {
         var rejected: [OCRRowDiagnostic] = []
         for (ordinal, visualLine) in visualLines.enumerated() {
             guard !movements.contains(where: { matches(visualLine, $0) }) else { continue }
-            let amount = parseRappiMoney(visualLine.line.amount)
+            let amount = parseRappiMoney(visualLine.line.amount).map(absoluteDecimal)
             let sign = visualLine.line.amount
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .first
@@ -6166,11 +6166,26 @@ final class FinanceStore {
             pattern: #"(?<![A-Za-z0-9.,])[+-−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         )
 
+        let unsignedMoneyRegex = try? NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9.,])\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+        )
+
         func evidenceCounts(_ text: String) -> (dates: Int, amounts: Int) {
             let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            let signedAmounts = signedMoneyRegex?.numberOfMatches(in: text, range: range) ?? 0
+            let semanticText = text
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+            let issuerCredit = semanticText.contains("pagoporspei")
+                || semanticText.contains("bonificacionconcashback")
+                || semanticText.contains("abonoconcashback")
+            let unsignedAmounts = issuerCredit
+                ? (unsignedMoneyRegex?.numberOfMatches(in: text, range: range) ?? 0)
+                : 0
             return (
                 dateRegex?.numberOfMatches(in: text, range: range) ?? 0,
-                signedMoneyRegex?.numberOfMatches(in: text, range: range) ?? 0
+                signedAmounts > 0 ? signedAmounts : unsignedAmounts
             )
         }
 
@@ -7032,7 +7047,7 @@ final class FinanceStore {
 
         var rows: [Row] = []
         for amount in amountBoxes {
-            guard amountToken(from: amount.text) != nil else { continue }
+            guard amount.text.range(of: rappiMoneyToken, options: .regularExpression) != nil else { continue }
             if let index = rows.firstIndex(where: { abs($0.y - amount.centerY) <= 0.010 }) {
                 let current = rows[index].amount
                 // Recovery passes can return both an unsigned fragment and
@@ -7149,10 +7164,10 @@ final class FinanceStore {
         let rawLines = rows.sorted { $0.y > $1.y }.compactMap { row -> RappiOCRMovementLine? in
             let matchingDates = deduplicated(dateBoxes.filter { abs($0.centerY - row.y) <= dateTolerance })
                 .sorted { $0.centerX < $1.centerX }
-            guard matchingDates.first != nil,
-                  let amount = amountToken(from: row.amount.text) else { return nil }
+            guard matchingDates.first != nil else { return nil }
             let dates = Array(matchingDates.prefix(2)).map(\.text)
             let title = titleForRow(y: row.y, amount: row.amount)
+            guard let amount = amountToken(from: row.amount.text, title: title) else { return nil }
             let rowBounds = observations
                 .filter { abs($0.centerY - row.y) <= dateTolerance }
                 .map(\.boundingBox)
@@ -7216,7 +7231,7 @@ final class FinanceStore {
         return MovementExtractionBounds(x: x, y: y, width: width, height: height)
     }
 
-    private static func amountToken(from rawValue: String) -> String? {
+    private static func amountToken(from rawValue: String, title: String? = nil) -> String? {
         let normalized = rawValue
             .replacingOccurrences(of: "−", with: "-")
             .replacingOccurrences(of: "–", with: "-")
@@ -7224,8 +7239,21 @@ final class FinanceStore {
         guard let range = normalized.range(of: rappiMoneyToken, options: .regularExpression) else { return nil }
         let number = String(normalized[range])
         guard number.contains(".") || number.contains(",") else { return nil }
-        let sign = normalized.contains("-") ? "-" : "+"
-        return "\(sign)$\(number)"
+        if normalized.contains("-") { return "-$\(number)" }
+        if normalized.contains("+") { return "+$\(number)" }
+
+        // An unsigned value is not enough to determine the direction of a
+        // Rappi purchase. Keep the conservative gate: only the two explicit
+        // issuer-credit labels may recover a dropped sign, and they are
+        // represented as a credit for the downstream Rappi parser.
+        let semanticTitle = (title ?? "")
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+            .lowercased()
+            .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+        guard semanticTitle.contains("pagoporspei")
+            || semanticTitle.contains("bonificacionconcashback")
+            || semanticTitle.contains("abonoconcashback") else { return nil }
+        return "-$\(number)"
     }
 
     private static func ocrLines(from observations: [OCRObservation]) -> [OCRObservation] {

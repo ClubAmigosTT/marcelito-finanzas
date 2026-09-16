@@ -575,6 +575,21 @@ final class RappiReaderTests: XCTestCase {
         })
     }
 
+    func testVisualRowCoverageMatchesSignedCreditsByMagnitude() {
+        let rows = [
+            "2026-08-01 2026-08-01 COMERCIO UNO +$50.00",
+            "2026-08-02 2026-08-02 PAGO POR SPEI -$40.00",
+            "2026-08-03 2026-08-03 BONIFICACION CON CASHBACK -$10.00"
+        ]
+        let diagnostics = FinanceStore.rappiOCRRowDiagnosticsForTesting(
+            allRows: rows,
+            selectedRows: rows
+        )
+
+        XCTAssertEqual(diagnostics.count, rows.count)
+        XCTAssertTrue(diagnostics.allSatisfy(\.accepted))
+    }
+
     func testVisualRowOCRReadsPixelsAndKeepsPaymentSeparateFromPurchase() throws {
         let size = CGSize(width: 1224, height: 1584)
         let format = UIGraphicsImageRendererFormat()
