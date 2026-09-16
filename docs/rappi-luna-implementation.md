@@ -11,11 +11,14 @@ Este documento acompaña la implementación actual en la rama de trabajo. No es 
 Luna debe continuar desde este estado y no desde una build anterior:
 
 - Rama: `codex/testflight-rappi-current-2026-09-15`.
+- Head actual probado en GitHub: `2d1cf1b` (`perf: bound Rappi financial confidence scan`).
+- Cambios funcionales de confianza financiera: `00c6cfe`; fixture corregido en `4d57dee`.
 - Runtime iOS validado para el artefacto actual: `6584fc3` (`fix: keep signed Rappi credits out of OCR review`).
 - Tag protegido de entrega: `ios-v1.0.3-bootstrap`, apuntando al head de handoff `2f41c1c`.
 - Workflow de GitHub Actions: `35067980061`.
 - TestFlight: versión `1.0.3`, build `201`, estado `VALID`, asignado al grupo interno `Marcelito - Pruebas internas`.
 - Versión del lector que debe aparecer en los informes: `ios-reader-deterministic-2026.09.15.39`.
+- Validaciones del head actual: [Web Reader Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35074752273) y [iOS Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35074752282), ambos en verde.
 
 El build 201 contiene la recuperación de filas Rappi cuando Vision detecta solo parte de las líneas horizontales, la deduplicación por región/importe, la evidencia por página y zona, la separación entre conciliación y enriquecimiento, el visor móvil y la corrección para no mandar créditos/pagos con signo válido a revisión por comparar signo contra magnitud. También dejó conservadora la inferencia de importes sin signo: no se inventa un cargo positivo si OCR perdió el signo. El build está distribuido, pero todavía no se debe declarar certificación nativa completa: falta ejecutar los seis PDFs privados con PDFKit/Vision en macOS y en un iPhone físico.
 
@@ -59,7 +62,7 @@ En la sesión del 15 de septiembre de 2026, los seis PDFs se procesaron mediante
 
 La columna de captura conserva el diagnóstico de la versión antigua que originó el reporte; no es el resultado de esta rama. Esos conteos sugirieron pérdida neta de una fila en tres documentos, pero no identificaron la fila exacta ni descartaron una combinación de omisiones y duplicaciones. Las explicaciones sobre compras extranjeras, duplicados y cortes de página fueron hipótesis. El evaluador actual debe ser la fuente de verdad para la regresión, y cada diferencia nativa debe quedar explicada por fila y página.
 
-El evaluador web privado actual devuelve los seis estados como válidos, con 17, 112, 147, 138, 13 y 108 movimientos respectivamente, sin filas rechazadas. Su decisión de método es `ocr-required` para los seis; por eso el manifiesto espera `vision-ocr` en la validación nativa y `columnsCalibrated: false` para Rappi. La capa de categorías Rappi redujo de forma medible las filas de gasto sin categoría frente al reporte anterior, manteniendo en revisión los descriptores que no prueban el comercio:
+El evaluador web privado actual devuelve los seis estados como válidos, con 17, 112, 147, 138, 13 y 108 movimientos respectivamente, sin filas rechazadas. Su decisión de método es `ocr-required` para los seis; por eso el manifiesto espera `vision-ocr` en la validación nativa y `columnsCalibrated: false` para Rappi. La capa de categorías Rappi redujo de forma medible las filas de gasto sin categoría frente al reporte anterior, manteniendo en revisión los descriptores que no prueban el comercio. El head `2d1cf1b` además separa el cálculo de confianza de fecha/importe de la confianza general del texto y evita reconstruir filas completas para cada métrica de página; esto mantiene el gate financiero conservador sin penalizar un comercio débil por sí solo:
 
 | Identificador | Antes de las reglas Rappi | Actual | Reducción |
 | --- | ---: | ---: | ---: |
