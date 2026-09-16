@@ -19,7 +19,7 @@ function loadEngine() {
 
 test("el bundle local de iOS expone el mismo contrato determinista de Rappi", () => {
   const engine = loadEngine();
-  assert.equal(engine?.version, "rappi-shared-engine-2026.09.16.1");
+  assert.equal(engine?.version, "rappi-shared-engine-2026.09.16.2");
   assert.equal(typeof engine?.parse, "function");
 
   const parsed = engine.parse({
@@ -50,6 +50,37 @@ test("el bundle local de iOS expone el mismo contrato determinista de Rappi", ()
   assert.equal(parsed.transactions[0].normalizedMerchant, "cafeteria");
   assert.equal(parsed.transactions[0].displayMerchant, "Cafeteria");
   assert.equal(parsed.reconciliation.status, "valid");
+});
+
+test("el motor compartido normaliza fechas OCR localizadas antes de cruzar con Swift", () => {
+  const engine = loadEngine();
+  const parsed = engine.parse({
+    fileName: "rappi-localized-dates.pdf",
+    mode: "text",
+    text: [
+      "Tarjeta de crédito RappiCard",
+      "Adeudo del periodo anterior = $0.00",
+      "Cargos regulares (no a meses) + $100.00",
+      "Cargos compras a meses (capital) + $0.00",
+      "Pagos y abonos - $50.00",
+      "Saldo deudor total $60.00",
+      "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+      "01/08/2026 02/08/2026 COMERCIO UNO +$50.00",
+      "01/08/2026 02/08/2026 COMERCIO DOS +$50.00",
+      "02-AGO-2026 02-AGO-2026 PAGO POR SPEI -$40.00",
+      "03/08/2026 03/08/2026 BONIFICACIÓN CON CASHBACK -$10.00",
+      "Total de cargos +$100.00",
+      "Total de abonos -$50.00",
+    ].join("\n"),
+  });
+
+  assert.equal(parsed.reconciliation.status, "valid");
+  assert.deepEqual(Array.from(parsed.transactions, (row) => row.date), [
+    "2026-08-01",
+    "2026-08-01",
+    "2026-08-02",
+    "2026-08-03",
+  ]);
 });
 
 test("el contrato compartido conserva geometría, confianza y metadatos OCR por fila", () => {

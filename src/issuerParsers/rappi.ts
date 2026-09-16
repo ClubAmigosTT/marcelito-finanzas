@@ -92,6 +92,11 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
       rejectedRows.push(raw.slice(0, 240));
       return;
     }
+    const date = parseIssuerDate(match[1], input.text, input.fileName);
+    if (!date) {
+      rejectedRows.push(raw.slice(0, 240));
+      return;
+    }
     const moneyMatches = [...raw.matchAll(signedMoney)];
     // A text line with more than one signed financial token is structurally
     // ambiguous: one may belong to a reference or to a flattened adjacent
@@ -160,7 +165,7 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
       parser: "rappicard-operations-v1",
       fileName: input.fileName,
       index: rows.length,
-      date: match[1],
+      date,
       description,
       account: "Rappi",
       amountCents: ledgerAmountCents,

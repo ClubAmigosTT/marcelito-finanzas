@@ -55,6 +55,15 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
   }
   function parseIssuerDate(token, text, fileName) {
     const normalized = fold$1(token).replace(/ag0/g, "ago").replace(/^o(?=\d)/, "0");
+    const iso = normalized.match(/^(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+    if (iso) {
+      const year2 = Number(iso[1]);
+      const month2 = Number(iso[2]);
+      const day2 = Number(iso[3]);
+      const date2 = new Date(Date.UTC(year2, month2 - 1, day2));
+      if (date2.getUTCFullYear() !== year2 || date2.getUTCMonth() !== month2 - 1 || date2.getUTCDate() !== day2) return void 0;
+      return `${year2}-${String(month2).padStart(2, "0")}-${String(day2).padStart(2, "0")}`;
+    }
     const numeric = normalized.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})$/);
     if (numeric) return `${numeric[3]}-${numeric[2].padStart(2, "0")}-${numeric[1].padStart(2, "0")}`;
     const named = normalized.match(/^(\d{1,2})(?:\s+de\s+|[-/])([a-z]+)(?:\s+de\s+|[-/])?(20\d{2})?$/) ?? normalized.match(/^(\d{1,2})\s+(?:de\s+)?([a-z]+)(?:\s+(?:de\s+)?(20\d{2}))?$/);
@@ -382,6 +391,11 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
         rejectedRows.push(raw.slice(0, 240));
         return;
       }
+      const date = parseIssuerDate(match[1], input.text, input.fileName);
+      if (!date) {
+        rejectedRows.push(raw.slice(0, 240));
+        return;
+      }
       const moneyMatches = [...raw.matchAll(signedMoney)];
       if (moneyMatches.length !== 1) {
         rejectedRows.push(raw.slice(0, 240));
@@ -427,7 +441,7 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
         parser: "rappicard-operations-v1",
         fileName: input.fileName,
         index: rows.length,
-        date: match[1],
+        date,
         description,
         account: "Rappi",
         amountCents: ledgerAmountCents,
@@ -626,7 +640,7 @@ ${row.text}`).join("\n")}` },
       rejectedRows: parsed.rejectedRows
     };
   }
-  const RAPPI_SHARED_ENGINE_VERSION = "rappi-shared-engine-2026.09.16.1";
+  const RAPPI_SHARED_ENGINE_VERSION = "rappi-shared-engine-2026.09.16.2";
   const rappiSharedEngine = {
     version: RAPPI_SHARED_ENGINE_VERSION,
     parse(input) {
