@@ -11,7 +11,6 @@ Este documento acompaña la implementación actual en la rama de trabajo. No es 
 Luna debe continuar desde este estado y no desde una build anterior:
 
 - Rama: `codex/testflight-rappi-current-2026-09-15`.
-- HEAD de la rama: `49f5c52` (los commits posteriores a `b0aef49` son documentación del handoff).
 - Base de código iOS validada: `b0aef49` (`fix: preserve Rappi recovery when OCR is sparse`).
 - Tag de iOS: `ios-v1.0.110`.
 - Workflow de GitHub Actions: `35063336931`.
@@ -19,6 +18,8 @@ Luna debe continuar desde este estado y no desde una build anterior:
 - Versión del lector que debe aparecer en los informes: `ios-reader-deterministic-2026.09.15.39`.
 
 El build 197 contiene la recuperación de filas Rappi cuando Vision detecta solo parte de las líneas horizontales, la deduplicación por región/importe, la evidencia por página y zona, la separación entre conciliación y enriquecimiento, y el visor móvil. El build está distribuido, pero todavía no se debe declarar certificación nativa completa: falta ejecutar los seis PDFs privados con PDFKit/Vision en macOS y en un iPhone físico.
+
+Los commits posteriores a `b0aef49` en esta rama son documentación del handoff. Antes de compilar, Luna debe comprobarlo con `git diff --stat b0aef49..HEAD` y revisar que no haya cambios de aplicación inesperados; la referencia de la app que corresponde al build 197 sigue siendo `b0aef49`.
 
 En GitHub, el enlace de referencia de esa ejecución es:
 `https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35063336931`
