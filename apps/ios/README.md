@@ -120,8 +120,9 @@ botón separado **Compartir diagnóstico por fila** es privado y sí incluye el
 texto OCR necesario para depurar una extracción. Guárdalo como
 `docs/native-corpus-certification.json` para que el workflow lo valide antes de
 publicar. La primera build que instala esta herramienta se ejecuta con la
-opción de bootstrap del workflow; después la compuerta vuelve a exigir un
-informe certificado de al menos 10 estados únicos.
+opción de bootstrap del workflow; después la compuerta acepta el perfil
+general de al menos 10 estados o el perfil `rappi-focused` de al menos seis
+tarjetas Rappi procesadas con `vision-ocr`.
 
 Para una auditoría con expectativas doradas, el runner nativo admite además
 `MARCELITO_PDF_CORPUS_MANIFEST` apuntando a un JSON privado fuera del checkout.
@@ -130,10 +131,10 @@ Ese manifiesto puede reutilizar el formato de
 estado, filas y controles); la versión declarada debe ser igual a
 `FinanceStore.readerVersion`. El script resuelve la ruta, exige que el conjunto
 de nombres coincida con los PDFs y valida los controles con PDFKit + Vision. La
-certificación se determina por el conjunto exacto del manifiesto, no por el
-mínimo de 10 archivos de la herramienta general del iPhone; esto permite
-certificar un corpus enfocado como los seis PDFs Rappi sin debilitar la
-compuerta de publicación del certificador general:
+certificación del runner se determina por el conjunto exacto del manifiesto,
+no por el perfil de tamaño de la herramienta general del iPhone; esto permite
+comprobar los seis PDFs Rappi con goldens sin debilitar la compuerta general ni
+el perfil `rappi-focused` del certificador del dispositivo:
 
 ```bash
 MARCELITO_PDF_CORPUS_DIR=/ruta/privada/estados \

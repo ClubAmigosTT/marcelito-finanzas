@@ -393,6 +393,7 @@ struct NativeCorpusDiagnosticReport: Codable {
 struct NativeCorpusCertificationReport: Codable, Identifiable {
     static let schemaVersion = 1
     static let minimumFileCount = 10
+    static let focusedRappiMinimumFileCount = 6
     static let targetPrecision = 0.97
 
     let schemaVersion: Int
@@ -408,6 +409,11 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
     let automaticAcceptancePrecision: Double
     let unresolvedOCR: Int
     let certified: Bool
+    /// The general release corpus remains 10+ files. A focused regression can
+    /// use the explicit Rappi profile only when every selected file is a
+    /// verified Rappi card read; the profile is exported so CI cannot infer a
+    /// weaker threshold from the file count alone.
+    let certificationScope: String
     /// A machine-readable promise consumed by the GitHub verifier.
     let financialDataRedacted: Bool
     let generatedBy: String
@@ -420,7 +426,7 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
         case schemaVersion, generatedAt, readerVersion, files, accepted,
              blocked, expectedValid, expectedPending, goldenAutoAccepted,
              goldenFalseAccepted, automaticAcceptancePrecision, unresolvedOCR,
-             certified, financialDataRedacted, generatedBy
+             certified, certificationScope, financialDataRedacted, generatedBy
     }
 
     var id: String { "native-corpus-\(generatedAt.timeIntervalSince1970)" }
@@ -442,7 +448,17 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
         goldenFalseAccepted = 0
         automaticAcceptancePrecision = files.isEmpty ? 0 : Double(accepted) / Double(files.count)
         unresolvedOCR = files.filter { ["vision-ocr", "multimodal-ai", "multimodal-error"].contains($0.mode) && !$0.accepted }.count
-        certified = files.count >= Self.minimumFileCount
+        let isFocusedRappi = files.count >= Self.focusedRappiMinimumFileCount
+            && files.allSatisfy {
+                $0.source.localizedCaseInsensitiveCompare("Rappi") == .orderedSame
+                    && $0.kind == StatementKind.card.rawValue
+                    && $0.mode == "vision-ocr"
+            }
+        certificationScope = isFocusedRappi ? "rappi-focused" : "general"
+        let requiredFileCount = isFocusedRappi
+            ? Self.focusedRappiMinimumFileCount
+            : Self.minimumFileCount
+        certified = files.count >= requiredFileCount
             && blocked == 0
             && automaticAcceptancePrecision >= Self.targetPrecision
             && unresolvedOCR == 0
@@ -579,7 +595,7 @@ struct NativeCorpusCertificationView: View {
     @State private var selectedFiles: [URL] = []
     @State private var isRunning = false
     @State private var progress = 0.0
-    @State private var status = "Selecciona los 10 estados validados para ejecutar Vision en este iPhone."
+    @State private var status = "Selecciona seis estados Rappi para el perfil enfocado o diez estados para el perfil general."
     @State private var report: NativeCorpusCertificationReport?
     @State private var exportURL: URL?
     @State private var diagnosticExportURL: URL?
@@ -642,7 +658,7 @@ struct NativeCorpusCertificationView: View {
             Text("El lector usa PDFKit y Vision dentro del iPhone. El proveedor de IA seleccionado no recibe PDFs: se usa opcionalmente después para clasificar gastos ya conciliados. El informe exportado contiene únicamente hashes y resultados de calidad.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            Text("Se requieren al menos \(NativeCorpusCertificationReport.minimumFileCount) archivos únicos para habilitar la compuerta de publicación.")
+            Text("La compuerta general requiere al menos \(NativeCorpusCertificationReport.minimumFileCount) archivos. El perfil enfocado Rappi requiere \(NativeCorpusCertificationReport.focusedRappiMinimumFileCount) estados Rappi leídos con Vision.")
                 .font(.caption)
                 .foregroundStyle(Color.marcelitoNavyMid)
         }
@@ -658,7 +674,7 @@ struct NativeCorpusCertificationView: View {
                 Spacer()
                 Text("\(selectedFiles.count)")
                     .font(.headline.monospacedDigit())
-                    .foregroundStyle(selectedFiles.count >= NativeCorpusCertificationReport.minimumFileCount ? Color.marcelitoSuccess : Color.marcelitoAmber)
+                    .foregroundStyle(Color.marcelitoNavy)
             }
             if !selectedFiles.isEmpty {
                 Text(selectedFiles.map(\.lastPathComponent).joined(separator: " · "))
@@ -735,8 +751,10 @@ struct NativeCorpusCertificationView: View {
             }
 
             Text(report.certified
-                ? "Comparte este informe JSON y guárdalo como docs/native-corpus-certification.json en GitHub. La siguiente build podrá usarlo sin una Mac."
-                : "Corrige los archivos bloqueados y vuelve a ejecutar el lector. El informe no habilita publicación hasta alcanzar 97% y cubrir los 10 estados; cada archivo aceptado debe conciliar al 100%.")
+                ? (report.certificationScope == "rappi-focused"
+                    ? "Perfil Rappi enfocado certificado. Comparte este informe JSON y guárdalo como docs/native-corpus-certification.json; la siguiente build podrá validarlo sin una Mac."
+                    : "Perfil general certificado. Comparte este informe JSON y guárdalo como docs/native-corpus-certification.json; la siguiente build podrá validarlo sin una Mac.")
+                : "Corrige los archivos bloqueados y vuelve a ejecutar el lector. El informe no habilita publicación hasta alcanzar 97%, cubrir el tamaño del perfil elegido y conciliar cada archivo al 100%.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 

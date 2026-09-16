@@ -50,6 +50,24 @@ test("el informe del dispositivo certificado pasa con 10 PDFs únicos", () => {
   assert.deepEqual(result.errors, []);
 });
 
+test("el perfil rappi-focused pasa con seis estados Rappi OCR", () => {
+  const rows = Array.from({ length: 6 }, (_, index) => row(index + 1, {
+    source: "Rappi",
+    accountKey: "rappi:9040",
+    kind: "card",
+    mode: "vision-ocr",
+    ocrConfidence: 0.94,
+    weakestOCRPage: 0.84,
+  }));
+  const result = verifyNativeDeviceReport(
+    { ...report(rows), certificationScope: "rappi-focused" },
+    "ios-reader-2026.08.31.14",
+    10,
+  );
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.errors, []);
+});
+
 test("el informe del dispositivo bloquea duplicados y estados pendientes", () => {
   const rows = Array.from({ length: 9 }, (_, index) => row(index + 1));
   rows.push(row(10, {

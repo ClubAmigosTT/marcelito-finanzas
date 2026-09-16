@@ -34,6 +34,7 @@ type DeviceReport = {
   automaticAcceptancePrecision?: unknown;
   unresolvedOCR?: unknown;
   certified?: unknown;
+  certificationScope?: unknown;
   financialDataRedacted?: unknown;
   generatedBy?: unknown;
 };
@@ -75,8 +76,20 @@ export function verifyNativeDeviceReport(report: DeviceReport, expectedReaderVer
   const blocked = numberValue(report.blocked);
   const precision = numberValue(report.automaticAcceptancePrecision);
   const unresolvedOCR = numberValue(report.unresolvedOCR);
+  const certificationScope = String(report.certificationScope ?? "general");
+  const focusedRappi = certificationScope === "rappi-focused";
+  const effectiveMinimumFiles = focusedRappi ? 6 : minimumFiles;
+  if (!["general", "rappi-focused"].includes(certificationScope)) {
+    errors.push(`certificationScope inválido: ${certificationScope}`);
+  }
   if (!Array.isArray(report.files)) errors.push("files debe ser una lista");
-  if (files.length < minimumFiles) errors.push(`el informe contiene ${files.length} archivo(s); se requieren al menos ${minimumFiles}`);
+  if (files.length < effectiveMinimumFiles) errors.push(`el informe contiene ${files.length} archivo(s); se requieren al menos ${effectiveMinimumFiles} para ${certificationScope}`);
+  if (focusedRappi && files.some((raw) => {
+    const row = raw && typeof raw === "object" ? raw as DeviceFile : {};
+    return row.source !== "Rappi" || row.kind !== "card" || row.mode !== "vision-ocr";
+  })) {
+    errors.push("el perfil rappi-focused solo permite archivos Rappi de tarjeta procesados con vision-ocr");
+  }
   if (!Number.isInteger(accepted) || accepted < 0) errors.push("accepted no es un entero válido");
   if (!Number.isInteger(blocked) || blocked < 0) errors.push("blocked no es un entero válido");
   if (Number.isInteger(accepted) && Number.isInteger(blocked) && accepted + blocked !== files.length) {

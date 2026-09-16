@@ -406,7 +406,7 @@ test("iOS usa el proveedor seleccionado solo para enriquecer gastos después de 
   assert.match(models, /Legacy compatibility markers/);
   assert.match(certification, /multimodalFallbackAttempted/);
   assert.match(certification, /static let targetPrecision = 0\.97/);
-  assert.match(certification, /cada archivo aceptado debe conciliar al 100%/);
+  assert.match(certification, /conciliar cada archivo al 100%/);
 });
 
 test("iOS permite elegir Gemini, Zen o NVIDIA sin incluir claves en el código", async () => {
