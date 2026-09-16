@@ -12,14 +12,14 @@ Luna debe continuar desde este estado y no desde una build anterior:
 
 - Rama: `codex/testflight-rappi-current-2026-09-15`.
 - Head funcional del lector incluido en el build 202: `544d7ae` (`docs: pin Luna handoff to validated head`).
-- Head actual de la rama: `0bd0176` (`docs: record current TestFlight bootstrap`); las diferencias posteriores al build 202 son documentales.
+- Head actual de la rama: `0fe4dfd` (`docs: record latest Rappi regression evidence`); las diferencias posteriores al build 202 son documentales.
 - Cambios funcionales de confianza financiera: `00c6cfe`; fixture corregido en `4d57dee`.
 - Runtime iOS validado para el artefacto actual: `6584fc3` (`fix: keep signed Rappi credits out of OCR review`).
 - Tag protegido de entrega: `ios-v1.0.4-bootstrap`, apuntando al head de handoff `544d7ae`.
 - Workflow de GitHub Actions: `35076838703`.
 - TestFlight: versión `1.0.4`, build `202`, estado `VALID`, asignado al grupo interno `Marcelito - Pruebas internas`.
 - Versión del lector que debe aparecer en los informes: `ios-reader-deterministic-2026.09.15.39`.
-- Validaciones del head actual: [Web Reader Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35078412259) y [iOS Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35078412265), ambos en verde.
+- Validaciones del head actual: [Web Reader Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35080863982) y [iOS Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35080864025), ambos en verde.
 - Auditoría local repetida el 16-sep-2026: `316/316` pruebas públicas, TypeScript, build Vite y auditoría pública en verde; la corrida privada web de los seis Rappi devolvió `6/6` válidos, `0` filas rechazadas y `0` fallas de manifiesto.
 
 El build 202 contiene la recuperación de filas Rappi cuando Vision detecta solo parte de las líneas horizontales, la deduplicación por región/importe, la evidencia por página y zona, la separación entre conciliación y enriquecimiento, el visor móvil y la corrección para no mandar créditos/pagos con signo válido a revisión por comparar signo contra magnitud. También separa la confianza financiera de fecha/importe de la confianza general del comercio, y deja conservadora la inferencia de importes sin signo: no se inventa un cargo positivo si OCR perdió el signo. El build está distribuido como bootstrap para probar el lector actual, pero todavía no se debe declarar certificación nativa completa: falta ejecutar los seis PDFs privados con PDFKit/Vision en macOS y confirmar el flujo completo en un iPhone físico.
