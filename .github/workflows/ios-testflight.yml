@@ -62,6 +62,8 @@ jobs:
           npm ci
           npm test
           npm run build
+          npm run rappi:engine:build
+          git diff --exit-code -- apps/ios/Cauce/Resources/rappi-engine.js
 
       - name: Mostrar toolchain de Apple
         shell: bash

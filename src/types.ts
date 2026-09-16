@@ -64,6 +64,8 @@ export type TransactionExtractionEvidence = {
   sameVisualRow?: boolean;
   /** Why this row needs human attention, without blocking financial import. */
   reviewReason?: string;
+  /** Deterministic rule used to resolve a bounded sign/column decision. */
+  selectionReason?: string;
 };
 
 /** Evidence used to identify the issuer without trusting transaction text. */

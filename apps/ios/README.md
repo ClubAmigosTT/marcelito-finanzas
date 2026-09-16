@@ -17,6 +17,23 @@ xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
   -destination "platform=iOS Simulator,name=iPhone 16" test
 ```
 
+El parser determinista de Rappi se comparte con la web como un recurso JavaScript
+local ejecutado por JavaScriptCore; PDFKit y Vision siguen siendo los extractores
+nativos. Antes de generar el proyecto, reconstruye el recurso para evitar que el
+bundle de iOS quede desfasado:
+
+```bash
+cd ../..
+npm ci
+npm run rappi:engine:build
+cd apps/ios
+xcodegen generate --spec project.yml
+```
+
+El recurso no usa CDN ni envía PDFs fuera del dispositivo. Si el recurso no puede
+cargarse, el lector nativo conserva su ruta de recuperación y la prueba de iOS
+debe reportarlo; no se mezclan resultados de ambos motores.
+
 Para medir los PDFs reales con el mismo lector Vision, conserva los archivos
 fuera del repositorio y pasa la carpeta al test nativo. El test exige todos los
 archivos del manifiesto, verifica los estados de texto disponibles y emite una línea
@@ -68,7 +85,7 @@ cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
   --manifest /ruta/privada/rappi-regression-manifest.json \
-  --reader-version ios-reader-deterministic-2026.09.16.2 \
+  --reader-version ios-reader-deterministic-2026.09.16.3 \
   --require-certified
 ```
 

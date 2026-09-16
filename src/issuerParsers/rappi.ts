@@ -1,4 +1,4 @@
-import type { StatementSummary, Transaction, TransactionKind } from "../types.ts";
+import type { ExtractionBounds, StatementSummary, Transaction, TransactionKind } from "../types.ts";
 import type { DeterministicParseInput, DeterministicParseResult } from "./types.ts";
 import { cents, fold, layoutLines, lineText, makeTransaction, money, parseIssuerDate, reconcileExactly } from "./shared.ts";
 import { deterministicExpenseClassification } from "../categoryRules.ts";
@@ -6,7 +6,13 @@ import { normalizeRappiMerchant, rappiCategoryFor } from "../merchantNormalizati
 
 const sectionTitle = "Cargos, abonos y compras regulares (no a meses)";
 const pageMarker = /^__pdf_page_(\d+)__$/;
-const rowStart = /^(\d{4}-\d{2}-\d{2})\s+(\d{4}-\d{2}-\d{2})\s+(.+)$/;
+// A complete year is required for a movement anchor. Without it, a merchant
+// such as `7 ELEVEN` can be mistaken for `day month` while splitting a
+// flattened line. Weak date tokens remain diagnostic evidence, never a
+// financial row.
+const rowDateToken = String.raw`(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.](?:\d{1,2}|[a-z]{3,12})[-/.]\d{2,4}|\d{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+(?:de\s+)?\d{2,4})`;
+const rowStart = new RegExp(`^(${rowDateToken})\\s+(${rowDateToken})\\s+(.+)$`, "i");
+const rowPairStart = new RegExp(`(?<![A-Za-z0-9.,])(?=${rowDateToken}\\s+${rowDateToken}\\s+)`, "i");
 // A signed token is a financial candidate only when it is not embedded in a
 // reference/code. The old expression could read `REF+12.34A` as the amount
 // and then trust the last numeric-looking fragment in the line.
@@ -50,7 +56,16 @@ function parseSummary(text: string): StatementSummary {
   };
 }
 
-type PendingRow = { raw: string; page: number; foreignCurrency: boolean };
+type PendingRow = {
+  raw: string;
+  page: number;
+  foreignCurrency: boolean;
+  bounds?: ExtractionBounds;
+  confidence?: number;
+  selectionReason?: string;
+};
+const rowBoundsMarker = /^__rappi_row_bounds__\s+(\d+)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)\s+(\d+(?:\.\d+)?)(?:\s+(\d+(?:\.\d+)?))?$/i;
+const rowMetaMarker = /^__rappi_row_meta__\s+(.+)$/i;
 
 function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean | null = null, rowConfidences: number[] = []) {
   const rows: Transaction[] = [];
@@ -59,8 +74,18 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
   let active = false;
   let pending: PendingRow | undefined;
   let rowConfidenceIndex = 0;
+  let nextRowBounds: ExtractionBounds | undefined;
+  let nextRowConfidence: number | undefined;
+  let nextSelectionReason: string | undefined;
 
-  const finishRow = (rawValue: string, rowPage: number, rowForeignCurrency: boolean, rowConfidence?: number) => {
+  const finishRow = (
+    rawValue: string,
+    rowPage: number,
+    rowForeignCurrency: boolean,
+    rowConfidence?: number,
+    rowBounds?: ExtractionBounds,
+    rowSelectionReason?: string,
+  ) => {
     const raw = rawValue.replace(/\s+/g, " ").trim();
     const match = raw.match(rowStart);
     if (!match) {
@@ -107,14 +132,15 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
     const normalizedDescription = fold(description);
     const merchant = normalizeRappiMerchant(description);
     const isPayment = /^pago\s+por\s+spei\b/.test(normalizedDescription);
-    const isRefund = !isPayment && signedValue < 0;
+    const cashbackCredit = !isPayment && /bonificaci[oó]n|cashback|devoluci[oó]n|reembolso/.test(normalizedDescription);
+    const isRefund = !isPayment && (signedValue < 0 || cashbackCredit);
     let kind: TransactionKind = "purchase";
     let ledgerAmountCents = -Math.abs(signedValue);
     if (isPayment) {
       kind = "cardPayment";
       ledgerAmountCents = -Math.abs(signedValue);
     } else if (isRefund) {
-      kind = /bonificaci[oó]n|cashback|devoluci[oó]n|reembolso/.test(normalizedDescription) ? "refund" : "credit";
+      kind = cashbackCredit ? "refund" : "credit";
       ledgerAmountCents = Math.abs(signedValue);
     }
     const rappiCategory = rappiCategoryFor(
@@ -155,6 +181,14 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
       merchantReviewReason: merchant.reviewReason,
       category: localCategory,
       sameVisualRow,
+      bounds: rowBounds,
+      selectionReason: rowSelectionReason ?? (
+        isPayment || cashbackCredit
+          ? selected[1] === "+"
+            ? "signo OCR corregido por etiqueta inequívoca de abono Rappi"
+            : "importe firmado por etiqueta inequívoca de abono Rappi"
+          : "importe firmado"
+      ),
     }));
   };
 
@@ -162,15 +196,30 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
     if (!pending) return;
     const rowPage = pending.page;
     const rowForeignCurrency = pending.foreignCurrency;
+    const rowBounds = pending.bounds;
+    const rowPendingConfidence = pending.confidence;
+    const rowSelectionReason = pending.selectionReason;
     const raw = pending.raw.replace(/\s+/g, " ").trim();
     pending = undefined;
     // PDF text can flatten two visual rows into one physical line. Split
     // only at a second complete ISO date pair, never at an arbitrary number;
     // a reference such as `REF2026` therefore remains part of the merchant.
-    const rowSegments = raw.split(/(?=\d{4}-\d{2}-\d{2}\s+\d{4}-\d{2}-\d{2}\s+)/);
-    for (const segment of rowSegments) {
-      const confidence = rowConfidences.length ? rowConfidences[rowConfidenceIndex++] : undefined;
-      finishRow(segment, rowPage, rowForeignCurrency, confidence);
+    const rowSegments = raw.split(rowPairStart);
+    for (const [index, segment] of rowSegments.entries()) {
+      const confidence = rowConfidences.length
+        ? rowConfidences[rowConfidenceIndex++]
+        : rowPendingConfidence;
+      // A flattened text line can contain more than one row, but an OCR
+      // bounds marker belongs to the first row only. Do not copy coordinates
+      // onto a sibling whose visual origin was not proven.
+      finishRow(
+        segment,
+        rowPage,
+        rowForeignCurrency,
+        confidence,
+        index === 0 ? rowBounds : undefined,
+        index === 0 ? rowSelectionReason : undefined,
+      );
     }
   };
 
@@ -182,6 +231,9 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
     if (marker) {
       finish();
       page = Number(marker[1]);
+      nextRowBounds = undefined;
+      nextRowConfidence = undefined;
+      nextSelectionReason = undefined;
       // The regular-movements table continues across page breaks.  A PDF
       // page marker is metadata for evidence/diagnostics, not a section
       // boundary; resetting `active` here silently discarded every movement
@@ -199,9 +251,37 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
       continue;
     }
     if (!active) continue;
+    const boundsMarker = line.match(rowBoundsMarker);
+    if (boundsMarker) {
+      finish();
+      nextRowBounds = {
+        x: Number(boundsMarker[2]),
+        y: Number(boundsMarker[3]),
+        width: Number(boundsMarker[4]),
+        height: Number(boundsMarker[5]),
+      };
+      nextRowConfidence = boundsMarker[6] === undefined ? undefined : Number(boundsMarker[6]);
+      nextSelectionReason = undefined;
+      continue;
+    }
+    const metaMarker = line.match(rowMetaMarker);
+    if (metaMarker) {
+      nextSelectionReason = metaMarker[1].trim();
+      continue;
+    }
     if (rowStart.test(line)) {
       finish();
-      pending = { raw: line, page, foreignCurrency: false };
+      pending = {
+        raw: line,
+        page,
+        foreignCurrency: false,
+        bounds: nextRowBounds,
+        confidence: nextRowConfidence,
+        selectionReason: nextSelectionReason,
+      };
+      nextRowBounds = undefined;
+      nextRowConfidence = undefined;
+      nextSelectionReason = undefined;
       continue;
     }
     if (!pending) continue;
@@ -249,7 +329,7 @@ function parseLayoutRows(input: DeterministicParseInput) {
     pending = undefined;
   };
 
-  const datePattern = /^(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.][a-z]{3,12}[-/.]20\d{2}|\d{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+20\d{2})$/i;
+  const datePattern = new RegExp(`^(?:${rowDateToken})$`, "i");
   for (const line of lines) {
     const raw = lineText(line);
     const normalized = fold(raw);

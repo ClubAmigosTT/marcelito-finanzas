@@ -781,7 +781,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.16.2"
+    static let readerVersion = "ios-reader-deterministic-2026.09.16.3"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -900,7 +900,7 @@ final class FinanceStore {
             // from the generic reader so a failed control never triggers OCR.
             movements = parseAmexText(text, fileName: fileName)
         } else if source == "Rappi" {
-            movements = parseRappiText(text)
+            movements = parseRappiText(text, fileName: fileName)
         } else {
             movements = parse(text: text, fileName: fileName, sourceHint: source)
         }
@@ -1222,7 +1222,7 @@ final class FinanceStore {
             accountKey: maskedAccountKey(from: text, source: source),
             kind: statementKind(from: text, source: source),
             period: periodLabel(from: text, fileName: fileName, sourceHint: source),
-            movements: parseRappiText(text, evidenceMethod: "vision-ocr",
+            movements: parseRappiText(text, fileName: fileName, evidenceMethod: "vision-ocr",
                                       confidenceByPage: confidenceByPage),
             summary: summary(from: text, source: source)
         )
@@ -4569,7 +4569,7 @@ final class FinanceStore {
         } else if isAmexLayout {
             candidates = parseAmexText(structuredText, fileName: fileName)
         } else if source == "Rappi" {
-            candidates = parseRappiText(structuredText)
+            candidates = parseRappiText(structuredText, fileName: fileName)
         } else {
             // Santander is validated through its fixed Vision columns. No
             // generic selectable-text scan is allowed to suppress OCR.
@@ -4828,6 +4828,7 @@ final class FinanceStore {
                 }
             let ocrCandidates = Self.parseRappiText(
                 text,
+                fileName: fileName,
                 evidenceMethod: "vision-ocr",
                 confidenceByPage: confidenceByPage
             )
@@ -4837,13 +4838,13 @@ final class FinanceStore {
             // contain a complete, reconcilable Rappi table. Select a source
             // only when its rows reconcile against an independent summary;
             // never merge both streams blindly, which could duplicate rows.
-            let selectableCandidates = Self.parseRappiText(extractedText, evidenceMethod: "pdf-text")
+            let selectableCandidates = Self.parseRappiText(extractedText, fileName: fileName, evidenceMethod: "pdf-text")
             let layoutCandidates = rappiSupplementalLayoutText.isEmpty
                 ? []
-                : Self.parseRappiText(rappiSupplementalLayoutText, evidenceMethod: "pdf-text")
+                : Self.parseRappiText(rappiSupplementalLayoutText, fileName: fileName, evidenceMethod: "pdf-text")
             let pageWiseCandidates = rappiPageWiseSelectableText.isEmpty
                 ? []
-                : Self.parseRappiText(rappiPageWiseSelectableText, evidenceMethod: "pdf-text")
+                : Self.parseRappiText(rappiPageWiseSelectableText, fileName: fileName, evidenceMethod: "pdf-text")
             let selectableSummary = Self.summary(from: extractedText, source: source)
             let layoutSummary = rappiSupplementalLayoutText.isEmpty
                 ? nil
@@ -4898,6 +4899,7 @@ final class FinanceStore {
                     }
                 let retryCandidates = Self.parseRappiText(
                     retryText,
+                    fileName: fileName,
                     evidenceMethod: "vision-ocr",
                     confidenceByPage: retryConfidenceByPage
                 )
@@ -4948,7 +4950,7 @@ final class FinanceStore {
         } else if usedOCR {
             parsedCandidates = []
         } else if source == "Rappi" {
-            parsedCandidates = Self.parseRappiText(text)
+            parsedCandidates = Self.parseRappiText(text, fileName: fileName)
             rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "RappiCard: importe MXN firmado en tabla regular")
         } else if source == "BBVA" {
             parsedCandidates = Self.parseBBVASelectableText(
@@ -5611,6 +5613,7 @@ final class FinanceStore {
         let amount: String
         let isolated: Bool
         let financialConfidence: Double?
+        let selectionReason: String?
     }
 
     private struct OCRAmountCandidate {
@@ -7079,6 +7082,9 @@ final class FinanceStore {
                             bounds: movementLine.bounds,
                             confidence: movementLine.financialConfidence
                         ))
+                        if let selectionReason = movementLine.selectionReason {
+                            lines.append("__RAPPI_ROW_META__ \(selectionReason)")
+                        }
                         lines.append(movementLine.text)
                     }
                 }
@@ -7272,13 +7278,29 @@ final class FinanceStore {
             }
             let financialConfidences = matchingDates.compactMap(\.confidence)
                 + [row.amount.confidence].compactMap { $0 }
+            let semanticTitle = title
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+            let issuerCredit = semanticTitle.contains("pagoporspei")
+                || semanticTitle.contains("bonificacionconcashback")
+                || semanticTitle.contains("abonoconcashback")
+            let selectionReason: String?
+            if issuerCredit && row.amount.text.contains("+") {
+                selectionReason = "signo OCR corregido por etiqueta inequívoca de abono Rappi"
+            } else if issuerCredit && !hasExplicitSign(row.amount.text) {
+                selectionReason = "signo ausente recuperado únicamente por etiqueta inequívoca de abono Rappi"
+            } else {
+                selectionReason = nil
+            }
             return RappiOCRMovementLine(
                 text: (dates + [title, amount]).joined(separator: " "),
                 y: row.y,
                 bounds: rowBounds,
                 amount: amount,
                 isolated: isolated,
-                financialConfidence: financialConfidences.min()
+                financialConfidence: financialConfidences.min(),
+                selectionReason: selectionReason
             )
         }
 
@@ -12061,9 +12083,23 @@ final class FinanceStore {
     /// cashback rewards and fiscal pages are not additional ledger movements.
     private static func parseRappiText(
         _ text: String,
+        fileName: String = "rappi.pdf",
         evidenceMethod: String = "pdf-text",
         confidenceByPage: [Int: Double] = [:]
     ) -> [Movement] {
+        // PDFKit and Vision own extraction; the shared deterministic engine
+        // owns the meaning of the reconstructed rows for both streams. The
+        // native caller still decides which complete stream reconciles and
+        // remains the final import gate.
+        if evidenceMethod == "pdf-text" || evidenceMethod == "vision-ocr",
+           let sharedMovements = RappiSharedEngine.shared.parseMovements(
+               text: text,
+               fileName: fileName,
+               evidenceMethod: evidenceMethod,
+               confidenceByPage: confidenceByPage
+           ) {
+            return sharedMovements
+        }
         // Keep the parser independent from PDFKit's content-stream ordering:
         // real Rappi statements often flatten several continuation pages into
         // one line even though every row is visibly date-anchored.
@@ -12077,6 +12113,8 @@ final class FinanceStore {
         var nextRowBounds: MovementExtractionBounds? = nil
         var rowConfidence: Double? = nil
         var nextRowConfidence: Double? = nil
+        var rowSelectionReason: String? = nil
+        var nextRowSelectionReason: String? = nil
         func compactSemanticTitle(_ value: String) -> String {
             value
                 .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
@@ -12103,10 +12141,13 @@ final class FinanceStore {
         func flush() {
             let evidenceBounds = rowBounds
             let evidenceConfidence = rowConfidence
+            let evidenceSelectionReason = rowSelectionReason
             defer {
                 pending = ""
                 rowBounds = nil
                 rowConfidence = nil
+                rowSelectionReason = nil
+                nextRowSelectionReason = nil
             }
             guard let rowPrefixRegex,
                   let match = rowPrefixRegex.firstMatch(
@@ -12213,7 +12254,8 @@ final class FinanceStore {
                             ? max(0, min(1, evidenceConfidence ?? confidenceByPage[rowPage ?? 0] ?? 0))
                             : 1,
                         sourceText: pending, bounds: evidenceBounds, selectedColumn: "MONTO MXN",
-                        selectedAmount: abs(amount), selectionReason: "RappiCard: \(signReason); fechas operación y cargo conservadas en evidencia",
+                        selectedAmount: abs(amount), selectionReason: evidenceSelectionReason
+                            ?? "RappiCard: \(signReason); fechas operación y cargo conservadas en evidencia",
                         reviewReason: merchant.reviewReason, sameVisualRow: evidenceBounds != nil ? true : nil),
                     rawDescription: merchant.rawDescription,
                     normalizedMerchant: merchant.normalizedMerchant,
@@ -12227,12 +12269,18 @@ final class FinanceStore {
             let lower = line.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
             let compactLower = lower.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
             if lower.hasPrefix("__pdf_page_") {
-                flush(); nextRowBounds = nil; nextRowConfidence = nil; page = Int(lower.filter(\.isNumber)); continue
+                flush(); nextRowBounds = nil; nextRowConfidence = nil; nextRowSelectionReason = nil; page = Int(lower.filter(\.isNumber)); continue
             }
             if let marker = parseRappiRowBoundsMarker(line) {
                 flush()
                 nextRowBounds = marker.bounds
                 nextRowConfidence = marker.confidence
+                continue
+            }
+            if lower.hasPrefix("__rappi_row_meta__") {
+                let prefix = "__rappi_row_meta__"
+                nextRowSelectionReason = String(line.dropFirst(prefix.count))
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
                 continue
             }
             if lower.contains("cargos, abonos y compras regulares")
@@ -12264,8 +12312,14 @@ final class FinanceStore {
                     rowPage = page
                     rowBounds = nextRowBounds
                     rowConfidence = nextRowConfidence
+                    // The metadata marker is emitted immediately before the
+                    // row it describes. Keep it with the pending row so a
+                    // native fallback and the shared engine expose the same
+                    // audit reason.
+                    rowSelectionReason = nextRowSelectionReason
                     nextRowBounds = nil
                     nextRowConfidence = nil
+                    nextRowSelectionReason = nil
                 }
             } else if !pending.isEmpty,
                       !lower.hasPrefix("numero de cuenta"), !compactLower.hasPrefix("numerodecuenta"), !lower.hasPrefix("pagina"),
