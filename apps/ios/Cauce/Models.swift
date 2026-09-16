@@ -3043,9 +3043,11 @@ final class FinanceStore {
     }
 
     private func isValidStoredMovement(_ movement: Movement) -> Bool {
+        let hasReadableConcept = movement.title.rangeOfCharacter(from: .letters) != nil
+        let hasEvidenceBackedRappiReviewConcept = Self.isEvidenceBackedRappiReviewConcept(movement)
         guard movement.amount != 0,
               movement.title.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3,
-              movement.title.rangeOfCharacter(from: .letters) != nil,
+              (hasReadableConcept || hasEvidenceBackedRappiReviewConcept),
               (!Self.isAdministrativeTitle(movement.title) || Self.isSupportedScreenshotDescriptor(movement)) else { return false }
         switch movement.flow {
         case .income:
@@ -3057,6 +3059,24 @@ final class FinanceStore {
         }
         let year = Calendar(identifier: .gregorian).component(.year, from: movement.date)
         return (1900...2_200).contains(year)
+    }
+
+    /// A numeric-only Rappi concept can still be a real visual row when
+    /// Vision retained the page/source fragment and selected the same amount.
+    /// Keep this exception issuer-scoped and review-only: it is never a
+    /// general relaxation for bank headers or arbitrary imported text.
+    private static func isEvidenceBackedRappiReviewConcept(_ movement: Movement) -> Bool {
+        guard movement.account.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX")) == "rappi",
+              movement.title.rangeOfCharacter(from: .letters) == nil,
+              movement.merchantReviewReason != nil,
+              let evidence = movement.extractionEvidence,
+              evidence.method == "vision-ocr",
+              evidence.confidence.isFinite,
+              (evidence.page ?? 0) > 0,
+              evidence.sourceText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+              let selectedAmount = evidence.selectedAmount,
+              abs(selectedAmount) == abs(movement.amount) else { return false }
+        return true
     }
 
     /// Mobile rows may show a merchant named TOTAL PASS or a reference plus
