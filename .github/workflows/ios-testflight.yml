@@ -62,6 +62,8 @@ jobs:
           npm ci
           npm test
           npm run build
+          npm run rappi:engine:build
+          git diff --exit-code -- apps/ios/Cauce/Resources/rappi-engine.js
 
       - name: Mostrar toolchain de Apple
         shell: bash
@@ -99,6 +101,10 @@ jobs:
           version="${REQUESTED_MARKETING_VERSION:-}"
           if [[ -z "$version" && "$GITHUB_REF" == refs/tags/ios-v* ]]; then
             version="${GITHUB_REF_NAME#ios-v}"
+            # A protected release tag ending in -bootstrap is the explicit
+            # path for installing the on-device certifier before the real
+            # corpus report exists. Keep the suffix out of CFBundleShortVersionString.
+            version="${version%-bootstrap}"
           fi
           version="${version:-1.0.0}"
           if [[ ! "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
@@ -107,6 +113,18 @@ jobs:
           fi
           echo "MARKETING_VERSION=$version" >> "$GITHUB_ENV"
           echo "Se compilará Marcelito $version"
+
+      - name: Evitar una versión de marketing obsoleta
+        env:
+          ASC_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          ASC_KEY_ID: ${{ secrets.APPSTORE_API_KEY_ID }}
+          ASC_PRIVATE_KEY: ${{ secrets.APPSTORE_API_PRIVATE_KEY }}
+          ASC_BUNDLE_ID: mx.marcelito.personal
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET_MARKETING_VERSION="$MARKETING_VERSION" \
+            node scripts/validate-testflight-marketing-version.mjs
 
       - name: Instalar XcodeGen
         shell: bash
@@ -142,7 +160,11 @@ jobs:
         env:
           NATIVE_CORPUS_CERTIFIED: ${{ vars.MARCELITO_NATIVE_CORPUS_CERTIFIED }}
           NATIVE_CORPUS_READER_VERSION: ${{ vars.MARCELITO_NATIVE_CORPUS_READER_VERSION }}
-          CORPUS_CERTIFIER_BOOTSTRAP: ${{ inputs.corpus_certifier }}
+          # Environment protection only permits the release tag path in this
+          # repository. A -bootstrap suffix is therefore an explicit, visible
+          # equivalent of the workflow_dispatch boolean input; it never marks
+          # the native corpus as certified.
+          CORPUS_CERTIFIER_BOOTSTRAP: ${{ inputs.corpus_certifier == true || endsWith(github.ref_name, '-bootstrap') }}
         shell: bash
         run: |
           set -euo pipefail

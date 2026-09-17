@@ -17,6 +17,23 @@ xcodebuild -project Marcelito.xcodeproj -scheme Marcelito \
   -destination "platform=iOS Simulator,name=iPhone 16" test
 ```
 
+El parser determinista de Rappi se comparte con la web como un recurso JavaScript
+local ejecutado por JavaScriptCore; PDFKit y Vision siguen siendo los extractores
+nativos. Antes de generar el proyecto, reconstruye el recurso para evitar que el
+bundle de iOS quede desfasado:
+
+```bash
+cd ../..
+npm ci
+npm run rappi:engine:build
+cd apps/ios
+xcodegen generate --spec project.yml
+```
+
+El recurso no usa CDN ni envía PDFs fuera del dispositivo. Si el recurso no puede
+cargarse, el lector nativo conserva su ruta de recuperación y la prueba de iOS
+debe reportarlo; no se mezclan resultados de ambos motores.
+
 Para medir los PDFs reales con el mismo lector Vision, conserva los archivos
 fuera del repositorio y pasa la carpeta al test nativo. El test exige todos los
 archivos del manifiesto, verifica los estados de texto disponibles y emite una línea
@@ -53,7 +70,8 @@ el corpus no cumpla el 97%:
 ```bash
 MARCELITO_PDF_CORPUS_VERIFY=1 \
 MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1 \
-MARCELITO_PDF_CORPUS_DIR="/ruta/a/estados-validados" \
+MARCELITO_PDF_CORPUS_DIR="/ruta/privada/estados-rappi" \
+MARCELITO_PDF_CORPUS_MANIFEST="/ruta/privada/rappi-regression-manifest.json" \
   ./scripts/run-native-corpus.sh
 ```
 
@@ -66,17 +84,17 @@ hay falsos positivos o la precisión cae por debajo de 97%:
 cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
-  --manifest tests/fixtures/pdf-corpus-attachments.json \
-  --reader-version ios-reader-2026.09.03.31 \
+  --manifest /ruta/privada/rappi-regression-manifest.json \
+  --reader-version ios-reader-deterministic-2026.09.17.1 \
   --require-certified
 ```
 
 El reporte incluye controles esperados y extraídos de saldo inicial, saldo
 final, depósitos, retiros, cargos y pagos, además de confianza del emisor,
 confianza OCR media y página OCR más débil. Todos los archivos deben identificar el emisor con estado
-`verified`; los cuatro estados de texto validan también filas y totales como
-aserciones duras. Los escaneos Santander se reportan para calibración mientras
-permanezcan en `pending`.
+`verified`; los archivos con expectativas doradas validan también filas y
+totales como aserciones duras. Los escaneos Santander se reportan para
+calibración mientras permanezcan en `pending`.
 
 El verificador también exige el `NATIVE_CORPUS_REPORT` por archivo: comprueba
 que no falte ningún PDF, que no haya archivos repetidos, que el conjunto de
@@ -120,8 +138,9 @@ botón separado **Compartir diagnóstico por fila** es privado y sí incluye el
 texto OCR necesario para depurar una extracción. Guárdalo como
 `docs/native-corpus-certification.json` para que el workflow lo valide antes de
 publicar. La primera build que instala esta herramienta se ejecuta con la
-opción de bootstrap del workflow; después la compuerta vuelve a exigir un
-informe certificado de al menos 10 estados únicos.
+opción de bootstrap del workflow; después la compuerta acepta el perfil
+general de al menos 10 estados o el perfil `rappi-focused` de al menos seis
+tarjetas Rappi procesadas con texto nativo o `vision-ocr`.
 
 Para una auditoría con expectativas doradas, el runner nativo admite además
 `MARCELITO_PDF_CORPUS_MANIFEST` apuntando a un JSON privado fuera del checkout.
@@ -129,7 +148,11 @@ Ese manifiesto puede reutilizar el formato de
 `tests/fixtures/pdf-corpus-attachments.json` (SHA-256, `emisor:últimos4`, tipo,
 estado, filas y controles); la versión declarada debe ser igual a
 `FinanceStore.readerVersion`. El script resuelve la ruta, exige que el conjunto
-de nombres coincida con los PDFs y valida los controles con PDFKit + Vision:
+de nombres coincida con los PDFs y valida los controles con PDFKit + Vision. La
+certificación del runner se determina por el conjunto exacto del manifiesto,
+no por el perfil de tamaño de la herramienta general del iPhone; esto permite
+comprobar los seis PDFs Rappi con goldens sin debilitar la compuerta general ni
+el perfil `rappi-focused` del certificador del dispositivo:
 
 ```bash
 MARCELITO_PDF_CORPUS_DIR=/ruta/privada/estados \

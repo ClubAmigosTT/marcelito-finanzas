@@ -98,11 +98,82 @@ enum DiagnosticsRecorder {
     }
 }
 
+private struct DiagnosticCountBadge: View {
+    let title: String
+    let value: Int
+    let color: Color
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Text("\(value)")
+                .font(.headline.monospacedDigit())
+                .foregroundStyle(color)
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 7)
+        .background(color.opacity(0.10), in: RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+private struct DiagnosticIssueRow: View {
+    let issue: LedgerDiagnosticIssue
+
+    private var color: Color {
+        switch issue.severity {
+        case .error: return .marcelitoDanger
+        case .warning: return .marcelitoAmber
+        case .info: return .marcelitoNavyMid
+        }
+    }
+
+    private var symbol: String {
+        switch issue.severity {
+        case .error: return "xmark.octagon.fill"
+        case .warning: return "exclamationmark.triangle.fill"
+        case .info: return "info.circle.fill"
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 9) {
+            Image(systemName: symbol)
+                .foregroundStyle(color)
+                .padding(.top, 2)
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(issue.title)
+                        .font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 4)
+                    Text(issue.severity.label)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(color)
+                }
+                if let scope = issue.scopeLabel {
+                    Text(scope)
+                        .font(.caption2.weight(.medium))
+                        .foregroundStyle(.secondary)
+                }
+                Text(issue.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 4)
+    }
+}
+
 struct DiagnosticsView: View {
     @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var copied = false
+    @State private var copiedMessage = "Puedes pegarlo en el reporte de TestFlight sin adjuntar tus estados de cuenta."
     @State private var events = DiagnosticsRecorder.events
+    @State private var diagnosticReport: LedgerDiagnosticReport?
     @State private var isNativeCorpusPresented = false
     @State private var isSettingsPresented = false
 
@@ -131,6 +202,62 @@ struct DiagnosticsView: View {
                     Text("Estado de la sesión")
                 }
 
+                Section("Revisión completa") {
+                    Button {
+                        _ = store.runAutomaticAudit(trigger: "diagnostics.manual")
+                        diagnosticReport = store.diagnosticReport()
+                        events = DiagnosticsRecorder.events
+                    } label: {
+                        Label("Analizar todos los estados guardados", systemImage: "stethoscope")
+                    }
+                    .accessibilityIdentifier("diagnostics.run-full-audit")
+
+                    Text("Revisa los PDFs y movimientos que ya están guardados en este iPhone. No vuelve a subir archivos ni a ejecutar OCR.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let report = diagnosticReport {
+                        HStack(spacing: 8) {
+                            DiagnosticCountBadge(title: "Errores", value: report.errorCount, color: .marcelitoDanger)
+                            DiagnosticCountBadge(title: "Advertencias", value: report.warningCount, color: .marcelitoAmber)
+                            DiagnosticCountBadge(title: "Info", value: report.infoCount, color: .marcelitoNavyMid)
+                        }
+
+                        Text("Conciliados: \(report.reconciledStatementCount)/\(report.statementCount) · Elegibles KPI: \(report.validatedStatementCount)/\(report.statementCount) · Canónicos: \(report.canonicalMovementCount) · Bloqueados por fila: \(report.blockedMovementCount) · En cuarentena: \(report.quarantinedCandidateCount) · Por enriquecer: \(report.enrichmentMovementCount)")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        Text("Generado \(report.generatedAt, style: .relative)")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+
+                        Button {
+                            UIPasteboard.general.string = report.text
+                            copiedMessage = "El diagnóstico completo quedó copiado. No incluye el PDF; contiene los hallazgos y la evidencia textual conservada localmente."
+                            copied = true
+                        } label: {
+                            Label("Copiar diagnóstico completo", systemImage: "doc.on.doc")
+                        }
+
+                        if report.errorCount == 0 && report.warningCount == 0 {
+                            Label(
+                                report.statementCount == 0
+                                    ? "No hay estados guardados para revisar"
+                                    : "No se encontraron errores ni pendientes",
+                                systemImage: report.statementCount == 0 ? "tray" : "checkmark.circle.fill"
+                            )
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(report.statementCount == 0 ? Color.marcelitoAmber : Color.marcelitoSuccess)
+                        }
+
+                        ForEach(report.issues) { issue in
+                            DiagnosticIssueRow(issue: issue)
+                        }
+                    }
+                }
+
                 Section("Libro canónico") {
                     if let audit = store.lastAuditRun {
                         let auditStatus: String = switch audit.status {
@@ -148,10 +275,12 @@ struct DiagnosticsView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
-                    LabeledContent("Estados", value: "\(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount) conciliados")
+                    LabeledContent("Estados con conciliación válida", value: "\(store.ledgerQuality.reconciledStatementCount)/\(store.ledgerQuality.statementCount)")
+                    LabeledContent("Estados elegibles para KPI", value: "\(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount)")
                     LabeledContent("Movimientos canónicos", value: "\(store.ledgerQuality.movementCount)")
-                    LabeledContent("Por revisar (canónicos)", value: "\(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) · \(money(store.ledgerQuality.reviewAmount))")
-                    LabeledContent("Movimientos en cuarentena", value: "\(store.ledgerQuality.quarantinedMovementCount) · \(money(store.ledgerQuality.quarantinedAmount))")
+                    LabeledContent("Movimientos por enriquecer", value: "\(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) · \(money(store.ledgerQuality.reviewAmount))")
+                    LabeledContent("Movimientos bloqueados por fila", value: "\(store.ledgerQuality.blockedMovementCount)")
+                    LabeledContent("Movimientos en cuarentena", value: "\(store.ledgerQuality.quarantinedCandidateCount)")
                     LabeledContent("Estados en cuarentena", value: "\(store.ledgerQuality.quarantinedStatementCount)")
                     LabeledContent("Importes fuera de rango", value: "\(store.ledgerQuality.absurdMovementCount)")
                     LabeledContent("Filas con evidencia", value: "\(Int(store.ledgerQuality.evidencePercent.rounded()))%")
@@ -308,7 +437,7 @@ struct DiagnosticsView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(store.statementAudits) { audit in
-                            let duplicateSuffix = audit.duplicateRows.map { " · \($0) duplicadas" } ?? ""
+                            let duplicateSuffix = audit.duplicateRows.flatMap { $0 > 0 ? " · \($0) duplicadas confirmadas" : nil } ?? ""
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
                                     Text("\(audit.source) · \(audit.period)")
@@ -318,10 +447,10 @@ struct DiagnosticsView: View {
                                         .font(.caption2.weight(.semibold))
                                         .foregroundStyle(audit.reconciliation == .invalid ? Color.marcelitoDanger : (audit.requiresReview ? Color.marcelitoAmber : Color.marcelitoSuccess))
                                 }
-                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas · \(audit.rejectedRows) rechazadas · \(audit.diagnosticRows) diagnosticadas · \(audit.quarantinedRows) en cuarentena\(duplicateSuffix)")
+                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas · \(audit.blockedRows) bloqueadas · \(audit.rejectedRows) rechazadas · \(audit.diagnosticRows) diagnosticadas · \(audit.quarantinedRows) en cuarentena\(duplicateSuffix)")
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(.secondary)
-                                Text("Por revisar \(audit.reviewRows) · \(money(audit.reviewTotal))")
+                                Text("Por enriquecer \(audit.reviewRows) · \(money(audit.reviewTotal))")
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(audit.reviewRows > 0 ? Color.marcelitoAmber : .secondary)
                                 Text("Ingresos \(money(audit.incomeTotal)) · Gasto \(money(audit.expenseTotal)) · Reembolsos \(money(audit.refundTotal))")
@@ -373,6 +502,7 @@ struct DiagnosticsView: View {
                             UIPasteboard.general.string = DiagnosticsRecorder.exportText()
                                 + "\n\n"
                                 + store.diagnosticExportText()
+                            copiedMessage = "Puedes pegar el registro resumido en el reporte de TestFlight sin adjuntar tus estados de cuenta."
                             copied = true
                         } label: {
                             Label("Copiar registro", systemImage: "doc.on.doc")
@@ -395,7 +525,7 @@ struct DiagnosticsView: View {
             .alert("Registro copiado", isPresented: $copied) {
                 Button("OK", role: .cancel) { }
             } message: {
-                Text("Puedes pegarlo en el reporte de TestFlight sin adjuntar tus estados de cuenta.")
+                Text(copiedMessage)
             }
             .sheet(isPresented: $isNativeCorpusPresented) {
                 NativeCorpusCertificationView()

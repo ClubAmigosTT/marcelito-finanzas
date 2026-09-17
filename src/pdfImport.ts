@@ -6,7 +6,7 @@ import { parseDeterministicStatement, reconcileExactly } from "./issuerParsers/i
 import type { DocumentLayout, DocumentLayoutLine, DocumentLayoutPage } from "./issuerParsers/types.ts";
 
 /** Bumped whenever extraction or reconciliation rules change materially. */
-export const PDF_READER_VERSION = "web-reader-deterministic-2026.09.12.2";
+export const PDF_READER_VERSION = "web-reader-deterministic-2026.09.16.2";
 
 const monthNames = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
 const monthTokenPattern = "enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|ag0|sep|set|oct|nov|dic";
@@ -252,6 +252,14 @@ export function detectAccountKey(text: string, source: StatementSource) {
     headerLines.push(line);
   }
   const header = headerLines.join(" ");
+  // RappiCard exposes a 20-digit account number in its administrative cover.
+  // Keep only its last four digits, just like the native reader; the generic
+  // bank patterns below intentionally cap shorter account/CLABE variants.
+  if (source === "Rappi") {
+    const rappiAccount = header.match(/(?:no\.?|numero)\s+de\s+cuenta\D{0,12}([0-9][0-9\s-]{18,30})/i)?.[1];
+    const digits = rappiAccount?.replace(/\D/g, "");
+    if (digits && digits.length >= 20 && digits.length <= 24) return `rappi:${digits.slice(-4)}`;
+  }
   const patterns = [
     /(?:no\.?|numero)\s+de\s+cuenta(?:\s+clabe)?\D{0,12}([0-9][0-9\s-]{3,24})/i,
     /cuenta\s+(?:clabe|de\s+(?:cheques|ahorro|corriente))\D{0,12}([0-9][0-9\s-]{3,24})/i,
@@ -372,6 +380,34 @@ export function shouldUseOCR(extractedText: string) {
   });
   const hasMovementRowSignal = sameLineMovementRowSignal || continuationMovementRowSignal;
   return !hasDateSignal || !hasTableSignal || !hasMovementRowSignal;
+}
+
+/**
+ * Proves Rappi's selectable layer against its own printed controls. Some
+ * Rappi exports contain a complete PDF text table but still trip the generic
+ * scan heuristic; sending those pages through OCR can lose one row on dense
+ * continuation pages. This helper is intentionally issuer-scoped so the
+ * existing Amex, BBVA and Santander extraction contracts remain unchanged.
+ */
+export function rappiTextLayerReconciles(
+  text: string,
+  fileName: string,
+  layout: DocumentLayout,
+) {
+  const sourceDetection = detectSourceEvidence(text, fileName);
+  if (sourceDetection.source !== "Rappi" || sourceDetection.status !== "verified") return false;
+  try {
+    const parsed = parseDeterministicStatement({
+      source: "Rappi",
+      fileName,
+      mode: "text",
+      text,
+      layout,
+    });
+    return parsed.transactions.length > 0 && parsed.reconciliation.status === "valid";
+  } catch {
+    return false;
+  }
 }
 
 function normalizeBareBankSummaryAmount(raw: string, parsed: number) {
@@ -1506,7 +1542,18 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   }
 
   const extractedText = pageTexts.join("\n");
-  const mode = shouldUseOCR(extractedText) ? "ocr" : "text";
+  // Rappi exports can contain a perfectly usable selectable layer even when
+  // the generic scan heuristic sees an ISO date shape or a long cover and
+  // asks for OCR. Prove that layer against the issuer controls first. This
+  // keeps OCR as a recovery path, instead of allowing a lossy OCR pass to
+  // replace a complete, auditable text table. The probe is intentionally
+  // Rappi-only so Amex, BBVA and Santander keep their existing contracts.
+  const selectableRappiReconciles = rappiTextLayerReconciles(
+    extractedText,
+    file.name,
+    { pages: textLayoutPages },
+  );
+  const mode = selectableRappiReconciles || !shouldUseOCR(extractedText) ? "text" : "ocr";
   const ocrResult = mode === "ocr" ? await recognizePdfText(document, onProgress) : undefined;
   const text = ocrResult?.text ?? extractedText;
   const layout = ocrResult?.layout ?? { pages: textLayoutPages };
@@ -1517,16 +1564,33 @@ export async function inspectPdf(file: File, onProgress: (value: number, label: 
   onProgress(98, mode === "ocr" ? "Conciliando movimientos reconocidos" : "Conciliando cargos y pagos");
 
   const deterministic = source === "Santander" || source === "BBVA" || source === "Amex" || source === "Rappi"
-    ? parseDeterministicStatement({ source, fileName: file.name, mode, text, layout })
+    ? parseDeterministicStatement({
+      source,
+      fileName: file.name,
+      mode,
+      text,
+      layout,
+      pageConfidences: ocrResult?.pageConfidences,
+    })
     : undefined;
   const parsed = deterministic?.transactions ?? [];
   const summary = deterministic?.summary;
-  const reconciliation = deterministic?.reconciliation ?? {
+  const baseReconciliation = deterministic?.reconciliation ?? {
     status: "invalid" as const,
     tolerance: 0,
     extractedMovementCount: 0,
     reason: "No existe un parser determinista para el emisor identificado",
   };
+  // A valid arithmetic match is not enough to auto-accept a browser OCR read.
+  // Apply the same confidence gate used by the review/save boundary before the
+  // result reaches the dialog, so a low-confidence OCR statement cannot look
+  // conciliado merely because its totals happened to match.
+  const reconciliation = gateOcrReconciliation(
+    baseReconciliation,
+    mode,
+    ocrResult?.confidence,
+    ocrResult?.pageConfidences,
+  );
   onProgress(100, "Listo para revisar");
 
     const result: ImportResult = {

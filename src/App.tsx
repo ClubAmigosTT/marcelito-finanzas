@@ -245,6 +245,20 @@ function compactMerchantName(description: string) {
     .slice(0, 46) || "Sin descripción";
 }
 
+function visibleMerchant(transaction: Pick<Transaction, "displayMerchant" | "description">) {
+  return transaction.displayMerchant?.trim() || transaction.description;
+}
+
+const pendingEnrichmentCategories = ["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"];
+
+function enrichmentLabel(transaction: Transaction) {
+  if (transaction.merchantReviewReason) return "Comercio por confirmar";
+  if (isCategorizedSpendTransaction(transaction) && pendingEnrichmentCategories.includes(transaction.category)) {
+    return "Categoría por confirmar";
+  }
+  return undefined;
+}
+
 function reconciliationCountLabel(reconciliation?: StatementReconciliation) {
   if (!reconciliation?.expectedMovementCount || reconciliation.extractedMovementCount === undefined) return "";
   return ` · filas ${reconciliation.extractedMovementCount}/${reconciliation.expectedMovementCount}`;
@@ -1055,8 +1069,8 @@ function DataQualityIndicator({ metrics }: { metrics: ReturnType<typeof buildFin
     <div className="quality-primary-metrics">
       <div><span>Estados conciliados</span><strong>{Math.round(quality.reconciledPercent)}%</strong><small>{quality.eligibleStatementCount} de {quality.eligibleStatementCount + quality.quarantinedStatementCount} estados aptos para KPI</small></div>
       <div><span>Movimientos canónicos</span><strong>{Math.round(quality.classifiedPercent)}%</strong><small>{quality.classifiedCount} de {quality.totalCount} clasificados · evidencia {Math.round(quality.eligibleEvidencePercent)}%</small></div>
-      <div><span>Por revisar (canónicos)</span><strong>{Math.round(quality.reviewPercent)}%</strong><small>{quality.reviewCount} movimientos · {displayMoney(quality.reviewAmount)} · {quality.relevantReviewCount} relevantes</small></div>
-      <div><span>En cuarentena</span><strong>{quality.quarantinedMovementCount}</strong><small>{displayMoney(quality.quarantinedMovementAmount)} · {quality.quarantinedStatementCount} estados bloqueados</small></div>
+      <div><span>Movimientos por enriquecer</span><strong>{Math.round(quality.reviewPercent)}%</strong><small>{quality.reviewCount} movimientos · {displayMoney(quality.reviewAmount)} · {quality.relevantReviewCount} relevantes</small></div>
+      <div><span>Movimientos bloqueados</span><strong>{quality.quarantinedMovementCount}</strong><small>{displayMoney(quality.quarantinedMovementAmount)} · {quality.quarantinedStatementCount} estados bloqueados</small></div>
     </div>
     <div className="quality-secondary"><span>{Math.round(quality.canonicalCoveragePercent)}% de filas importadas llegó al libro canónico</span><span>Conciliación fila a fila: {Math.round(quality.rawReconciledPercent)}%</span><span>{quality.rawReviewCount} filas requieren revisión en la ingestión completa</span>{blockedReasonText && <span>Bloqueos por causa (pueden superponerse): {blockedReasonText}</span>}</div>
     {alert ? <p className="quality-alert">{metrics.isProvisional ? "KPI provisionales: " : ""}{quality.relevantReviewCount ? `revisa ${quality.relevantReviewCount} movimiento${quality.relevantReviewCount === 1 ? " relevante" : "s relevantes"}` : quality.quarantinedStatementCount ? `${quality.quarantinedStatementCount} estado${quality.quarantinedStatementCount === 1 ? " está" : "s están"} en cuarentena y no alimenta${quality.quarantinedStatementCount === 1 ? "" : "n"} los KPI` : "hay filas rechazadas por el parser"}.</p> : <p className="quality-ok">Sin alertas relevantes de clasificación.</p>}
@@ -1181,7 +1195,7 @@ function MetricDetailPanel({ metric, metrics, transactions, statements, onClose 
       <div className="metric-audit-block"><h3>Cálculo exacto</h3><div className="metric-formula-list">{components.map((component) => <div key={component.label}><span>{component.label}</span><strong className={component.value < 0 ? "negative" : ""}>{signedDeltaMoney(component.value)}</strong></div>)}</div></div>
       <div className="metric-audit-block"><h3>Estados y cuentas fuente</h3>{sourcePeriods.length ? <div className="metric-source-list">{sourcePeriods.map((period) => { const statement = statements.find((item) => item.id === period.statementId); const value = metric === "cash" ? period.cashBalance : metric === "debt" ? period.debtBalance : undefined; return <div key={period.statementId}><span><strong>{period.source} · {period.label}</strong><small>{statement?.fileName ?? "Estado importado"} · conciliación {statement?.reconciliationStatus ?? "pendiente"}</small></span>{value !== undefined && <b>{displayMoney(value)}</b>}</div>; })}</div> : <p className="metric-detail-empty">Movimiento manual o cifra sin un estado asociado.</p>}</div>
     </div>}
-    {!metrics.isProvisional && movements.length > 0 && <div className="metric-movement-audit"><div className="metric-movement-head"><h3>Movimientos que generan la cifra</h3><span>{movements.length} filas canónicas · sin pagos de tarjeta ni transferencias internas</span></div><div className="metric-movement-list">{movements.slice().sort((left, right) => Math.abs(right.amount) - Math.abs(left.amount)).map((transaction) => { const contribution = isSpendTransaction(transaction) ? (metric === "expense" ? Math.abs(transaction.amount) : -Math.abs(transaction.amount)) : Math.abs(transaction.amount); const statement = statements.find((item) => item.id === transaction.statementId); return <div key={transaction.id}><span><strong>{compactMerchantName(transaction.description)}</strong><small>{transaction.date} · {transaction.category} · {statementLabel(statement)}{transaction.classificationReason ? ` · ${transaction.classificationReason}` : ""}</small></span><b className={contribution < 0 ? "negative" : ""}>{signedDeltaMoney(contribution)}</b></div>; })}</div></div>}
+    {!metrics.isProvisional && movements.length > 0 && <div className="metric-movement-audit"><div className="metric-movement-head"><h3>Movimientos que generan la cifra</h3><span>{movements.length} filas canónicas · sin pagos de tarjeta ni transferencias internas</span></div><div className="metric-movement-list">{movements.slice().sort((left, right) => Math.abs(right.amount) - Math.abs(left.amount)).map((transaction) => { const contribution = isSpendTransaction(transaction) ? (metric === "expense" ? Math.abs(transaction.amount) : -Math.abs(transaction.amount)) : Math.abs(transaction.amount); const statement = statements.find((item) => item.id === transaction.statementId); const enrichment = enrichmentLabel(transaction); return <div key={transaction.id}><span><strong>{compactMerchantName(visibleMerchant(transaction))}</strong><small>{transaction.date} · {transaction.category} · {statementLabel(statement)}{enrichment ? ` · ${enrichment}` : ""}{transaction.classificationReason ? ` · ${transaction.classificationReason}` : ""}</small></span><b className={contribution < 0 ? "negative" : ""}>{signedDeltaMoney(contribution)}</b></div>; })}</div></div>}
   </section>;
 }
 
@@ -1210,12 +1224,12 @@ function Movements({ transactions, statements, setTransactions, onLearnCategory,
   const [query, setQuery] = useState("");
   const filtered = transactions.filter((item) => {
     const statement = statements.find((source) => source.id === item.statementId);
-    return `${item.description} ${item.category} ${item.account} ${statementLabel(statement)} ${statement?.fileName ?? ""}`.toLowerCase().includes(query.toLowerCase());
+    return `${visibleMerchant(item)} ${item.description} ${item.rawDescription ?? ""} ${item.normalizedMerchant ?? ""} ${item.category} ${item.account} ${statementLabel(statement)} ${statement?.fileName ?? ""}`.toLowerCase().includes(query.toLowerCase());
   });
   function updateCategory(id: string, category: string) {
     setTransactions((items) => items.map((item) => {
       if (item.id !== id) return item;
-      const deterministic = deterministicExpenseClassification(item.description, item.flow, item.kind);
+      const deterministic = deterministicExpenseClassification(item.normalizedMerchant ?? item.description, item.flow, item.kind);
       return {
         ...item,
         category,
@@ -1226,9 +1240,9 @@ function Movements({ transactions, statements, setTransactions, onLearnCategory,
       };
     }));
     const movement = transactions.find((item) => item.id === id);
-    if (movement) onLearnCategory(movement.description, category);
+    if (movement) onLearnCategory(movement.account === "Rappi" ? movement.normalizedMerchant ?? movement.description : movement.description, category);
   }
-  return <section className={embedded ? "movements-detail" : undefined}>{!embedded && <PageHeading title="Movimientos" body="Busca, corrige y conecta cada movimiento con su estado de cuenta." action="Importar estado" onAction={onImport} />}<div className="filter-row"><div className="search-box"><ListMagnifyingGlass size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar comercio, banco, periodo o categoría" /></div><span className="result-count">{filtered.length} de {transactions.length}</span></div>{filtered.length ? <div className="movement-list">{filtered.map((item) => { const statement = statements.find((source) => source.id === item.statementId); return <div className="movement-row" key={item.id}><span className={`movement-glyph glyph-${item.flow}`}>{item.flow === "transfer" ? <ArrowsLeftRight size={18} /> : item.flow === "income" ? <ArrowDown size={18} /> : <Receipt size={18} />}</span><div className="movement-name"><strong>{item.description}</strong><span>{item.date} · {item.account} · {statementLabel(statement)}</span></div><select aria-label={`Categoría de ${item.description}`} value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)}>{["Ingresos", "Transferencia", ...expenseCategories].map((category) => <option key={category}>{category}</option>)}</select><strong className={item.amount > 0 ? "amount positive" : "amount"}>{moneyPrecise.format(item.amount)}</strong><button className="row-action" aria-label={`Editar ${item.description}`}><PencilSimple size={17} /></button></div>; })}</div> : <EmptyState title="No hay movimientos reales" body="Importa un estado de cuenta o agrega un movimiento manual para empezar." />}</section>;
+  return <section className={embedded ? "movements-detail" : undefined}>{!embedded && <PageHeading title="Movimientos" body="Busca, corrige y conecta cada movimiento con su estado de cuenta." action="Importar estado" onAction={onImport} />}<div className="filter-row"><div className="search-box"><ListMagnifyingGlass size={19} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Buscar comercio, banco, periodo o categoría" /></div><span className="result-count">{filtered.length} de {transactions.length}</span></div>{filtered.length ? <div className="movement-list">{filtered.map((item) => { const statement = statements.find((source) => source.id === item.statementId); const label = visibleMerchant(item); const enrichment = enrichmentLabel(item); const raw = item.rawDescription?.trim(); return <div className="movement-row" key={item.id}><span className={`movement-glyph glyph-${item.flow}`}>{item.flow === "transfer" ? <ArrowsLeftRight size={18} /> : item.flow === "income" ? <ArrowDown size={18} /> : <Receipt size={18} />}</span><div className="movement-name"><strong title={raw ?? item.description}>{label}</strong><span>{item.date} · {item.account} · {statementLabel(statement)}{enrichment ? ` · ${enrichment}` : ""}</span>{enrichment && raw && raw !== label && <small className="merchant-review-warning">Texto original: {raw}</small>}</div><select aria-label={`Categoría de ${label}`} value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)}>{["Ingresos", "Transferencia", ...expenseCategories].map((category) => <option key={category}>{category}</option>)}</select><strong className={item.amount > 0 ? "amount positive" : "amount"}>{moneyPrecise.format(item.amount)}</strong><button className="row-action" aria-label={`Editar ${label}`}><PencilSimple size={17} /></button></div>; })}</div> : <EmptyState title="No hay movimientos reales" body="Importa un estado de cuenta o agrega un movimiento manual para empezar." />}</section>;
 }
 
 function Expenses({ transactions, statements, metrics, onImport }: { transactions: Transaction[]; statements: Statement[]; metrics: ReturnType<typeof buildFinanceMetrics>; onImport: () => void }) {
@@ -1273,13 +1287,14 @@ function CategoryDistribution({ categories, period, analyticsPeriods, transactio
   const recurring = useMemo(() => {
     const grouped = new Map<string, { name: string; total: number; count: number }>();
     selectedTransactions.forEach((transaction) => {
-      const key = merchantKey(transaction.description) || normalizeConcept(transaction.description) || transaction.description.trim().toLowerCase();
+      const label = visibleMerchant(transaction);
+      const key = transaction.normalizedMerchant?.trim() || merchantKey(label) || normalizeConcept(label) || label.trim().toLowerCase();
       const current = grouped.get(key);
       if (current) {
         current.total += Math.abs(transaction.amount);
         current.count += 1;
       } else {
-        grouped.set(key, { name: compactMerchantName(transaction.description), total: Math.abs(transaction.amount), count: 1 });
+        grouped.set(key, { name: compactMerchantName(label), total: Math.abs(transaction.amount), count: 1 });
       }
     });
     return Array.from(grouped.values()).sort((left, right) => right.count - left.count || right.total - left.total).slice(0, 5);
@@ -1318,7 +1333,7 @@ function CategoryDistribution({ categories, period, analyticsPeriods, transactio
       {categoryTrend.some((item) => item.total > 0) && <div className="category-trend" aria-label={`Evolución de ${selectedCategory} en los últimos periodos`}><div className="category-trend-head"><div><h4>Evolución</h4><p className="category-detail-caption">Gasto de esta categoría por periodo.</p></div><strong>{displayMoney(categoryTrend.at(-1)?.total)}</strong></div><div className="category-trend-bars" style={{ gridTemplateColumns: `repeat(${categoryTrend.length}, minmax(0, 1fr))` }} role="img" aria-label={categoryTrend.map((item) => `${item.label}: ${displayMoney(item.total)}`).join("; ")}>{categoryTrend.map((item) => <div className="category-trend-bar-wrap" key={item.key}><span className="category-trend-bar" style={{ height: `${Math.max(item.total ? 8 : 2, item.total / categoryTrendMax * 100)}%` }} title={`${item.label}: ${displayMoney(item.total)}`} /><small>{item.label}</small></div>)}</div></div>}
       {selectedTransactions.length ? <div className="category-detail-grid">
         <div><h4>Gastos más recurrentes</h4><p className="category-detail-caption">Comercios que aparecen con mayor frecuencia.</p>{recurring.length ? <ol className="category-detail-list">{recurring.map((merchant, index) => <li key={merchant.name}><span className="category-detail-rank">{index + 1}</span><div><strong>{merchant.name}</strong><small>{merchant.count} movimiento{merchant.count === 1 ? "" : "s"}</small></div><strong>{displayMoney(merchant.total)}</strong></li>)}</ol> : <p className="category-detail-empty">Sin recurrencias identificadas.</p>}</div>
-        <div><h4>Gastos más altos</h4><p className="category-detail-caption">Movimientos de mayor importe en el periodo.</p>{highest.length ? <ol className="category-detail-list">{highest.map((transaction, index) => <li key={transaction.id}><span className="category-detail-rank">{index + 1}</span><div><strong>{compactMerchantName(transaction.description)}</strong><small>{transaction.date} · {transaction.account}</small></div><strong>{displayMoney(Math.abs(transaction.amount))}</strong></li>)}</ol> : <p className="category-detail-empty">Sin movimientos destacados.</p>}</div>
+        <div><h4>Gastos más altos</h4><p className="category-detail-caption">Movimientos de mayor importe en el periodo.</p>{highest.length ? <ol className="category-detail-list">{highest.map((transaction, index) => <li key={transaction.id}><span className="category-detail-rank">{index + 1}</span><div><strong>{compactMerchantName(visibleMerchant(transaction))}</strong><small>{transaction.date} · {transaction.account}</small></div><strong>{displayMoney(Math.abs(transaction.amount))}</strong></li>)}</ol> : <p className="category-detail-empty">Sin movimientos destacados.</p>}</div>
       </div> : <p className="category-detail-empty">No hay movimientos válidos de esta categoría en el periodo seleccionado.</p>}
     </div>}
   </section>;
@@ -1564,7 +1579,9 @@ function ImportDialog({ open, initialMode, onClose, onSave, onSaveScreenshot, ca
       // PDF bytes leave the browser.
       void saveImportedPdf(inspected.sourceFingerprint, file);
       const withLearnedCategories = inspected.transactions.map((item) => {
-        const learned = categoryFromRules(item.description, categoryRules);
+        const merchantNeedsReview = item.account === "Rappi" && Boolean(item.merchantReviewReason);
+        const classificationText = item.normalizedMerchant || item.description;
+        const learned = merchantNeedsReview ? undefined : categoryFromRules(classificationText, categoryRules);
         if (learned) {
           return {
             ...item,
@@ -1575,7 +1592,16 @@ function ImportDialog({ open, initialMode, onClose, onSave, onSaveScreenshot, ca
             confidence: 1,
           };
         }
-        const deterministic = deterministicExpenseClassification(item.description, item.flow, item.kind);
+        if (merchantNeedsReview) {
+          return {
+            ...item,
+            category: item.kind === "cardPayment" ? "Transferencia" : "Por revisar",
+            classificationProvider: "rules" as const,
+            classificationConfidence: item.merchantConfidence ?? 0,
+            classificationReason: item.merchantReviewReason,
+          };
+        }
+        const deterministic = deterministicExpenseClassification(classificationText, item.flow, item.kind);
         if (!deterministic) return item;
         return {
           ...item,
@@ -1676,7 +1702,7 @@ function ImportDialog({ open, initialMode, onClose, onSave, onSaveScreenshot, ca
   const reconciliationBlocked = Boolean(currentReconciliation && currentReconciliation.status !== "valid");
   const learnedCategories = Object.fromEntries(validItems.flatMap((item) => {
     const previous = initialCategories.current[item.id];
-    const key = merchantKey(item.description);
+    const key = merchantKey(item.account === "Rappi" ? item.normalizedMerchant ?? item.description : item.description);
     return key && previous && previous !== item.category && !["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"].includes(item.category) ? [[key, item.category]] : [];
   }));
   const screenshotPreview = screenshotResult ? deduplicateScreenshotTransactions(screenshotResult.transactions).transactions : [];
@@ -1699,7 +1725,7 @@ function ImportDialog({ open, initialMode, onClose, onSave, onSaveScreenshot, ca
       </div>
       {transactionClassifierEndpoint && currentReconciliation?.status === "valid" && validItems.length > 0 && <div className="classifier-callout"><div><strong>Clasificación opcional con Zen</strong><small>Solo enriquece filas ya conciliadas; no puede cambiar importes, emisor ni aceptación.</small></div><button type="button" className="secondary-button" onClick={classifyExpensesWithZen} disabled={classificationBusy || !readerPreflightReady}>{classificationBusy ? "Clasificando…" : "Clasificar gastos"}</button>{classificationMessage && <span role="status">{classificationMessage}</span>}</div>}
       {result.mode === "ocr" && <div className="ocr-callout"><Warning size={21} /><div><strong>Lectura OCR con plantilla fija</strong><p>Solo se aceptaron filas dentro de la sección contractual del emisor. No se permiten correcciones manuales de importes; si el archivo no concilia, debe reimportarse.</p></div></div>}
-      {items.length ? <div className="review-table">{items.map((item) => <div className="review-row" key={item.id}><div><strong>{item.description}</strong><small>{item.date} · página {item.extractionEvidence?.page ?? "—"}</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)} disabled={reconciliationBlocked}>{["Ingresos", "Transferencia", ...expenseCategories].map((category) => <option key={category}>{category}</option>)}</select><span className={item.amount > 0 ? "review-amount positive" : "review-amount"}>{moneyPrecise.format(item.amount)}</span></div>)}</div> : <EmptyState title="Importación rechazada" body="No se extrajeron movimientos contractuales. Este archivo no puede guardarse ni afectar los KPI." />}
+      {items.length ? <div className="review-table">{items.map((item) => { const label = item.displayMerchant ?? item.description; const enrichment = enrichmentLabel(item); const raw = item.rawDescription?.trim(); const showRaw = Boolean(enrichment && raw && raw !== label); const confidence = item.extractionEvidence?.confidence; return <div className="review-row" key={item.id}><div><strong title={raw ?? item.description}>{label}</strong>{enrichment && <small className="merchant-review-warning">{enrichment}{showRaw ? ` · Texto original: ${raw}` : ""}</small>}<small>{item.date} · página {item.extractionEvidence?.page ?? "—"}{item.extractionEvidence?.method ? ` · ${item.extractionEvidence.method === "ocr" ? "OCR" : "texto nativo"}` : ""}{confidence !== undefined ? ` · confianza ${Math.round(confidence * 100)}%` : ""}</small></div><select aria-label="Categoría" value={item.category} onChange={(event) => updateCategory(item.id, event.target.value)} disabled={reconciliationBlocked}>{["Ingresos", "Transferencia", ...expenseCategories].map((category) => <option key={category}>{category}</option>)}</select><span className={item.amount > 0 ? "review-amount positive" : "review-amount"}>{moneyPrecise.format(item.amount)}</span></div>; })}</div> : <EmptyState title="Importación rechazada" body="No se extrajeron movimientos contractuales. Este archivo no puede guardarse ni afectar los KPI." />}
       <div className="dialog-actions"><button className="text-button" onClick={() => setStage("pick")}>Elegir otro archivo</button><button className="primary-button" disabled={reconciliationBlocked} title={reconciliationBlocked ? "El parser rechazó el estado; no admite desbloqueo manual" : undefined} onClick={() => currentReconciliation?.status === "valid" && onSave({ source: result.source, accountKey: result.accountKey, kind: result.kind, period: result.period, fileName: result.fileName, sourceFingerprint: result.sourceFingerprint, fileSizeBytes: result.fileSizeBytes, pageCount: result.pageCount, readerVersion: result.readerVersion, parserId: result.parserId, sourceSection: result.sourceSection, extractionProvider: result.extractionProvider, extractionModel: result.extractionModel, extractionPromptVersion: result.extractionPromptVersion, mode: result.mode, transactions: validItems, summary: result.summary, reconciliation: result.reconciliation, sourceDetection: result.sourceDetection, ocrConfidence: result.ocrConfidence, ocrPageConfidences: result.ocrPageConfidences, categoryRules: learnedCategories })}><Check size={18} />{reconciliationBlocked ? "Estado rechazado" : `Guardar estado y ${validItems.length} movimientos`}</button></div>
     </div>}
     {stage === "review" && importMode === "screenshots" && screenshotResult && <div className="review-state screenshot-review-state">

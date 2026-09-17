@@ -29,6 +29,8 @@ export type DeterministicParseInput = {
   mode: ImportResult["mode"];
   text: string;
   layout?: DocumentLayout;
+  /** Average OCR confidence by 1-based PDF page, when available. */
+  pageConfidences?: number[];
 };
 
 export type DeterministicParseResult = {

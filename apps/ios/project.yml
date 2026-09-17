@@ -12,6 +12,8 @@ targets:
     platform: iOS
     sources:
       - Cauce
+    resources:
+      - Cauce/Resources/rappi-engine.js
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: mx.marcelito.personal

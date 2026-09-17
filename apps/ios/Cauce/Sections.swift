@@ -128,7 +128,7 @@ struct MovementsView: View {
                                     .foregroundStyle(movement.flow.color)
                                     .font(.title3)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(movement.title)
+                                    Text(movement.displayMerchant ?? movement.title)
                                         .lineLimit(1)
                                     Text(movement.category)
                                         .font(.caption.weight(.semibold))
@@ -404,6 +404,17 @@ struct MovementDetailView: View {
             if let statement = movement.statementId.flatMap({ id in store.statements.first(where: { $0.id == id }) }) {
                 LabeledContent("Estado", value: "\(statement.source) · \(conciseStatementPeriod(statement))")
                 LabeledContent("Archivo", value: statement.fileName)
+                if store.statementFileURL(for: statement) != nil {
+                    NavigationLink {
+                        StatementDocumentView(
+                            statement: statement,
+                            initialPage: currentMovement.extractionEvidence?.page,
+                            initialBounds: currentMovement.extractionEvidence?.bounds
+                        )
+                    } label: {
+                        Label("Abrir origen en PDF", systemImage: "doc.viewfinder")
+                    }
+                }
             } else if store.isProvisionalScreenshotMovement(currentMovement) {
                 LabeledContent("Estado", value: "Captura provisional")
                 Label("Ya está incluido en las métricas y se sustituirá al conciliarse con el estado oficial.", systemImage: "clock.badge.checkmark")
@@ -411,6 +422,23 @@ struct MovementDetailView: View {
                     .foregroundStyle(Color.marcelitoAmber)
             } else {
                 LabeledContent("Estado", value: "Movimiento manual")
+            }
+            if let displayMerchant = currentMovement.displayMerchant, !displayMerchant.isEmpty {
+                LabeledContent("Comercio mostrado", value: displayMerchant)
+            }
+            if let rawDescription = currentMovement.rawDescription,
+               rawDescription != currentMovement.displayMerchant,
+               !rawDescription.isEmpty {
+                LabeledContent("Texto original", value: rawDescription)
+            }
+            if let merchantConfidence = currentMovement.merchantConfidence {
+                LabeledContent("Confianza del comercio", value: "\(Int((merchantConfidence * 100).rounded()))%")
+            }
+            if let merchantReviewReason = currentMovement.merchantReviewReason {
+                Label("Comercio por confirmar: \(merchantReviewReason)", systemImage: "questionmark.circle")
+                    .font(.caption)
+                    .foregroundStyle(Color.marcelitoAmber)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let evidence = movement.extractionEvidence {
                 let method = evidence.method == "vision-ocr" ? "OCR visual" : evidence.method == "pdf-text" ? "Texto del PDF" : evidence.method
@@ -438,6 +466,11 @@ struct MovementDetailView: View {
                             bounds.height
                         )
                     )
+                }
+                if let reviewReason = evidence.reviewReason {
+                    Text(reviewReason)
+                        .font(.caption)
+                        .foregroundStyle(Color.marcelitoAmber)
                 }
             }
             if let confidence = currentMovement.reconciliationConfidence,
@@ -503,7 +536,7 @@ struct MovementDetailView: View {
                 }
             ))
         }
-        .navigationTitle(movement.title)
+        .navigationTitle(currentMovement.displayMerchant ?? currentMovement.title)
         .navigationBarTitleDisplayMode(.inline)
         .foregroundStyle(Color.marcelitoNavy)
         .scrollContentBackground(.hidden)
@@ -686,8 +719,9 @@ private struct ExpenseCategoryDetailView: View {
     private var recurringMerchants: [ExpenseMerchantSummary] {
         var grouped: [String: ExpenseMerchantSummary] = [:]
         for movement in movements {
-            let key = merchantKey(movement.title)
-            let display = merchantDisplayName(movement.title)
+            let merchantText = movement.normalizedMerchant ?? movement.title
+            let key = merchantKey(merchantText)
+            let display = movement.displayMerchant ?? merchantDisplayName(merchantText)
             if let existing = grouped[key] {
                 grouped[key] = ExpenseMerchantSummary(
                     id: key,
@@ -794,7 +828,7 @@ private struct ExpenseCategoryDetailView: View {
                                             .foregroundStyle(Color.marcelitoNavyMid)
                                             .frame(width: 20)
                                         VStack(alignment: .leading, spacing: 2) {
-                                            Text(movement.title)
+                                            Text(movement.displayMerchant ?? movement.title)
                                                 .font(.subheadline.weight(.medium))
                                                 .lineLimit(2)
                                             Text(movement.date.formatted(.dateTime.day().month(.abbreviated)))
@@ -1479,7 +1513,9 @@ struct AccountsView: View {
     private var accountsScrollView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 22) {
-                if store.dashboardIsBlocked || store.dashboardIsProvisional {
+                if store.dashboardIsBlocked
+                    || store.dashboardIsProvisional
+                    || store.ledgerQuality.reviewMovementCount > 0 {
                     LedgerQualityBanner(store: store)
                 }
                 accountsHeading
@@ -1835,13 +1871,77 @@ private struct StatementDocumentTile: View {
 struct StatementDocumentView: View {
     @Environment(FinanceStore.self) private var store
     let statement: StatementRecord
+    private let initialPage: Int?
+    private let initialBounds: MovementExtractionBounds?
+    @State private var currentPage: Int
+    @State private var zoomScale: CGFloat = 0
+    @State private var fitWidthRequest = 0
+
+    init(statement: StatementRecord, initialPage: Int? = nil, initialBounds: MovementExtractionBounds? = nil) {
+        self.statement = statement
+        self.initialPage = initialPage
+        self.initialBounds = initialBounds
+        _currentPage = State(initialValue: max(initialPage ?? 1, 1))
+    }
 
     var body: some View {
         Group {
             if let url = store.statementFileURL(for: statement),
                let document = PDFDocument(url: url) {
-                PDFDocumentRepresentable(document: document)
-                    .ignoresSafeArea(edges: .bottom)
+                VStack(spacing: 0) {
+                    if statement.ocrConfidence != nil {
+                        Label("Este PDF requirió OCR", systemImage: "text.viewfinder")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.marcelitoAmber)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(Color.marcelitoAmber.opacity(0.10))
+                    }
+                    HStack(spacing: 10) {
+                        Button { zoomScale = max(0.35, (zoomScale == 0 ? 1 : zoomScale) / 1.25) } label: {
+                            Image(systemName: "minus.magnifyingglass")
+                        }
+                        .accessibilityLabel("Alejar")
+                        Button { fitWidthRequest += 1 } label: {
+                            Text("Ajustar a ancho")
+                                .font(.caption.weight(.semibold))
+                        }
+                        Button { zoomScale = min(6, (zoomScale == 0 ? 1 : zoomScale) * 1.25) } label: {
+                            Image(systemName: "plus.magnifyingglass")
+                        }
+                        .accessibilityLabel("Acercar")
+                        Spacer(minLength: 4)
+                        Button {
+                            currentPage = max(1, currentPage - 1)
+                        } label: {
+                            Image(systemName: "chevron.left")
+                        }
+                        .disabled(currentPage <= 1)
+                        .accessibilityLabel("Página anterior")
+                        Text("Página \(currentPage) de \(max(document.pageCount, 1))")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(Color.marcelitoNavy)
+                        Button {
+                            currentPage = min(max(document.pageCount, 1), currentPage + 1)
+                        } label: {
+                            Image(systemName: "chevron.right")
+                        }
+                        .disabled(currentPage >= document.pageCount)
+                        .accessibilityLabel("Página siguiente")
+                    }
+                    .buttonStyle(.bordered)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    PDFDocumentRepresentable(
+                        document: document,
+                        currentPage: $currentPage,
+                        zoomScale: $zoomScale,
+                        fitWidthRequest: $fitWidthRequest,
+                        initialBounds: initialBounds
+                    )
+                }
+                .ignoresSafeArea(edges: .bottom)
             } else {
                 ContentUnavailableView(
                     "Archivo no disponible",
@@ -1859,14 +1959,23 @@ struct StatementDocumentView: View {
 
 private struct PDFDocumentRepresentable: UIViewRepresentable {
     let document: PDFDocument
+    @Binding var currentPage: Int
+    @Binding var zoomScale: CGFloat
+    @Binding var fitWidthRequest: Int
+    let initialBounds: MovementExtractionBounds?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(currentPage: $currentPage)
+    }
 
     func makeUIView(context: Context) -> PDFView {
         let view = PDFView()
         view.document = document
-        view.autoScales = true
-        view.displayMode = .singlePageContinuous
-        view.displayDirection = .vertical
+        view.autoScales = false
+        view.displayMode = .singlePage
+        view.displayDirection = .horizontal
         view.backgroundColor = UIColor(red: 0.96, green: 0.94, blue: 0.88, alpha: 1)
+        context.coordinator.install(on: view)
         return view
     }
 
@@ -1874,7 +1983,82 @@ private struct PDFDocumentRepresentable: UIViewRepresentable {
         if view.document !== document {
             view.document = document
         }
-        view.autoScales = true
+        let pageNumber = min(max(currentPage, 1), max(document.pageCount, 1))
+        if pageNumber != currentPage {
+            DispatchQueue.main.async { currentPage = pageNumber }
+        }
+        if let page = document.page(at: pageNumber - 1), view.currentPage !== page {
+            view.go(to: page)
+        }
+        if context.coordinator.lastFitWidthRequest != fitWidthRequest {
+            context.coordinator.lastFitWidthRequest = fitWidthRequest
+            context.coordinator.applyFitWidth(to: view) { scale in
+                zoomScale = scale
+            }
+        } else if zoomScale == 0 {
+            context.coordinator.applyFitWidth(to: view) { scale in
+                zoomScale = scale
+            }
+        } else if abs(view.scaleFactor - zoomScale) > 0.01 {
+            view.scaleFactor = zoomScale
+        }
+        if let initialBounds, !context.coordinator.didFocusOrigin,
+           let page = document.page(at: pageNumber - 1) {
+            context.coordinator.didFocusOrigin = true
+            let bounds = page.bounds(for: .mediaBox)
+            let point = CGPoint(
+                x: bounds.minX + CGFloat(initialBounds.x + initialBounds.width / 2) * bounds.width,
+                // Vision's normalized boxes and PDFKit's page coordinates
+                // both use a bottom-left origin. Do not flip this value as if
+                // it came from a top-left UIKit image coordinate system.
+                y: bounds.minY + CGFloat(initialBounds.y + initialBounds.height / 2) * bounds.height
+            )
+            view.go(to: PDFDestination(page: page, at: point))
+        }
+    }
+
+    final class Coordinator: NSObject {
+        let currentPage: Binding<Int>
+        var lastFitWidthRequest = -1
+        var didFocusOrigin = false
+        weak var view: PDFView?
+
+        init(currentPage: Binding<Int>) {
+            self.currentPage = currentPage
+        }
+
+        func install(on view: PDFView) {
+            self.view = view
+            NotificationCenter.default.addObserver(
+                self,
+                selector: #selector(pageChanged),
+                name: Notification.Name.PDFViewPageChanged,
+                object: view
+            )
+        }
+
+        @objc private func pageChanged() {
+            guard let view, let page = view.currentPage, let index = view.document?.index(for: page) else { return }
+            currentPage.wrappedValue = index + 1
+        }
+
+        func applyFitWidth(to view: PDFView, completion: @escaping (CGFloat) -> Void) {
+            guard let page = view.currentPage ?? view.document?.page(at: 0) else { return }
+            let pageBounds = page.bounds(for: .mediaBox)
+            guard pageBounds.width > 0, view.bounds.width > 0 else {
+                DispatchQueue.main.async { self.applyFitWidth(to: view, completion: completion) }
+                return
+            }
+            let scale = min(6, max(0.35, (view.bounds.width - 24) / pageBounds.width))
+            view.scaleFactor = scale
+            completion(scale)
+        }
+
+        deinit {
+            if let view {
+                NotificationCenter.default.removeObserver(self, name: Notification.Name.PDFViewPageChanged, object: view)
+            }
+        }
     }
 }
 

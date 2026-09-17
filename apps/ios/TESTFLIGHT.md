@@ -29,18 +29,16 @@ El workflow `.github/workflows/ios-testflight.yml` compila Marcelito en un runne
    - `APPLE_DISTRIBUTION_P12`: certificado de distribución en Base64.
    - `APPLE_DISTRIBUTION_P12_PASSWORD`: contraseña del certificado P12.
    - `APPLE_PROVISIONING_PROFILE`: perfil App Store en Base64 para `mx.marcelito.personal`.
-4. En GitHub abre **Actions > iOS TestFlight > Run workflow**, escribe la versión (por ejemplo `1.0.1`) y ejecuta. Alternativamente, desde una terminal:
+4. El entorno protegido `testflight` solo permite `main` y tags `ios-v*`. La ruta comprobada para esta corrección es el tag `ios-v1.0.112-bootstrap`, que produjo TestFlight `1.0.112 (210)` en estado `VALID`. El grupo interno `Marcelito - Pruebas internas` tiene distribución automática; el workflow lo verifica sin intentar una asociación manual incompatible con Apple. El tag `ios-v1.0.110-bootstrap` y el build `1.0.110 (209)` quedan como histórico inmediato; `ios-v1.0.6-bootstrap` y el build `1.0.6 (204)` también son históricos. Para una rama de trabajo o una siguiente versión, crea un tag nuevo sobre el commit exacto siguiendo el patrón `ios-vX.Y.Z` (o `ios-vX.Y.Z-bootstrap` si solo vas a instalar el certificador); nunca reutilices ni muevas un tag existente. Usa ese tag como **Run workflow > Use workflow from**. Para el bootstrap inicial marca `corpus_certifier=true`; para una publicación final usa `false` y solo después de certificar el corpus.
 
-   ```bash
-   git tag ios-v1.0.1
-   git push origin ios-v1.0.1
-   ```
+   También puedes ejecutar **Actions > iOS TestFlight > Run workflow** seleccionando ese tag, escribiendo la versión correspondiente y eligiendo el valor de bootstrap adecuado.
 
-5. Antes de publicar, certifica todos los estados con Vision. La ruta preferida no requiere Mac: instala una primera build con la opción **Bootstrap: incluir la herramienta de certificación local**, abre **Resumen > Opciones > Diagnóstico > Certificar estados con Vision**, selecciona los estados privados y comparte el informe JSON sanitizado. Guarda ese archivo como `docs/native-corpus-certification.json` en el repositorio. Como alternativa, puedes ejecutar el runner nativo en una Mac siguiendo el procedimiento del README. En **Settings > Secrets and variables > Actions > Variables** registra:
-   - `MARCELITO_NATIVE_CORPUS_CERTIFIED=true` solo si `NATIVE_CORPUS_SUMMARY` devuelve `certified=true`.
-   - `MARCELITO_NATIVE_CORPUS_READER_VERSION` con la versión del lector que produjo ese informe (por ejemplo, `ios-reader-2026.08.31.14`).
-   Si existe `docs/native-corpus-certification.json`, el workflow valida directamente el informe del dispositivo y no necesitas copiar estas dos variables. En ambos casos, la build se detiene mientras haya estados pendientes, duplicados o una revisión diferente del lector.
-6. Cuando finalice el workflow, espera a que App Store Connect procese el build y agrégalo a un grupo de testers en TestFlight.
+5. Antes de publicar, certifica todos los estados con Vision. Para esta corrección Rappi, la ruta obligatoria es el runner nativo con el manifiesto privado exacto de los seis PDFs, siguiendo `docs/rappi-luna-implementation.md` y `apps/ios/README.md`. Ese runner valida los nombres anonimizados, huellas, filas, controles y versión del lector sin copiar documentos al repositorio. Solo después de que `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1` termine con `certified=true`, y después de comprobar el flujo en un iPhone físico, registra en **Settings > Secrets and variables > Actions > Variables**:
+   - `MARCELITO_NATIVE_CORPUS_CERTIFIED=true`.
+   - `MARCELITO_NATIVE_CORPUS_READER_VERSION=ios-reader-deterministic-2026.09.17.1`.
+
+   La pantalla **Resumen > Opciones > Diagnóstico > Certificar estados con Vision** tiene dos perfiles: selecciona seis o más estados exclusivamente Rappi para producir `certificationScope: rappi-focused`, o diez o más estados para el perfil general. El informe Rappi enfocado exige que todos sean tarjetas Rappi, procesadas con texto nativo o `vision-ocr`, conciliadas y sin revisión pendiente. El manifiesto privado sigue fijando el método exacto esperado por cada PDF. Puede guardarse como `docs/native-corpus-certification.json` y el workflow ajustará la compuerta al perfil declarado. Este informe de dispositivo demuestra la lectura y calidad del conjunto; el runner privado con manifiesto sigue siendo la prueba más fuerte de filas, controles y goldens exactos. Nunca mezcles estados de otros emisores en el perfil Rappi.
+6. Cuando finalice el workflow, espera a que App Store Connect procese el build. El workflow confirma la disponibilidad para los grupos internos con distribución automática; solo agrega manualmente el build a grupos externos o a grupos internos que no tengan distribución automática.
 
 La firma de distribución se importa en un llavero temporal del runner y se elimina al terminar; no hace falta una Mac local. Si Apple muestra un error de firma, revisa que el Bundle ID exista, que la clave tenga permisos de App Manager y que `APPLE_TEAM_ID` corresponda al equipo que creó la app.
 

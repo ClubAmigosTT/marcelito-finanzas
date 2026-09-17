@@ -55,6 +55,19 @@ test("Cuentas conserva un acceso superior para asignar y editar movimientos", as
   assert.match(accounts, /MovementsView\(\)/);
 });
 
+test("calidad distingue conciliación de comercios por enriquecer en Cuentas", async () => {
+  const [sections, root] = await Promise.all([
+    readFile(sectionsPath, "utf8"),
+    readFile(rootTabPath, "utf8"),
+  ]);
+
+  assert.match(sections, /store\.ledgerQuality\.reviewMovementCount > 0/);
+  assert.match(sections, /LedgerQualityBanner\(store: store\)/);
+  assert.match(root, /store\.ledgerQuality\.reviewMovementCount > 0/);
+  assert.match(root, /Movimientos bloqueados por fila:/);
+  assert.match(root, /Por enriquecer en el libro:/);
+});
+
 test("Resumen grafica únicamente el flujo neto y conserva su desglose", async () => {
   const [root, models] = await Promise.all([
     readFile(rootTabPath, "utf8"),

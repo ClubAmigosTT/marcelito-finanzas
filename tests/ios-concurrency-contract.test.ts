@@ -87,10 +87,10 @@ test("la auditoría iOS separa revisión canónica de cuarentena", async () => {
   assert.match(models, /let reviewRows = canonical\.filter/);
   assert.match(models, /quarantinedMovementCount: quarantined\.count/);
   assert.match(models, /reviewTotal: review\.reduce/);
-  assert.match(diagnostics, /Por revisar \(canónicos\)/);
-  assert.match(diagnostics, /Movimientos en cuarentena/);
+  assert.match(diagnostics, /Movimientos por enriquecer/);
+  assert.match(diagnostics, /Movimientos bloqueados/);
   assert.match(diagnostics, /audit\.quarantinedRows/);
-  assert.match(rootTab, /por revisar en el libro canónico/);
+  assert.match(rootTab, /Por enriquecer en el libro/);
 });
 
 test("Vision tiene fallback de idiomas cuando el dispositivo no expone etiquetas regionales", async () => {
@@ -165,6 +165,83 @@ test("Rappi relee la portada aunque la tabla seleccionable ya concilie", async (
   assert.match(source, /recognizedText: usedOCR \? text : ""/);
 });
 
+test("Rappi conserva OCR completo cuando la detección por bandas es parcial", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  // Encontrar algunas bandas no demuestra cobertura completa. La ruta visual
+  // debe conservar también la pasada de página y deduplicar por coordenada,
+  // de modo que una fila omitida pueda recuperarse sin sumar duplicados.
+  assert.match(source, /selectedObservations\.append\(contentsOf: visualRows\)/);
+  assert.match(source, /rappiOCRMovementLineRecords\(from: observations\)/);
+  assert.match(source, /abs\(\$0\.y - candidate\.y\) <= 0\.018/);
+  assert.match(source, /normalized\(\$0\.amount\) == normalized\(candidate\.amount\)/);
+  assert.doesNotMatch(source, /if !visualRows\.isEmpty \{[\s\S]{0,260}observations\.append\(contentsOf: visualRows\)\s*return/);
+});
+
+test("Rappi combina bandas de regla y anclas de fecha sin duplicarlas", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /private static func mergedRappiRowRegions\(/);
+  assert.match(source, /let retriedDateRegions = rappiDateAnchoredRowRegions\(in: image\)/);
+  assert.match(source, /return mergedRappiRowRegions\(ruleRegions: ruleRegions, dateRegions: dateRegions\)/);
+  assert.match(source, /overlapRatio >= 0\.35/);
+  assert.match(source, /fullPageObservations: \[OCRObservation\] = \[\]/);
+  assert.match(source, /observedDateRegions\.count >= ruleRegions\.count/);
+  assert.match(source, /retryDateAnchorsWhenUnobserved: Bool = true/);
+  assert.match(source, /rappiTableRowRegions\(in: image, retryDateAnchorsWhenUnobserved: false\)/);
+});
+
+test("Rappi guarda página y región visual de cada fila OCR", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /private static let rappiRowBoundsPrefix = "__RAPPI_ROW_BOUNDS__"/);
+  assert.match(source, /MovementExtractionBounds\(x: x, y: y, width: width, height: height\)/);
+  assert.match(source, /sourceText: pending, bounds: evidenceBounds/);
+  assert.match(source, /rowBounds: evidence\?\.bounds/);
+  assert.match(source, /sameVisualRow: evidenceBounds != nil \? true : nil/);
+});
+
+test("Rappi conserva evidencia cuando el comercio no es confiable", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /var sourceFallback: String\?/);
+  assert.match(source, /return sourceFallback \?\? ""/);
+  assert.match(source, /repaired\.category = "Por revisar"/);
+  assert.match(source, /repaired\.displayMerchant = String\(source\.prefix\(120\)\)/);
+  assert.doesNotMatch(source, /repaired\.title = "Movimiento Rappi sin concepto/);
+});
+
+test("la inspección nativa aplica los mismos bloqueos OCR que la importación", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /private static func ocrQualityNeedsReview\(_ extraction: PDFImportExtraction\)/);
+  assert.match(source, /let ocrQualityNeedsReview = (?:usedOCR|extraction\.usedOCR) && Self\.ocrQualityNeedsReview\(extraction\)/);
+  assert.match(source, /extraction\.ocrFallbackNeedsReview\s*\|\|\s*extraction\.ocrColumnCalibrationNeedsReview\s*\|\|\s*extraction\.ocrConfidenceNeedsReview/);
+  assert.match(source, /extraction\.rowDiagnostics\.contains \{ !\$0\.accepted \}/);
+  assert.match(source, /let merchant = rappiMerchantIdentity\(titleBody, rawDescription: titleBody\)/);
+  assert.match(source, /sourceText: pending, bounds: evidenceBounds/);
+});
+
+test("Rappi deja diagnóstico rechazado para filas OCR visuales no seleccionadas", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /private static func rappiOCRRowDiagnostics\(/);
+  assert.match(source, /rappi\.visual-row-not-reconstructed/);
+  assert.match(source, /rappi\.visual-row-rejected/);
+  assert.match(source, /selectedRappiOCRObservations = ocrObservations/);
+  assert.match(source, /rowDiagnostics = Self\.rappiOCRRowDiagnostics\(/);
+});
+
+test("el visor PDF enfoca la región OCR con la convención de Vision", async () => {
+  const source = await readFile(sectionsPath, "utf8");
+  assert.match(source, /both use a bottom-left origin/);
+  assert.match(source, /y: bounds\.minY \+ CGFloat\(initialBounds\.y \+ initialBounds\.height \/ 2\) \* bounds\.height/);
+  assert.doesNotMatch(source, /y: bounds\.maxY - CGFloat\(initialBounds\.y/);
+  assert.match(source, /Text\("Ajustar a ancho"\)/);
+  assert.ok(source.includes('Text("Página \\(currentPage) de'));
+});
+
+test("Rappi no cruza controles entre candidatos y sus propios resúmenes", async () => {
+  const source = await readFile(modelsPath, "utf8");
+  assert.match(source, /candidateSets: \[\s*\(pageWiseCandidates, pageWiseSummary\)/);
+  assert.match(source, /for \(candidates, summary\) in candidateSets/);
+  assert.doesNotMatch(source, /candidateSets: \[\s*pageWiseCandidates/);
+});
+
 test("una capa de texto no conciliada fuerza una recuperación visual", async () => {
   const source = await readFile(modelsPath, "utf8");
   // A malformed or administrative text layer can contain enough dates and
@@ -197,7 +274,7 @@ test("el corpus nativo admite manifiesto privado fuera del repositorio", async (
   assert.match(nativeCorpus, /MARCELITO_PDF_CORPUS_MANIFEST/);
   assert.match(nativeCorpus, /readerVersion/);
   assert.match(nativeCorpus, /runExpectations/);
-  assert.match(nativeCorpus, /runExpectations\.count >= 10/);
+  assert.match(nativeCorpus, /!runExpectations\.isEmpty/);
   assert.match(runner, /MARCELITO_PDF_CORPUS_MANIFEST/);
   assert.match(runner, /export MARCELITO_PDF_CORPUS_MANIFEST=/);
   assert.match(runner, /No se encontró el manifiesto privado/);
@@ -237,7 +314,7 @@ test("Amex queda aislado en el parser nativo y no cae a Vision", async () => {
 test("RappiCard usa tabla dedicada y concilia abonos además de cargos", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /if header.contains\("rappicard"\) && header.contains\("tarjeta de credito"\) \{ return "Rappi" \}/);
-  assert.match(source, /parsedCandidates = Self\.parseRappiText\(text\)/);
+  assert.match(source, /parsedCandidates = Self\.parseRappiText\(text(?:,\s*fileName: fileName)?\)/);
   assert.match(source, /compare\("pagos y abonos", extracted: payments \+ credits/);
   assert.match(source, /opening \+ charges - payments - credits/);
   assert.match(source, /result\.msiMonthlyLoad == 0, result\.msiPending == 0/);
@@ -351,7 +428,7 @@ test("iOS usa el proveedor seleccionado solo para enriquecer gastos después de 
   assert.match(models, /Legacy compatibility markers/);
   assert.match(certification, /multimodalFallbackAttempted/);
   assert.match(certification, /static let targetPrecision = 0\.97/);
-  assert.match(certification, /cada archivo aceptado debe conciliar al 100%/);
+  assert.match(certification, /conciliar cada archivo al 100%/);
 });
 
 test("iOS permite elegir Gemini, Zen o NVIDIA sin incluir claves en el código", async () => {

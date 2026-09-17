@@ -650,7 +650,10 @@ struct LedgerQualityBanner: View {
     let store: FinanceStore
 
     private var isWarning: Bool {
-        store.dashboardIsBlocked || store.dashboardIsProvisional || store.operationalMetricsBlocked
+        store.dashboardIsBlocked
+            || store.dashboardIsProvisional
+            || store.operationalMetricsBlocked
+            || store.ledgerQuality.reviewMovementCount > 0
     }
 
     private var percentText: String {
@@ -670,12 +673,18 @@ struct LedgerQualityBanner: View {
                 if isWarning || store.ledgerQuality.reviewMovementCount > 0 {
                     LedgerBlockerDetailsButton().environment(store)
                 }
-                Text("\(Int(store.ledgerQuality.reviewPercent.rounded()))% por revisar en el libro canónico · \(store.ledgerQuality.reviewMovementCount) movimientos · \(money(store.ledgerQuality.reviewAmount))")
+                Text("Conciliación financiera: \(store.ledgerQuality.reconciledStatementCount)/\(store.ledgerQuality.statementCount) · elegibles KPI: \(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                Text("Movimientos bloqueados por fila: \(store.ledgerQuality.blockedMovementCount) · por enriquecer: \(store.ledgerQuality.enrichmentMovementCount)")
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(store.ledgerQuality.blockedMovementCount > 0 || store.ledgerQuality.enrichmentMovementCount > 0 ? Color.marcelitoAmber : .secondary)
+                Text("Por enriquecer en el libro: \(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) movimientos · \(money(store.ledgerQuality.reviewAmount))")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(store.ledgerQuality.reviewMovementCount > 0 ? Color.marcelitoAmber : .secondary)
-                Text("\(store.ledgerQuality.quarantinedMovementCount) en cuarentena · \(money(store.ledgerQuality.quarantinedAmount)) · \(store.ledgerQuality.quarantinedStatementCount) estado(s) bloqueado(s)")
+                Text("\(store.ledgerQuality.quarantinedCandidateCount) movimientos en cuarentena por estado · \(store.ledgerQuality.quarantinedStatementCount) estado(s) fuera de KPI")
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(store.ledgerQuality.quarantinedMovementCount > 0 ? Color.marcelitoAmber : .secondary)
+                    .foregroundStyle(store.ledgerQuality.quarantinedCandidateCount > 0 ? Color.marcelitoAmber : .secondary)
                 if store.dashboardIsProvisional {
                     Text("\(store.provisionalMovementCount) movimientos provisionales · gasto neto \(store.provisionalSpend.formatted(.currency(code: "MXN")))")
                         .font(.caption2.weight(.semibold))
@@ -1220,7 +1229,7 @@ struct MetricDetailSheet: View {
                                             .foregroundStyle(.secondary)
                                             .frame(width: 20)
                                         VStack(alignment: .leading, spacing: 3) {
-                                            Text(movement.title)
+                                            Text(movement.displayMerchant ?? movement.title)
                                                 .font(.subheadline.weight(.semibold))
                                                 .lineLimit(2)
                                             Text("\(movement.category) · \(movement.date.formatted(.dateTime.day().month(.abbreviated).year()))")
@@ -1255,7 +1264,7 @@ struct MetricDetailSheet: View {
                                 List(allSupportingMovements) { movement in
                                     NavigationLink { MovementDetailView(movement: movement) } label: {
                                         VStack(alignment: .leading) {
-                                            Text(movement.title)
+                                            Text(movement.displayMerchant ?? movement.title)
                                             Text(metric == .expense ? movement.expenseContribution : movement.amount, format: .currency(code: "MXN"))
                                         }
                                     }

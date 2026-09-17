@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import * as pdfjs from "pdfjs-dist/legacy/build/pdf.mjs";
-import { detectAccountKey, detectPeriod, detectSourceEvidence, PDF_READER_VERSION, rebuildOcrLayout, rebuildPdfLayout, rebuildPdfText, shouldUseOCR } from "../src/pdfImport.ts";
+import { detectAccountKey, detectPeriod, detectSourceEvidence, gateOcrReconciliation, PDF_READER_VERSION, rappiTextLayerReconciles, rebuildOcrLayout, rebuildPdfLayout, rebuildPdfText, shouldUseOCR } from "../src/pdfImport.ts";
 import { parseDeterministicStatement } from "../src/issuerParsers/index.ts";
 import { cents } from "../src/issuerParsers/shared.ts";
 import type { DocumentLayoutPage } from "../src/issuerParsers/types.ts";
@@ -23,12 +23,18 @@ type ExpectedFile = {
   status?: "valid" | "invalid" | "pending";
   rows?: number;
   summary?: Record<string, number>;
+  expectedMethod?: "pdf-text" | "vision-ocr";
+  columnsCalibrated?: boolean;
+  maxRejectedRows?: number;
+  maxUncategorized?: number;
 };
 
 type CorpusManifest = {
   tolerance?: number;
   /** The manifest is tied to the exact extraction rules it certifies. */
   readerVersion?: string;
+  /** A shared private manifest may also certify the web reader separately. */
+  webReaderVersion?: string;
   files?: ExpectedFile[];
 };
 
@@ -38,7 +44,9 @@ function argument(name: string) {
 }
 
 function kindFor(source: StatementSource): StatementKind {
-  return source === "Amex" ? "card" : source === "Desconocido" ? "unknown" : "bank";
+  return source === "Amex" || source === "Rappi"
+    ? "card"
+    : source === "Desconocido" ? "unknown" : "bank";
 }
 
 function closeEnough(actual: unknown, expected: unknown, tolerance: number) {
@@ -131,7 +139,13 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
   // Keep corpus diagnostics on the exact same text/OCR decision as the app;
   // otherwise a hidden administrative layer could be certified as text here
   // while the product correctly falls back to visual OCR (or vice versa).
-  const requiresOCR = shouldUseOCR(text);
+  // Rappi statements can have a valid selectable table even when the generic
+  // scan heuristic asks for OCR. Prove that issuer-specific text set against
+  // its independent controls first; OCR remains the recovery path. This is
+  // deliberately scoped to Rappi so the Amex/BBVA/Santander contracts do not
+  // change as a side effect.
+  const selectableRappiReconciles = rappiTextLayerReconciles(text, fileName, layout);
+  const requiresOCR = !selectableRappiReconciles && shouldUseOCR(text);
   let mode: "ocr-required" | "pdf-text" | "ocr" = requiresOCR ? "ocr-required" : "pdf-text";
   let ocrConfidence: number | undefined;
   let ocrPageConfidences: number[] | undefined;
@@ -147,7 +161,7 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
   const accountKey = detectAccountKey(text, sourceDetection.source);
   const period = detectPeriod(text, fileName);
   const kind = kindFor(sourceDetection.source);
-  const deterministic = kind !== "unknown" && (sourceDetection.source === "Santander" || sourceDetection.source === "BBVA" || sourceDetection.source === "Amex")
+  const deterministic = kind !== "unknown" && ["Santander", "BBVA", "Amex", "Rappi"].includes(sourceDetection.source)
     ? parseDeterministicStatement({ source: sourceDetection.source, fileName, mode: mode === "ocr" ? "ocr" : "text", text, layout })
     : undefined;
   const transactions = deterministic?.transactions ?? [];
@@ -170,9 +184,15 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
     minimumPlusMsi: summary.minimumPlusMsi,
     msiPending: summary.msiPending,
   } : {};
-  const reconciliation = deterministic?.reconciliation
+  const baseReconciliation = deterministic?.reconciliation
     ?? { status: "invalid" as const, tolerance: 0, extractedMovementCount: 0, reason: "Emisor no soportado" };
-  const qualityGateApplied = false;
+  const reconciliation = gateOcrReconciliation(
+    baseReconciliation,
+    mode === "ocr" ? "ocr" : "text",
+    ocrConfidence,
+    ocrPageConfidences,
+  );
+  const qualityGateApplied = reconciliation.status !== baseReconciliation.status;
   const suspiciousRows = transactions.filter((row) => !Number.isFinite(row.amount) || Math.abs(row.amount) >= 100_000_000 || row.date === "Sin fecha");
   // A valid total is not enough to certify an extracted row. Every accepted
   // movement must remain traceable to the source page and a bounded fragment
@@ -189,6 +209,22 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
   const evidenceCoverage = transactions.length > 0
     ? Number(((transactions.length - missingEvidenceRows.length) / transactions.length).toFixed(4))
     : 1;
+  // Category quality is measured only on spend rows. Payments and refunds
+  // have a financial direction but do not need an expense taxonomy; counting
+  // them as "without category" would make the dashboard overstate the work
+  // left for merchant enrichment.
+  const uncategorizedRows = transactions.filter((row) => {
+    if (row.flow !== "expense") return false;
+    const category = String(row.category ?? "").toLowerCase();
+    return Boolean(row.merchantReviewReason)
+      || category === "sin categoría"
+      || category === "otros / por revisar"
+      || category === "por revisar";
+  }).length;
+  const merchantReviewRows = transactions.filter((row) => Boolean(row.merchantReviewReason)).length;
+  const merchantIdentityRows = transactions.filter((row) => row.rawDescription?.trim()).length;
+  const normalizedMerchantRows = transactions.filter((row) => row.normalizedMerchant?.trim()).length;
+  const displayMerchantRows = transactions.filter((row) => row.displayMerchant?.trim()).length;
   return {
     file: fileName,
     readerVersion: PDF_READER_VERSION,
@@ -196,6 +232,16 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
     sourceSection: deterministic?.sourceSection,
     rejectedRowCount: deterministic?.rejectedRowCount ?? 0,
     rejectedRows: deterministic?.rejectedRows ?? [],
+    uncategorizedRows,
+    merchantReviewRows,
+    merchantQuality: {
+      rawDescriptionRows: merchantIdentityRows,
+      normalizedMerchantRows,
+      displayMerchantRows,
+      identityCoverage: merchantIdentityRows > 0
+        ? Number((normalizedMerchantRows / merchantIdentityRows).toFixed(4))
+        : 1,
+    },
     sourceFingerprint: extracted.sourceFingerprint,
     mode,
     ocrConfidence,
@@ -220,6 +266,12 @@ async function evaluate(file: string, options: { ocr: boolean; dpi: number; pdft
       signedAmount: Number(row.amount.toFixed(2)),
       kind: row.kind,
       foreignCurrency: row.foreignCurrency,
+      category: row.category,
+      rawDescription: row.rawDescription,
+      displayMerchant: row.displayMerchant,
+      normalizedMerchant: row.normalizedMerchant,
+      merchantConfidence: row.merchantConfidence,
+      merchantReviewReason: row.merchantReviewReason,
       page: row.extractionEvidence?.page,
       sourceText: row.extractionEvidence?.sourceText,
     })),
@@ -255,7 +307,7 @@ const ocrDpi = ocrDpiRaw === undefined ? 220 : Number(ocrDpiRaw);
 const pdftoppmPath = argument("--pdftoppm") ?? process.env.MARCELITO_PDFTOPPM ?? "pdftoppm";
 const requireManifest = process.argv.includes("--require-manifest");
 const targetPrecisionRaw = argument("--target-precision");
-const targetPrecision = targetPrecisionRaw === undefined ? 0.97 : Number(targetPrecisionRaw);
+  const targetPrecision = targetPrecisionRaw === undefined ? 0.97 : Number(targetPrecisionRaw);
 if (!directory) {
   console.error("Uso: npm run pdf:corpus -- --dir <carpeta> [--manifest <archivo.json>] [--out <reporte.json>] [--require-manifest] [--target-precision 0.97] [--ocr --ocr-dpi 220 --pdftoppm <ruta>]");
   process.exitCode = 2;
@@ -280,6 +332,7 @@ if (!directory) {
   let goldenFalseAccepted = 0;
   let diagnosticOcrAccepted = 0;
   const expectedFiles = manifest.files ?? [];
+  const expectedReaderVersion = manifest.webReaderVersion ?? manifest.readerVersion;
   const expectedNames = expectedFiles.map((item) => item.file);
   const manifestSchemaFailures: string[] = [];
   if (requireManifest) {
@@ -304,6 +357,17 @@ if (!directory) {
       if (entry.status === "valid" && (!Number.isInteger(entry.rows) || (entry.rows ?? -1) < 0)) {
         manifestSchemaFailures.push(`${label}: un golden valid necesita rows entero no negativo`);
       }
+      if (entry.expectedMethod !== undefined && !["pdf-text", "vision-ocr"].includes(entry.expectedMethod)) {
+        manifestSchemaFailures.push(`${label}: expectedMethod debe ser pdf-text o vision-ocr`);
+      }
+      if (entry.columnsCalibrated !== undefined && typeof entry.columnsCalibrated !== "boolean") {
+        manifestSchemaFailures.push(`${label}: columnsCalibrated debe ser booleano`);
+      }
+      for (const [key, value] of [["maxRejectedRows", entry.maxRejectedRows], ["maxUncategorized", entry.maxUncategorized]] as const) {
+        if (value !== undefined && (!Number.isInteger(value) || value < 0)) {
+          manifestSchemaFailures.push(`${label}: ${key} debe ser entero no negativo`);
+        }
+      }
     });
     if (manifestSchemaFailures.length) failures += manifestSchemaFailures.length;
   }
@@ -314,7 +378,7 @@ if (!directory) {
   if (missingManifestFiles.length) failures += missingManifestFiles.length;
   if (requireManifest && unlistedCorpusFiles.length) failures += unlistedCorpusFiles.length;
   const manifestReaderVersionMismatch = Boolean(
-    requireManifest && manifest.readerVersion !== PDF_READER_VERSION,
+    requireManifest && expectedReaderVersion !== PDF_READER_VERSION,
   );
   if (manifestReaderVersionMismatch) failures += 1;
 
@@ -341,6 +405,16 @@ if (!directory) {
         ignoredBodyMentions: [],
         kind: "unknown",
         rows: 0,
+        rejectedRowCount: 0,
+        rejectedRows: [],
+        uncategorizedRows: 0,
+        merchantReviewRows: 0,
+        merchantQuality: {
+          rawDescriptionRows: 0,
+          normalizedMerchantRows: 0,
+          displayMerchantRows: 0,
+          identityCoverage: 0,
+        },
         statementControls: {},
         qualityGate: {
           applied: false,
@@ -381,9 +455,38 @@ if (!directory) {
     if (expectedOCRPromotion && result.mode !== "ocr") mismatches.push("el modo OCR no se ejecutó");
     if (expectedOCRPromotion && result.reconciliation.status === "invalid") mismatches.push("OCR produjo una conciliación inválida");
     if (expectedOCRPromotion && result.mode === "ocr" && result.rows === 0) mismatches.push("OCR no produjo movimientos");
+    if (expected?.expectedMethod) {
+      const actualMethod = result.mode === "pdf-text" ? "pdf-text" : "vision-ocr";
+      if (expected.expectedMethod !== actualMethod) {
+        mismatches.push(`método esperado ${expected.expectedMethod}, obtenido ${actualMethod}`);
+      }
+    }
+    if (expected?.columnsCalibrated !== undefined) {
+      // Rappi does not use Santander/BBVA's fixed movement-column
+      // calibration contract. Its expected value is therefore false; other
+      // issuers leave this field to the native report.
+      if (result.source === "Rappi" && expected.columnsCalibrated !== false) {
+        mismatches.push(`calibración esperada ${expected.columnsCalibrated}, obtenida false`);
+      }
+    }
+    if (expected?.maxRejectedRows !== undefined && result.rejectedRowCount > expected.maxRejectedRows) {
+      mismatches.push(`filas rechazadas ${result.rejectedRowCount} superan el máximo ${expected.maxRejectedRows}`);
+    }
+    if (expected?.maxUncategorized !== undefined && result.uncategorizedRows > expected.maxUncategorized) {
+      mismatches.push(`filas sin categoría ${result.uncategorizedRows} superan el máximo ${expected.maxUncategorized}`);
+    }
+    const reconciliationControls = result.reconciliation as Record<string, unknown>;
+    const statementControls = result.statementControls as Record<string, unknown>;
+    const expectedAliases: Record<string, string> = {
+      chargeTotal: "extractedChargeTotal",
+      paymentTotal: "extractedPaymentTotal",
+      depositTotal: "extractedDepositTotal",
+      withdrawalTotal: "extractedWithdrawalTotal",
+    };
     for (const [key, value] of Object.entries(expected?.summary ?? {})) {
-      const actual = result.reconciliation[key as keyof typeof result.reconciliation]
-        ?? result.statementControls[key as keyof typeof result.statementControls];
+      const actual = reconciliationControls[key]
+        ?? statementControls[key]
+        ?? (expectedAliases[key] ? reconciliationControls[expectedAliases[key]] : undefined);
       if (!closeEnough(actual, value, tolerance)) mismatches.push(`${key}: esperado ${value}, obtenido ${String(actual)}`);
     }
     const checked = expected ? mismatches.length === 0 : undefined;
@@ -459,7 +562,7 @@ if (!directory) {
     readerVersion: PDF_READER_VERSION,
     ocrEnabled: useOCR,
     ocrDpi: useOCR ? ocrDpi : undefined,
-    manifestReaderVersion: manifest.readerVersion,
+    manifestReaderVersion: expectedReaderVersion,
     manifestReaderVersionMismatch,
     manifestFailures: failures,
     manifestSchemaFailures,

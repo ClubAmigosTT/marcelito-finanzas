@@ -1,4 +1,6 @@
 import { readFile } from "node:fs/promises";
+import { resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 
 type DeviceFile = {
   file?: unknown;
@@ -34,6 +36,7 @@ type DeviceReport = {
   automaticAcceptancePrecision?: unknown;
   unresolvedOCR?: unknown;
   certified?: unknown;
+  certificationScope?: unknown;
   financialDataRedacted?: unknown;
   generatedBy?: unknown;
 };
@@ -75,8 +78,20 @@ export function verifyNativeDeviceReport(report: DeviceReport, expectedReaderVer
   const blocked = numberValue(report.blocked);
   const precision = numberValue(report.automaticAcceptancePrecision);
   const unresolvedOCR = numberValue(report.unresolvedOCR);
+  const certificationScope = String(report.certificationScope ?? "general");
+  const focusedRappi = certificationScope === "rappi-focused";
+  const effectiveMinimumFiles = focusedRappi ? 6 : minimumFiles;
+  if (!["general", "rappi-focused"].includes(certificationScope)) {
+    errors.push(`certificationScope inválido: ${certificationScope}`);
+  }
   if (!Array.isArray(report.files)) errors.push("files debe ser una lista");
-  if (files.length < minimumFiles) errors.push(`el informe contiene ${files.length} archivo(s); se requieren al menos ${minimumFiles}`);
+  if (files.length < effectiveMinimumFiles) errors.push(`el informe contiene ${files.length} archivo(s); se requieren al menos ${effectiveMinimumFiles} para ${certificationScope}`);
+  if (focusedRappi && files.some((raw) => {
+    const row = raw && typeof raw === "object" ? raw as DeviceFile : {};
+    return row.source !== "Rappi" || row.kind !== "card" || !["pdf-text", "vision-ocr"].includes(String(row.mode));
+  })) {
+    errors.push("el perfil rappi-focused solo permite archivos Rappi de tarjeta procesados con texto nativo u OCR visual");
+  }
   if (!Number.isInteger(accepted) || accepted < 0) errors.push("accepted no es un entero válido");
   if (!Number.isInteger(blocked) || blocked < 0) errors.push("blocked no es un entero válido");
   if (Number.isInteger(accepted) && Number.isInteger(blocked) && accepted + blocked !== files.length) {
@@ -153,7 +168,8 @@ async function main() {
   if (!result.ok) process.exitCode = 1;
 }
 
-const invokedPath = process.argv[1]?.replaceAll("\\", "/");
-if (invokedPath && import.meta.url.endsWith(invokedPath)) {
+const invokedPath = process.argv[1];
+const invokedUrl = invokedPath ? pathToFileURL(resolve(invokedPath)).href : undefined;
+if (invokedUrl && import.meta.url === invokedUrl) {
   await main();
 }

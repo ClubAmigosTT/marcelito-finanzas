@@ -133,9 +133,28 @@ if (selected.length === 0) {
 }
 
 let assigned = 0;
+let automaticallyAvailable = 0;
 const failures = [];
 for (const { group, relationship } of selected) {
   const alreadyAssigned = relationship.some((item) => item.id === build.id);
+  const isInternal = group.attributes?.isInternalGroup === true;
+  const hasAccessToAllBuilds = group.attributes?.hasAccessToAllBuilds === true;
+
+  // Apple does not expose a build relationship for an internal group whose
+  // automatic distribution is enabled. Those testers already receive every
+  // eligible build, and POSTing the relationship returns HTTP 422
+  // ("Builds cannot be assigned to this internal group."). Treat that state
+  // as a verified distribution path instead of failing an otherwise valid
+  // upload.
+  if (isInternal && hasAccessToAllBuilds) {
+    automaticallyAvailable += 1;
+    console.log(
+      `Build ${targetBuild}: disponible automáticamente para el grupo interno `
+      + `"${group.attributes?.name || group.id}"; no requiere asociación manual.`,
+    );
+    continue;
+  }
+
   try {
     if (!alreadyAssigned) {
       await request(`/v1/betaGroups/${encodeURIComponent(group.id)}/relationships/builds`, {
@@ -168,7 +187,7 @@ if (failures.length === selected.length) {
 
 console.log(
   `Distribución verificada: build ${targetBuild} VALID, ${selected.length} grupo(s) objetivo, `
-  + `${assigned} asociación(es) nuevas.`,
+  + `${assigned} asociación(es) nuevas, ${automaticallyAvailable} con acceso interno automático.`,
 );
 if (failures.length > 0) {
   console.warn(`Grupos con revisión pendiente: ${failures.join(" | ")}`);

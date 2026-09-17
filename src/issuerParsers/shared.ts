@@ -1,4 +1,4 @@
-import type { ImportResult, StatementReconciliation, StatementSummary, Transaction, TransactionKind } from "../types.ts";
+import type { ImportResult, StatementReconciliation, StatementSummary, Transaction, TransactionExtractionEvidence, TransactionKind } from "../types.ts";
 import type { DocumentLayout, DocumentLayoutLine } from "./types.ts";
 
 export function fold(value: string) {
@@ -61,9 +61,19 @@ function statementYear(text: string, fileName: string) {
 
 export function parseIssuerDate(token: string, text: string, fileName: string) {
   const normalized = fold(token).replace(/ag0/g, "ago").replace(/^o(?=\d)/, "0");
+  const iso = normalized.match(/^(20\d{2})[-/.](\d{1,2})[-/.](\d{1,2})$/);
+  if (iso) {
+    const year = Number(iso[1]);
+    const month = Number(iso[2]);
+    const day = Number(iso[3]);
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return undefined;
+    return `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
   const numeric = normalized.match(/^(\d{1,2})[-/.](\d{1,2})[-/.](20\d{2})$/);
   if (numeric) return `${numeric[3]}-${numeric[2].padStart(2, "0")}-${numeric[1].padStart(2, "0")}`;
-  const named = normalized.match(/^(\d{1,2})(?:\s+de\s+|[-/])([a-z]+)(?:\s+de\s+|[-/])?(20\d{2})?$/);
+  const named = normalized.match(/^(\d{1,2})(?:\s+de\s+|[-/])([a-z]+)(?:\s+de\s+|[-/])?(20\d{2})?$/)
+    ?? normalized.match(/^(\d{1,2})\s+(?:de\s+)?([a-z]+)(?:\s+(?:de\s+)?(20\d{2}))?$/);
   if (!named) return undefined;
   const month = months[named[2]] ?? months[named[2].slice(0, 3)];
   const day = Number(named[1]);
@@ -88,6 +98,17 @@ export function makeTransaction(options: {
   confidence: number;
   foreignCurrency?: boolean;
   sourceText: string;
+  bounds?: TransactionExtractionEvidence["bounds"];
+  rawDescription?: string;
+  normalizedMerchant?: string;
+  displayMerchant?: string;
+  merchantConfidence?: number;
+  merchantReviewReason?: string;
+  category?: string;
+  /** True only when the parser has row-level visual evidence. */
+  /** Use null when the parser cannot prove visual co-location. */
+  sameVisualRow?: boolean | null;
+  selectionReason?: string;
 }) : Transaction {
   const amount = options.amountCents / 100;
   const flow: Transaction["flow"] = options.kind === "cardPayment" ? "debt" : amount > 0 ? "income" : "expense";
@@ -97,17 +118,28 @@ export function makeTransaction(options: {
     date: options.date,
     description: options.description.replace(/\s+/g, " ").trim().slice(0, 120),
     account: options.account,
-    category: options.kind === "cardPayment" || options.kind === "bankTransfer" ? "Transferencia" : "Sin categoría",
+    category: options.category ?? (options.merchantReviewReason
+      ? "Por revisar"
+      : options.kind === "cardPayment" || options.kind === "bankTransfer" ? "Transferencia" : "Sin categoría"),
     amount,
     flow,
     kind: options.kind,
     foreignCurrency: options.foreignCurrency,
     confidence: options.confidence,
+    rawDescription: options.rawDescription ?? options.description,
+    normalizedMerchant: options.normalizedMerchant,
+    displayMerchant: options.displayMerchant,
+    merchantConfidence: options.merchantConfidence,
+    merchantReviewReason: options.merchantReviewReason,
     extractionEvidence: {
       method: options.mode === "ocr" ? "ocr" : "pdf-text",
       page: options.page,
       confidence: options.confidence,
       sourceText: options.sourceText.slice(0, 240),
+      bounds: options.bounds,
+      sameVisualRow: options.sameVisualRow === null ? (options.bounds ? true : undefined) : options.sameVisualRow ?? true,
+      reviewReason: options.merchantReviewReason,
+      selectionReason: options.selectionReason,
     },
   };
 }

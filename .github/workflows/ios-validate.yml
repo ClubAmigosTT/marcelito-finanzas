@@ -23,6 +23,20 @@ jobs:
       - name: Descargar el repositorio
         uses: actions/checkout@v4
 
+      - name: Construir el motor compartido de Rappi
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Verificar artefacto JavaScript local de iOS
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run rappi:engine:build
+          git diff --exit-code -- apps/ios/Cauce/Resources/rappi-engine.js
+
       - name: Mostrar toolchain de Apple
         shell: bash
         run: |
