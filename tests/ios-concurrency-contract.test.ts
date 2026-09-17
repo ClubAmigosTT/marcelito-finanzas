@@ -303,11 +303,13 @@ test("Amex conserva PDFKit cuando su capa de texto ya concilia", async () => {
   assert.match(source, /let shouldAttemptOCR = allowOCR && !textLayerReconciles/);
 });
 
-test("Amex queda aislado en el parser nativo y no cae a Vision", async () => {
+test("Amex conserva PDFKit y cae a Vision cuando la capa de texto falla", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /private static func parseAmexText\(_ text: String, fileName: String, diagnosticSink:/);
-  assert.match(source, /let selectableAmex = selectableSource\.localizedCaseInsensitiveCompare\("Amex"\)/);
-  assert.match(source, /let ocrObservations = shouldAttemptOCR && !selectableAmex\s*\?/);
+  assert.match(source, /let shouldAttemptOCR = allowOCR && !textLayerReconciles/);
+  assert.match(source, /let ocrObservations = shouldAttemptOCR\s*\?/);
+  assert.match(source, /else if usedOCR, source\.localizedCaseInsensitiveContains\("Amex"\)/);
+  assert.match(source, /let initial = Self\.parseAmexOCRResult\(ocrObservations, fileName: fileName\)/);
   assert.match(source, /parsedCandidates = Self\.parseAmexText\(text, fileName: fileName, diagnosticSink:/);
 });
 
@@ -340,7 +342,7 @@ test("Santander usa rectángulo y columnas fijas de la tabla", async () => {
   assert.match(source, /previousPrintedBalance = physical.balance/);
   assert.equal((source.match(/let gatedReconciliation = Self.santanderRowGate\(/g) ?? []).length, 2);
   assert.match(source, /santanderCropPixelRect\(region, width: image.width, height: image.height\)/);
-  assert.match(source, /let santanderResult = Self\.parseSantanderTable\(\s*ocrObservations/);
+  assert.match(source, /(?:let|var) santanderResult = Self\.parseSantanderTable\(\s*ocrObservations/);
 });
 
 test("Santander conserva cajas nativas de fecha e importe", async () => {
@@ -421,7 +423,8 @@ test("iOS usa el proveedor seleccionado solo para enriquecer gastos después de 
   ]);
   assert.doesNotMatch(settings, /Toggle\("Usar IA cuando Vision no concilie"/);
   assert.match(settings, /Nunca recibe PDFs, cuentas ni saldos/);
-  assert.match(models, /stage\?\("Lectura local lista; conciliando contra los totales/);
+  assert.match(models, /localExtractionStage\(for: localExtraction\.recoveryAttempts\)/);
+  assert.match(models, /conciliando contra los totales/);
   assert.doesNotMatch(models, /ZenStatementReader/);
   assert.doesNotMatch(certification, /allowMultimodalFallback/);
   assert.match(certification, /El proveedor de IA seleccionado no recibe PDFs/);

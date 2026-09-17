@@ -1898,6 +1898,15 @@ struct StatementDocumentView: View {
                             .padding(.vertical, 8)
                             .background(Color.marcelitoAmber.opacity(0.10))
                     }
+                    if let attempts = statement.recoveryAttempts, !attempts.isEmpty {
+                        Text("Ruta de lectura: \(attempts.map(readerRecoveryLabel).joined(separator: " → "))")
+                            .font(.caption2)
+                            .foregroundStyle(Color.marcelitoNavyMid)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 6)
+                            .background(Color.marcelitoNavy.opacity(0.05))
+                    }
                     HStack(spacing: 10) {
                         Button { zoomScale = max(0.35, (zoomScale == 0 ? 1 : zoomScale) / 1.25) } label: {
                             Image(systemName: "minus.magnifyingglass")
@@ -2122,6 +2131,16 @@ struct StatementSummaryEditor: View {
                 if let reason = statement.reconciliation?.reason,
                    statement.reconciliation?.status != .valid {
                     Text(reason)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let attempts = statement.recoveryAttempts, !attempts.isEmpty {
+                Section("Ruta de lectura local") {
+                    Text(attempts.map(readerRecoveryLabel).joined(separator: " → "))
+                        .font(.subheadline)
+                        .foregroundStyle(Color.marcelitoNavy)
+                    Text("La ruta es informativa; la aceptación sigue dependiendo de la evidencia de filas y la conciliación del estado.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

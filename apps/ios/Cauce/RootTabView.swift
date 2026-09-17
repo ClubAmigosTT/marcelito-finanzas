@@ -394,6 +394,7 @@ struct ImportReportItem: Identifiable {
     let ocrConfidence: Double?
     let ocrPageConfidences: [Double]?
     let ocrColumnsCalibrated: Bool?
+    let recoveryAttempts: [String]
 
     init(summary: ImportSummary) {
         fileName = summary.fileName
@@ -408,6 +409,7 @@ struct ImportReportItem: Identifiable {
         ocrConfidence = summary.ocrConfidence
         ocrPageConfidences = summary.ocrPageConfidences
         ocrColumnsCalibrated = summary.ocrColumnsCalibrated
+        recoveryAttempts = summary.recoveryAttempts
     }
 
     init(fileName: String, errorMessage: String) {
@@ -423,6 +425,7 @@ struct ImportReportItem: Identifiable {
         ocrConfidence = nil
         ocrPageConfidences = nil
         ocrColumnsCalibrated = nil
+        recoveryAttempts = []
     }
 
     var state: State {
@@ -552,6 +555,13 @@ private struct ImportReportRow: View {
                     Label("Columnas de movimientos provisionales", systemImage: "ruler")
                         .font(.caption2.weight(.semibold))
                         .foregroundStyle(Color.marcelitoAmber)
+                }
+
+                if item.recoveryAttempts.count > 1 {
+                    Text("Ruta de lectura: \(item.recoveryAttempts.map(readerRecoveryLabel).joined(separator: " → "))")
+                        .font(.caption2)
+                        .foregroundStyle(Color.marcelitoNavyMid)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 Text(item.statusText)
