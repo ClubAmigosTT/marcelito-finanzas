@@ -680,6 +680,93 @@ struct LedgerQuality {
     let message: String?
 }
 
+/// Severity assigned to one item in the on-device diagnostic sweep. This is
+/// deliberately separate from `LedgerAuditStatus`: a single report can have
+/// blocking errors and non-blocking enrichment warnings at the same time.
+enum LedgerDiagnosticSeverity: String, CaseIterable {
+    case error
+    case warning
+    case info
+
+    var label: String {
+        switch self {
+        case .error: return "Error"
+        case .warning: return "Advertencia"
+        case .info: return "Información"
+        }
+    }
+
+    var sortOrder: Int {
+        switch self {
+        case .error: return 0
+        case .warning: return 1
+        case .info: return 2
+        }
+    }
+}
+
+/// One actionable finding produced from the ledger already stored on the
+/// device. It never requires reopening a PDF, rerunning OCR or uploading a
+/// document.
+struct LedgerDiagnosticIssue: Identifiable {
+    let id: String
+    let severity: LedgerDiagnosticSeverity
+    let source: String?
+    let period: String?
+    let title: String
+    let detail: String
+
+    var scopeLabel: String? {
+        let parts = [source, period].compactMap { value in
+            guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return value
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+}
+
+/// Full local report shown by the Diagnostics screen. Counts mirror the
+/// dashboard quality model, while `issues` explains each blocking row or
+/// enrichment item so a user does not have to guess which PDF is affected.
+struct LedgerDiagnosticReport {
+    let generatedAt: Date
+    let statementCount: Int
+    let validatedStatementCount: Int
+    let canonicalMovementCount: Int
+    let blockedMovementCount: Int
+    let enrichmentMovementCount: Int
+    let issues: [LedgerDiagnosticIssue]
+
+    var errorCount: Int { issues.filter { $0.severity == .error }.count }
+    var warningCount: Int { issues.filter { $0.severity == .warning }.count }
+    var infoCount: Int { issues.filter { $0.severity == .info }.count }
+    var isClean: Bool { errorCount == 0 && warningCount == 0 }
+
+    var text: String {
+        let formatter = ISO8601DateFormatter()
+        var lines = [
+            "Marcelito · revisión completa del libro",
+            "Generado: \(formatter.string(from: generatedAt))",
+            "Estados conciliados: \(validatedStatementCount)/\(statementCount)",
+            "Movimientos canónicos: \(canonicalMovementCount)",
+            "Movimientos bloqueados: \(blockedMovementCount)",
+            "Movimientos por enriquecer: \(enrichmentMovementCount)",
+            "Errores: \(errorCount) · Advertencias: \(warningCount) · Información: \(infoCount)",
+            ""
+        ]
+        if issues.isEmpty {
+            lines.append("No se encontraron problemas en los estados y movimientos guardados.")
+        } else {
+            lines.append("Hallazgos")
+            lines.append(contentsOf: issues.map { issue in
+                let scope = issue.scopeLabel.map { " · \($0)" } ?? ""
+                return "[\(issue.severity.label)] \(issue.title)\(scope): \(issue.detail)"
+            })
+        }
+        return lines.joined(separator: "\n")
+    }
+}
+
 struct CanonicalRebuildResult {
     let candidateCount: Int
     let importedCount: Int
@@ -1755,6 +1842,386 @@ final class FinanceStore {
             return "\(audit.source) · \(audit.period) · \(audit.statusLabel) · filas \(audit.validRows)/\(audit.importedRows) · canónicas \(audit.canonicalRows)\(duplicateText) · ingresos \(diagnosticMoney(audit.incomeTotal)) · gasto \(diagnosticMoney(audit.expenseTotal)) · transferencias \(diagnosticMoney(audit.transferTotal)) · pagos tarjeta \(diagnosticMoney(audit.cardPaymentTotal)) · reembolsos \(diagnosticMoney(audit.refundTotal))"
         })
         return lines.joined(separator: "\n")
+    }
+
+    /// Builds the detailed, on-demand diagnostic shown in the app. This pass
+    /// only inspects `statements`, `movements`, row diagnostics and derived
+    /// quality projections already persisted on the device. It never reopens
+    /// a PDF, runs OCR or mixes a new extraction into the financial book.
+    func diagnosticReport() -> LedgerDiagnosticReport {
+        let quality = ledgerQuality
+        var issues: [LedgerDiagnosticIssue] = []
+
+        func add(
+            id: String,
+            severity: LedgerDiagnosticSeverity,
+            source: String? = nil,
+            period: String? = nil,
+            title: String,
+            detail: String
+        ) {
+            issues.append(LedgerDiagnosticIssue(
+                id: "\(id)-\(issues.count)",
+                severity: severity,
+                source: source,
+                period: period,
+                title: title,
+                detail: detail
+            ))
+        }
+
+        func snippet(_ value: String, limit: Int = 120) -> String {
+            let flattened = value
+                .replacingOccurrences(of: "\n", with: " ")
+                .replacingOccurrences(of: "\r", with: " ")
+                .split(whereSeparator: { $0.isWhitespace })
+                .joined(separator: " ")
+            return String(flattened.prefix(limit))
+        }
+
+        func movementLabel(_ movement: Movement) -> String {
+            let candidate = [
+                movement.displayMerchant,
+                movement.rawDescription,
+                movement.title
+            ]
+            .compactMap { value -> String? in
+                guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                return value
+            }
+            .first ?? "Concepto sin texto"
+            let date = movement.date.formatted(.dateTime.day().month(.abbreviated).year())
+            return "\(snippet(candidate)) · \(date)"
+        }
+
+        if statements.isEmpty {
+            add(
+                id: "ledger-empty",
+                severity: .info,
+                title: "No hay estados guardados",
+                detail: "Sube un estado para que el lector pueda verificarlo y conciliarlo."
+            )
+        }
+
+        if canonicalRebuildPending {
+            add(
+                id: "ledger-rebuild-pending",
+                severity: .error,
+                title: "Reconstrucción pendiente",
+                detail: "El libro canónico todavía no terminó de reconstruirse; los movimientos no deben alimentar los KPI."
+            )
+        }
+
+        let auditsByID = Dictionary(uniqueKeysWithValues: statementAudits.map { ($0.id, $0) })
+
+        for statement in statements {
+            let source = statement.source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? "Documento"
+                : statement.source
+            let period = statement.period.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                ? nil
+                : statement.period
+            let statementID = statement.id.uuidString
+            let reconciliationStatus = statement.reconciliation?.status
+
+            switch reconciliationStatus {
+            case .valid:
+                break
+            case .invalid:
+                add(
+                    id: "\(statementID)-reconciliation-invalid",
+                    severity: .error,
+                    source: source,
+                    period: period,
+                    title: "El estado no concilia",
+                    detail: statement.reconciliation?.reason ?? "Los importes reconstruidos no cuadran con los controles impresos del estado."
+                )
+            case .pending, .none:
+                add(
+                    id: "\(statementID)-reconciliation-pending",
+                    severity: .error,
+                    source: source,
+                    period: period,
+                    title: "Conciliación pendiente",
+                    detail: statement.reconciliation?.reason ?? "No existe una conciliación válida contra los totales impresos del estado."
+                )
+            }
+
+            if !isCurrentReader(statement) {
+                add(
+                    id: "\(statementID)-reader",
+                    severity: .error,
+                    source: source,
+                    period: period,
+                    title: "Estado leído con una versión anterior",
+                    detail: "Este documento debe reconstruirse con el lector actual antes de entrar al libro canónico."
+                )
+            }
+
+            if !hasVerifiedSourceEvidence(statement) || statement.kind == .unknown
+                || source.caseInsensitiveCompare("Desconocido") == .orderedSame {
+                let detectionDetail: String
+                if let detection = statement.sourceDetection {
+                    detectionDetail = "Emisor detectado como \(detection.source) con confianza \(Int((detection.confidence * 100).rounded()))%; se requiere evidencia verificada para aceptarlo."
+                } else {
+                    detectionDetail = "No se conservó evidencia suficiente para confirmar el emisor y tipo de estado."
+                }
+                add(
+                    id: "\(statementID)-issuer",
+                    severity: .error,
+                    source: source,
+                    period: period,
+                    title: "Emisor o tipo de estado no verificado",
+                    detail: detectionDetail
+                )
+            }
+
+            if statement.ocrColumnsCalibrated == false {
+                add(
+                    id: "\(statementID)-columns",
+                    severity: .error,
+                    source: source,
+                    period: period,
+                    title: "Columnas OCR sin calibrar",
+                    detail: "No se identificaron con seguridad las columnas visuales de movimientos; el documento permanece bloqueado."
+                )
+            }
+
+            if !hasSufficientOCRQuality(statement) {
+                let average = statement.ocrConfidence.map { "promedio \(Int(($0 * 100).rounded()))%" } ?? "promedio no disponible"
+                add(
+                    id: "\(statementID)-ocr-quality",
+                    severity: .error,
+                    source: source,
+                    period: period,
+                    title: "Confianza OCR insuficiente",
+                    detail: "La lectura visual tiene \(average) o páginas por debajo del umbral; revisa el PDF original."
+                )
+            }
+
+            if let pageConfidences = statement.ocrPageConfidences {
+                for (index, confidence) in pageConfidences.enumerated() where !confidence.isFinite || confidence < 0.78 {
+                    let value = confidence.isFinite ? "\(Int((confidence * 100).rounded()))%" : "no disponible"
+                    add(
+                        id: "\(statementID)-ocr-page-\(index + 1)",
+                        severity: .error,
+                        source: source,
+                        period: period,
+                        title: "Página OCR débil",
+                        detail: "La página \(index + 1) tiene confianza \(value), por debajo del mínimo operativo."
+                    )
+                }
+            }
+
+            if statement.transactionCount == 0 {
+                add(
+                    id: "\(statementID)-empty-rows",
+                    severity: .error,
+                    source: source,
+                    period: period,
+                    title: "Estado sin movimientos",
+                    detail: "No se reconstruyeron filas financieras para este documento."
+                )
+            }
+
+            if let reconciliation = statement.reconciliation,
+               let extracted = reconciliation.extractedMovementCount,
+               let expected = reconciliation.expectedMovementCount,
+               extracted != expected {
+                add(
+                    id: "\(statementID)-coverage",
+                    severity: reconciliationStatus == .valid ? .warning : .error,
+                    source: source,
+                    period: period,
+                    title: "Cobertura de filas incompleta",
+                    detail: "El lector conservó \(extracted) movimiento(s) de \(expected) esperado(s) según los controles del estado."
+                )
+            }
+
+            if statement.requiresReview {
+                let hasDocumentBlocker = reconciliationStatus != .valid
+                    || !isCurrentReader(statement)
+                    || !hasVerifiedSourceEvidence(statement)
+                    || statement.kind == .unknown
+                    || statement.ocrColumnsCalibrated == false
+                    || !hasSufficientOCRQuality(statement)
+                add(
+                    id: "\(statementID)-manual-review",
+                    severity: hasDocumentBlocker ? .error : .warning,
+                    source: source,
+                    period: period,
+                    title: "Estado marcado para revisión",
+                    detail: "El lector conservó evidencia, pero no lo considera listo para alimentar automáticamente los KPI."
+                )
+            }
+
+            for (index, row) in (statement.rowDiagnostics ?? []).enumerated() where !row.accepted {
+                var detail = row.reason.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let page = row.page {
+                    detail = "Página \(page) · \(detail)"
+                }
+                let rawText = snippet(row.rawText)
+                if !rawText.isEmpty {
+                    detail += " · Texto detectado: \(rawText)"
+                }
+                add(
+                    id: "\(statementID)-row-\(row.id)-\(index)",
+                    severity: reconciliationStatus == .valid ? .warning : .error,
+                    source: source,
+                    period: period,
+                    title: "Fila rechazada",
+                    detail: detail.isEmpty ? "La fila no superó la validación de fecha, importe, signo o columna." : detail
+                )
+            }
+
+            if let duplicateRows = auditsByID[statement.id]?.duplicateRows, duplicateRows > 0 {
+                add(
+                    id: "\(statementID)-duplicates",
+                    severity: .warning,
+                    source: source,
+                    period: period,
+                    title: "Posibles filas duplicadas",
+                    detail: "La auditoría detectó \(duplicateRows) fila(s) que no llegaron al conjunto canónico."
+                )
+            }
+
+            let linkedMovements = movements.filter { $0.statementId == statement.id }
+            for movement in linkedMovements {
+                let label = movementLabel(movement)
+                let blockingReasons = movementBlockingReasons(movement)
+                if !blockingReasons.isEmpty {
+                    add(
+                        id: "\(statementID)-movement-\(movement.id.uuidString)-blocked",
+                        severity: .error,
+                        source: source,
+                        period: period,
+                        title: "Movimiento bloqueado",
+                        detail: "\(label): \(blockingReasons.joined(separator: " "))"
+                    )
+                }
+
+                if let merchantReviewReason = movement.merchantReviewReason {
+                    let confidence = movement.merchantConfidence.map { " · confianza \(Int(($0 * 100).rounded()))%" } ?? ""
+                    add(
+                        id: "\(statementID)-movement-\(movement.id.uuidString)-merchant",
+                        severity: .warning,
+                        source: source,
+                        period: period,
+                        title: "Comercio por confirmar",
+                        detail: "\(label)\(confidence): \(merchantReviewReason)"
+                    )
+                } else if isClassifiableExpenseForCategory(movement)
+                            && Self.pendingCategoryNames.contains(movement.category) {
+                    add(
+                        id: "\(statementID)-movement-\(movement.id.uuidString)-category",
+                        severity: .warning,
+                        source: source,
+                        period: period,
+                        title: "Categoría pendiente",
+                        detail: "\(label): la categoría actual es \"\(movement.category)\" y requiere confirmación."
+                    )
+                }
+
+                if let evidence = movement.extractionEvidence,
+                   evidence.method == "vision-ocr" {
+                    if !evidence.confidence.isFinite || evidence.confidence < 0.88 {
+                        let confidence = evidence.confidence.isFinite
+                            ? "\(Int((evidence.confidence * 100).rounded()))%"
+                            : "no disponible"
+                        add(
+                            id: "\(statementID)-movement-\(movement.id.uuidString)-evidence-confidence",
+                            severity: .warning,
+                            source: source,
+                            period: period,
+                            title: "Confianza baja en la fila OCR",
+                            detail: "\(label): la evidencia de esta fila tiene confianza \(confidence)."
+                        )
+                    }
+                    if evidence.sameVisualRow == false {
+                        add(
+                            id: "\(statementID)-movement-\(movement.id.uuidString)-visual-row",
+                            severity: .warning,
+                            source: source,
+                            period: period,
+                            title: "Fila visual no confirmada",
+                            detail: "\(label): fecha, descripción e importe no quedaron confirmados como parte de la misma fila visual."
+                        )
+                    }
+                }
+            }
+        }
+
+        // Legacy/manual rows may not have a statement id. Keep their local
+        // validation visible without treating the absence of a PDF as an
+        // import-evidence error.
+        for movement in movements where movement.statementId == nil {
+            let blockingReasons = movementBlockingReasons(movement)
+            if !blockingReasons.isEmpty {
+                add(
+                    id: "orphan-movement-\(movement.id.uuidString)",
+                    severity: .error,
+                    title: "Movimiento fuera del libro",
+                    detail: "\(movementLabel(movement)): \(blockingReasons.joined(separator: " "))"
+                )
+            }
+        }
+
+        for check in consistencyChecks where !check.passed {
+            let difference = check.difference.map { " Diferencia: \(diagnosticMoney($0))." } ?? ""
+            add(
+                id: "consistency-\(check.id)",
+                severity: .error,
+                title: "Control contable no cuadra",
+                detail: "\(check.label).\(difference)"
+            )
+        }
+
+        if quality.spendMismatch {
+            add(
+                id: "quality-spend-mismatch",
+                severity: .error,
+                title: "Gasto consolidado inconsistente",
+                detail: "El gasto calculado supera los movimientos canónicos; el KPI permanece bloqueado."
+            )
+        }
+
+        if quality.missingRebuiltStatements {
+            add(
+                id: "quality-rebuild-count",
+                severity: .error,
+                title: "Faltan estados reconstruidos",
+                detail: "La reconstrucción esperada todavía no contiene todos los estados que deben validarse."
+            )
+        }
+
+        if !quality.isBlocking && quality.reviewMovementCount == 0 && issues.isEmpty {
+            add(
+                id: "quality-clean",
+                severity: .info,
+                title: "Libro sin problemas detectados",
+                detail: "Los estados guardados concilian y no tienen filas bloqueadas ni enriquecimiento pendiente."
+            )
+        }
+
+        issues.sort { left, right in
+            if left.severity.sortOrder != right.severity.sortOrder {
+                return left.severity.sortOrder < right.severity.sortOrder
+            }
+            let leftScope = left.scopeLabel ?? ""
+            let rightScope = right.scopeLabel ?? ""
+            if leftScope != rightScope { return leftScope < rightScope }
+            return left.title < right.title
+        }
+
+        return LedgerDiagnosticReport(
+            generatedAt: .now,
+            statementCount: quality.statementCount,
+            validatedStatementCount: quality.validatedStatementCount,
+            canonicalMovementCount: quality.movementCount,
+            blockedMovementCount: quality.blockedMovementCount,
+            enrichmentMovementCount: quality.enrichmentMovementCount,
+            issues: issues
+        )
     }
 
     private func diagnosticMoney(_ value: Decimal) -> String {

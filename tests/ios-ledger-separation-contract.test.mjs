@@ -40,6 +40,21 @@ test("el dashboard separa estados conciliados, filas bloqueadas y enriquecimient
   assert.match(models, /let blockedRows: Int/);
 });
 
+test("diagnóstico puede auditar todo el libro sin volver a subir PDFs", async () => {
+  const [diagnostics, models] = await Promise.all([
+    readFile(new URL("../apps/ios/Cauce/Diagnostics.swift", import.meta.url), "utf8"),
+    readFile(modelsPath, "utf8"),
+  ]);
+  assert.match(diagnostics, /Analizar todos los estados guardados/);
+  assert.match(diagnostics, /diagnostics\.manual/);
+  assert.match(diagnostics, /No vuelve a subir archivos ni a ejecutar OCR/);
+  assert.match(diagnostics, /Copiar diagnóstico completo/);
+  assert.match(models, /struct LedgerDiagnosticReport/);
+  assert.match(models, /func diagnosticReport\(\) -> LedgerDiagnosticReport/);
+  assert.match(models, /movementBlockingReasons\(movement\)/);
+  assert.match(models, /where !row\.accepted/);
+});
+
 test("Zen solo recibe gastos canónicos y falla cerrado", async () => {
   const sections = await readFile(sectionsPath, "utf8");
   const ai = await readFile(aiPath, "utf8");
