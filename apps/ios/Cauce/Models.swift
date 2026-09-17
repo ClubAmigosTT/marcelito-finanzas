@@ -2036,15 +2036,17 @@ final class FinanceStore {
                     && hasSufficientOCRQuality(statement)
                 for (index, confidence) in pageConfidences.enumerated() where !confidence.isFinite || confidence < 0.78 {
                     let value = confidence.isFinite ? "\(Int((confidence * 100).rounded()))%" : "no disponible"
+                    let pageDetail = rappiPageWarningOnly ? "La página \(index + 1) tiene señal visual \(value), pero sus fechas/importes de fila y la conciliación siguen siendo utilizables." : "La página \(index + 1) tiene confianza \(value), por debajo del mínimo operativo."
                     add(
                         id: "\(statementID)-ocr-page-\(index + 1)",
                         severity: rappiPageWarningOnly ? .warning : .error,
                         source: source,
                         period: period,
                         title: rappiPageWarningOnly ? "Señal OCR de página baja (no bloqueante)" : "Página OCR débil",
-                        detail: rappiPageWarningOnly
+                        detail: pageDetail /*
                             ? "La página \(index + 1) tiene señal visual \(value\), pero sus fechas/importes de fila y la conciliación siguen siendo utilizables."
                             : "La página \(index + 1) tiene confianza \(value\), por debajo del mínimo operativo."
+                            */
                     )
                 }
             }
