@@ -92,7 +92,11 @@ enum SelectablePDFLayout {
         func lineGroups(_ fragments: [Fragment]) -> [[Fragment]] {
             let sorted = fragments.sorted {
                 if abs($0.bounds.midY - $1.bounds.midY) > 0.5 {
-                    return $0.bounds.midY > $1.bounds.midY
+                    // PDFKit's page bounds use the opposite vertical origin
+                    // from the printed reading order. Walk from the visual
+                    // top to the visual bottom so totals close the table
+                    // after its rows, not before them.
+                    return $0.bounds.midY < $1.bounds.midY
                 }
                 return $0.bounds.minX < $1.bounds.minX
             }
