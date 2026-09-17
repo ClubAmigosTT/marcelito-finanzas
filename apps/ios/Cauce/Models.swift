@@ -717,7 +717,7 @@ struct LedgerDiagnosticIssue: Identifiable {
     let detail: String
 
     var scopeLabel: String? {
-        let parts = [source, period].compactMap { value in
+        let parts: [String] = [source, period].compactMap { value -> String? in
             guard let value, !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
             return value
         }
