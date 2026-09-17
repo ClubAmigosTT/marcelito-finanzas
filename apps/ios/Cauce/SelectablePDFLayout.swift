@@ -101,7 +101,7 @@ enum SelectablePDFLayout {
                 if let index = groups.indices.last,
                    let anchor = groups[index].first,
                    abs(anchor.bounds.midY - fragment.bounds.midY)
-                    <= max(3.5, min(6.0, min(anchor.bounds.height, fragment.bounds.height) * 0.75)) {
+                    <= max(4.5, min(10.0, min(anchor.bounds.height, fragment.bounds.height) * 1.25)) {
                     groups[index].append(fragment)
                 } else {
                     groups.append([fragment])
