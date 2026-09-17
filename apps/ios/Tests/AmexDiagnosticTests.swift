@@ -60,6 +60,21 @@ final class AmexDiagnosticTests: XCTestCase {
         XCTAssertEqual(FinanceStore.amexTextDiagnosticsForTesting(text, fileName: "2026.pdf").first?.reason, "amex.mxn-cell-ambiguous")
     }
 
+    func testAmexVisionCandidateCanRecoverWhenTextPathFails() {
+        let rows = FinanceStore.amexOCRRowsForTesting([
+            OCRObservationFixture(page: 0, text: "Fecha y Detalle de las operaciones", x: 0.08, y: 0.90, width: 0.52),
+            OCRObservationFixture(page: 0, text: "05 de Agosto", x: 0.05, y: 0.80, width: 0.16),
+            OCRObservationFixture(page: 0, text: "MERCADOPAGO TIENDA", x: 0.22, y: 0.80, width: 0.34),
+            OCRObservationFixture(page: 0, text: "48.00", x: 0.82, y: 0.80, width: 0.10),
+            OCRObservationFixture(page: 0, text: "Total de las transacciones 48.00", x: 0.08, y: 0.70, width: 0.50)
+        ], fileName: "Amex-2026.pdf")
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.amount, Decimal(string: "-48.00"))
+        XCTAssertEqual(rows.first?.kind, .purchase)
+        XCTAssertEqual(rows.first?.extractionEvidence?.method, "vision-ocr")
+    }
+
     func testRejectedAmexRowBlocksEvenCompensatingTotals() {
         let rejected = OCRRowDiagnostic(page: 2, rawText: "synthetic", reason: "amex.mxn-cell-ambiguous", accepted: false)
         let result = FinanceStore.santanderRowGate(StatementReconciliationRecord(status: .valid, tolerance: 0),

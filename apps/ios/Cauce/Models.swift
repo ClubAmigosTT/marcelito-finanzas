@@ -446,6 +446,21 @@ struct StatementRecord: Identifiable, Codable {
     /// remain attached to the statement so a rejected PDF can be debugged
     /// after its provisional movements have been removed from the ledger.
     var rowDiagnostics: [OCRRowDiagnostic]? = nil
+    /// Ordered local reader paths used for this statement. Older persisted
+    /// records may omit the field; new imports retain it for later review.
+    var recoveryAttempts: [String]? = nil
+}
+
+func readerRecoveryLabel(_ value: String) -> String {
+    switch value {
+    case "pdf-text": return "texto PDF"
+    case "pdf-layout": return "orden visual"
+    case "vision-ocr": return "Vision"
+    case "vision-region-retry": return "relectura por zonas"
+    case "vision-empty": return "Vision sin texto"
+    case "pdf-text-unverified": return "texto PDF provisional"
+    default: return value
+    }
 }
 
 struct ImportSummary {
@@ -474,6 +489,9 @@ struct ImportSummary {
     /// Row-level visual decisions retained for the explicit private
     /// diagnostics export. Normal dashboard calculations ignore this field.
     var rowDiagnostics: [OCRRowDiagnostic] = []
+    /// Ordered local reader paths used for this import. This is diagnostic
+    /// provenance only; acceptance still depends on the accounting gates.
+    var recoveryAttempts: [String] = []
     /// Candidate rows for explicit private device audits only, including rejected statements.
     var auditRows: [NativeAuditRow] = []
     /// Legacy compatibility markers. They remain false for new imports and
@@ -818,6 +836,8 @@ private struct PDFImportExtraction: Codable, @unchecked Sendable {
     let ocrColumnCalibrationNeedsReview: Bool
     let ocrConfidenceNeedsReview: Bool
     let rowDiagnostics: [OCRRowDiagnostic]
+    /// Ordered local reader paths used while producing this candidate.
+    let recoveryAttempts: [String]
     /// Legacy compatibility markers; always false for new local extraction.
     var multimodalFallbackAttempted: Bool = false
     var multimodalFallbackError: String? = nil
@@ -879,7 +899,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.17.1"
+    static let readerVersion = "ios-reader-recovery-2026.09.17.1"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -994,8 +1014,9 @@ final class FinanceStore {
         let kind = statementKind(from: text, source: source)
         let movements: [Movement]
         if source.localizedCaseInsensitiveContains("Amex") {
-            // American Express PDFs are text-native. Keep this path separate
-            // from the generic reader so a failed control never triggers OCR.
+            // American Express keeps a section-aware text parser. Production
+            // extraction may fall through to parseAmexOCR when this candidate
+            // does not reconcile; this pure text seam remains deterministic.
             movements = parseAmexText(text, fileName: fileName)
         } else if source == "Rappi" {
             movements = parseRappiText(text, fileName: fileName)
@@ -5205,6 +5226,7 @@ final class FinanceStore {
         // controls accept it; sorting is never itself proof of correctness.
         var rappiSupplementalLayoutText = ""
         var rappiPageWiseSelectableText = ""
+        var recoveryAttempts = ["pdf-text"]
         if !textLayerReconciles {
             let isRappi = Self.sourceDetection(from: extractedText, fileName: fileName).source == "Rappi"
             if isRappi {
@@ -5229,15 +5251,15 @@ final class FinanceStore {
                                        sourceOverride: cleanedSourceOverride, kindOverride: kindOverride) {
                 extractedText = layoutText
                 textLayerReconciles = true
+                recoveryAttempts.append("pdf-layout")
             }
         }
 
-        // American Express PDFs contain a digital text layer. Once the issuer
-        // is identified from that layer, Vision is permanently disabled for
-        // this import; a failed text control must reject the statement rather
-        // than silently switch to OCR.
+        // The text layer is the preferred path for American Express, but it is
+        // not a reason to suppress Vision when the rows or controls fail. The
+        // OCR parser below is section-aware and keeps the same reconciliation
+        // gate as the selectable-text path.
         let selectableSource = Self.sourceDetection(from: extractedText, fileName: fileName).source
-        let selectableAmex = selectableSource.localizedCaseInsensitiveCompare("Amex") == .orderedSame
 
         // A short administrative layer is not a trustworthy movement table;
         // a structured layer that failed reconciliation is not trustworthy
@@ -5247,10 +5269,8 @@ final class FinanceStore {
         // the wrong rows. A valid, reconciled layer remains the fast path and
         // avoids a lossy OCR round-trip (especially for Amex's split columns).
         let shouldAttemptOCR = allowOCR && !textLayerReconciles
-        // Keep the legacy quality-gate variable intact for bank recovery,
-        // but never invoke Vision for a selectable American Express PDF.
         let rappiPages = selectableSource == "Rappi" ? Self.rappiOCRPageIndexes(in: document) : nil
-        let ocrObservations = shouldAttemptOCR && !selectableAmex
+        let ocrObservations = shouldAttemptOCR
             ? Self.ocrObservations(
                 from: document,
                 pageIndexes: rappiPages,
@@ -5261,6 +5281,11 @@ final class FinanceStore {
             ? Self.rappiOCRText(from: ocrObservations)
             : Self.ocrText(from: ocrObservations)
         let usedOCR = shouldAttemptOCR && !ocrObservations.isEmpty
+        if usedOCR {
+            recoveryAttempts.append("vision-ocr")
+        } else if shouldAttemptOCR {
+            recoveryAttempts.append("vision-empty")
+        }
         // If Vision cannot produce a single observation, keep the original
         // text so the caller receives the normal reconciliation diagnostics
         // instead of an opaque "empty PDF" error.
@@ -5368,21 +5393,97 @@ final class FinanceStore {
             summaryText = text
         }
         var summary = Self.summary(from: summaryText, source: source)
+        if usedOCR,
+           (source.localizedCaseInsensitiveContains("Amex")
+            || source == "BBVA"
+            || source == "Santander") {
+            // OCR is the recovery source for movement rows, but a selectable
+            // administrative layer often preserves the printed controls more
+            // faithfully than Vision. Keep that independent control set when
+            // it exists; it can reject an OCR candidate, never authorize one
+            // by itself.
+            let selectableSummaryText: String
+            if source.localizedCaseInsensitiveContains("Amex") {
+                selectableSummaryText = Self.rebuildAmexSelectableLines(extractedText)
+            } else if source == "BBVA" {
+                selectableSummaryText = Self.rebuildBBVASelectableLines(extractedText)
+            } else {
+                selectableSummaryText = extractedText
+            }
+            if let selectableSummary = Self.summary(from: selectableSummaryText, source: source) {
+                summary = selectableSummary
+            }
+        }
         var movementColumnsCalibrated = true
         var rowDiagnostics: [OCRRowDiagnostic] = []
         let parsedCandidates: [Movement]
         if usedOCR, source == "Santander" {
-            let santanderResult = Self.parseSantanderTable(
+            var santanderResult = Self.parseSantanderTable(
                 ocrObservations,
                 fileName: fileName,
                 openingBalance: summary?.previousBalance,
                 document: document
             )
+            let firstReconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
+                kind: kind,
+                summary: summary,
+                movements: santanderResult.movements
+            )
+            if allowOCR && firstReconciliation.status != .valid {
+                let retryObservations = Self.ocrObservations(
+                    from: document,
+                    pageIndexes: nil,
+                    prioritizeNumericEvidence: false,
+                    forceRegionRecovery: true
+                )
+                let retryResult = Self.parseSantanderTable(
+                    retryObservations,
+                    fileName: fileName,
+                    openingBalance: summary?.previousBalance,
+                    document: document
+                )
+                let retryReconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
+                    kind: kind,
+                    summary: summary,
+                    movements: retryResult.movements
+                )
+                let retryImprovesCoverage = retryResult.movements.count > santanderResult.movements.count
+                    && retryResult.diagnostics.filter { !$0.accepted }.count <= santanderResult.diagnostics.filter { !$0.accepted }.count
+                if retryReconciliation.status == .valid || retryImprovesCoverage {
+                    santanderResult = retryResult
+                    recoveryAttempts.append("vision-region-retry")
+                }
+            }
             movementColumnsCalibrated = santanderResult.columnsCalibrated
             rowDiagnostics = santanderResult.diagnostics
             parsedCandidates = santanderResult.movements
         } else if usedOCR, source == "BBVA" {
-            let bbvaResult = Self.parseBBVAOCRResult(ocrObservations, fileName: fileName)
+            var bbvaResult = Self.parseBBVAOCRResult(ocrObservations, fileName: fileName)
+            let firstReconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
+                kind: kind,
+                summary: summary,
+                movements: bbvaResult.movements
+            )
+            if allowOCR && firstReconciliation.status != .valid {
+                let retryObservations = Self.ocrObservations(
+                    from: document,
+                    pageIndexes: nil,
+                    prioritizeNumericEvidence: false,
+                    forceRegionRecovery: true
+                )
+                let retryResult = Self.parseBBVAOCRResult(retryObservations, fileName: fileName)
+                let retryReconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
+                    kind: kind,
+                    summary: summary,
+                    movements: retryResult.movements
+                )
+                let retryImprovesCoverage = retryResult.movements.count > bbvaResult.movements.count
+                    && retryResult.diagnostics.filter { !$0.accepted }.count <= bbvaResult.diagnostics.filter { !$0.accepted }.count
+                if retryReconciliation.status == .valid || retryImprovesCoverage {
+                    bbvaResult = retryResult
+                    recoveryAttempts.append("vision-region-retry")
+                }
+            }
             movementColumnsCalibrated = bbvaResult.columnsCalibrated
             rowDiagnostics = bbvaResult.diagnostics
             parsedCandidates = bbvaResult.movements
@@ -5455,7 +5556,7 @@ final class FinanceStore {
                     from: document,
                     pageIndexes: rappiPages,
                     prioritizeNumericEvidence: true,
-                    forceRappiRegionRecovery: true
+                    forceRegionRecovery: true
                 )
                 let retryText = Self.rappiOCRText(from: retryObservations)
                 let retryConfidenceByPage = Dictionary(grouping: retryObservations, by: { $0.page + 1 })
@@ -5515,6 +5616,40 @@ final class FinanceStore {
                     fallbackReason: "RappiCard: importe firmado recuperado visualmente y conciliado con controles independientes"
                 )
             }
+        } else if usedOCR, source.localizedCaseInsensitiveContains("Amex") {
+            let initial = Self.parseAmexOCRResult(ocrObservations, fileName: fileName)
+            var selected = initial
+            let initialReconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
+                kind: kind,
+                summary: summary,
+                movements: initial.movements
+            )
+            if allowOCR && initialReconciliation.status != .valid {
+                // Dense Amex tables can return a confident full-page result
+                // while dropping a date or the local MXN cell. Re-read the
+                // page in bounded visual regions only after the first OCR
+                // candidate fails the same accounting contract used at save.
+                let retryObservations = Self.ocrObservations(
+                    from: document,
+                    pageIndexes: nil,
+                    prioritizeNumericEvidence: false,
+                    forceRegionRecovery: true
+                )
+                let retry = Self.parseAmexOCRResult(retryObservations, fileName: fileName)
+                let retryReconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
+                    kind: kind,
+                    summary: summary,
+                    movements: retry.movements
+                )
+                let improvesCoverage = retry.movements.count > initial.movements.count
+                    && retry.diagnostics.filter { !$0.accepted }.count <= initial.diagnostics.filter { !$0.accepted }.count
+                if retryReconciliation.status == .valid || improvesCoverage {
+                    selected = retry
+                    recoveryAttempts.append("vision-region-retry")
+                }
+            }
+            parsedCandidates = selected.movements
+            rowDiagnostics = selected.diagnostics
         } else if usedOCR {
             parsedCandidates = []
         } else if source == "Rappi" {
@@ -5615,7 +5750,8 @@ final class FinanceStore {
             ocrFallbackNeedsReview: ocrFallbackNeedsReview,
             ocrColumnCalibrationNeedsReview: ocrColumnCalibrationNeedsReview,
             ocrConfidenceNeedsReview: ocrConfidenceNeedsReview,
-            rowDiagnostics: rowDiagnostics
+            rowDiagnostics: rowDiagnostics,
+            recoveryAttempts: recoveryAttempts
         )
     }
 
@@ -5751,7 +5887,8 @@ final class FinanceStore {
             extractionProvider: extraction.extractionProvider,
             fileSizeBytes: documentData.count,
             pageCount: extraction.pageCount,
-            rowDiagnostics: extraction.rowDiagnostics
+            rowDiagnostics: extraction.rowDiagnostics,
+            recoveryAttempts: extraction.recoveryAttempts
         )
         if let index = statements.firstIndex(where: { $0.id == statementId }) {
             statements[index] = statement
@@ -5804,6 +5941,7 @@ final class FinanceStore {
             fileSizeBytes: documentData.count,
             pageCount: extraction.pageCount,
             rowDiagnostics: extraction.rowDiagnostics,
+            recoveryAttempts: extraction.recoveryAttempts,
             multimodalFallbackAttempted: extraction.multimodalFallbackAttempted,
             multimodalFallbackError: extraction.multimodalFallbackError
         )
@@ -5842,6 +5980,22 @@ final class FinanceStore {
             cache?.store(compact, key: key)
         }
         return result
+    }
+
+    private static func localExtractionStage(for attempts: [String]) -> String {
+        if attempts.contains("vision-region-retry") {
+            return "Relectura regional local terminada"
+        }
+        if attempts.contains("vision-ocr") {
+            return "Lectura local con Vision terminada"
+        }
+        if attempts.contains("pdf-layout") {
+            return "Reconstrucción visual local terminada"
+        }
+        if attempts.contains("vision-empty") {
+            return "Vision local no encontró texto"
+        }
+        return "Lectura de texto local terminada"
     }
 
     func importPDF(
@@ -5924,7 +6078,7 @@ final class FinanceStore {
             }
         }.value
         try Task.checkCancellation()
-        stage?("Lectura local lista; conciliando contra los totales…")
+        stage?("\(Self.localExtractionStage(for: localExtraction.recoveryAttempts)); conciliando contra los totales…")
         let extraction = localExtraction
         try Task.checkCancellation()
         return try applyPDFExtraction(
@@ -5977,7 +6131,7 @@ final class FinanceStore {
             }
         }.value
         try Task.checkCancellation()
-        stage?("Lectura local lista; conciliando contra los totales…")
+        stage?("\(Self.localExtractionStage(for: localExtraction.recoveryAttempts)); conciliando contra los totales…")
         let extraction = localExtraction
         try Task.checkCancellation()
         return inspectionSummary(for: extraction, url: url)
@@ -6034,6 +6188,7 @@ final class FinanceStore {
             fileSizeBytes: extraction.documentData.count,
             pageCount: extraction.pageCount,
             rowDiagnostics: extraction.rowDiagnostics,
+            recoveryAttempts: extraction.recoveryAttempts,
             auditRows: candidates.map(NativeAuditRow.init),
             multimodalFallbackAttempted: extraction.multimodalFallbackAttempted,
             multimodalFallbackError: extraction.multimodalFallbackError
@@ -7009,7 +7164,7 @@ final class FinanceStore {
         from document: PDFDocument,
         pageIndexes: Set<Int>? = nil,
         prioritizeNumericEvidence: Bool = false,
-        forceRappiRegionRecovery: Bool = false
+        forceRegionRecovery: Bool = false
     ) -> [OCRObservation] {
         var observations: [OCRObservation] = []
         let ciContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -7540,7 +7695,7 @@ final class FinanceStore {
                         }
                     }
                 }
-                if prioritizeNumericEvidence, forceRappiRegionRecovery, pageIndex > 0 {
+                if forceRegionRecovery && (!prioritizeNumericEvidence || pageIndex > 0) {
                     // A dense Rappi continuation page can produce a confident
                     // full-page result while silently omitting the first
                     // column of rows (the April statement lost the first 15
@@ -7557,7 +7712,7 @@ final class FinanceStore {
                         supplemental.append(contentsOf: recognize(
                             selectedImage,
                             page: pageIndex,
-                            numericFocus: true,
+                            numericFocus: prioritizeNumericEvidence,
                             regionOfInterest: region
                         ))
                     }

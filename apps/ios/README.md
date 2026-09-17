@@ -85,7 +85,7 @@ cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
   --manifest /ruta/privada/rappi-regression-manifest.json \
-  --reader-version ios-reader-deterministic-2026.09.17.1 \
+  --reader-version ios-reader-recovery-2026.09.17.1 \
   --require-certified
 ```
 
