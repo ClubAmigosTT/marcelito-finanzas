@@ -63,27 +63,11 @@ final class SelectablePDFLayoutTests: XCTestCase {
         }
         let document = try XCTUnwrap(PDFDocument(data: data))
         let text = SelectablePDFLayout.rappiText(from: document)
-        let geometryDebug: String = {
-            guard let page = document.page(at: 1),
-                  let pageText = page.string,
-                  let tokenRegex = try? NSRegularExpression(pattern: #"\S+"#) else {
-                return "<sin geometría>"
-            }
-            let original = pageText as NSString
-            return tokenRegex.matches(
-                in: pageText,
-                range: NSRange(location: 0, length: original.length)
-            ).compactMap { match in
-                guard let selection = page.selection(for: match.range) else { return nil }
-                let bounds = selection.bounds(for: page)
-                return "\(original.substring(with: match.range))@\(bounds.minX),\(bounds.midY),\(bounds.width),\(bounds.height)"
-            }.joined(separator: " | ")
-        }()
 
         XCTAssertEqual(
             text.components(separatedBy: "__RAPPI_ROW_BOUNDS__").count - 1,
             2,
-            "Rappi geometry output: \(text)\nPDFKit geometry: \(geometryDebug)"
+            "Rappi geometry output: \(text)"
         )
         XCTAssertTrue(text.contains("22/07/2026 23/07/2026 COMERCIO UNO +$50.00"))
         XCTAssertTrue(text.contains("24/07/2026 25/07/2026 PAGO POR SPEI -$40.00"))
