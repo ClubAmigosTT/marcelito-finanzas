@@ -224,7 +224,7 @@ struct DiagnosticsView: View {
                             DiagnosticCountBadge(title: "Info", value: report.infoCount, color: .marcelitoNavyMid)
                         }
 
-                        Text("Estados conciliados: \(report.validatedStatementCount)/\(report.statementCount) · Movimientos canónicos: \(report.canonicalMovementCount) · Bloqueados: \(report.blockedMovementCount) · Por enriquecer: \(report.enrichmentMovementCount)")
+                        Text("Conciliados: \(report.reconciledStatementCount)/\(report.statementCount) · Elegibles KPI: \(report.validatedStatementCount)/\(report.statementCount) · Canónicos: \(report.canonicalMovementCount) · Bloqueados por fila: \(report.blockedMovementCount) · En cuarentena: \(report.quarantinedCandidateCount) · Por enriquecer: \(report.enrichmentMovementCount)")
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -275,10 +275,12 @@ struct DiagnosticsView: View {
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
-                    LabeledContent("Estados", value: "\(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount) conciliados")
+                    LabeledContent("Estados con conciliación válida", value: "\(store.ledgerQuality.reconciledStatementCount)/\(store.ledgerQuality.statementCount)")
+                    LabeledContent("Estados elegibles para KPI", value: "\(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount)")
                     LabeledContent("Movimientos canónicos", value: "\(store.ledgerQuality.movementCount)")
                     LabeledContent("Movimientos por enriquecer", value: "\(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) · \(money(store.ledgerQuality.reviewAmount))")
-                    LabeledContent("Movimientos bloqueados", value: "\(store.ledgerQuality.quarantinedMovementCount) · \(money(store.ledgerQuality.quarantinedAmount))")
+                    LabeledContent("Movimientos bloqueados por fila", value: "\(store.ledgerQuality.blockedMovementCount)")
+                    LabeledContent("Movimientos en cuarentena", value: "\(store.ledgerQuality.quarantinedCandidateCount)")
                     LabeledContent("Estados en cuarentena", value: "\(store.ledgerQuality.quarantinedStatementCount)")
                     LabeledContent("Importes fuera de rango", value: "\(store.ledgerQuality.absurdMovementCount)")
                     LabeledContent("Filas con evidencia", value: "\(Int(store.ledgerQuality.evidencePercent.rounded()))%")
@@ -435,7 +437,7 @@ struct DiagnosticsView: View {
                             .foregroundStyle(.secondary)
                     } else {
                         ForEach(store.statementAudits) { audit in
-                            let duplicateSuffix = audit.duplicateRows.map { " · \($0) duplicadas" } ?? ""
+                            let duplicateSuffix = audit.duplicateRows.flatMap { $0 > 0 ? " · \($0) duplicadas confirmadas" : nil } ?? ""
                             VStack(alignment: .leading, spacing: 4) {
                                 HStack {
                                     Text("\(audit.source) · \(audit.period)")

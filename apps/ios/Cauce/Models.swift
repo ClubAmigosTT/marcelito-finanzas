@@ -657,6 +657,10 @@ enum FinanceImportError: LocalizedError {
 
 struct LedgerQuality {
     let statementCount: Int
+    /// Estados cuyos controles financieros cuadran al centavo, incluso si
+    /// todavía requieren revisión de OCR/evidencia antes de alimentar KPI.
+    let reconciledStatementCount: Int
+    /// Estados que además de conciliar superan todos los filtros operativos.
     let validatedStatementCount: Int
     let invalidStatementCount: Int
     let pendingStatementCount: Int
@@ -668,6 +672,9 @@ struct LedgerQuality {
     let reviewAmount: Decimal
     let quarantinedStatementCount: Int
     let quarantinedMovementCount: Int
+    /// Candidatos retenidos por estados que no son elegibles. No son
+    /// duplicados ni errores individuales; son filas fuera del libro KPI.
+    let quarantinedCandidateCount: Int
     let quarantinedAmount: Decimal
     let absurdMovementCount: Int
     let reconciledPercent: Double
@@ -731,9 +738,11 @@ struct LedgerDiagnosticIssue: Identifiable {
 struct LedgerDiagnosticReport {
     let generatedAt: Date
     let statementCount: Int
+    let reconciledStatementCount: Int
     let validatedStatementCount: Int
     let canonicalMovementCount: Int
     let blockedMovementCount: Int
+    let quarantinedCandidateCount: Int
     let enrichmentMovementCount: Int
     let issues: [LedgerDiagnosticIssue]
 
@@ -747,9 +756,11 @@ struct LedgerDiagnosticReport {
         var lines = [
             "Marcelito · revisión completa del libro",
             "Generado: \(formatter.string(from: generatedAt))",
-            "Estados conciliados: \(validatedStatementCount)/\(statementCount)",
+            "Estados con conciliación financiera válida: \(reconciledStatementCount)/\(statementCount)",
+            "Estados elegibles para KPI: \(validatedStatementCount)/\(statementCount)",
             "Movimientos canónicos: \(canonicalMovementCount)",
-            "Movimientos bloqueados: \(blockedMovementCount)",
+            "Movimientos bloqueados por fila: \(blockedMovementCount)",
+            "Movimientos en cuarentena por estado: \(quarantinedCandidateCount)",
             "Movimientos por enriquecer: \(enrichmentMovementCount)",
             "Errores: \(errorCount) · Advertencias: \(warningCount) · Información: \(infoCount)",
             ""
@@ -868,7 +879,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-deterministic-2026.09.16.3"
+    static let readerVersion = "ios-reader-deterministic-2026.09.17.1"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -1594,6 +1605,7 @@ final class FinanceStore {
            ) {
             return cached.value
         }
+        let reconciledStatementCount = statements.filter { $0.reconciliation?.status == .valid }.count
         let validated = statements.filter(isEligibleStatement)
         let invalid = statements.filter { $0.reconciliation?.status == .invalid }
         let pending = statements.filter { !isEligibleStatement($0) && $0.reconciliation?.status != .invalid }
@@ -1616,13 +1628,20 @@ final class FinanceStore {
         // rejected diagnostics remain blocked.
         let blockedCount = statements.reduce(0) { total, statement in
             let diagnosticBlocked = statement.rowDiagnostics?.filter { !$0.accepted }.count ?? 0
-            guard !isEligibleStatement(statement) else { return total + diagnosticBlocked }
+            let persistedBlocked = movements.filter { movement in
+                movement.statementId == statement.id && !movementBlockingReasons(movement).isEmpty
+            }.count
+            return total + diagnosticBlocked + persistedBlocked
+        }
+        let quarantinedCandidateCount = statements.reduce(0) { total, statement in
+            guard !isEligibleStatement(statement) else { return total }
             let candidateCount = statement.reconciliation?.extractedMovementCount ?? statement.transactionCount
+            let diagnosticBlocked = statement.rowDiagnostics?.filter { !$0.accepted }.count ?? 0
             return total + max(diagnosticBlocked, candidateCount)
         }
         let absurdCount = movements.filter { abs($0.amount) >= 10_000_000 || !isValidStoredMovement($0) }.count
         let statementCount = statements.count
-        let reconciledPercent = statementCount == 0 ? 100 : Double(validated.count) / Double(statementCount) * 100
+        let reconciledPercent = statementCount == 0 ? 100 : Double(reconciledStatementCount) / Double(statementCount) * 100
         let evidenceRows = movements.filter { movement in
             guard movement.statementId != nil else { return false }
             return movement.extractionEvidence?.method != "manual"
@@ -1632,9 +1651,16 @@ final class FinanceStore {
             ? 100
             : Double(evidenceRows.count - missingEvidenceCount) / Double(evidenceRows.count) * 100
         let expectedRebuildCount = UserDefaults.standard.integer(forKey: canonicalRebuildExpectedCountKey)
+        // A rebuild is complete when every expected source has a current
+        // statement record and a reconciliation result, even if that result
+        // is invalid or requires review. Comparing against `validated` made
+        // blocked Rappi OCR look like missing files and hid the real reason.
+        let reconstructedStatementCount = statements.filter {
+            isCurrentReader($0) && $0.reconciliation != nil
+        }.count
         let missingRebuiltStatements = UserDefaults.standard.bool(forKey: canonicalRebuildKey)
             && expectedRebuildCount > 0
-            && validated.count < expectedRebuildCount
+            && reconstructedStatementCount < expectedRebuildCount
         let canonicalGross = eligibleMovements.filter(isSpend).reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let canonicalRefunds = eligibleMovements.filter { movementKind($0) == .refund }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let canonicalNetSpend = max(Decimal(0), canonicalGross - canonicalRefunds)
@@ -1665,12 +1691,13 @@ final class FinanceStore {
         } else if let failed = failedChecks.first {
             message = "La conciliación no cuadra: \(failed.label)."
         } else if missingRebuiltStatements {
-            message = "Faltan \(expectedRebuildCount - validated.count) estado(s) validado(s) de la reconstrucción."
+            message = "Faltan \(expectedRebuildCount - reconstructedStatementCount) estado(s) reconstruido(s); los estados reconstruidos pero bloqueados se muestran por separado."
         } else {
             message = nil
         }
         let value = LedgerQuality(
             statementCount: statementCount,
+            reconciledStatementCount: reconciledStatementCount,
             validatedStatementCount: validated.count,
             invalidStatementCount: invalid.count,
             pendingStatementCount: pending.count,
@@ -1682,6 +1709,7 @@ final class FinanceStore {
             reviewAmount: reviewAmount,
             quarantinedStatementCount: max(0, statementCount - validated.count),
             quarantinedMovementCount: quarantined.count,
+            quarantinedCandidateCount: quarantinedCandidateCount,
             quarantinedAmount: quarantined.reduce(Decimal(0)) { $0 + absolute($1.amount) },
             absurdMovementCount: absurdCount,
             reconciledPercent: reconciledPercent,
@@ -1828,9 +1856,11 @@ final class FinanceStore {
         let quality = ledgerQuality
         var lines = [
             "Libro canónico",
-            "Estados: \(quality.validatedStatementCount)/\(quality.statementCount) conciliados",
+            "Estados con conciliación financiera válida: \(quality.reconciledStatementCount)/\(quality.statementCount)",
+            "Estados elegibles para KPI: \(quality.validatedStatementCount)/\(quality.statementCount)",
             "Movimientos canónicos: \(quality.movementCount)",
-            "Movimientos bloqueados: \(quality.blockedMovementCount)",
+            "Movimientos bloqueados por fila: \(quality.blockedMovementCount)",
+            "Movimientos en cuarentena por estado: \(quality.quarantinedCandidateCount)",
             "Movimientos por enriquecer: \(quality.enrichmentMovementCount)",
             "Calidad de evidencia: \(Int(quality.evidencePercent.rounded()))%",
             "Estado del dashboard: \(dashboardIsBlocked ? "bloqueado" : (manualDashboardUnlockEnabled ? "provisional (desbloqueo manual)" : "disponible"))",
@@ -1995,20 +2025,26 @@ final class FinanceStore {
                     source: source,
                     period: period,
                     title: "Confianza OCR insuficiente",
-                    detail: "La lectura visual tiene \(average) o páginas por debajo del umbral; revisa el PDF original."
+                    detail: source.caseInsensitiveCompare("Rappi") == .orderedSame
+                        ? "Una o más filas Rappi no demostraron fecha, importe y evidencia visual suficientes (\(average)); el estado permanece fuera del libro automático."
+                        : "La lectura visual tiene \(average) o páginas por debajo del umbral; revisa el PDF original."
                 )
             }
 
             if let pageConfidences = statement.ocrPageConfidences {
+                let rappiPageWarningOnly = source.caseInsensitiveCompare("Rappi") == .orderedSame
+                    && hasSufficientOCRQuality(statement)
                 for (index, confidence) in pageConfidences.enumerated() where !confidence.isFinite || confidence < 0.78 {
                     let value = confidence.isFinite ? "\(Int((confidence * 100).rounded()))%" : "no disponible"
                     add(
                         id: "\(statementID)-ocr-page-\(index + 1)",
-                        severity: .error,
+                        severity: rappiPageWarningOnly ? .warning : .error,
                         source: source,
                         period: period,
-                        title: "Página OCR débil",
-                        detail: "La página \(index + 1) tiene confianza \(value), por debajo del mínimo operativo."
+                        title: rappiPageWarningOnly ? "Señal OCR de página baja (no bloqueante)" : "Página OCR débil",
+                        detail: rappiPageWarningOnly
+                            ? "La página \(index + 1) tiene señal visual \(value\), pero sus fechas/importes de fila y la conciliación siguen siendo utilizables."
+                            : "La página \(index + 1) tiene confianza \(value\), por debajo del mínimo operativo."
                     )
                 }
             }
@@ -2080,8 +2116,8 @@ final class FinanceStore {
                     severity: .warning,
                     source: source,
                     period: period,
-                    title: "Posibles filas duplicadas",
-                    detail: "La auditoría detectó \(duplicateRows) fila(s) que no llegaron al conjunto canónico."
+                    title: "Filas duplicadas confirmadas",
+                    detail: "La auditoría encontró \(duplicateRows) fila(s) con la misma fecha, importe y evidencia visual."
                 )
             }
 
@@ -2216,9 +2252,11 @@ final class FinanceStore {
         return LedgerDiagnosticReport(
             generatedAt: .now,
             statementCount: quality.statementCount,
+            reconciledStatementCount: quality.reconciledStatementCount,
             validatedStatementCount: quality.validatedStatementCount,
             canonicalMovementCount: quality.movementCount,
             blockedMovementCount: quality.blockedMovementCount,
+            quarantinedCandidateCount: quality.quarantinedCandidateCount,
             enrichmentMovementCount: quality.enrichmentMovementCount,
             issues: issues
         )
@@ -2325,7 +2363,7 @@ final class FinanceStore {
                 let refunds = canonical.filter { movementKind($0) == .refund }
                 let reconciliation = statement.reconciliation?.status
                 let duplicateRows: Int? = reconciliation == .valid
-                    ? max(0, statement.transactionCount - canonical.count)
+                    ? confirmedDuplicateRows(in: valid)
                     : nil
                 return StatementAuditRow(
                     id: statement.id,
@@ -2337,15 +2375,19 @@ final class FinanceStore {
                     rejectedRows: statement.rowDiagnostics?.filter { !$0.accepted }.count ?? 0,
                     blockedRows: {
                         let diagnosticBlocked = statement.rowDiagnostics?.filter { !$0.accepted }.count ?? 0
-                        guard !isEligibleStatement(statement) else { return diagnosticBlocked }
-                        let candidateCount = statement.reconciliation?.extractedMovementCount ?? statement.transactionCount
-                        return max(diagnosticBlocked, candidateCount)
+                        let persistedBlocked = linked.filter { !movementBlockingReasons($0).isEmpty }.count
+                        return diagnosticBlocked + persistedBlocked
                     }(),
                     duplicateRows: duplicateRows,
                     diagnosticRows: statement.rowDiagnostics?.count ?? 0,
                     reviewRows: review.count,
                     reviewTotal: review.reduce(Decimal(0)) { $0 + absolute($1.amount) },
-                    quarantinedRows: max(0, linked.count - canonical.count),
+                    quarantinedRows: {
+                        let linkedQuarantine = max(0, linked.count - canonical.count)
+                        guard !isEligibleStatement(statement) else { return linkedQuarantine }
+                        let candidateCount = statement.reconciliation?.extractedMovementCount ?? statement.transactionCount
+                        return max(linkedQuarantine, candidateCount)
+                    }(),
                     incomeRows: income.count,
                     expenseRows: expenses.count,
                     transferRows: transfers.count,
@@ -2653,11 +2695,30 @@ final class FinanceStore {
     }
 
     /// OCR quality remains an eligibility gate after the import dialog closes.
-    /// Re-check persisted values here so an old/corrupt `requiresReview=false`
-    /// flag cannot promote a weak visual read into a KPI.
+    /// Rappi is evaluated at financial-row level: a weak merchant token or a
+    /// weak page average does not block a statement whose date/amount rows
+    /// are independently evidenced and reconcile. Other OCR readers keep the
+    /// stricter document-level gate because their calibrated columns are part
+    /// of the accounting proof.
     private func hasSufficientOCRQuality(_ statement: StatementRecord) -> Bool {
         let hasOCRSignal = statement.ocrConfidence != nil || statement.ocrPageConfidences != nil
         guard hasOCRSignal else { return true }
+        if statement.source.caseInsensitiveCompare("Rappi") == .orderedSame {
+            if statement.rowDiagnostics?.contains(where: { !$0.accepted }) == true {
+                return false
+            }
+            let rows = movements.filter { $0.statementId == statement.id }
+            return rows.allSatisfy { movement in
+                guard let evidence = movement.extractionEvidence,
+                      evidence.method == "vision-ocr" else { return true }
+                return evidence.confidence.isFinite
+                    && evidence.confidence >= 0.88
+                    && evidence.sameVisualRow == true
+                    && (evidence.page ?? 0) >= 1
+                    && evidence.sourceText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                    && evidence.selectedAmount != nil
+            }
+        }
         guard let average = statement.ocrConfidence,
               average.isFinite,
               average >= 0.88,
@@ -3006,6 +3067,42 @@ final class FinanceStore {
     private func normalizedDate(_ date: Date) -> String {
         let components = Calendar.current.dateComponents([.year, .month, .day], from: date)
         return String(format: "%04d-%02d-%02d", components.year ?? 0, components.month ?? 0, components.day ?? 0)
+    }
+
+    /// Confirms duplicates only when two stored rows point to the same visual
+    /// evidence cell. A count difference with the canonical projection is not
+    /// enough: a valid statement that is still under OCR review is expected
+    /// to have zero canonical rows and would otherwise make every row look
+    /// duplicated.
+    private func confirmedDuplicateRows(in rows: [Movement]) -> Int {
+        var seen = Set<String>()
+        var duplicates = 0
+        for movement in rows {
+            guard let evidence = movement.extractionEvidence,
+                  let page = evidence.page,
+                  let bounds = evidence.bounds else {
+                // Text-only rows do not retain enough geometry to prove that
+                // two equal date/amount/merchant rows are the same purchase.
+                continue
+            }
+            let coordinateKey = [bounds.x, bounds.y, bounds.width, bounds.height]
+                .map { String(Int(($0 * 1_000).rounded())) }
+                .joined(separator: ",")
+            let source = normalizedConcept(evidence.sourceText ?? movement.rawDescription ?? movement.title)
+            guard !source.isEmpty else { continue }
+            let amount = NSDecimalNumber(decimal: absolute(movement.amount) * Decimal(100)).intValue
+            let key = [
+                normalizedDate(movement.date),
+                movement.amount < 0 ? "out" : "in",
+                String(amount),
+                movementKind(movement).rawValue,
+                String(page),
+                coordinateKey,
+                source
+            ].joined(separator: "|")
+            if !seen.insert(key).inserted { duplicates += 1 }
+        }
+        return duplicates
     }
 
     private func deduplicationKey(_ movement: Movement) -> String {
@@ -5114,7 +5211,9 @@ final class FinanceStore {
                 // PDF text layer omits the repeated table heading.
                 rappiPageWiseSelectableText = Self.rappiPageWiseSelectableText(from: document)
             }
-            let layoutText = SelectablePDFLayout.text(from: document, rappiColumns: isRappi)
+            let layoutText = isRappi
+                ? SelectablePDFLayout.rappiText(from: document)
+                : SelectablePDFLayout.text(from: document, rappiColumns: false)
             // Keep Rappi's visually ordered selectable layer even when its
             // cover alone cannot prove reconciliation.  Vision can recover
             // the signed amounts while this layer retains merchant names;
@@ -5486,8 +5585,12 @@ final class FinanceStore {
             && !selectedOCRRows.isEmpty
             && (source == "Santander" || source == "BBVA")
             && !movementColumnsCalibrated
+        // Rappi's page average is retained for evidence and diagnostics, but
+        // it is not a document-level blocker. Its financial rows are guarded
+        // independently by `ocrFallbackNeedsReview` and their row evidence.
         let ocrConfidenceNeedsReview = usedOCR
             && !selectedOCRRows.isEmpty
+            && source.caseInsensitiveCompare("Rappi") != .orderedSame
             && ((ocrConfidence ?? 0) < 0.88 || (ocrPageConfidences?.min() ?? 0) < 0.78)
 
         return PDFImportExtraction(

@@ -673,18 +673,18 @@ struct LedgerQualityBanner: View {
                 if isWarning || store.ledgerQuality.reviewMovementCount > 0 {
                     LedgerBlockerDetailsButton().environment(store)
                 }
-                Text("Estados conciliados: \(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount)")
+                Text("Conciliación financiera: \(store.ledgerQuality.reconciledStatementCount)/\(store.ledgerQuality.statementCount) · elegibles KPI: \(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount)")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
-                Text("Movimientos bloqueados: \(store.ledgerQuality.blockedMovementCount) · por enriquecer: \(store.ledgerQuality.enrichmentMovementCount)")
+                Text("Movimientos bloqueados por fila: \(store.ledgerQuality.blockedMovementCount) · por enriquecer: \(store.ledgerQuality.enrichmentMovementCount)")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(store.ledgerQuality.blockedMovementCount > 0 || store.ledgerQuality.enrichmentMovementCount > 0 ? Color.marcelitoAmber : .secondary)
                 Text("Por enriquecer en el libro: \(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) movimientos · \(money(store.ledgerQuality.reviewAmount))")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(store.ledgerQuality.reviewMovementCount > 0 ? Color.marcelitoAmber : .secondary)
-                Text("\(store.ledgerQuality.quarantinedMovementCount) en cuarentena · \(money(store.ledgerQuality.quarantinedAmount)) · \(store.ledgerQuality.quarantinedStatementCount) estado(s) bloqueado(s)")
+                Text("\(store.ledgerQuality.quarantinedCandidateCount) movimientos en cuarentena por estado · \(store.ledgerQuality.quarantinedStatementCount) estado(s) fuera de KPI")
                     .font(.caption2.monospacedDigit())
-                    .foregroundStyle(store.ledgerQuality.quarantinedMovementCount > 0 ? Color.marcelitoAmber : .secondary)
+                    .foregroundStyle(store.ledgerQuality.quarantinedCandidateCount > 0 ? Color.marcelitoAmber : .secondary)
                 if store.dashboardIsProvisional {
                     Text("\(store.provisionalMovementCount) movimientos provisionales · gasto neto \(store.provisionalSpend.formatted(.currency(code: "MXN")))")
                         .font(.caption2.weight(.semibold))

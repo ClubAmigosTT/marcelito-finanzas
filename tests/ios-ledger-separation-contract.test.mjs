@@ -11,7 +11,7 @@ const settingsPath = new URL("../apps/ios/Cauce/Settings.swift", import.meta.url
 test("el lector nativo separa diagnóstico de libro operativo", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /var rowDiagnostics: \[OCRRowDiagnostic\]\? = nil/);
-  assert.match(source, /static let readerVersion = "ios-reader-deterministic-2026\.09\.16\.3"/);
+  assert.match(source, /static let readerVersion = "ios-reader-deterministic-2026\.09\.17\.1"/);
   assert.match(source, /let canonicalFresh = Self\.shouldPersistCanonicalRowsForTesting/);
   assert.match(source, /let ocrQualityNeedsReview = usedOCR/);
   assert.doesNotMatch(source, /let ocrQualityNeedsReview = false/);
@@ -21,6 +21,11 @@ test("el lector nativo separa diagnóstico de libro operativo", async () => {
   assert.match(source, /rowDiagnostics: extraction\.rowDiagnostics/);
   assert.match(source, /columnas CARGOS\/ABONOS\/SALDO calibradas por encabezado distribuido/);
   assert.match(source, /fila colapsada/);
+  assert.match(source, /SelectablePDFLayout\.rappiText\(from: document\)/);
+  assert.match(await readFile(new URL("../apps/ios/Cauce/SelectablePDFLayout.swift", import.meta.url), "utf8"), /static func rappiText\(from document: PDFDocument\)/);
+  assert.match(await readFile(new URL("../apps/ios/Cauce/SelectablePDFLayout.swift", import.meta.url), "utf8"), /let dateMatches = dateRegex\.matches/);
+  assert.match(await readFile(new URL("../apps/ios/Cauce/SelectablePDFLayout.swift", import.meta.url), "utf8"), /let amountMatch = amountRegex\.firstMatch/);
+  assert.match(await readFile(new URL("../apps/ios/Cauce/SelectablePDFLayout.swift", import.meta.url), "utf8"), /__RAPPI_ROW_BOUNDS__/);
   assert.match(source, /let blockedCount = statements\.reduce/);
   assert.match(source, /blockedMovementCount: blockedCount/);
   assert.match(source, /enrichmentMovementCount: reviewCount/);
@@ -32,12 +37,14 @@ test("el dashboard separa estados conciliados, filas bloqueadas y enriquecimient
     readFile(new URL("../apps/ios/Cauce/Diagnostics.swift", import.meta.url), "utf8"),
     readFile(modelsPath, "utf8"),
   ]);
-  assert.match(rootTab, /Estados conciliados:/);
-  assert.match(rootTab, /Movimientos bloqueados:/);
+  assert.match(rootTab, /Conciliación financiera:/);
+  assert.match(rootTab, /Movimientos bloqueados por fila:/);
   assert.match(rootTab, /por enriquecer:/);
   assert.match(diagnostics, /audit\.blockedRows/);
   assert.match(diagnostics, /Por enriquecer/);
   assert.match(models, /let blockedRows: Int/);
+  assert.match(models, /reconciledStatementCount/);
+  assert.match(models, /quarantinedCandidateCount/);
 });
 
 test("diagnóstico puede auditar todo el libro sin volver a subir PDFs", async () => {

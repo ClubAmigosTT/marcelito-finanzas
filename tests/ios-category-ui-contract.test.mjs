@@ -64,7 +64,7 @@ test("calidad distingue conciliación de comercios por enriquecer en Cuentas", a
   assert.match(sections, /store\.ledgerQuality\.reviewMovementCount > 0/);
   assert.match(sections, /LedgerQualityBanner\(store: store\)/);
   assert.match(root, /store\.ledgerQuality\.reviewMovementCount > 0/);
-  assert.match(root, /Movimientos bloqueados:/);
+  assert.match(root, /Movimientos bloqueados por fila:/);
   assert.match(root, /Por enriquecer en el libro:/);
 });
 

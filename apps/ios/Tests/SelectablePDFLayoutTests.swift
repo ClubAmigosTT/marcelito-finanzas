@@ -33,4 +33,39 @@ final class SelectablePDFLayoutTests: XCTestCase {
         XCTAssertTrue(text.contains("__PDF_PAGE_2__"))
         XCTAssertEqual(text.components(separatedBy: "01/ENE ABONO 72.00").count - 1, 2)
     }
+
+    func testRappiGeometryReaderKeepsRowsAfterARepeatedTableTotal() throws {
+        let renderer = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792))
+        let attributes: [NSAttributedString.Key: Any] = [.font: UIFont.systemFont(ofSize: 10)]
+        let data = renderer.pdfData { context in
+            context.beginPage()
+            ("RappiCard  Periodo 22/07/2026 - 21/08/2026" as NSString)
+                .draw(at: CGPoint(x: 30, y: 730), withAttributes: attributes)
+
+            context.beginPage()
+            func draw(_ value: String, x: CGFloat, y: CGFloat) {
+                (value as NSString).draw(at: CGPoint(x: x, y: y), withAttributes: attributes)
+            }
+            draw("CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)", x: 30, y: 730)
+            draw("22/07/2026", x: 42, y: 680)
+            draw("23/07/2026", x: 109, y: 680)
+            draw("COMERCIO UNO", x: 175, y: 680)
+            draw("+$50.00", x: 510, y: 680)
+            draw("Total de cargos", x: 30, y: 630)
+            draw("+$50.00", x: 510, y: 630)
+            draw("CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)", x: 30, y: 580)
+            draw("24/07/2026", x: 42, y: 530)
+            draw("25/07/2026", x: 109, y: 530)
+            draw("PAGO POR SPEI", x: 175, y: 530)
+            draw("-$40.00", x: 510, y: 530)
+            draw("Total de cargos", x: 30, y: 480)
+            draw("+$10.00", x: 510, y: 480)
+        }
+        let document = try XCTUnwrap(PDFDocument(data: data))
+        let text = SelectablePDFLayout.rappiText(from: document)
+
+        XCTAssertEqual(text.components(separatedBy: "__RAPPI_ROW_BOUNDS__").count - 1, 2)
+        XCTAssertTrue(text.contains("22/07/2026 23/07/2026 COMERCIO UNO +$50.00"))
+        XCTAssertTrue(text.contains("24/07/2026 25/07/2026 PAGO POR SPEI -$40.00"))
+    }
 }
