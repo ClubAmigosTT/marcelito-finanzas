@@ -64,7 +64,11 @@ final class SelectablePDFLayoutTests: XCTestCase {
         let document = try XCTUnwrap(PDFDocument(data: data))
         let text = SelectablePDFLayout.rappiText(from: document)
 
-        XCTAssertEqual(text.components(separatedBy: "__RAPPI_ROW_BOUNDS__").count - 1, 2)
+        XCTAssertEqual(
+            text.components(separatedBy: "__RAPPI_ROW_BOUNDS__").count - 1,
+            2,
+            "Rappi geometry output: \(text)"
+        )
         XCTAssertTrue(text.contains("22/07/2026 23/07/2026 COMERCIO UNO +$50.00"))
         XCTAssertTrue(text.contains("24/07/2026 25/07/2026 PAGO POR SPEI -$40.00"))
     }
