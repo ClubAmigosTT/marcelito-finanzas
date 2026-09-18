@@ -224,7 +224,7 @@ struct DiagnosticsView: View {
                             DiagnosticCountBadge(title: "Info", value: report.infoCount, color: .marcelitoNavyMid)
                         }
 
-                        Text("Conciliados: \(report.reconciledStatementCount)/\(report.statementCount) · Elegibles KPI: \(report.validatedStatementCount)/\(report.statementCount) · Canónicos: \(report.canonicalMovementCount) · Bloqueados por fila: \(report.blockedMovementCount) · En cuarentena: \(report.quarantinedCandidateCount) · Por enriquecer: \(report.enrichmentMovementCount)")
+                        Text("Conciliados: \(report.reconciledStatementCount)/\(report.statementCount) · Elegibles KPI: \(report.validatedStatementCount)/\(report.statementCount) · Canónicos: \(report.canonicalMovementCount) · Bloqueados por fila: \(report.blockedMovementCount) · Fuera del libro: \(report.quarantinedMovementCount) · Candidatos fuera de KPI: \(report.quarantinedCandidateCount) · Por enriquecer: \(report.enrichmentMovementCount)")
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -280,7 +280,8 @@ struct DiagnosticsView: View {
                     LabeledContent("Movimientos canónicos", value: "\(store.ledgerQuality.movementCount)")
                     LabeledContent("Movimientos por enriquecer", value: "\(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) · \(money(store.ledgerQuality.reviewAmount))")
                     LabeledContent("Movimientos bloqueados por fila", value: "\(store.ledgerQuality.blockedMovementCount)")
-                    LabeledContent("Movimientos en cuarentena", value: "\(store.ledgerQuality.quarantinedCandidateCount)")
+                    LabeledContent("Movimientos fuera del libro", value: "\(store.ledgerQuality.quarantinedMovementCount)")
+                    LabeledContent("Candidatos fuera de KPI (no persistidos)", value: "\(store.ledgerQuality.quarantinedCandidateCount)")
                     LabeledContent("Estados en cuarentena", value: "\(store.ledgerQuality.quarantinedStatementCount)")
                     LabeledContent("Importes fuera de rango", value: "\(store.ledgerQuality.absurdMovementCount)")
                     LabeledContent("Filas con evidencia", value: "\(Int(store.ledgerQuality.evidencePercent.rounded()))%")
@@ -447,7 +448,7 @@ struct DiagnosticsView: View {
                                         .font(.caption2.weight(.semibold))
                                         .foregroundStyle(audit.reconciliation == .invalid ? Color.marcelitoDanger : (audit.requiresReview ? Color.marcelitoAmber : Color.marcelitoSuccess))
                                 }
-                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas · \(audit.blockedRows) bloqueadas · \(audit.rejectedRows) rechazadas · \(audit.diagnosticRows) diagnosticadas · \(audit.quarantinedRows) en cuarentena\(duplicateSuffix)")
+                                Text("Filas: \(audit.validRows)/\(audit.importedRows) válidas · \(audit.canonicalRows) canónicas · \(audit.blockedRows) bloqueadas · \(audit.rejectedRows) rechazadas · \(audit.diagnosticRows) diagnosticadas · \(audit.quarantinedRows) candidatos fuera de KPI\(duplicateSuffix)")
                                     .font(.caption2.monospacedDigit())
                                     .foregroundStyle(.secondary)
                                 Text("Por enriquecer \(audit.reviewRows) · \(money(audit.reviewTotal))")

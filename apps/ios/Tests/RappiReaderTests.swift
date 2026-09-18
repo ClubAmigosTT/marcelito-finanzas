@@ -408,6 +408,21 @@ final class RappiReaderTests: XCTestCase {
         )
     }
 
+    func testUnreconciledOCRStreamIsNotReturnedAsLedgerCandidates() {
+        let unsafeOCR = fixture.replacingOccurrences(
+            of: "Total de cargos +$100.00",
+            with: "2026-08-04 2026-08-04 FILA OCR DUPLICADA +$5618.56\nTotal de cargos +$100.00"
+        )
+        let snapshot = FinanceStore.rappiHybridSelectionForTesting(
+            ocrText: unsafeOCR,
+            selectableText: "",
+            layoutText: "",
+            summaryText: fixture
+        )
+
+        XCTAssertTrue(snapshot.movements.isEmpty)
+    }
+
     func testEvidenceBackedFallbackKeepsNumericOnlyRowsWhenTotalsProveThem() {
         let collapsedOCR = fixture.replacingOccurrences(
             of: "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00\n2026-08-01 2026-08-02 COMERCIO EJEMPLO +$50.00",

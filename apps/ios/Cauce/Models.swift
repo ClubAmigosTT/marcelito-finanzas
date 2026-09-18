@@ -459,6 +459,7 @@ func readerRecoveryLabel(_ value: String) -> String {
     case "vision-region-retry": return "relectura por zonas"
     case "vision-empty": return "Vision sin texto"
     case "pdf-text-unverified": return "texto PDF provisional"
+    case "rappi-unsafe-candidate-stream-rejected": return "corriente Rappi no conciliada descartada"
     default: return value
     }
 }
@@ -760,6 +761,10 @@ struct LedgerDiagnosticReport {
     let validatedStatementCount: Int
     let canonicalMovementCount: Int
     let blockedMovementCount: Int
+    /// Actual Movement records kept outside the canonical ledger. This is
+    /// intentionally separate from candidate rows that were never persisted.
+    let quarantinedMovementCount: Int
+    /// Candidate rows retained only in a blocked statement's metadata.
     let quarantinedCandidateCount: Int
     let enrichmentMovementCount: Int
     let issues: [LedgerDiagnosticIssue]
@@ -778,7 +783,8 @@ struct LedgerDiagnosticReport {
             "Estados elegibles para KPI: \(validatedStatementCount)/\(statementCount)",
             "Movimientos canónicos: \(canonicalMovementCount)",
             "Movimientos bloqueados por fila: \(blockedMovementCount)",
-            "Movimientos en cuarentena por estado: \(quarantinedCandidateCount)",
+            "Movimientos fuera del libro canónico: \(quarantinedMovementCount)",
+            "Candidatos fuera de KPI (no persistidos): \(quarantinedCandidateCount)",
             "Movimientos por enriquecer: \(enrichmentMovementCount)",
             "Errores: \(errorCount) · Advertencias: \(warningCount) · Información: \(infoCount)",
             ""
@@ -899,7 +905,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-recovery-2026.09.17.1"
+    static let readerVersion = "ios-reader-recovery-2026.09.17.2"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -1377,7 +1383,10 @@ final class FinanceStore {
             accountKey: maskedAccountKey(from: summaryText, source: "Rappi"),
             kind: .card,
             period: periodLabel(from: summaryText, fileName: "rappi.pdf", sourceHint: "Rappi"),
-            movements: selected?.candidates ?? ocrCandidates,
+            // The test seam follows the production invariant: an unverified
+            // OCR stream is evidence for diagnostics, never a returned ledger
+            // candidate set.
+            movements: selected?.candidates ?? [],
             summary: selected?.summary ?? statementSummary
         )
     }
@@ -1881,7 +1890,8 @@ final class FinanceStore {
             "Estados elegibles para KPI: \(quality.validatedStatementCount)/\(quality.statementCount)",
             "Movimientos canónicos: \(quality.movementCount)",
             "Movimientos bloqueados por fila: \(quality.blockedMovementCount)",
-            "Movimientos en cuarentena por estado: \(quality.quarantinedCandidateCount)",
+            "Movimientos fuera del libro canónico: \(quality.quarantinedMovementCount)",
+            "Candidatos fuera de KPI (no persistidos): \(quality.quarantinedCandidateCount)",
             "Movimientos por enriquecer: \(quality.enrichmentMovementCount)",
             "Calidad de evidencia: \(Int(quality.evidencePercent.rounded()))%",
             "Estado del dashboard: \(dashboardIsBlocked ? "bloqueado" : (manualDashboardUnlockEnabled ? "provisional (desbloqueo manual)" : "disponible"))",
@@ -2133,6 +2143,26 @@ final class FinanceStore {
                 )
             }
 
+            for (index, row) in (statement.rowDiagnostics ?? []).enumerated()
+                where row.accepted && row.reason.hasPrefix("bbva.foreign-auxiliary") {
+                var detail = row.reason.trimmingCharacters(in: .whitespacesAndNewlines)
+                if let page = row.page {
+                    detail = "Página \(page) · \(detail)"
+                }
+                let rawText = snippet(row.rawText)
+                if !rawText.isEmpty {
+                    detail += " · Texto detectado: \(rawText)"
+                }
+                add(
+                    id: "\(statementID)-foreign-auxiliary-\(index)",
+                    severity: reconciliationStatus == .valid ? .warning : .error,
+                    source: source,
+                    period: period,
+                    title: "Evidencia extranjera pendiente",
+                    detail: detail
+                )
+            }
+
             if let duplicateRows = auditsByID[statement.id]?.duplicateRows, duplicateRows > 0 {
                 add(
                     id: "\(statementID)-duplicates",
@@ -2262,6 +2292,22 @@ final class FinanceStore {
             )
         }
 
+        // The report is an action list, not a row dump. Multiple identical
+        // category or OCR findings for the same merchant/date are collapsed
+        // so the user sees the distinct problems without losing any canonical
+        // movement or its underlying evidence.
+        var seenIssueKeys = Set<String>()
+        issues = issues.filter { issue in
+            let key = [
+                issue.severity.rawValue,
+                issue.source ?? "",
+                issue.period ?? "",
+                issue.title,
+                issue.detail
+            ].joined(separator: "\u{001F}")
+            return seenIssueKeys.insert(key).inserted
+        }
+
         issues.sort { left, right in
             if left.severity.sortOrder != right.severity.sortOrder {
                 return left.severity.sortOrder < right.severity.sortOrder
@@ -2279,6 +2325,7 @@ final class FinanceStore {
             validatedStatementCount: quality.validatedStatementCount,
             canonicalMovementCount: quality.movementCount,
             blockedMovementCount: quality.blockedMovementCount,
+            quarantinedMovementCount: quality.quarantinedMovementCount,
             quarantinedCandidateCount: quality.quarantinedCandidateCount,
             enrichmentMovementCount: quality.enrichmentMovementCount,
             issues: issues
@@ -5524,9 +5571,13 @@ final class FinanceStore {
             let ocrSummary = Self.summary(from: text, source: source)
             let duplicateRepairedOCRCandidates = Self.rappiOCRDuplicateRepairedCandidates(ocrCandidates)
             let evidenceBackedOCRCandidates = Self.rappiEvidenceBackedFallbackCandidates(ocrCandidates)
-            var selectedRappiCandidates = ocrCandidates
+            // No OCR stream is a valid default. If every complete stream fails
+            // the issuer reconciliation, retain only bounded diagnostics; a
+            // raw OCR candidate set must never look like an extracted ledger.
+            var selectedRappiCandidates: [Movement] = []
             var selectedRappiSummary = summary
             var selectedRappiOCRObservations: [OCRObservation]? = nil
+            var diagnosticRappiOCRObservations = ocrObservations
             var selected = Self.reconciledRappiSelection(
                 candidateSets: [
                     (pageWiseCandidates, pageWiseSummary),
@@ -5593,22 +5644,28 @@ final class FinanceStore {
                     if retrySelection.candidates.contains(where: { $0.extractionEvidence?.method == "vision-ocr" }) {
                         selectedRappiOCRObservations = retryObservations
                     }
+                } else if retryCandidates.count > ocrCandidates.count {
+                    // The retry is useful as forensic evidence even when it
+                    // still cannot be certified. It must not become rows.
+                    diagnosticRappiOCRObservations = retryObservations
                 }
+            }
+            if selected == nil {
+                recoveryAttempts.append("rappi-unsafe-candidate-stream-rejected")
             }
             summary = selectedRappiSummary
             parsedCandidates = selectedRappiCandidates
-            if selectedRappiOCRObservations == nil,
-               parsedCandidates.contains(where: { $0.extractionEvidence?.method == "vision-ocr" }) {
-                // If no candidate set reconciled, the conservative fallback is
-                // still the original OCR stream. Keep its row geometry in the
-                // diagnostics so the import cannot silently lose a visual row.
-                selectedRappiOCRObservations = ocrObservations
-            }
             if let selectedRappiOCRObservations {
                 rowDiagnostics = Self.rappiOCRRowDiagnostics(
                     observations: selectedRappiOCRObservations,
                     movements: parsedCandidates,
                     fallbackReason: "RappiCard: importe firmado recuperado visualmente y conciliado con controles independientes"
+                )
+            } else if parsedCandidates.isEmpty && !diagnosticRappiOCRObservations.isEmpty {
+                rowDiagnostics = Self.rappiOCRRowDiagnostics(
+                    observations: diagnosticRappiOCRObservations,
+                    movements: [],
+                    fallbackReason: "RappiCard: ninguna corriente completa de lectura concilió; los candidatos OCR quedaron fuera del libro"
                 )
             } else {
                 rowDiagnostics = Self.rowDiagnostics(
@@ -6459,9 +6516,9 @@ final class FinanceStore {
     /// become one of the selected OCR movements. A reconciled total alone is
     /// not enough evidence: a missing date, amount or sign must remain visible
     /// to the user and keep the document out of automatic import. This helper
-    /// intentionally runs only for the OCR candidate stream that won
-    /// reconciliation; a valid selectable-text stream does not get penalized
-    /// by an unused OCR attempt.
+    /// runs for the OCR candidate stream that won reconciliation, or for a
+    /// rejected stream when no complete source could be certified. A valid
+    /// selectable-text stream does not get penalized by an unused OCR attempt.
     private static func rappiOCRRowDiagnostics(
         observations: [OCRObservation],
         movements: [Movement],
@@ -8538,6 +8595,23 @@ final class FinanceStore {
         let pageMarkerRegex = try? NSRegularExpression(pattern: #"^__pdf_page_(\d+)__$"#)
         let dateTokenPattern = #"(?i)^(?:\s*(?:\d{1,2}\s*[\/\-]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-]\s*(?:20)?\d{2})?|\d{1,2}\s+(?:de\s*)?[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s+(?:de\s+)?\d{4})?))\s+"#
 
+        func isForeignAuxiliaryAmount(_ match: TextMatch, in value: String) -> Bool {
+            guard let range = Range(match.range, in: value) else { return false }
+            let before = String(value[..<range.lowerBound].suffix(24))
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+            let after = String(value[range.upperBound...].prefix(24))
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+            // The foreign token is tied to the amount immediately before
+            // `TC/AUT`, or to an amount immediately preceded by `USD`. Do not
+            // mark a domestic amount as auxiliary merely because the same
+            // row later contains a separate `USD 2.22TC...` continuation.
+            return before.hasSuffix("usd")
+                || after.hasPrefix("tc")
+                || after.hasPrefix("aut")
+        }
+
         struct RawBBVARow {
             let lines: [String]
             let page: Int?
@@ -8673,13 +8747,28 @@ final class FinanceStore {
             // BBVA emits operation and settlement dates before the merchant.
             // Remove the second date without touching dates in the description.
             working = working.replacingOccurrences(of: dateTokenPattern, with: " ", options: .regularExpression)
-            guard let firstAmount = allMatches(in: working, regex: amountRegex).first,
+            let normalizedOriginal = original.folding(
+                options: [.diacriticInsensitive, .caseInsensitive],
+                locale: .current
+            )
+            let compactOriginal = normalizedOriginal.replacingOccurrences(of: " ", with: "")
+            let foreignAuthorization = normalizedOriginal.contains("usd")
+                && compactOriginal.contains("tc")
+                && compactOriginal.contains("aut")
+            let allMoneyMatches = allMatches(in: working, regex: amountRegex)
+            let moneyMatches = foreignAuthorization
+                ? allMoneyMatches.filter { !isForeignAuxiliaryAmount($0, in: working) }
+                : allMoneyMatches
+            // A line such as `USD 21.00 TC... AUT...` is auxiliary foreign
+            // evidence, not an MXN bank movement. If the row also contains a
+            // domestic amount, choose that amount; otherwise keep the row out
+            // of the financial candidate stream for manual review.
+            guard let firstAmount = moneyMatches.first,
                   let amountRange = Range(firstAmount.range, in: working),
                   let parsedAmount = parseAmount(firstAmount.text),
                   parsedAmount != 0,
                   abs(parsedAmount) < 10_000_000 else { return nil }
 
-            let moneyMatches = allMatches(in: working, regex: amountRegex)
             let prefix = String(working[..<amountRange.lowerBound])
             var title = prefix
                 .replacingOccurrences(of: #"(?i)\bRFC\s*[:#]?\s*[A-Z0-9]+\b"#, with: " ", options: .regularExpression)
@@ -8694,14 +8783,6 @@ final class FinanceStore {
             let titleNormalized = title.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
             let explicitIncoming = incomingWords.contains { titleNormalized.contains($0) }
             let explicitOutgoing = outgoingWords.contains { titleNormalized.contains($0) }
-            let normalizedOriginal = original.folding(
-                options: [.diacriticInsensitive, .caseInsensitive],
-                locale: .current
-            )
-            let compactOriginal = normalizedOriginal.replacingOccurrences(of: " ", with: "")
-            let foreignAuthorization = normalizedOriginal.contains("usd")
-                && compactOriginal.contains("tc")
-                && compactOriginal.contains("aut")
             // FACEBK/TELEF rows do not spell out CARGOS in their description,
             // but their movement token is followed by a running balance. The
             // first amount is safe in that unambiguous bank-table shape.
@@ -9936,6 +10017,16 @@ final class FinanceStore {
         var allMovementPagesCalibrated = true
         var previousRunningBalance: Decimal?
 
+        func isForeignAuxiliaryRow(_ row: [OCRObservation]) -> Bool {
+            let raw = row.map(\.text).joined(separator: " ")
+            let normalized = raw
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            let compact = normalized.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+            return normalized.contains("usd")
+                && compact.contains("tc")
+                && compact.contains("aut")
+        }
+
         for page in observationsByPage.keys.sorted() {
             let rawPageObservations = observationsByPage[page] ?? []
             let localColumns = bbvaOCRColumns(from: rawPageObservations)
@@ -10028,12 +10119,17 @@ final class FinanceStore {
                     )
                     previousRunningBalance = result.runningBalance
                 } else {
+                    let foreignAuxiliary = isForeignAuxiliaryRow(row)
                     diagnostics.append(
                         OCRRowDiagnostic(
                             page: row.first.map { $0.page + 1 },
                             rawText: rawText,
-                            reason: "fila BBVA rechazada: fecha, importe, dirección de columna o descripción no demostrables",
-                            accepted: false
+                            selectedColumn: foreignAuxiliary ? "MONEDA EXTRANJERA (USD/TC/AUT)" : nil,
+                            reason: foreignAuxiliary
+                                ? "bbva.foreign-auxiliary: se conservó evidencia USD/TC/AUT, pero no se inventó un importe MXN"
+                                : "fila BBVA rechazada: fecha, importe, dirección de columna o descripción no demostrables",
+                            accepted: foreignAuxiliary,
+                            cellTexts: foreignAuxiliary ? ["USD/TC/AUT sin importe MXN demostrable"] : nil
                         )
                     )
                     previousRunningBalance = nil
@@ -10069,6 +10165,10 @@ final class FinanceStore {
 
         let fullText = row.map(\.text).joined(separator: " ")
         let normalizedFullText = fullText.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let compactFullText = normalizedFullText.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+        let foreignAuthorization = normalizedFullText.contains("usd")
+            && compactFullText.contains("tc")
+            && compactFullText.contains("aut")
         let ignoredPhrases = [
             "estado de cuenta", "resumen de cuenta", "resumen de movimientos",
             "saldo anterior", "saldo final", "saldo disponible", "fecha de corte",
@@ -10097,9 +10197,36 @@ final class FinanceStore {
                 )
             }
         }
-        guard !amountCandidates.isEmpty else { return nil }
+        let movementAmountCandidates: [OCRAmountCandidate] = {
+            guard foreignAuthorization else { return amountCandidates }
+            let filtered = amountCandidates.filter { candidate in
+                let observation = row[candidate.observationIndex]
+                let text = observation.text
+                let start = String.Index(
+                    utf16Offset: min(candidate.characterOffset, text.utf16.count),
+                    in: text
+                )
+                let prefix = String(text[..<start].suffix(36))
+                let suffix = String(text[start...].prefix(36))
+                let compactPrefix = prefix
+                    .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                    .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+                let compactSuffix = suffix
+                    .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                    .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+                let isAuxiliary = compactPrefix.hasSuffix("usd")
+                    || compactSuffix.hasPrefix("tc")
+                    || compactSuffix.hasPrefix("aut")
+                return !isAuxiliary
+            }
+            return filtered
+        }()
+        // A USD/TC/AUT line without a domestic amount is an auxiliary
+        // foreign-currency authorization. It is retained in diagnostics but
+        // cannot become a MXN movement by treating USD as pesos.
+        guard !movementAmountCandidates.isEmpty else { return nil }
 
-        let orderedAmountCandidates = amountCandidates.sorted { $0.order < $1.order }
+        let orderedAmountCandidates = movementAmountCandidates.sorted { $0.order < $1.order }
         // A collapsed Vision box can contain description + movement + saldo;
         // in that shape token coordinates are not trustworthy. The final two
         // monetary tokens are the only safe pair, exactly as in Santander:
@@ -10115,7 +10242,7 @@ final class FinanceStore {
         let useCollapsedPair = isWholeRowObservation || isCollapsedRowGeometry
         let collapsedMovement = useCollapsedPair ? orderedAmountCandidates.dropLast().last : nil
         let collapsedBalance = useCollapsedPair ? orderedAmountCandidates.last : nil
-        let movementCandidates = amountCandidates.filter { $0.x >= 0.36 && $0.x < columns.balanceMinX }
+        let movementCandidates = movementAmountCandidates.filter { $0.x >= 0.36 && $0.x < columns.balanceMinX }
         let nearest: (CGFloat) -> OCRAmountCandidate? = { target in
             movementCandidates.min {
                 let leftDistance = abs($0.x - target)
@@ -10159,7 +10286,7 @@ final class FinanceStore {
         guard let selected else { return nil }
 
         let runningBalance = collapsedBalance?.value
-            ?? amountCandidates
+            ?? movementAmountCandidates
                 .filter { $0.x >= columns.balanceMinX }
                 .sorted { $0.order < $1.order }
                 .first?.value
@@ -13060,14 +13187,76 @@ final class FinanceStore {
     }
 
     /// Vision can repeat a signed amount (or an entire OCR line) while the
-    /// printed statement contains one row.  Do not blindly collapse equal
-    /// date/amount/title tuples: legitimate Rappi statements frequently have
-    /// several identical purchases.  Instead, use the bounded source fragment
-    /// retained on each row as an occurrence budget.  A candidate is removed
-    /// only when its normalized merchant text occurs fewer times in that same
-    /// fragment than Vision emitted candidates for it.  The untouched OCR
-    /// stream remains a candidate too; issuer totals choose whichever stream
-    /// proves exact reconciliation.
+    /// printed statement contains one row.  Keep one candidate when the
+    /// evidence points to the same physical band, but never collapse two
+    /// legitimate identical purchases that occupy different bands.
+    private static func rappiOCRSpatiallyDeduplicatedCandidates(_ candidates: [Movement]) -> [Movement] {
+        func compact(_ value: String) -> String {
+            value
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+        }
+
+        func isBetter(_ candidate: Movement, than existing: Movement) -> Bool {
+            let candidateEvidence = candidate.extractionEvidence
+            let existingEvidence = existing.extractionEvidence
+            let candidateHasMerchant = candidate.title.rangeOfCharacter(from: .letters) != nil
+            let existingHasMerchant = existing.title.rangeOfCharacter(from: .letters) != nil
+            if candidateHasMerchant != existingHasMerchant { return candidateHasMerchant }
+            return (candidateEvidence?.confidence ?? 0) > (existingEvidence?.confidence ?? 0)
+        }
+
+        var result: [Movement] = []
+        for candidate in candidates {
+            guard candidate.extractionEvidence?.method == "vision-ocr",
+                  let candidateEvidence = candidate.extractionEvidence,
+                  let candidatePage = candidateEvidence.page,
+                  let candidateBounds = candidateEvidence.bounds,
+                  let candidateAmount = candidateEvidence.selectedAmount else {
+                result.append(candidate)
+                continue
+            }
+
+            let duplicateIndex = result.firstIndex { existing in
+                guard existing.extractionEvidence?.method == "vision-ocr",
+                      let existingEvidence = existing.extractionEvidence,
+                      existingEvidence.page == candidatePage,
+                      existingEvidence.selectedAmount == candidateAmount,
+                      existing.date == candidate.date,
+                      existing.kind == candidate.kind,
+                      existing.flow == candidate.flow,
+                      existing.foreignCurrency == candidate.foreignCurrency,
+                      let existingBounds = existingEvidence.bounds else { return false }
+                let candidateCenterY = candidateBounds.y + candidateBounds.height / 2
+                let existingCenterY = existingBounds.y + existingBounds.height / 2
+                guard abs(candidateCenterY - existingCenterY) <= 0.022 else { return false }
+                let candidateSource = compact(candidateEvidence.sourceText ?? candidate.title)
+                let existingSource = compact(existingEvidence.sourceText ?? existing.title)
+                let sameMerchant = compact(candidate.title) == compact(existing.title)
+                    || (!candidateSource.isEmpty && candidateSource == existingSource)
+                // Geometry is necessary but not sufficient: two legitimate
+                // adjacent purchases can share date, amount and direction.
+                // Require merchant/source identity before collapsing a band;
+                // numeric-only duplicates are handled by the occurrence
+                // budget below when they share the same OCR source fragment.
+                return sameMerchant
+            }
+
+            if let duplicateIndex {
+                if isBetter(candidate, than: result[duplicateIndex]) {
+                    result[duplicateIndex] = candidate
+                }
+            } else {
+                result.append(candidate)
+            }
+        }
+        return result
+    }
+
+    /// The occurrence budget remains useful when one OCR observation contains
+    /// a repeated signed token. It runs after the spatial pass so an isolated
+    /// row and its full-page counterpart cannot survive as two movements.
     private static func rappiOCRDuplicateRepairedCandidates(_ candidates: [Movement]) -> [Movement] {
         func compact(_ value: String) -> String {
             value
@@ -13093,8 +13282,9 @@ final class FinanceStore {
             let source: String
         }
 
+        let spatiallyDeduplicated = rappiOCRSpatiallyDeduplicatedCandidates(candidates)
         var grouped: [GroupKey: [Int]] = [:]
-        for (index, candidate) in candidates.enumerated() {
+        for (index, candidate) in spatiallyDeduplicated.enumerated() {
             guard candidate.extractionEvidence?.method == "vision-ocr",
                   let source = candidate.extractionEvidence?.sourceText,
                   !source.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -13102,7 +13292,7 @@ final class FinanceStore {
             grouped[GroupKey(page: page, source: source), default: []].append(index)
         }
 
-        var keep = Array(repeating: true, count: candidates.count)
+        var keep = Array(repeating: true, count: spatiallyDeduplicated.count)
         for (key, indexes) in grouped where indexes.count > 1 {
             let source = compact(key.source)
             // A repeated signed token inside one OCR observation produces a
@@ -13113,21 +13303,21 @@ final class FinanceStore {
             // has a merchant-backed sibling.  A genuinely unreadable row with
             // no sibling is retained for the evidence-backed fallback below.
             for index in indexes {
-                let title = candidates[index].title
+                let title = spatiallyDeduplicated[index].title
                 guard title.rangeOfCharacter(from: .letters) == nil else { continue }
                 let hasMerchantSibling = indexes.contains { siblingIndex in
                     siblingIndex != index
-                        && candidates[siblingIndex].date == candidates[index].date
-                        && candidates[siblingIndex].amount == candidates[index].amount
-                        && candidates[siblingIndex].flow == candidates[index].flow
-                        && candidates[siblingIndex].title.rangeOfCharacter(from: .letters) != nil
+                        && spatiallyDeduplicated[siblingIndex].date == spatiallyDeduplicated[index].date
+                        && spatiallyDeduplicated[siblingIndex].amount == spatiallyDeduplicated[index].amount
+                        && spatiallyDeduplicated[siblingIndex].flow == spatiallyDeduplicated[index].flow
+                        && spatiallyDeduplicated[siblingIndex].title.rangeOfCharacter(from: .letters) != nil
                 }
                 if hasMerchantSibling { keep[index] = false }
             }
             var availableByTitle: [String: Int] = [:]
             for index in indexes {
                 guard keep[index] else { continue }
-                let title = compact(candidates[index].title)
+                let title = compact(spatiallyDeduplicated[index].title)
                 if availableByTitle[title] == nil {
                     availableByTitle[title] = occurrenceCount(of: title, in: source)
                 }
@@ -13135,7 +13325,7 @@ final class FinanceStore {
             var consumedByTitle: [String: Int] = [:]
             for index in indexes {
                 guard keep[index] else { continue }
-                let title = compact(candidates[index].title)
+                let title = compact(spatiallyDeduplicated[index].title)
                 let available = availableByTitle[title] ?? 0
                 guard available > 0 else { continue }
                 let consumed = consumedByTitle[title, default: 0]
@@ -13146,7 +13336,7 @@ final class FinanceStore {
                 }
             }
         }
-        return candidates.enumerated().compactMap { keep[$0.offset] ? $0.element : nil }
+        return spatiallyDeduplicated.enumerated().compactMap { keep[$0.offset] ? $0.element : nil }
     }
 
     /// Pick one complete Rappi evidence stream. Candidate streams are never
