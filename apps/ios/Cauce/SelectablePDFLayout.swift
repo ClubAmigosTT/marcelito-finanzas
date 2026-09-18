@@ -114,6 +114,56 @@ enum SelectablePDFLayout {
             return groups
         }
 
+        /// Do not hard-code the Rappi columns to one export's exact x
+        /// coordinates. Banorte has shipped the same table with slightly
+        /// different left/right margins and with a wider description cell.
+        /// Calibrate from rows that prove the two date cells and one signed
+        /// amount cell belong to the same visual line. The fallback keeps the
+        /// previous profile for damaged pages that have no complete row.
+        func columnCalibration(
+            for groups: [[Fragment]],
+            pageWidth: CGFloat
+        ) -> (dateCutoff: CGFloat, descriptionStart: CGFloat, amountStart: CGFloat) {
+            var maximumDateCenter: CGFloat?
+            var minimumAmountCenter: CGFloat?
+
+            for group in groups {
+                let ordered = group.sorted { $0.bounds.minX < $1.bounds.minX }
+                let dateFragments = ordered.filter { fragment in
+                    let text = fragment.text
+                    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+                    return dateRegex.numberOfMatches(in: text, range: range) > 0
+                }
+                let dateText = dateFragments.map(\.text).joined(separator: " ")
+                let dateRange = NSRange(dateText.startIndex..<dateText.endIndex, in: dateText)
+                guard dateRegex.numberOfMatches(in: dateText, range: dateRange) >= 2 else { continue }
+
+                let amountFragments = ordered.filter { fragment in
+                    let text = fragment.text
+                    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+                    return amountRegex.firstMatch(in: text, range: range) != nil
+                }
+                guard let amount = amountFragments.min(by: { $0.bounds.midX < $1.bounds.midX }) else { continue }
+                let dateCenter = dateFragments.map { $0.bounds.midX / pageWidth }.max() ?? 0
+                let amountCenter = amount.bounds.midX / pageWidth
+                maximumDateCenter = max(maximumDateCenter ?? 0, dateCenter)
+                minimumAmountCenter = min(minimumAmountCenter ?? 1, amountCenter)
+            }
+
+            guard let maximumDateCenter, let minimumAmountCenter,
+                  maximumDateCenter < minimumAmountCenter else {
+                return (dateCutoff: 0.30, descriptionStart: 0.26, amountStart: 0.76)
+            }
+
+            let dateCutoff = min(0.44, max(0.22, maximumDateCenter + 0.04))
+            let amountStart = min(0.92, max(0.60, minimumAmountCenter - 0.04))
+            let descriptionStart = min(
+                amountStart - 0.06,
+                max(0.16, dateCutoff - 0.01)
+            )
+            return (dateCutoff: dateCutoff, descriptionStart: descriptionStart, amountStart: amountStart)
+        }
+
         func fragmentsForPage(_ page: PDFPage) -> [Fragment] {
             guard let pageText = page.string,
                   (pageText as NSString).length <= 200_000 else { return [] }
@@ -184,6 +234,7 @@ enum SelectablePDFLayout {
             let pageWidth = page.bounds(for: .mediaBox).width
             guard pageWidth.isFinite, pageWidth > 0 else { continue }
             let groups = lineGroups(fragments)
+            let columns = columnCalibration(for: groups, pageWidth: pageWidth)
             var output = ["__PDF_PAGE_\(index + 1)__"]
 
             // The cover contains the independent issuer controls. Preserve it
@@ -251,11 +302,11 @@ enum SelectablePDFLayout {
 
                 let dateFragments = ordered.filter { fragment in
                     let center = fragment.bounds.midX / pageWidth
-                    return center < 0.30
+                    return center < columns.dateCutoff
                 }
                 let amountFragments = ordered.filter { fragment in
                     let center = fragment.bounds.midX / pageWidth
-                    return center >= 0.76
+                    return center >= columns.amountStart
                 }
                 let dateCell = dateFragments.map { $0.text }.joined(separator: " ")
                 let dateMatches = dateRegex.matches(
@@ -282,7 +333,7 @@ enum SelectablePDFLayout {
                     let description = ordered
                         .filter {
                             let center = $0.bounds.midX / pageWidth
-                            return center >= 0.26 && center < 0.76
+                            return center >= columns.descriptionStart && center < columns.amountStart
                         }
                         .map { $0.text }
                         .joined(separator: " ")
@@ -299,7 +350,7 @@ enum SelectablePDFLayout {
                     let continuationFragments = ordered
                         .filter {
                             let center = $0.bounds.midX / pageWidth
-                            return center >= 0.26 && center < 0.76
+                            return center >= columns.descriptionStart && center < columns.amountStart
                         }
                     let continuation = continuationFragments
                         .map { $0.text }

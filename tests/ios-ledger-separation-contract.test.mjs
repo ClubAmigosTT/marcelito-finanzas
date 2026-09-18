@@ -11,7 +11,7 @@ const settingsPath = new URL("../apps/ios/Cauce/Settings.swift", import.meta.url
 test("el lector nativo separa diagnóstico de libro operativo", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /var rowDiagnostics: \[OCRRowDiagnostic\]\? = nil/);
-  assert.match(source, /static let readerVersion = "ios-reader-recovery-2026\.09\.17\.1"/);
+  assert.match(source, /static let readerVersion = "ios-reader-recovery-2026\.09\.17\.2"/);
   assert.match(source, /let canonicalFresh = Self\.shouldPersistCanonicalRowsForTesting/);
   assert.match(source, /let ocrQualityNeedsReview = usedOCR/);
   assert.doesNotMatch(source, /let ocrQualityNeedsReview = false/);
@@ -22,6 +22,11 @@ test("el lector nativo separa diagnóstico de libro operativo", async () => {
   assert.match(source, /columnas CARGOS\/ABONOS\/SALDO calibradas por encabezado distribuido/);
   assert.match(source, /fila colapsada/);
   assert.match(source, /SelectablePDFLayout\.rappiText\(from: document\)/);
+  assert.match(source, /var selectedRappiCandidates: \[Movement\] = \[\]/);
+  assert.doesNotMatch(source, /var selectedRappiCandidates = ocrCandidates/);
+  assert.match(source, /rappi-unsafe-candidate-stream-rejected/);
+  assert.match(source, /rappiOCRSpatiallyDeduplicatedCandidates/);
+  assert.match(source, /bbva\.foreign-auxiliary/);
   assert.match(await readFile(new URL("../apps/ios/Cauce/SelectablePDFLayout.swift", import.meta.url), "utf8"), /static func rappiText\(from document: PDFDocument\)/);
   assert.match(await readFile(new URL("../apps/ios/Cauce/SelectablePDFLayout.swift", import.meta.url), "utf8"), /let dateMatches = dateRegex\.matches/);
   assert.match(await readFile(new URL("../apps/ios/Cauce/SelectablePDFLayout.swift", import.meta.url), "utf8"), /let amountMatch = amountRegex\.firstMatch/);
@@ -45,6 +50,8 @@ test("el dashboard separa estados conciliados, filas bloqueadas y enriquecimient
   assert.match(models, /let blockedRows: Int/);
   assert.match(models, /reconciledStatementCount/);
   assert.match(models, /quarantinedCandidateCount/);
+  assert.match(models, /quarantinedMovementCount/);
+  assert.match(diagnostics, /Candidatos fuera de KPI/);
 });
 
 test("diagnóstico puede auditar todo el libro sin volver a subir PDFs", async () => {

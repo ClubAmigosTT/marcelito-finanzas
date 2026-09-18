@@ -702,7 +702,7 @@ struct LedgerQualityBanner: View {
                 Text("Por enriquecer en el libro: \(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) movimientos · \(money(store.ledgerQuality.reviewAmount))")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(store.ledgerQuality.reviewMovementCount > 0 ? Color.marcelitoAmber : .secondary)
-                Text("\(store.ledgerQuality.quarantinedCandidateCount) movimientos en cuarentena por estado · \(store.ledgerQuality.quarantinedStatementCount) estado(s) fuera de KPI")
+                Text("Fuera del libro: \(store.ledgerQuality.quarantinedMovementCount) · candidatos fuera de KPI (no persistidos): \(store.ledgerQuality.quarantinedCandidateCount) · \(store.ledgerQuality.quarantinedStatementCount) estado(s) fuera de KPI")
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(store.ledgerQuality.quarantinedCandidateCount > 0 ? Color.marcelitoAmber : .secondary)
                 if store.dashboardIsProvisional {
