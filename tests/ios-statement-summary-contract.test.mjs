@@ -4,6 +4,7 @@ import test from "node:test";
 import { URL } from "node:url";
 
 const sectionsPath = new URL("../apps/ios/Cauce/Sections.swift", import.meta.url);
+const rootTabViewPath = new URL("../apps/ios/Cauce/RootTabView.swift", import.meta.url);
 
 test("las cifras detectadas conservan sus etiquetas cuando contienen un valor", async () => {
   const source = await readFile(sectionsPath, "utf8");
@@ -17,4 +18,14 @@ test("las cuentas bancarias muestran un resumen propio sin campos de tarjeta", a
 
   assert.match(source, /Section\("Resumen del periodo bancario"\)[\s\S]*"Saldo inicial"[\s\S]*"Depósitos \/ abonos"[\s\S]*"Retiros \/ cargos"[\s\S]*"Saldo final"/);
   assert.match(source, /Section\("Estado detectado"\)[\s\S]*"Periodo"[\s\S]*"Movimientos"[\s\S]*"Conciliación"/);
+});
+
+test("el reporte de importación muestra la ruta y versión del lector local", async () => {
+  const source = await readFile(rootTabViewPath, "utf8");
+
+  assert.match(source, /let readerVersion: String/);
+  assert.match(source, /readerVersion = summary\.readerVersion/);
+  assert.match(source, /if !item\.recoveryAttempts\.isEmpty/);
+  assert.match(source, /Ruta local:/);
+  assert.match(source, /Lector en iPhone:/);
 });
