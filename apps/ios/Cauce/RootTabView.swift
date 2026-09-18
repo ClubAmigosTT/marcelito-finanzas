@@ -395,6 +395,7 @@ struct ImportReportItem: Identifiable {
     let ocrPageConfidences: [Double]?
     let ocrColumnsCalibrated: Bool?
     let recoveryAttempts: [String]
+    let readerVersion: String
 
     init(summary: ImportSummary) {
         fileName = summary.fileName
@@ -410,6 +411,7 @@ struct ImportReportItem: Identifiable {
         ocrPageConfidences = summary.ocrPageConfidences
         ocrColumnsCalibrated = summary.ocrColumnsCalibrated
         recoveryAttempts = summary.recoveryAttempts
+        readerVersion = summary.readerVersion
     }
 
     init(fileName: String, errorMessage: String) {
@@ -426,6 +428,7 @@ struct ImportReportItem: Identifiable {
         ocrPageConfidences = nil
         ocrColumnsCalibrated = nil
         recoveryAttempts = []
+        readerVersion = ""
     }
 
     var state: State {
@@ -557,10 +560,17 @@ private struct ImportReportRow: View {
                         .foregroundStyle(Color.marcelitoAmber)
                 }
 
-                if item.recoveryAttempts.count > 1 {
-                    Text("Ruta de lectura: \(item.recoveryAttempts.map(readerRecoveryLabel).joined(separator: " → "))")
+                if !item.recoveryAttempts.isEmpty {
+                    Text("Ruta local: \(item.recoveryAttempts.map(readerRecoveryLabel).joined(separator: " → "))")
                         .font(.caption2)
                         .foregroundStyle(Color.marcelitoNavyMid)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !item.readerVersion.isEmpty {
+                    Text("Lector en iPhone: \(item.readerVersion)")
+                        .font(.caption2)
+                        .foregroundStyle(Color.marcelitoNavySoft)
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
