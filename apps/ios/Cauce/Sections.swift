@@ -77,6 +77,7 @@ func conciseStatementPeriod(_ statement: StatementRecord) -> String {
 
 struct MovementsView: View {
     @Environment(FinanceStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
     @State private var query = ""
     @State private var isAddPresented = false
     @State private var isAISettingsPresented = false
@@ -162,6 +163,9 @@ struct MovementsView: View {
             .navigationTitle("Movimientos")
             .listStyle(.insetGrouped)
             .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cerrar") { dismiss() }
+                }
                 ToolbarItem(placement: .topBarTrailing) {
                     Button { isAddPresented = true } label: {
                         Image(systemName: "plus")
@@ -1528,6 +1532,7 @@ struct AccountsView: View {
             .padding(.bottom, 28)
         }
         .scrollIndicators(.hidden)
+        .safeAreaPadding(.bottom, 76)
     }
 
     var body: some View {
@@ -1540,6 +1545,7 @@ struct AccountsView: View {
                         isMovementManagementPresented = true
                     } label: {
                         Label("Ajustes", systemImage: "slider.horizontal.3")
+                            .accessibilityLabel("Editar movimientos")
                     }
                     .accessibilityHint("Abre la asignación y edición de gastos y movimientos")
                 }
@@ -1950,7 +1956,7 @@ struct StatementDocumentView: View {
                         initialBounds: initialBounds
                     )
                 }
-                .ignoresSafeArea(edges: .bottom)
+                .safeAreaPadding(.bottom, 54)
             } else {
                 ContentUnavailableView(
                     "Archivo no disponible",

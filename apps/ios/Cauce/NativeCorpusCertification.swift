@@ -596,6 +596,7 @@ struct NativeCorpusCertificationView: View {
     @State private var isAISettingsPresented = false
     @State private var selectedFiles: [URL] = []
     @State private var isRunning = false
+    @State private var certificationTask: Task<Void, Never>?
     @State private var progress = 0.0
     @State private var status = "Selecciona seis estados Rappi para el perfil enfocado o diez estados para el perfil general."
     @State private var report: NativeCorpusCertificationReport?
@@ -610,10 +611,17 @@ struct NativeCorpusCertificationView: View {
                     introCard
                     selectionCard
                     if isRunning {
-                        ProgressView(value: progress) {
-                            Text(status)
+                        VStack(alignment: .leading, spacing: 10) {
+                            ProgressView(value: progress) {
+                                Text(status)
+                            }
+                            .tint(Color.marcelitoNavy)
+                            Button("Cancelar certificación", role: .cancel) {
+                                cancelCertification()
+                            }
+                            .buttonStyle(.borderless)
+                            .foregroundStyle(Color.marcelitoDanger)
                         }
-                        .tint(Color.marcelitoNavy)
                     }
                     if let report {
                         resultCard(report)
@@ -651,6 +659,9 @@ struct NativeCorpusCertificationView: View {
         .presentationDetents([.large])
         .presentationDragIndicator(.visible)
         .presentationBackground(Color.marcelitoCream)
+        .onDisappear {
+            certificationTask?.cancel()
+        }
     }
 
     private var introCard: some View {
@@ -841,12 +852,18 @@ struct NativeCorpusCertificationView: View {
         diagnosticExportURL = nil
         progress = 0
         status = "Preparando el corpus…"
-        Task { @MainActor in
+        certificationTask = Task { @MainActor in
+            defer { certificationTask = nil }
             let result = await store.certifyNativeCorpus(
                 from: selectedFiles
             ) { completed, total, fileName in
                 progress = total == 0 ? 0 : Double(completed) / Double(total)
                 status = "Leyendo \(fileName) con PDFKit/Vision…"
+            }
+            guard !Task.isCancelled else {
+                isRunning = false
+                status = "Certificación cancelada."
+                return
             }
             report = result
             progress = 1
@@ -860,6 +877,13 @@ struct NativeCorpusCertificationView: View {
                 message: "Certificación en dispositivo: \(result.accepted)/\(result.files.count) aceptados; precisión \(Int((result.automaticAcceptancePrecision * 100).rounded()))%."
             )
         }
+    }
+
+    private func cancelCertification() {
+        certificationTask?.cancel()
+        certificationTask = nil
+        isRunning = false
+        status = "Cancelando la certificación…"
     }
 }
 

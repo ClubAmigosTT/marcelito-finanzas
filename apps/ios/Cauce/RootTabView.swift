@@ -133,6 +133,7 @@ struct HomeView: View {
                     .padding(.vertical, 14)
             }
             .scrollIndicators(.hidden)
+            .safeAreaPadding(.bottom, 76)
             .background(MarcelitoAmbientBackground())
             .navigationTitle("Resumen")
             .navigationBarTitleDisplayMode(.large)
@@ -690,6 +691,14 @@ struct LedgerQualityBanner: View {
                 Text(percentText)
                     .font(.caption2.monospacedDigit())
                     .foregroundStyle(.secondary)
+                if store.ledgerQuality.reconciledStatementCount > 0,
+                   store.ledgerQuality.reconciledStatementCount == store.ledgerQuality.statementCount,
+                   store.ledgerQuality.validatedStatementCount < store.ledgerQuality.statementCount {
+                    Text("Conciliado, pero \(store.ledgerQuality.statementCount - store.ledgerQuality.validatedStatementCount) estado(s) requieren revisión OCR antes de entrar a los KPI")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.marcelitoAmber)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if isWarning || store.ledgerQuality.reviewMovementCount > 0 {
                     LedgerBlockerDetailsButton().environment(store)
                 }
