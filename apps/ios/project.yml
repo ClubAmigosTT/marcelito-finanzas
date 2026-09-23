@@ -16,6 +16,7 @@ targets:
       - Cauce/Resources/rappi-engine.js
     settings:
       base:
+        PRODUCT_NAME: Marcelito
         PRODUCT_BUNDLE_IDENTIFIER: mx.marcelito.personal
         MARKETING_VERSION: "1.0.0"
         CURRENT_PROJECT_VERSION: "1"
@@ -43,4 +44,5 @@ targets:
       - target: Marcelito
     settings:
       base:
+        PRODUCT_NAME: MarcelitoTests
         PRODUCT_BUNDLE_IDENTIFIER: mx.marcelito.personal.tests
