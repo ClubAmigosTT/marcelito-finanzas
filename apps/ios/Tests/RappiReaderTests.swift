@@ -97,6 +97,33 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertFalse(lines[0].hasSuffix(" POR -$40.00"))
     }
 
+    func testRappiRepeatedOCRCellUsesTheHighestConfidenceReading() throws {
+        let observations = [
+            OCRObservationFixture(
+                page: 2,
+                text: "2026-08-02 2026-08-02 COMERCIO EJEMPLO +$50.00",
+                x: 0.05,
+                y: 0.70,
+                width: 0.80,
+                confidence: 0.59
+            ),
+            OCRObservationFixture(
+                page: 2,
+                text: "2026-08-02 2026-08-02 COMERCIO EJEMPLO +$55.00",
+                x: 0.05,
+                y: 0.70,
+                width: 0.80,
+                confidence: 0.96
+            ),
+        ]
+        let lines = FinanceStore.rappiOCRMovementLinesForTesting(observations)
+        let confidence = try XCTUnwrap(FinanceStore.rappiOCRMovementConfidenceForTesting(observations).first ?? nil)
+
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertTrue(lines[0].hasSuffix("+$55.00"))
+        XCTAssertEqual(confidence, 0.96, accuracy: 0.0001)
+    }
+
     func testReconciledSelectableRappiLayerAvoidsVisionAndMissingRowDoesNotPass() {
         XCTAssertTrue(
             FinanceStore.selectableTextLayerReconcilesForTesting(

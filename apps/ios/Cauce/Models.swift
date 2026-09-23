@@ -7331,16 +7331,16 @@ final class FinanceStore {
         return rappiOCRMovementLines(from: observations)
     }
 
-    /// Builds normalized OCR observations so title recovery can be tested
-    /// with a full-page label beside an isolated crop's truncated text.
-    static func rappiOCRMovementLinesForTesting(_ fixtures: [OCRObservationFixture]) -> [String] {
+    /// Builds normalized OCR observations so title recovery and confidence
+    /// selection can be tested with full-page and recovered crop evidence.
+    private static func rappiOCRObservationsForTesting(_ fixtures: [OCRObservationFixture]) -> [OCRObservation] {
         let dateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(?:\d{4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}|\d{1,2}\s*[-/.]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*\d{2,4})"#
         )
         let moneyRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9.,])[-+−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         )
-        let observations = fixtures.map { fixture -> OCRObservation in
+        return fixtures.map { fixture -> OCRObservation in
             let textRange = NSRange(fixture.text.startIndex..<fixture.text.endIndex, in: fixture.text)
             let characterCount = max(fixture.text.utf16.count, 1)
 
@@ -7379,7 +7379,15 @@ final class FinanceStore {
                 amountBoxes: boxes(matching: moneyRegex)
             )
         }
-        return rappiOCRMovementLines(from: observations)
+    }
+
+    static func rappiOCRMovementLinesForTesting(_ fixtures: [OCRObservationFixture]) -> [String] {
+        rappiOCRMovementLineRecords(from: rappiOCRObservationsForTesting(fixtures)).map(\.text)
+    }
+
+    static func rappiOCRMovementConfidenceForTesting(_ fixtures: [OCRObservationFixture]) -> [Double?] {
+        rappiOCRMovementLineRecords(from: rappiOCRObservationsForTesting(fixtures))
+            .map(\.financialConfidence)
     }
 
     /// Exercises the field-level Rappi quality signal without rendering a
@@ -8156,12 +8164,27 @@ final class FinanceStore {
                 return $0.centerX < $1.centerX
             }) {
                 guard !box.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-                let duplicate = result.contains { existing in
-                    normalized(existing.text) == normalized(box.text)
-                        && abs(existing.centerX - box.centerX) <= 0.018
+                if let index = result.firstIndex(where: { existing in
+                    abs(existing.centerX - box.centerX) <= 0.018
                         && abs(existing.centerY - box.centerY) <= 0.012
+                }) {
+                    // Repeated Vision passes can disagree on the glyphs in
+                    // one printed cell. Prefer the strongest observation of
+                    // that physical token rather than whichever pass happened
+                    // to be appended first; exact statement reconciliation
+                    // remains the independent acceptance gate.
+                    let currentConfidence = result[index].confidence ?? -1
+                    let candidateConfidence = box.confidence ?? -1
+                    if candidateConfidence > currentConfidence {
+                        result[index] = box
+                    } else if normalized(result[index].text) == normalized(box.text),
+                              result[index].confidence == nil,
+                              box.confidence != nil {
+                        result[index] = box
+                    }
+                } else {
+                    result.append(box)
                 }
-                if !duplicate { result.append(box) }
             }
             return result
         }
@@ -8187,9 +8210,16 @@ final class FinanceStore {
                 // its signed sibling at the same coordinate. Prefer the
                 // signed and rightmost token; the printed amount column has
                 // only one financial value per visual row.
-                if (hasExplicitSign(amount.text) && !hasExplicitSign(current.text))
-                    || (hasExplicitSign(amount.text) == hasExplicitSign(current.text)
-                        && amount.centerX > current.centerX) {
+                let candidateIsSigned = hasExplicitSign(amount.text)
+                let currentIsSigned = hasExplicitSign(current.text)
+                let candidateIsFurtherRight = amount.centerX > current.centerX + 0.018
+                let sameAmountColumn = abs(amount.centerX - current.centerX) <= 0.018
+                let candidateConfidence = amount.confidence ?? -1
+                let currentConfidence = current.confidence ?? -1
+                if (candidateIsSigned && !currentIsSigned)
+                    || (candidateIsSigned == currentIsSigned
+                        && (candidateIsFurtherRight
+                            || (sameAmountColumn && candidateConfidence > currentConfidence))) {
                     rows[index].amount = amount
                 }
             } else {
