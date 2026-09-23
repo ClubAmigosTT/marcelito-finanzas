@@ -47,7 +47,7 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
   assert.ok(importBlock, "la importación debe tener un límite de extracción identificable");
   assert.doesNotMatch(importBlock, /Task\.detached/);
   assert.match(importBlock, /try Task\.checkCancellation\(\)/);
-  assert.match(models, /for pageIndex in 0\.\.\<document\.pageCount \{\s*if Task\.isCancelled \{ break \}/);
+  assert.match(models, /for pageIndex in 0\.\.<document\.pageCount \{\s*if Task\.isCancelled \{ break \}/);
   assert.match(models, /ciContext\.clearCaches\(\)/);
   assert.match(models, /func inspectPDFAsync[\s\S]*?PDFExtractionCoordinator\.shared\.perform/);
   assert.match(models, /PDFExtractionCoordinator\.shared\.perform \{\s*var seenFingerprints = Set<String>\(\)[\s\S]{0,400}for url in storedURLs \{\s*try Task\.checkCancellation\(\)/);
