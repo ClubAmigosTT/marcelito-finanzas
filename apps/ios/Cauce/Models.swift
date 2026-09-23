@@ -907,7 +907,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-recovery-2026.09.23.1"
+    static let readerVersion = "ios-reader-recovery-2026.09.23.2"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -4752,15 +4752,29 @@ final class FinanceStore {
 
         let storedURLs = storedPDFURLs
         let knownStatements = statements
-        let candidates = await Task.detached(priority: .utility) {
-            var seenFingerprints = Set<String>()
-            return storedURLs.compactMap { url -> URL? in
-                guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { return nil }
-                let fingerprint = Self.pdfFingerprint(data)
-                guard seenFingerprints.insert(fingerprint).inserted else { return nil }
-                return url
+        let candidates: [URL]
+        do {
+            candidates = try await PDFExtractionCoordinator.shared.perform {
+                var seenFingerprints = Set<String>()
+                var uniqueURLs: [URL] = []
+                for url in storedURLs {
+                    try Task.checkCancellation()
+                    guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else { continue }
+                    let fingerprint = Self.pdfFingerprint(data)
+                    if seenFingerprints.insert(fingerprint).inserted {
+                        uniqueURLs.append(url)
+                    }
+                }
+                return uniqueURLs
             }
-        }.value
+        } catch {
+            ledgerRefreshState = .pending
+            return CanonicalRebuildResult(
+                candidateCount: storedURLs.count,
+                importedCount: 0,
+                invalidCount: storedURLs.count
+            )
+        }
         guard !Task.isCancelled else {
             ledgerRefreshState = .pending
             return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: 0, invalidCount: candidates.count)
@@ -5310,13 +5324,14 @@ final class FinanceStore {
         // the evidence gate then quarantined the entire statement. The
         // parser treats these sentinels as structural markers and carries the
         // real 1-based page into each movement's provenance.
-        var extractedText = (0..<document.pageCount)
-            .compactMap { index -> String? in
-                guard let pageText = document.page(at: index)?.string,
-                      !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-                return "__PDF_PAGE_\(index + 1)__\n\(pageText)"
-            }
-            .joined(separator: "\n")
+        var pageTexts: [String] = []
+        for index in 0..<document.pageCount {
+            try Task.checkCancellation()
+            guard let pageText = document.page(at: index)?.string,
+                  !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
+            pageTexts.append("__PDF_PAGE_\(index + 1)__\n\(pageText)")
+        }
+        var extractedText = pageTexts.joined(separator: "\n")
         let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // A PDF can expose a text layer even when its line breaks are unusual
@@ -5388,6 +5403,7 @@ final class FinanceStore {
                 prioritizeNumericEvidence: selectableSource == "Rappi"
             )
             : []
+        try Task.checkCancellation()
         let ocrText = selectableSource.localizedCaseInsensitiveCompare("Rappi") == .orderedSame
             ? Self.rappiOCRText(from: ocrObservations)
             : Self.ocrText(from: ocrObservations)
@@ -5429,6 +5445,7 @@ final class FinanceStore {
             )
             return Self.ocrText(from: coverObservations)
         }()
+        try Task.checkCancellation()
         let ocrPageConfidences: [Double]? = {
             guard usedOCR else { return nil }
             let grouped = Dictionary(grouping: ocrObservations, by: \.page)
@@ -5548,6 +5565,7 @@ final class FinanceStore {
                     prioritizeNumericEvidence: false,
                     forceRegionRecovery: true
                 )
+                try Task.checkCancellation()
                 let retryResult = Self.parseSantanderTable(
                     retryObservations,
                     fileName: fileName,
@@ -5583,6 +5601,7 @@ final class FinanceStore {
                     prioritizeNumericEvidence: false,
                     forceRegionRecovery: true
                 )
+                try Task.checkCancellation()
                 let retryResult = Self.parseBBVAOCRResult(retryObservations, fileName: fileName)
                 let retryReconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
                     kind: kind,
@@ -5779,6 +5798,7 @@ final class FinanceStore {
                     prioritizeNumericEvidence: true,
                     forceRegionRecovery: true
                 )
+                try Task.checkCancellation()
                 let retryText = Self.rappiOCRText(from: retryObservations)
                 let retryConfidenceByPage = Dictionary(grouping: retryObservations, by: { $0.page + 1 })
                     .mapValues { observations in
@@ -5886,6 +5906,7 @@ final class FinanceStore {
                     prioritizeNumericEvidence: false,
                     forceRegionRecovery: true
                 )
+                try Task.checkCancellation()
                 let retry = Self.parseAmexOCRResult(retryObservations, fileName: fileName)
                 let retryReconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
                     kind: kind,
@@ -6234,6 +6255,19 @@ final class FinanceStore {
         return result
     }
 
+    static func readPDFData(from url: URL) throws -> Data {
+        try Task.checkCancellation()
+        if let fileSize = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+           fileSize > 50 * 1024 * 1024 {
+            throw FinanceImportError.documentTooLarge
+        }
+        do {
+            return try Data(contentsOf: url, options: .mappedIfSafe)
+        } catch {
+            throw FinanceImportError.unreadableDocument
+        }
+    }
+
     private static func localExtractionStage(for attempts: [String]) -> String {
         if attempts.contains("vision-region-retry") {
             return "Relectura regional local terminada"
@@ -6308,17 +6342,12 @@ final class FinanceStore {
             }
         }
 
-        let documentData: Data
-        do {
-            documentData = try Data(contentsOf: url, options: .mappedIfSafe)
-        } catch {
-            throw FinanceImportError.unreadableDocument
-        }
         let fileName = url.lastPathComponent
         let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
         try Task.checkCancellation()
-        let localExtraction = try await Task.detached(priority: .userInitiated) {
-            try autoreleasepool {
+        let localExtraction = try await PDFExtractionCoordinator.shared.perform {
+            let documentData = try Self.readPDFData(from: url)
+            return try autoreleasepool {
                 try Self.extractPDFUsingCache(
                     data: documentData,
                     fileName: fileName,
@@ -6328,7 +6357,7 @@ final class FinanceStore {
                     learnedRules: learnedRules
                 )
             }
-        }.value
+        }
         try Task.checkCancellation()
         stage?("\(Self.localExtractionStage(for: localExtraction.recoveryAttempts)); conciliando contra los totales…")
         let extraction = localExtraction
@@ -6360,18 +6389,12 @@ final class FinanceStore {
             }
         }
 
-        let documentData: Data
-        do {
-            documentData = try Data(contentsOf: url, options: .mappedIfSafe)
-        } catch {
-            throw FinanceImportError.unreadableDocument
-        }
-
         let fileName = url.lastPathComponent
         let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
         try Task.checkCancellation()
-        let localExtraction = try await Task.detached(priority: .userInitiated) {
-            try autoreleasepool {
+        let localExtraction = try await PDFExtractionCoordinator.shared.perform {
+            let documentData = try Self.readPDFData(from: url)
+            return try autoreleasepool {
                 try Self.extractPDF(
                     data: documentData,
                     fileName: fileName,
@@ -6381,7 +6404,7 @@ final class FinanceStore {
                     learnedRules: learnedRules
                 )
             }
-        }.value
+        }
         try Task.checkCancellation()
         stage?("\(Self.localExtractionStage(for: localExtraction.recoveryAttempts)); conciliando contra los totales…")
         let extraction = localExtraction
@@ -7213,6 +7236,7 @@ final class FinanceStore {
         }
 
         func recognize(region: CGRect, languages: [String]?, correctLanguage: Bool) -> OCRObservation? {
+            guard !Task.isCancelled else { return nil }
             // Physically crop the pixels. A Vision ROI alone can still group
             // text from adjacent rows in the source image.
             let bounds = CGRect(x: 0, y: 0, width: CGFloat(image.width), height: CGFloat(image.height))
@@ -7233,6 +7257,7 @@ final class FinanceStore {
             } catch {
                 return nil
             }
+            guard !Task.isCancelled else { return nil }
             let values = (request.results ?? []).compactMap { result -> (String, CGRect, Double)? in
                 guard let candidate = result.topCandidates(1).first else { return nil }
                 let text = candidate.string.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -7267,6 +7292,7 @@ final class FinanceStore {
             fullPageObservations: fullPageObservations,
             retryDateAnchorsWhenUnobserved: retryDateAnchorsWhenUnobserved
         ) {
+            if Task.isCancelled { break }
             let selected = autoreleasepool { () -> OCRObservation? in
                 var candidates: [OCRObservation] = []
                 let passes: [([String]?, Bool)] = [
@@ -7275,6 +7301,7 @@ final class FinanceStore {
                     (nil, false),
                 ]
                 for (languages, correction) in passes {
+                    if Task.isCancelled { break }
                     if let candidate = recognize(
                         region: region,
                         languages: languages,
@@ -7523,6 +7550,7 @@ final class FinanceStore {
             // this changes no acceptance rule because every resulting row
             // still needs a valid date, direction and issuer reconciliation.
             func run(languages: [String]?) -> [OCRObservation]? {
+                guard !Task.isCancelled else { return nil }
                 let request = VNRecognizeTextRequest()
                 request.recognitionLevel = .accurate
                 if let languages {
@@ -7570,6 +7598,7 @@ final class FinanceStore {
                 } catch {
                     return nil
                 }
+                guard !Task.isCancelled else { return nil }
 
                 let substringPatterns = (
                     date: try? NSRegularExpression(
@@ -7839,6 +7868,7 @@ final class FinanceStore {
             let variants = [crop, enhancedImage(from: crop)].compactMap { $0 }
             var best: [OCRObservation] = []
             for variant in variants {
+                if Task.isCancelled { break }
                 let observations = recognize(variant, page: page, numericFocus: true)
                     .filter { isPeriodToken($0.text) }
                 if observations.count > best.count {
@@ -7867,12 +7897,15 @@ final class FinanceStore {
         }
 
         for pageIndex in 0..<document.pageCount {
+            if Task.isCancelled { break }
             if let pageIndexes, !pageIndexes.contains(pageIndex) { continue }
             autoreleasepool {
+                guard !Task.isCancelled else { return }
                 guard let page = document.page(at: pageIndex) else { return }
                 guard let cgImage = render(page, longEdge: 2_400) else { return }
 
                 let baseObservations = recognize(cgImage, page: pageIndex)
+                guard !Task.isCancelled else { return }
                 var selectedObservations = baseObservations
                 var selectedImage = cgImage
                 let baseConfidence = meanConfidence(baseObservations)
@@ -7883,6 +7916,7 @@ final class FinanceStore {
                 if baseConfidence < 0.88,
                    let detailImage = render(page, longEdge: 3_200) {
                     let detailObservations = recognize(detailImage, page: pageIndex)
+                    guard !Task.isCancelled else { return }
                     if meanConfidence(detailObservations) > meanConfidence(selectedObservations) {
                         selectedObservations = detailObservations
                         selectedImage = detailImage
@@ -7894,6 +7928,7 @@ final class FinanceStore {
                 if meanConfidence(selectedObservations) < 0.88,
                    let contrastImage = enhancedImage(from: selectedImage) {
                     let contrastObservations = recognize(contrastImage, page: pageIndex)
+                    guard !Task.isCancelled else { return }
                     if meanConfidence(contrastObservations) > meanConfidence(selectedObservations) {
                         selectedObservations = contrastObservations
                         // Keep the image that produced the selected evidence in
@@ -7912,6 +7947,7 @@ final class FinanceStore {
                         page: pageIndex,
                         fullPageObservations: selectedObservations
                     )
+                    guard !Task.isCancelled else { return }
                     if !visualRows.isEmpty {
                         // One isolated observation represents one printed row,
                         // but a non-empty result is not proof of full page
@@ -7975,6 +8011,7 @@ final class FinanceStore {
                         var recoveredKeys = Set<String>()
                         var existingKeys = Set<String>()
                         for observation in selectedObservations {
+                            if Task.isCancelled { return }
                             for box in observation.dateBoxes + observation.amountBoxes {
                                 let key = "\(box.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current))|\(Int((box.centerX * 1_000).rounded()))|\(Int((box.boundingBox.midY * 1_000).rounded()))"
                                 existingKeys.insert(key)
@@ -7982,13 +8019,16 @@ final class FinanceStore {
                         }
                         var completeRecovery: [OCRObservation] = []
                         for recoveryImage in recoveryImages {
+                            if Task.isCancelled { break }
                             let recovery = recognize(recoveryImage, page: pageIndex, numericFocus: true)
+                            if Task.isCancelled { break }
                             if completeRecovery.isEmpty, !recovery.isEmpty {
                                 completeRecovery = recovery
                             }
                             let tokenObservations = numericTokens(from: recovery)
                                 + (pageIndex == 0 ? numericComponents(from: recovery) : [])
                             for token in tokenObservations {
+                                if Task.isCancelled { break }
                                 let key = "\(token.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current))|\(Int((token.centerX * 1_000).rounded()))|\(Int((token.centerY * 1_000).rounded()))"
                                 if !existingKeys.contains(key), recoveredKeys.insert(key).inserted {
                                     recoveredTokens.append(token)
@@ -8022,6 +8062,7 @@ final class FinanceStore {
                     ]
                     var supplemental: [OCRObservation] = []
                     for region in regions {
+                        if Task.isCancelled { break }
                         supplemental.append(contentsOf: recognize(
                             selectedImage,
                             page: pageIndex,
@@ -8029,6 +8070,7 @@ final class FinanceStore {
                             regionOfInterest: region
                         ))
                     }
+                    guard !Task.isCancelled else { return }
 
                     func normalizedOCRToken(_ value: String) -> String {
                         value
@@ -8057,6 +8099,7 @@ final class FinanceStore {
 
                     var merged = selectedObservations
                     for observation in supplemental {
+                        if Task.isCancelled { break }
                         let sharesLine = selectedObservations.contains { sameVisualLine($0, observation) }
                         if sharesLine {
                             // Keep the merchant line chosen by the full-page
@@ -8079,8 +8122,13 @@ final class FinanceStore {
                    let coverObservation = rappiCoverNumericObservation(from: coverImage, page: pageIndex) {
                     selectedObservations.append(coverObservation)
                 }
+                guard !Task.isCancelled else { return }
                 observations.append(contentsOf: selectedObservations)
             }
+            // Core Image may retain intermediate buffers after the page's
+            // autorelease pool drains. Drop those caches before rendering the
+            // next page to keep peak memory bounded across long statements.
+            ciContext.clearCaches()
         }
 
         return observations
@@ -14331,13 +14379,21 @@ final class FinanceStore {
             guard let url = statementFileURL(for: statement) else { return nil }
             return (statement.id, url)
         }
-        let updates = await Task.detached(priority: .utility) {
-            sources.compactMap { id, url -> (UUID, String)? in
-                guard let document = PDFDocument(url: url),
-                      let period = FinanceStore.bbvaDocumentPeriod(document) else { return nil }
-                return (id, period)
+        let updates: [(UUID, String)]
+        do {
+            updates = try await PDFExtractionCoordinator.shared.perform {
+                var resolved: [(UUID, String)] = []
+                for (id, url) in sources {
+                    try Task.checkCancellation()
+                    guard let document = PDFDocument(url: url),
+                          let period = FinanceStore.bbvaDocumentPeriod(document) else { continue }
+                    resolved.append((id, period))
+                }
+                return resolved
             }
-        }.value
+        } catch {
+            return
+        }
         var changed = false
         for (id, period) in updates {
             guard let index = statements.firstIndex(where: { $0.id == id }), statements[index].period != period else { continue }

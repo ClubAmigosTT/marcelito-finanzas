@@ -5,6 +5,8 @@ import { readFile } from "node:fs/promises";
 const rootTabPath = new URL("../apps/ios/Cauce/RootTabView.swift", import.meta.url);
 const sectionsPath = new URL("../apps/ios/Cauce/Sections.swift", import.meta.url);
 const modelsPath = new URL("../apps/ios/Cauce/Models.swift", import.meta.url);
+const pdfDiagnosticPath = new URL("../apps/ios/Cauce/PDFExtractionDiagnostic.swift", import.meta.url);
+const pdfCachePath = new URL("../apps/ios/Cauce/PDFReadingCache.swift", import.meta.url);
 const appPath = new URL("../apps/ios/Cauce/CauceApp.swift", import.meta.url);
 const aiClassificationPath = new URL("../apps/ios/Cauce/AIClassification.swift", import.meta.url);
 const certificationViewPath = new URL("../apps/ios/Cauce/NativeCorpusCertification.swift", import.meta.url);
@@ -12,11 +14,12 @@ const nativeCorpusPath = new URL("../apps/ios/Tests/NativeCorpusContractTests.sw
 const nativeCorpusRunnerPath = new URL("../apps/ios/scripts/run-native-corpus.sh", import.meta.url);
 
 test("la interfaz iOS usa importación y reconstrucción asíncronas", async () => {
-  const [rootTab, sections, models, app] = await Promise.all([
+  const [rootTab, sections, models, app, pdfCache] = await Promise.all([
     readFile(rootTabPath, "utf8"),
     readFile(sectionsPath, "utf8"),
     readFile(modelsPath, "utf8"),
     readFile(appPath, "utf8"),
+    readFile(pdfCachePath, "utf8"),
   ]);
 
   assert.match(rootTab, /try await store\.importPDFAsync\(/);
@@ -38,8 +41,17 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
   assert.doesNotMatch(sections, /try store\.importPDF\(/);
 
   assert.match(models, /func importPDFAsync\(/);
-  assert.match(models, /Task\.detached\(priority: \.userInitiated\)/);
-  assert.match(models, /func importPDFAsync[\s\S]*?try Task\.checkCancellation\(\)[\s\S]*?try Task\.checkCancellation\(\)/);
+  assert.match(pdfCache, /actor PDFExtractionCoordinator/);
+  assert.match(models, /PDFExtractionCoordinator\.shared\.perform/);
+  const importBlock = models.match(/func importPDFAsync\([\s\S]*?func inspectPDFAsync/)?.[0];
+  assert.ok(importBlock, "la importación debe tener un límite de extracción identificable");
+  assert.doesNotMatch(importBlock, /Task\.detached/);
+  assert.match(importBlock, /try Task\.checkCancellation\(\)/);
+  assert.match(models, /for pageIndex in 0\.\.\<document\.pageCount \{\s*if Task\.isCancelled \{ break \}/);
+  assert.match(models, /ciContext\.clearCaches\(\)/);
+  assert.match(models, /func inspectPDFAsync[\s\S]*?PDFExtractionCoordinator\.shared\.perform/);
+  assert.match(models, /PDFExtractionCoordinator\.shared\.perform \{\s*var seenFingerprints = Set<String>\(\)[\s\S]{0,400}for url in storedURLs \{\s*try Task\.checkCancellation\(\)/);
+  assert.doesNotMatch(models, /let candidates = await Task\.detached\(priority: \.utility\)/);
   assert.match(models, /func rebuildCanonicalLedgerIfNeededAsync\(/);
   assert.match(models, /private var activeRebuildTask: Task<CanonicalRebuildResult, Never>\? = nil/);
   assert.match(models, /private func performCanonicalRebuildIfNeededAsync\(/);
@@ -76,6 +88,21 @@ test("volver al frente no ejecuta una auditoría síncrona ni congela las pesta�
   assert.match(models, /lastAuditRun\.readerVersion == Self\.readerVersion/);
   assert.match(models, /DerivedProjectionCache/);
   assert.match(models, /@ObservationIgnored private var ledgerQualityCache/);
+});
+
+test("toda lectura nativa de PDF comparte el límite cancelable de memoria", async () => {
+  const [models, diagnostic] = await Promise.all([
+    readFile(modelsPath, "utf8"),
+    readFile(pdfDiagnosticPath, "utf8"),
+  ]);
+  assert.match(diagnostic, /PDFExtractionCoordinator\.shared\.perform/);
+  assert.doesNotMatch(diagnostic, /Task\.detached/);
+  assert.match(models, /@MainActor func repairBBVAPeriods[\s\S]*?PDFExtractionCoordinator\.shared\.perform/);
+  const ocrBlock = models.match(/private static func ocrObservations\([\s\S]*?private static func ocrText\(/)?.[0];
+  assert.ok(ocrBlock, "la pasada OCR debe quedar delimitada para revisar su uso de memoria");
+  assert.match(ocrBlock, /autoreleasepool \{/);
+  assert.match(ocrBlock, /ciContext\.clearCaches\(\)/);
+  assert.match(ocrBlock, /if Task\.isCancelled \{ break \}/);
 });
 
 test("la auditoría iOS separa revisión canónica de cuarentena", async () => {

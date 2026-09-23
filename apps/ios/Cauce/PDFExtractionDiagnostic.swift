@@ -87,12 +87,14 @@ enum PDFExtractionDiagnostic {
         guard data.count <= 50 * 1024 * 1024 else { throw FinanceImportError.documentTooLarge }
         guard let document = PDFDocument(data: data) else { throw FinanceImportError.unreadableDocument }
         guard document.pageCount <= 80 else { throw FinanceImportError.documentTooManyPages }
-        let pages = (0..<document.pageCount).map { index -> Page in
+        var pages: [Page] = []
+        for index in 0..<document.pageCount {
+            try Task.checkCancellation()
             let page = document.page(at: index)
             let text = page?.string ?? ""
-            return Page(number: index + 1, rotation: page?.rotation ?? 0,
+            pages.append(Page(number: index + 1, rotation: page?.rotation ?? 0,
                 characterCount: text.count, truncated: text.count > 100_000,
-                text: String(text.prefix(100_000)))
+                text: String(text.prefix(100_000))))
         }
         let native = pages.map { "__PDF_PAGE_\($0.number)__\n\($0.text)" }.joined(separator: "\n")
         let ordered = SelectablePDFLayout.text(from: document)
@@ -123,12 +125,13 @@ enum PDFExtractionDiagnostic {
     }
 
     static func export(from url: URL) async throws -> URL {
-        try await Task.detached(priority: .userInitiated) {
+        try await PDFExtractionCoordinator.shared.perform {
             let access = url.startAccessingSecurityScopedResource()
             defer { if access { url.stopAccessingSecurityScopedResource() } }
-            let data = try Data(contentsOf: url, options: .mappedIfSafe)
+            let data = try FinanceStore.readPDFData(from: url)
             try Task.checkCancellation()
-            let report = try capture(data: data)
+            let report = try autoreleasepool { try capture(data: data) }
+            try Task.checkCancellation()
             let encoder = JSONEncoder()
             encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
             encoder.dateEncodingStrategy = .iso8601
@@ -136,6 +139,6 @@ enum PDFExtractionDiagnostic {
                 .appendingPathComponent("marcelito-pdf-extraction-\(UUID().uuidString).json")
             try encoder.encode(report).write(to: destination, options: [.atomic, .completeFileProtection])
             return destination
-        }.value
+        }
     }
 }

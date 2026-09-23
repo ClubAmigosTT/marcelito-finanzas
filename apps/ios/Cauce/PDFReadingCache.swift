@@ -44,3 +44,21 @@ struct PDFReadingCache {
         }
     }
 }
+
+/// Serializes expensive PDFKit/Vision work across imports, inspection and
+/// diagnostics. A synchronous actor operation cannot overlap another reader
+/// pass, which bounds peak image memory when the UI starts a second task.
+/// Callers still check cancellation inside page and region loops so a canceled
+/// operation releases the actor promptly instead of finishing an entire file.
+actor PDFExtractionCoordinator {
+    static let shared = PDFExtractionCoordinator()
+
+    func perform<Value: Sendable>(
+        _ operation: @Sendable () throws -> Value
+    ) throws -> Value {
+        try Task.checkCancellation()
+        let value = try operation()
+        try Task.checkCancellation()
+        return value
+    }
+}
