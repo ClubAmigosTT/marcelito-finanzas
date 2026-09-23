@@ -1074,9 +1074,9 @@ private struct AccountSummaryRow: View {
     }
 
     private var balanceText: String {
-        if store.dashboardIsBlocked { return "Bloqueado" }
+        if statement?.readerVersion != FinanceStore.readerVersion { return "Actualizar PDF" }
         guard let balance = kind == .card ? metric?.debtBalance : metric?.cashBalance else {
-            return "Pendiente"
+            return statement?.requiresReview == true ? "Por revisar" : "Pendiente"
         }
         let formatted = balance.formatted(.currency(code: "MXN").precision(.fractionLength(0)))
         return kind == .card ? "−\(formatted)" : formatted
@@ -1084,6 +1084,7 @@ private struct AccountSummaryRow: View {
 
     private var detailText: String {
         guard kind == .card else { return "Cuenta de efectivo" }
+        guard metric != nil else { return "Cifras en revisión; fuera de los totales" }
         let minimum = (statement?.summary?.minimumPlusMsi ?? statement?.summary?.minimumPayment)?
             .formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
         let noInterest = metric?.paymentForNoInterest?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
@@ -1128,6 +1129,22 @@ struct AccountsView: View {
     @State private var statementImportProgress = 0
     @State private var statementImportStatus = "Preparando…"
     @State private var isDiagnosticsPresented = false
+
+    @MainActor
+    private func refreshPendingStatements() async {
+        guard store.hasCanonicalRebuildPending, !isImportingStatements else { return }
+        isImportingStatements = true
+        statementImportProgress = 0
+        statementImportStatus = "Releyendo estados guardados…"
+        let result = await store.rebuildCanonicalLedgerIfNeededAsync { completed, total, fileName in
+            statementImportProgress = Int((Double(completed) / Double(max(total, 1)) * 100).rounded())
+            statementImportStatus = "Validando \(fileName)…"
+        }
+        statementImportProgress = 100
+        statementImportStatus = "\(result.importedCount) estados listos · \(result.invalidCount) por revisar"
+        isImportingStatements = false
+        store.runAutomaticAuditIfNeeded(trigger: "accounts-rebuild")
+    }
 
     private var displayedAccounts: [AccountDisplayItem] {
         var seen = Set<String>()
@@ -1517,6 +1534,13 @@ struct AccountsView: View {
     private var accountsScrollView: some View {
         ScrollView {
             LazyVStack(alignment: .leading, spacing: 22) {
+                if store.hasCanonicalRebuildPending {
+                    PendingLedgerRefreshCard {
+                        Task { @MainActor in
+                            await refreshPendingStatements()
+                        }
+                    }
+                }
                 if store.dashboardIsBlocked
                     || store.dashboardIsProvisional
                     || store.ledgerQuality.reviewMovementCount > 0 {
@@ -1824,6 +1848,25 @@ private struct AccountEvolutionChart: View {
 private struct StatementDocumentTile: View {
     let statement: StatementRecord
 
+    private var needsNewReader: Bool {
+        statement.readerVersion != FinanceStore.readerVersion
+    }
+
+    private var isReady: Bool {
+        !needsNewReader && !statement.requiresReview && statement.reconciliation?.status == .valid
+    }
+
+    private var movementText: String {
+        if needsNewReader { return "Lector anterior · actualizar PDF" }
+        if isReady { return "\(statement.transactionCount) mov." }
+        let extracted = statement.reconciliation?.extractedMovementCount ?? statement.transactionCount
+        let examined = statement.rowDiagnostics?.count ?? 0
+        if extracted == 0 && examined > 0 {
+            return "\(examined) filas examinadas · por revisar"
+        }
+        return "\(extracted) detectados · por revisar"
+    }
+
     private var iconName: String {
         statement.kind == .card || statement.source.localizedCaseInsensitiveContains("amex")
             ? "creditcard.fill"
@@ -1839,10 +1882,10 @@ private struct StatementDocumentTile: View {
                     .frame(width: 28, height: 28)
                     .background(Color.marcelitoNavy.opacity(0.08), in: Circle())
                 Spacer(minLength: 8)
-                Image(systemName: statement.requiresReview ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
+                Image(systemName: isReady ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
                     .font(.caption)
-                    .foregroundStyle(statement.requiresReview ? Color.marcelitoAmber : Color.marcelitoSuccess)
-                    .accessibilityLabel(statement.requiresReview ? "Pendiente de revisión" : "Revisado")
+                    .foregroundStyle(isReady ? Color.marcelitoSuccess : Color.marcelitoAmber)
+                    .accessibilityLabel(isReady ? "Revisado" : "Pendiente de revisión")
             }
             Text(conciseStatementPeriod(statement))
                 .font(.headline)
@@ -1853,9 +1896,7 @@ private struct StatementDocumentTile: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
-            Text(statement.requiresReview
-                 ? "\(statement.reconciliation?.extractedMovementCount ?? statement.transactionCount) detectados · por revisar"
-                 : "\(statement.transactionCount) mov.")
+            Text(movementText)
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .monospacedDigit()

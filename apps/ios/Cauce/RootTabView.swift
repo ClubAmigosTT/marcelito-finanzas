@@ -645,7 +645,7 @@ private struct EmptyDataCard: View {
     }
 }
 
-private struct PendingLedgerRefreshCard: View {
+struct PendingLedgerRefreshCard: View {
     let refreshAction: () -> Void
 
     var body: some View {
