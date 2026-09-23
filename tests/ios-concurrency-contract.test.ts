@@ -252,6 +252,9 @@ test("Rappi deja diagnóstico rechazado para filas OCR visuales no seleccionadas
   assert.match(source, /rappi\.visual-stream-unreconciled/);
   assert.match(source, /Fila candidata Rappi en revisión/);
   assert.match(source, /Fila visual fuera de corriente/);
+  assert.match(source, /Corriente OCR Rappi sin conciliar/);
+  assert.match(source, /La señal agregada de página es/);
+  assert.match(source, /let rappiPageWarningOnly = source\.caseInsensitiveCompare\("Rappi"\) == \.orderedSame/);
   assert.match(source, /selectedRappiOCRObservations = ocrObservations/);
   assert.match(source, /rowDiagnostics = Self\.rappiOCRRowDiagnostics\(/);
 });

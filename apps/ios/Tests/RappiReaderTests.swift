@@ -769,6 +769,7 @@ final class RappiReaderTests: XCTestCase {
                 && $0.reason.contains("ninguna corriente completa concilió")
         })
         XCTAssertTrue(diagnostics.contains { $0.rawText.contains("REST REINA DE LOS MARE") })
+        XCTAssertTrue(diagnostics.allSatisfy { $0.confidence == 0.99 })
     }
 
     func testVisualRowCoverageMatchesSignedCreditsByMagnitude() {

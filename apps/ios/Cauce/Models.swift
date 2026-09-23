@@ -199,6 +199,8 @@ struct OCRRowDiagnostic: Codable, Identifiable {
     let direction: String?
     let reason: String
     let accepted: Bool
+    /// Vision confidence for the row's financial tokens, when available.
+    let confidence: Double?
     /// Private Santander evidence, absent in older reports and other readers.
     let rowOrdinal: Int?
     let rowBounds: MovementExtractionBounds?
@@ -206,7 +208,7 @@ struct OCRRowDiagnostic: Codable, Identifiable {
     let cellRetryTexts: [String]?
 
     private enum CodingKeys: String, CodingKey {
-        case id, page, rawText, selectedColumn, selectedAmount, direction, reason, accepted
+        case id, page, rawText, selectedColumn, selectedAmount, direction, reason, accepted, confidence
         case rowOrdinal, rowBounds, cellTexts, cellRetryTexts
     }
 
@@ -219,6 +221,7 @@ struct OCRRowDiagnostic: Codable, Identifiable {
         direction: String? = nil,
         reason: String,
         accepted: Bool,
+        confidence: Double? = nil,
         rowOrdinal: Int? = nil,
         rowBounds: MovementExtractionBounds? = nil,
         cellTexts: [String]? = nil,
@@ -232,6 +235,7 @@ struct OCRRowDiagnostic: Codable, Identifiable {
         self.direction = direction
         self.reason = reason
         self.accepted = accepted
+        self.confidence = confidence
         self.rowOrdinal = rowOrdinal
         self.rowBounds = rowBounds
         self.cellTexts = cellTexts
@@ -248,6 +252,7 @@ struct OCRRowDiagnostic: Codable, Identifiable {
         try container.encodeIfPresent(direction, forKey: .direction)
         try container.encode(reason, forKey: .reason)
         try container.encode(accepted, forKey: .accepted)
+        try container.encodeIfPresent(confidence, forKey: .confidence)
         try container.encodeIfPresent(rowOrdinal, forKey: .rowOrdinal)
         try container.encodeIfPresent(rowBounds, forKey: .rowBounds)
         try container.encodeIfPresent(cellTexts, forKey: .cellTexts)
@@ -2114,21 +2119,67 @@ final class FinanceStore {
 
             if !hasSufficientOCRQuality(statement) {
                 let average = statement.ocrConfidence.map { "promedio \(Int(($0 * 100).rounded()))%" } ?? "promedio no disponible"
+                let isRappi = source.caseInsensitiveCompare("Rappi") == .orderedSame
+                let unacceptedRappiRows = isRappi
+                    ? (statement.rowDiagnostics ?? []).filter { !$0.accepted }
+                    : []
+                let qualityTitle: String
+                let qualityDetail: String
+                if isRappi && !unacceptedRappiRows.isEmpty {
+                    let streamUnreconciled = unacceptedRappiRows.contains {
+                        $0.reason.hasPrefix("rappi.visual-stream-unreconciled")
+                    }
+                    let rowOutsideSelectedStream = unacceptedRappiRows.contains {
+                        $0.reason.hasPrefix("rappi.visual-row-unselected")
+                    }
+                    let cause: String
+                    if streamUnreconciled {
+                        qualityTitle = "Corriente OCR Rappi sin conciliar"
+                        cause = "ninguna corriente completa de filas visuales concilió con los controles del estado"
+                    } else if rowOutsideSelectedStream {
+                        qualityTitle = "Filas Rappi fuera de la corriente seleccionada"
+                        cause = "una corriente seleccionada dejó filas visuales fuera y el estado requiere revisión"
+                    } else {
+                        qualityTitle = "Evidencia de filas Rappi incompleta"
+                        cause = "una o más filas no conservaron evidencia visual completa"
+                    }
+                    let lowestRowConfidence = unacceptedRappiRows.compactMap(\.confidence).min()
+                    let rowConfidenceDetail = lowestRowConfidence.map {
+                        " La confianza financiera mínima conservada por fila es \(Int(($0 * 100).rounded()))%."
+                    } ?? " No se conservó confianza financiera por fila para todas las candidatas."
+                    qualityDetail = "\(unacceptedRappiRows.count) fila(s) candidata(s) siguen fuera del libro porque \(cause). La señal agregada de página es \(average); no mide la confianza individual por fila.\(rowConfidenceDetail)"
+                } else if isRappi {
+                    let rowConfidences = movements
+                        .filter { $0.statementId == statement.id }
+                        .compactMap { movement -> Double? in
+                            guard movement.extractionEvidence?.method == "vision-ocr" else { return nil }
+                            return movement.extractionEvidence?.confidence
+                        }
+                    let lowestRowConfidence = rowConfidences.min()
+                    qualityTitle = "Confianza OCR insuficiente"
+                    qualityDetail = lowestRowConfidence.map {
+                        "La fila con menor confianza financiera tiene \(Int(($0 * 100).rounded()))%; el mínimo operativo por fila es 88%. La señal agregada de página (\(average)) se conserva solo como contexto."
+                    } ?? "La evidencia financiera de las filas Rappi no cumple el mínimo operativo; el promedio de página (\(average)) no sustituye la validación por fila."
+                } else {
+                    qualityTitle = "Confianza OCR insuficiente"
+                    qualityDetail = "La lectura visual tiene \(average) o páginas por debajo del umbral; revisa el PDF original."
+                }
                 add(
                     id: "\(statementID)-ocr-quality",
                     severity: .error,
                     source: source,
                     period: period,
-                    title: "Confianza OCR insuficiente",
-                    detail: source.caseInsensitiveCompare("Rappi") == .orderedSame
-                        ? "Una o más filas Rappi no demostraron fecha, importe y evidencia visual suficientes (\(average)); el estado permanece fuera del libro automático."
-                        : "La lectura visual tiene \(average) o páginas por debajo del umbral; revisa el PDF original."
+                    title: qualityTitle,
+                    detail: qualityDetail
                 )
             }
 
             if let pageConfidences = statement.ocrPageConfidences {
+                // Rappi eligibility is checked against financial evidence per
+                // row and statement reconciliation. A page aggregate remains
+                // useful context, but must not be promoted into a row-quality
+                // error when another independent gate already blocked rows.
                 let rappiPageWarningOnly = source.caseInsensitiveCompare("Rappi") == .orderedSame
-                    && hasSufficientOCRQuality(statement)
                 for (index, confidence) in pageConfidences.enumerated() where !confidence.isFinite || confidence < 0.78 {
                     let value = confidence.isFinite ? "\(Int((confidence * 100).rounded()))%" : "no disponible"
                     let pageDetail = rappiPageWarningOnly ? "La página \(index + 1) tiene señal visual \(value), pero sus fechas/importes de fila y la conciliación siguen siendo utilizables." : "La página \(index + 1) tiene confianza \(value), por debajo del mínimo operativo."
@@ -6733,6 +6784,7 @@ final class FinanceStore {
                 direction: movement.amount >= 0 ? "in" : "out",
                 reason: evidence?.selectionReason ?? fallbackReason,
                 accepted: true,
+                confidence: evidence?.confidence,
                 rowBounds: evidence?.bounds
             )
         }
@@ -6822,6 +6874,7 @@ final class FinanceStore {
                 direction: sign == "-" || sign == "−" ? "in" : "out",
                 reason: rejectionReason,
                 accepted: false,
+                confidence: visualLine.line.financialConfidence,
                 rowOrdinal: ordinal + 1,
                 rowBounds: MovementExtractionBounds(rect: visualLine.line.bounds)
             ))
