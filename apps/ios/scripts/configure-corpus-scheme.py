@@ -28,7 +28,7 @@ def configure(path, environ):
         value = environ.get(key, "").strip()
         if not value:
             continue
-        if key != "MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED":
+        if key != "MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED" and not value.startswith("app-documents://"):
             value = str(Path(value).resolve(strict=True))
         ET.SubElement(variables, "EnvironmentVariable", {
             "key": key, "value": value, "isEnabled": "YES",

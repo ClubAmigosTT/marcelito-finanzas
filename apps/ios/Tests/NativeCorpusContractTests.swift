@@ -9,6 +9,30 @@ import XCTest
 /// the same PDFDocument + Vision path used by the app, unlike the web corpus
 /// evaluator which intentionally stops at `ocr-required` for scans.
 final class NativeCorpusContractTests: XCTestCase {
+    private func corpusURL(_ rawPath: String, isDirectory: Bool = false) throws -> URL {
+        let appDocumentsPrefix = "app-documents://"
+        guard rawPath.hasPrefix(appDocumentsPrefix) else {
+            return URL(fileURLWithPath: rawPath, isDirectory: isDirectory)
+        }
+
+        let relativePath = String(rawPath.dropFirst(appDocumentsPrefix.count))
+        let components = relativePath.split(separator: "/", omittingEmptySubsequences: false)
+        guard !components.isEmpty,
+              components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }),
+              let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first else {
+            throw NSError(
+                domain: "NativeCorpusManifest",
+                code: 11,
+                userInfo: [NSLocalizedDescriptionKey: "La ruta relativa del corpus no es válida."]
+            )
+        }
+
+        let resolved = components.reduce(documents) { url, component in
+            url.appendingPathComponent(String(component))
+        }
+        return URL(fileURLWithPath: resolved.path, isDirectory: isDirectory)
+    }
+
     /// A private corpus may carry its golden expectations in a file outside
     /// the repository.  The public fixture below stays synthetic, while a
     /// macOS/iPhone run can point at a local manifest containing hashes and
@@ -207,7 +231,7 @@ final class NativeCorpusContractTests: XCTestCase {
             return expectations
         }
 
-        let manifestURL = URL(fileURLWithPath: rawPath)
+        let manifestURL = try corpusURL(rawPath)
         let data = try Data(contentsOf: manifestURL, options: .mappedIfSafe)
         let manifest = try JSONDecoder().decode(ExternalManifest.self, from: data)
         if let schemaVersion = manifest.schemaVersion, schemaVersion != 1 {
@@ -356,7 +380,7 @@ final class NativeCorpusContractTests: XCTestCase {
             throw XCTSkip("Define MARCELITO_PDF_CORPUS_DIR para ejecutar la prueba de seguridad sobre PDFs reales.")
         }
 
-        let directory = URL(fileURLWithPath: rawDirectory, isDirectory: true)
+        let directory = try corpusURL(rawDirectory, isDirectory: true)
         let files = try FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey],
@@ -390,6 +414,82 @@ final class NativeCorpusContractTests: XCTestCase {
                 XCTAssertEqual(result.imported, 0, file.lastPathComponent + " inválido alimentó el libro canónico")
             }
         }
+    }
+
+    /// Emits a private, per-file diagnostic report without promoting any
+    /// statement or turning uncertain extraction into a test acceptance.
+    /// The final skip is deliberate: this is evidence gathering, not corpus
+    /// certification. Use app-documents:// to resolve the corpus inside the
+    /// simulator's current app container after Xcode installs the test host.
+    func testDiagnosticCorpusThroughNativeReaderWhenProvided() throws {
+        guard let rawDirectory = ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_DIR"],
+              !rawDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw XCTSkip("Define MARCELITO_PDF_CORPUS_DIR para diagnosticar PDFs reales.")
+        }
+
+        let directory = try corpusURL(rawDirectory, isDirectory: true)
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+        .filter { $0.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !files.isEmpty else {
+            throw XCTSkip("MARCELITO_PDF_CORPUS_DIR no contiene PDFs.")
+        }
+
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        var report: [[String: String]] = []
+
+        for file in files {
+            do {
+                let result = try store.importPDF(
+                    from: file,
+                    allowOCR: true,
+                    preserveExistingOnEmpty: false,
+                    requireValidReconciliation: false
+                )
+                report.append([
+                    "file": file.lastPathComponent,
+                    "source": result.source,
+                    "kind": result.kind.rawValue,
+                    "mode": result.usedOCR ? "vision-ocr" : "pdf-text",
+                    "sourceStatus": result.sourceDetection.status.rawValue,
+                    "status": result.reconciliation?.status.rawValue ?? "pending",
+                    "rows": String(result.imported),
+                    "extractedRows": String(result.reconciliation?.extractedMovementCount ?? result.imported),
+                    "requiresReview": String(result.requiresReview),
+                    "pageCount": String(result.pageCount ?? 0),
+                    "diagnosticRows": String(result.rowDiagnostics.count),
+                    "acceptedDiagnosticRows": String(result.rowDiagnostics.filter(\.accepted).count),
+                    "rejectedRows": String(result.rowDiagnostics.filter { !$0.accepted }.count),
+                    "rejectedReasonCodeCounts": {
+                        let reasons = Dictionary(
+                            grouping: result.rowDiagnostics.filter { !$0.accepted }.map { row in
+                                String(row.reason.prefix { $0 != ":" && !$0.isWhitespace })
+                            },
+                            by: { $0 }
+                        ).mapValues(\.count)
+                        guard let data = try? JSONSerialization.data(withJSONObject: reasons, options: [.sortedKeys]),
+                              let text = String(data: data, encoding: .utf8) else { return "{}" }
+                        return text
+                    }(),
+                    "ocrColumnsCalibrated": result.ocrColumnsCalibrated.map { $0 ? "true" : "false" } ?? ""
+                ])
+            } catch {
+                report.append([
+                    "file": file.lastPathComponent,
+                    "status": "reader-error",
+                    "errorType": String(reflecting: type(of: error))
+                ])
+            }
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
+        print("NATIVE_CORPUS_DIAGNOSTIC_REPORT " + (String(data: data, encoding: .utf8) ?? "[]"))
+        throw XCTSkip("Informe emitido solo para diagnóstico; el corpus sigue sin certificarse.")
     }
 
     func testRowDiagnosticsStayPrivateAndCanBeExported() throws {
@@ -449,7 +549,7 @@ final class NativeCorpusContractTests: XCTestCase {
             throw XCTSkip("Define MARCELITO_PDF_CORPUS_DIR para ejecutar el corpus nativo con Vision.")
         }
 
-        let directory = URL(fileURLWithPath: rawDirectory, isDirectory: true)
+        let directory = try corpusURL(rawDirectory, isDirectory: true)
         let runExpectations: [String: Expectation]
         do {
             runExpectations = try expectationsForRun()
