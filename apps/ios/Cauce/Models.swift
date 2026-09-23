@@ -904,15 +904,11 @@ private struct LedgerEnvelope: Codable {
 
 @Observable
 final class FinanceStore {
-    /// Bump when native extraction, OCR or reconciliation rules change.
-    // Bump the reader revision whenever extraction rules change. Existing
-    // PDF-derived rows then appear as a pending refresh and cannot remain
-    // silently backed by the previous OCR decisions. The refresh is explicit
-    // so a reader migration never blocks app launch.
-    // Bump whenever the local reader or its safety boundary changes. This
-    // release removes the legacy remote-PDF fallback, so old rows must be
-    // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-recovery-2026.09.23.2"
+    /// Bump when native extraction, OCR or reconciliation rules change, or
+    /// when saved PDF results need a deliberate replay. This release forces
+    /// older persisted snapshots through the current reader; the refresh stays
+    /// explicit so a full Vision pass never blocks app launch.
+    static let readerVersion = "ios-reader-recovery-2026.09.23.3"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
