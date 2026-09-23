@@ -1,5 +1,6 @@
 import Foundation
 import CryptoKit
+import PDFKit
 import XCTest
 @testable import Marcelito
 
@@ -31,6 +32,15 @@ final class NativeCorpusContractTests: XCTestCase {
             url.appendingPathComponent(String(component))
         }
         return URL(fileURLWithPath: resolved.path, isDirectory: isDirectory)
+    }
+
+    private func waitForSimulatorCorpusIfNeeded(rawPath: String, directory: URL) {
+        guard rawPath.hasPrefix("app-documents://") else { return }
+        let readyMarker = directory.appendingPathComponent(".ready")
+        let deadline = Date().addingTimeInterval(45)
+        while !FileManager.default.fileExists(atPath: readyMarker.path), Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.2)
+        }
     }
 
     /// A private corpus may carry its golden expectations in a file outside
@@ -381,6 +391,7 @@ final class NativeCorpusContractTests: XCTestCase {
         }
 
         let directory = try corpusURL(rawDirectory, isDirectory: true)
+        waitForSimulatorCorpusIfNeeded(rawPath: rawDirectory, directory: directory)
         let files = try FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey],
@@ -428,6 +439,7 @@ final class NativeCorpusContractTests: XCTestCase {
         }
 
         let directory = try corpusURL(rawDirectory, isDirectory: true)
+        waitForSimulatorCorpusIfNeeded(rawPath: rawDirectory, directory: directory)
         let files = try FileManager.default.contentsOfDirectory(
             at: directory,
             includingPropertiesForKeys: [.isRegularFileKey],
@@ -439,45 +451,62 @@ final class NativeCorpusContractTests: XCTestCase {
             throw XCTSkip("MARCELITO_PDF_CORPUS_DIR no contiene PDFs.")
         }
 
-        let store = FinanceStore()
-        defer { store.clearLocalData() }
         var report: [[String: String]] = []
 
         for file in files {
             do {
-                let result = try store.importPDF(
-                    from: file,
-                    allowOCR: true,
-                    preserveExistingOnEmpty: false,
-                    requireValidReconciliation: false
+                let result = try FinanceStore.readerPDFDiagnosticSnapshotForTesting(
+                    data: Data(contentsOf: file, options: [.mappedIfSafe]),
+                    fileName: file.lastPathComponent
                 )
-                report.append([
+                let rejectedRows = result.rowDiagnostics.filter { !$0.accepted }
+                func matchCount(_ pattern: String, in text: String) -> Int {
+                    guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return 0 }
+                    return regex.numberOfMatches(in: text, range: NSRange(text.startIndex..<text.endIndex, in: text))
+                }
+                let rejectedWithTwoDates = rejectedRows.filter {
+                    matchCount(#"(?<!\d)\d{4}[-/.]\d{1,2}[-/.]\d{1,2}(?!\d)"#, in: $0.rawText) == 2
+                }.count
+                let rejectedWithSignedAmount = rejectedRows.filter {
+                    matchCount(#"(?<![A-Za-z0-9.,])[+-]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#, in: $0.rawText) == 1
+                }.count
+                let summary = result.snapshot.summary
+                var summaryFields: [String] = []
+                if summary?.previousBalance != nil { summaryFields.append("previousBalance") }
+                if summary?.statementBalance != nil { summaryFields.append("statementBalance") }
+                if summary?.debtBalance != nil { summaryFields.append("debtBalance") }
+                if summary?.newCharges != nil { summaryFields.append("newCharges") }
+                if summary?.paymentsAndCredits != nil { summaryFields.append("paymentsAndCredits") }
+                if summary?.paymentForNoInterest != nil { summaryFields.append("paymentForNoInterest") }
+                let acceptedDiagnosticRows = result.rowDiagnostics.filter(\.accepted).count
+                let candidateRows = result.reconciliation.extractedMovementCount ?? 0
+                let requiresReview = result.ocrFallbackNeedsReview
+                    || result.ocrColumnCalibrationNeedsReview
+                    || result.ocrConfidenceNeedsReview
+                    || result.reconciliation.status != .valid
+                var fileReport: [String: String] = [
                     "file": file.lastPathComponent,
-                    "source": result.source,
-                    "kind": result.kind.rawValue,
+                    "source": result.snapshot.source,
+                    "kind": result.snapshot.kind.rawValue,
                     "mode": result.usedOCR ? "vision-ocr" : "pdf-text",
-                    "sourceStatus": result.sourceDetection.status.rawValue,
-                    "status": result.reconciliation?.status.rawValue ?? "pending",
-                    "rows": String(result.imported),
-                    "extractedRows": String(result.reconciliation?.extractedMovementCount ?? result.imported),
-                    "requiresReview": String(result.requiresReview),
-                    "pageCount": String(result.pageCount ?? 0),
+                    "sourceStatus": result.snapshot.sourceDetection.status.rawValue,
+                    "status": result.reconciliation.status.rawValue,
+                    "rows": String(result.snapshot.movements.count),
+                    "extractedRows": String(result.reconciliation.extractedMovementCount ?? result.snapshot.movements.count),
+                    "requiresReview": String(requiresReview),
                     "diagnosticRows": String(result.rowDiagnostics.count),
-                    "acceptedDiagnosticRows": String(result.rowDiagnostics.filter(\.accepted).count),
-                    "rejectedRows": String(result.rowDiagnostics.filter { !$0.accepted }.count),
-                    "rejectedReasonCodeCounts": {
-                        let reasons = Dictionary(
-                            grouping: result.rowDiagnostics.filter { !$0.accepted }.map { row in
-                                String(row.reason.prefix { $0 != ":" && !$0.isWhitespace })
-                            },
-                            by: { $0 }
-                        ).mapValues(\.count)
-                        guard let data = try? JSONSerialization.data(withJSONObject: reasons, options: [.sortedKeys]),
-                              let text = String(data: data, encoding: .utf8) else { return "{}" }
-                        return text
-                    }(),
-                    "ocrColumnsCalibrated": result.ocrColumnsCalibrated.map { $0 ? "true" : "false" } ?? ""
-                ])
+                    "acceptedDiagnosticRows": String(acceptedDiagnosticRows),
+                    "rejectedRows": String(rejectedRows.count),
+                    "rejectedRowsWithTwoISODateTokens": String(rejectedWithTwoDates),
+                    "rejectedRowsWithOneSignedAmount": String(rejectedWithSignedAmount),
+                    "candidateRows": String(candidateRows),
+                    "summaryFieldsPresent": summaryFields.joined(separator: ","),
+                    "ocrColumnsCalibrated": ""
+                ]
+                for (key, value) in result.testDiagnostics {
+                    fileReport["reader.\(key)"] = value
+                }
+                report.append(fileReport)
             } catch {
                 report.append([
                     "file": file.lastPathComponent,
@@ -490,6 +519,81 @@ final class NativeCorpusContractTests: XCTestCase {
         let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
         print("NATIVE_CORPUS_DIAGNOSTIC_REPORT " + (String(data: data, encoding: .utf8) ?? "[]"))
         throw XCTSkip("Informe emitido solo para diagnóstico; el corpus sigue sin certificarse.")
+    }
+
+    /// Measures the text-only reader path before Vision is allowed to run.
+    /// The report deliberately includes only document identity, row counts,
+    /// and reconciliation state; it never prints extracted financial data.
+    func testSelectableTextCorpusThroughNativeReaderWhenProvided() throws {
+        guard let rawDirectory = ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_DIR"],
+              !rawDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw XCTSkip("Define MARCELITO_PDF_CORPUS_DIR para diagnosticar PDFs reales.")
+        }
+
+        let directory = try corpusURL(rawDirectory, isDirectory: true)
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+        .filter { $0.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !files.isEmpty else {
+            throw XCTSkip("MARCELITO_PDF_CORPUS_DIR no contiene PDFs.")
+        }
+
+        var report: [[String: String]] = []
+        for file in files {
+            do {
+                let data = try Data(contentsOf: file, options: [.mappedIfSafe])
+                guard let document = PDFDocument(data: data) else {
+                    throw NSError(domain: "NativeCorpusTextOnly", code: 1)
+                }
+                let text = (0..<document.pageCount).compactMap { index -> String? in
+                    guard let pageText = document.page(at: index)?.string,
+                          !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+                    return "__PDF_PAGE_\(index + 1)__\n\(pageText)"
+                }.joined(separator: "\n")
+                let snapshot = try FinanceStore.readerPDFSnapshotForTesting(
+                    data: data,
+                    fileName: file.lastPathComponent
+                )
+                let reconciliation = FinanceStore.reconcileStatementForTesting(
+                    kind: snapshot.kind,
+                    summary: snapshot.summary,
+                    movements: snapshot.movements
+                )
+                let textLayerReconciles = FinanceStore.selectableTextLayerReconcilesForTesting(
+                    text: text,
+                    fileName: file.lastPathComponent
+                )
+                var fileReport = [
+                    "file": file.lastPathComponent,
+                    "source": snapshot.source,
+                    "pageCount": String(document.pageCount),
+                    "selectableTextReconciles": String(textLayerReconciles),
+                    "parsedRows": String(snapshot.movements.count),
+                    "status": reconciliation.status.rawValue
+                ]
+                fileReport.merge(
+                    try FinanceStore.readerPDFTextPathSummaryForTesting(
+                        data: data,
+                        fileName: file.lastPathComponent
+                    )
+                ) { _, pathValue in pathValue }
+                report.append(fileReport)
+            } catch {
+                report.append([
+                    "file": file.lastPathComponent,
+                    "status": "reader-error",
+                    "errorType": String(reflecting: type(of: error))
+                ])
+            }
+        }
+
+        let data = try JSONSerialization.data(withJSONObject: report, options: [.sortedKeys])
+        print("NATIVE_CORPUS_TEXT_DIAGNOSTIC_REPORT " + (String(data: data, encoding: .utf8) ?? "[]"))
+        throw XCTSkip("Informe de texto seleccionable emitido solo para diagnóstico.")
     }
 
     func testRowDiagnosticsStayPrivateAndCanBeExported() throws {

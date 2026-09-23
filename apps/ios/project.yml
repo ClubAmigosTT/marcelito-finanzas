@@ -46,3 +46,4 @@ targets:
       base:
         PRODUCT_NAME: MarcelitoTests
         PRODUCT_BUNDLE_IDENTIFIER: mx.marcelito.personal.tests
+        GENERATE_INFOPLIST_FILE: YES

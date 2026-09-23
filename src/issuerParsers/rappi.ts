@@ -11,12 +11,30 @@ const pageMarker = /^__pdf_page_(\d+)__$/;
 // flattened line. Weak date tokens remain diagnostic evidence, never a
 // financial row.
 const rowDateToken = String.raw`(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.](?:\d{1,2}|[a-z]{3,12})[-/.]\d{2,4}|\d{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+(?:de\s+)?\d{2,4})`;
-const rowStart = new RegExp(`^(${rowDateToken})\\s+(${rowDateToken})\\s+(.+)$`, "i");
+// Some Rappi statements place the two date columns on a line by themselves,
+// then put the description and signed amount on the next physical line.
+// Keep that date-only line as a pending row so its continuation can supply
+// the evidence; finishRow still rejects it unless a complete description and
+// exactly one signed amount are present.
+const rowStart = new RegExp(`^(${rowDateToken})\\s+(${rowDateToken})(?:\\s+(.*))?$`, "i");
 const rowPairStart = new RegExp(`(?<![A-Za-z0-9.,])(?=${rowDateToken}\\s+${rowDateToken}\\s+)`, "i");
 // A signed token is a financial candidate only when it is not embedded in a
 // reference/code. The old expression could read `REF+12.34A` as the amount
 // and then trust the last numeric-looking fragment in the line.
 const signedMoney = /(?<![A-Za-z0-9.,])([+-])\s*\$?\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})(?![A-Za-z0-9.,])/g;
+
+function isAdministrativeOrTruncatedDescription(value: string) {
+  const compact = fold(value).replace(/[^a-z0-9]+/g, "");
+  // Date anchors can land beside a page heading when OCR bands overlap. The
+  // heading's neighboring amount is not a transaction unless the same visual
+  // row also provides a real merchant/payment description.
+  return compact.startsWith("desglosedemovimientos")
+    || compact.startsWith("cargosabonosycomprasregulares")
+    // A crop can preserve only the tail of `PAGO POR SPEI`. Do not turn that
+    // ambiguous fragment into an income/refund; the full-page observation
+    // must restore the complete issuer label first.
+    || compact === "por";
+}
 
 function amountAfter(text: string, label: RegExp) {
   const match = text.match(new RegExp(`${label.source}[^$\\n]{0,100}\\$\\s*([\\d,]+\\.\\d{2})`, "i"));
@@ -115,7 +133,7 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
 
     const signedValue = selected[1] === "-" ? -amountCents : amountCents;
     const descriptionEnd = selected.index ?? raw.length;
-    const descriptionStart = match[0].length - match[3].length;
+    const descriptionStart = match[0].length - (match[3]?.length ?? 0);
     // Keep this before removing foreign-currency annotations. It is the
     // bounded source evidence shown in diagnostics; merchant cleanup receives
     // a separate, conservative view below.
@@ -130,6 +148,10 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
       .replace(/\s+/g, " ")
       .trim();
     if (!description) {
+      rejectedRows.push(raw.slice(0, 240));
+      return;
+    }
+    if (isAdministrativeOrTruncatedDescription(description)) {
       rejectedRows.push(raw.slice(0, 240));
       return;
     }

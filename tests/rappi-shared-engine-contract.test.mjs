@@ -19,7 +19,7 @@ function loadEngine() {
 
 test("el bundle local de iOS expone el mismo contrato determinista de Rappi", () => {
   const engine = loadEngine();
-  assert.equal(engine?.version, "rappi-shared-engine-2026.09.16.2");
+  assert.equal(engine?.version, "rappi-shared-engine-2026.09.23.1");
   assert.equal(typeof engine?.parse, "function");
 
   const parsed = engine.parse({
@@ -119,6 +119,73 @@ test("el contrato compartido conserva geometría, confianza y metadatos OCR por 
   assert.equal(bounds?.width, 0.76);
   assert.equal(bounds?.height, 0.032);
   assert.match(parsed.transactions[1].extractionEvidence?.selectionReason ?? "", /signo OCR corregido/);
+});
+
+test("Rappi descarta encabezados y fragmentos de comercio sin perder filas completas", () => {
+  const engine = loadEngine();
+  const parsed = engine.parse({
+    fileName: "rappi-overlapping-row-headings.pdf",
+    mode: "ocr",
+    text: [
+      "Tarjeta de crédito RappiCard",
+      "Adeudo del periodo anterior = $10.00",
+      "Cargos regulares (no a meses) + $30.00",
+      "Pagos y abonos - $5.00",
+      "Saldo deudor total $35.00",
+      "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+      "__PDF_PAGE_3__",
+      "2026-08-01 2026-08-01 RESTAURANTE EJEMPLO +$10.00",
+      "2026-08-02 2026-08-02 DESGLOSE DE MOVIMIENTOS +$99.00",
+      "2026-08-02 2026-08-02 CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES +$88.00",
+      "2026-08-03 2026-08-03 POR -$7.00",
+      "2026-08-03 2026-08-03 COMERCIO DOS +$20.00",
+      "2026-08-04 2026-08-04 PAGO POR SPEI -$5.00",
+      "Total de cargos +$30.00",
+      "Total de abonos -$5.00",
+    ].join("\n"),
+  });
+
+  const descriptions = Array.from(parsed.transactions, (row) => row.description.toLowerCase());
+  assert.equal(parsed.reconciliation.status, "valid");
+  assert.equal(parsed.transactions.length, 3);
+  assert.equal(parsed.rejectedRowCount, 3);
+  assert.equal(descriptions.some((value) => value.includes("desglose de movimientos")), false);
+  assert.equal(descriptions.some((value) => value.includes("cargos, abonos y compras regulares")), false);
+  assert.equal(descriptions.some((value) => value === "por"), false);
+  assert.equal(parsed.transactions.filter((row) => row.kind === "cardPayment").length, 1);
+});
+
+test("el bundle nativo conserva candidatos Rappi legibles pero no valida una corriente incompleta", () => {
+  const engine = loadEngine();
+  const parsed = engine.parse({
+    fileName: "rappi-reporte-febrero.pdf",
+    mode: "ocr",
+    text: [
+      "Tarjeta de crédito RappiCard",
+      "Cargos regulares (no a meses) + $22,526.21",
+      "Cargos compras a meses (capital) + $0.00",
+      "Pagos y abonos - $19,161.36",
+      "Saldo deudor total $13,470.03",
+      "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+      "__PDF_PAGE_3__",
+      "2026-02-22 2026-02-23 REST REINA DE LOS MARE +$566.50",
+      "2026-02-23 2026-02-24 DESGLOSE DE MOVIMIENTOS +$1,022.25",
+      "2026-02-24 2026-02-26 CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES +$90.00",
+      "2026-02-24 2026-02-24 POR -$400.00",
+      "2026-02-21 2026-02-24 EXTRA K ADOLFO PRIETO +$77.00",
+      "2026-02-21 2026-02-21 LIB ROSARIO CASTELLANO +$72.25",
+      "2026-02-21 2026-02-24 MERPAGO*GAJREST +$511.50",
+      "2026-02-21 2026-02-21 CHILI S INSURGENTES +$458.70",
+      "2026-02-26 2026-02-22 OP BRUESAL II +$490.00",
+      "2026-02-21 2026-02-27 MERPAGO*CLUBCITOMX +$150.00",
+    ].join("\n"),
+  });
+
+  assert.equal(parsed.transactions.length, 7);
+  assert.equal(parsed.rejectedRowCount, 3);
+  assert.equal(parsed.reconciliation.status, "invalid");
+  assert.equal(parsed.reconciliation.extractedChargeTotal, 2_325.95);
+  assert.equal(parsed.reconciliation.extractedPaymentTotal, 0);
 });
 
 test("iOS empaqueta y usa el puente compartido para ambos extractores Rappi", () => {

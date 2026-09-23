@@ -334,9 +334,13 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
   const sectionTitle = "Cargos, abonos y compras regulares (no a meses)";
   const pageMarker = /^__pdf_page_(\d+)__$/;
   const rowDateToken = String.raw`(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.](?:\d{1,2}|[a-z]{3,12})[-/.]\d{2,4}|\d{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+(?:de\s+)?\d{2,4})`;
-  const rowStart = new RegExp(`^(${rowDateToken})\\s+(${rowDateToken})\\s+(.+)$`, "i");
+  const rowStart = new RegExp(`^(${rowDateToken})\\s+(${rowDateToken})(?:\\s+(.*))?$`, "i");
   const rowPairStart = new RegExp(`(?<![A-Za-z0-9.,])(?=${rowDateToken}\\s+${rowDateToken}\\s+)`, "i");
   const signedMoney = /(?<![A-Za-z0-9.,])([+-])\s*\$?\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})(?![A-Za-z0-9.,])/g;
+  function isAdministrativeOrTruncatedDescription(value) {
+    const compact2 = fold$1(value).replace(/[^a-z0-9]+/g, "");
+    return compact2.startsWith("desglosedemovimientos") || compact2.startsWith("cargosabonosycomprasregulares") || compact2 === "por";
+  }
   function amountAfter(text, label) {
     const match = text.match(new RegExp(`${label.source}[^$\\n]{0,100}\\$\\s*([\\d,]+\\.\\d{2})`, "i"));
     return money(match?.[1]);
@@ -409,10 +413,14 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
       }
       const signedValue = selected[1] === "-" ? -amountCents : amountCents;
       const descriptionEnd = selected.index ?? raw.length;
-      const descriptionStart = match[0].length - match[3].length;
+      const descriptionStart = match[0].length - (match[3]?.length ?? 0);
       const rawDescription = raw.slice(descriptionStart, descriptionEnd).replace(/\s+/g, " ").trim();
       const description = rawDescription.replace(/compra\s+en\s+el\s+extranjero/ig, "").replace(/tasa\s+de\s+conversi[oó]n\s+[^ ]+/ig, "").replace(/usd\s+\$?\s*[\d,.]+/ig, "").replace(/\s+/g, " ").trim();
       if (!description) {
+        rejectedRows.push(raw.slice(0, 240));
+        return;
+      }
+      if (isAdministrativeOrTruncatedDescription(description)) {
         rejectedRows.push(raw.slice(0, 240));
         return;
       }
@@ -640,7 +648,7 @@ ${row.text}`).join("\n")}` },
       rejectedRows: parsed.rejectedRows
     };
   }
-  const RAPPI_SHARED_ENGINE_VERSION = "rappi-shared-engine-2026.09.16.2";
+  const RAPPI_SHARED_ENGINE_VERSION = "rappi-shared-engine-2026.09.23.1";
   const rappiSharedEngine = {
     version: RAPPI_SHARED_ENGINE_VERSION,
     parse(input) {

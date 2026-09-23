@@ -46,6 +46,84 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements).status, .valid)
     }
 
+    func testNativeFallbackRejectsOverlappingHeadingsAndTruncatedPorRow() {
+        let textWithFalseRows = fixture.replacingOccurrences(
+            of: "2026-08-02 2026-08-02 PAGO POR SPEI -$40.00",
+            with: "2026-08-02 2026-08-02 DESGLOSE DE MOVIMIENTOS +$99.00\n"
+                + "2026-08-02 2026-08-02 CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES +$88.00\n"
+                + "2026-08-02 2026-08-02 POR -$7.00\n"
+                + "2026-08-02 2026-08-02 PAGO POR SPEI -$40.00"
+        )
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: textWithFalseRows,
+            fileName: "rappi-native-fallback.pdf",
+            rappiEvidenceMethod: "native-fallback-test"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("desglose de movimientos") })
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("cargos, abonos y compras regulares") })
+        XCTAssertFalse(snapshot.movements.contains { $0.title.caseInsensitiveCompare("por") == .orderedSame })
+        XCTAssertEqual(
+            FinanceStore.reconcileStatementForTesting(
+                kind: .card,
+                summary: snapshot.summary,
+                movements: snapshot.movements
+            ).status,
+            .valid
+        )
+    }
+
+    func testFullPagePaymentLabelRestoresAnIsolatedPorFragment() {
+        let lines = FinanceStore.rappiOCRMovementLinesForTesting([
+            OCRObservationFixture(
+                page: 2,
+                text: "2026-08-02 2026-08-02 POR -$40.00",
+                x: 0.05,
+                y: 0.70,
+                width: 0.80
+            ),
+            OCRObservationFixture(
+                page: 2,
+                text: "PAGO POR SPEI",
+                x: 0.32,
+                y: 0.70,
+                width: 0.28
+            ),
+        ])
+
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertTrue(lines[0].contains("PAGO POR SPEI"))
+        XCTAssertFalse(lines[0].hasSuffix(" POR -$40.00"))
+    }
+
+    func testRappiRepeatedOCRCellUsesTheHighestConfidenceReading() throws {
+        let observations = [
+            OCRObservationFixture(
+                page: 2,
+                text: "2026-08-02 2026-08-02 COMERCIO EJEMPLO +$50.00",
+                x: 0.05,
+                y: 0.70,
+                width: 0.80,
+                confidence: 0.59
+            ),
+            OCRObservationFixture(
+                page: 2,
+                text: "2026-08-02 2026-08-02 COMERCIO EJEMPLO +$55.00",
+                x: 0.05,
+                y: 0.70,
+                width: 0.80,
+                confidence: 0.96
+            ),
+        ]
+        let lines = FinanceStore.rappiOCRMovementLinesForTesting(observations)
+        let confidence = try XCTUnwrap(FinanceStore.rappiOCRMovementConfidenceForTesting(observations).first ?? nil)
+
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertTrue(lines[0].hasSuffix("+$55.00"))
+        XCTAssertEqual(confidence, 0.96, accuracy: 0.0001)
+    }
+
     func testReconciledSelectableRappiLayerAvoidsVisionAndMissingRowDoesNotPass() {
         XCTAssertTrue(
             FinanceStore.selectableTextLayerReconcilesForTesting(
@@ -635,6 +713,29 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertTrue(lines.last?.contains("COMERCIO DOS") == true)
     }
 
+    func testRowsFromRappiFailureReportKeepMerchantsAndRejectOverlappingHeadings() {
+        let lines = FinanceStore.rappiIsolatedRowLinesForTesting([
+            "2026-02-22 2026-02-23 REST REINA DE LOS MARE +$566.50",
+            "2026-02-23 2026-02-24 DESGLOSE DE MOVIMIENTOS +$1,022.25",
+            "2026-02-24 2026-02-26 CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES +$90.00",
+            "2026-02-24 2026-02-24 POR -$400.00",
+            "2026-02-21 2026-02-24 EXTRA K ADOLFO PRIETO +$77.00",
+            "2026-02-21 2026-02-21 LIB ROSARIO CASTELLANO +$72.25",
+            "2026-02-21 2026-02-24 MERPAGO*GAJREST +$511.50",
+            "2026-02-21 2026-02-21 CHILI S INSURGENTES +$458.70",
+            "2026-02-26 2026-02-22 OP BRUESAL II +$490.00",
+            "2026-02-21 2026-02-27 MERPAGO*CLUBCITOMX +$150.00"
+        ])
+
+        XCTAssertEqual(lines.count, 7)
+        XCTAssertTrue(lines.contains { $0.contains("REST REINA DE LOS MARE") })
+        XCTAssertTrue(lines.contains { $0.contains("MERPAGO*GAJREST") })
+        XCTAssertTrue(lines.contains { $0.contains("OP BRUESAL II") })
+        XCTAssertFalse(lines.contains { $0.localizedCaseInsensitiveContains("DESGLOSE DE MOVIMIENTOS") })
+        XCTAssertFalse(lines.contains { $0.localizedCaseInsensitiveContains("CARGOS, ABONOS Y COMPRAS REGULARES") })
+        XCTAssertFalse(lines.contains { $0.localizedCaseInsensitiveContains(" POR ") })
+    }
+
     func testVisualRowCoverageMarksAnUnselectedRappiRowForReview() {
         let diagnostics = FinanceStore.rappiOCRRowDiagnosticsForTesting(
             allRows: [
@@ -647,9 +748,28 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(diagnostics.filter { $0.accepted == false }.count, 1)
         XCTAssertTrue(diagnostics.contains {
             !$0.accepted
-                && $0.reason.hasPrefix("rappi.visual-row-rejected")
+                && $0.reason.hasPrefix("rappi.visual-row-unselected")
                 && $0.rawText.contains("COMERCIO DOS")
         })
+    }
+
+    func testUnreconciledRappiCandidatesAreNotReportedAsMalformedRows() {
+        let diagnostics = FinanceStore.rappiOCRRowDiagnosticsForTesting(
+            allRows: [
+                "2026-02-22 2026-02-23 REST REINA DE LOS MARE +$566.50",
+                "2026-02-21 2026-02-24 MERPAGO*GAJREST +$511.50"
+            ],
+            selectedRows: []
+        )
+
+        XCTAssertEqual(diagnostics.filter { !$0.accepted }.count, 2)
+        XCTAssertTrue(diagnostics.allSatisfy {
+            !$0.accepted
+                && $0.reason.hasPrefix("rappi.visual-stream-unreconciled")
+                && $0.reason.contains("ninguna corriente completa concilió")
+        })
+        XCTAssertTrue(diagnostics.contains { $0.rawText.contains("REST REINA DE LOS MARE") })
+        XCTAssertTrue(diagnostics.allSatisfy { $0.confidence == 0.99 })
     }
 
     func testVisualRowCoverageMatchesSignedCreditsByMagnitude() {

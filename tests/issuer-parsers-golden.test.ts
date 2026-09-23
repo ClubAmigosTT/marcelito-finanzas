@@ -217,6 +217,67 @@ test("golden RappiCard conserva el emisor Banorte como evidencia legal y concili
   assert.equal(foreign?.category, "Transporte");
 });
 
+test("Rappi fuente descarta encabezados y el fragmento ambiguo POR sin perder el pago", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Adeudo del periodo anterior = $10.00",
+    "Cargos regulares (no a meses) + $30.00",
+    "Pagos y abonos - $5.00",
+    "Saldo deudor total $35.00",
+    "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+    "__PDF_PAGE_3__",
+    "2026-08-01 2026-08-01 RESTAURANTE EJEMPLO +$10.00",
+    "2026-08-02 2026-08-02 DESGLOSE DE MOVIMIENTOS +$99.00",
+    "2026-08-02 2026-08-02 CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES +$88.00",
+    "2026-08-03 2026-08-03 POR -$7.00",
+    "2026-08-03 2026-08-03 COMERCIO DOS +$20.00",
+    "2026-08-04 2026-08-04 PAGO POR SPEI -$5.00",
+    "Total de cargos +$30.00",
+    "Total de abonos -$5.00",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({
+    source: "Rappi",
+    fileName: "rappi-overlapping-row-headings.pdf",
+    mode: "ocr",
+    text,
+  });
+
+  assert.equal(parsed.reconciliation.status, "valid");
+  assert.equal(parsed.transactions.length, 3);
+  assert.equal(parsed.rejectedRowCount, 3);
+  assert.equal(parsed.transactions.filter((row) => row.kind === "cardPayment").length, 1);
+  assert.equal(parsed.transactions.some((row) => row.description.toLowerCase() === "por"), false);
+  assert.equal(parsed.transactions.some((row) => /desglose de movimientos|cargos, abonos y compras regulares/i.test(row.description)), false);
+});
+
+test("Rappi conserva una bonificación cuando las fechas quedaron en el renglón anterior", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Adeudo del periodo anterior = $0.00",
+    "Cargos regulares (no a meses) + $200.00",
+    "Cargos compras a meses (capital) + $0.00",
+    "Pagos y abonos - $64.33",
+    "Saldo deudor total $135.67",
+    "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+    "2026-08-01 2026-08-01 COMERCIO DE PRUEBA +$200.00",
+    "2026-08-02 2026-08-02",
+    "BONIFICACIÓN CON CASHBACK -$54.33",
+    "2026-08-03 2026-08-03 PAGO POR SPEI -$10.00",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({
+    source: "Rappi",
+    fileName: "rappi-fechas-en-linea-separada.pdf",
+    mode: "text",
+    text,
+  });
+
+  assert.equal(parsed.transactions.length, 3);
+  assert.equal(parsed.reconciliation.status, "valid", parsed.reconciliation.reason);
+  assert.equal(parsed.reconciliation.extractedChargeTotal, 200);
+  assert.equal(parsed.reconciliation.extractedPaymentTotal, 10);
+  assert.equal(parsed.reconciliation.extractedCreditTotal, 54.33);
+});
+
 test("RappiCard conserva la tabla cuando los movimientos cruzan un salto de página", () => {
   const text = [
     "Tarjeta de crédito RappiCard",
@@ -270,6 +331,48 @@ test("Rappi OCR selecciona el importe por columna y no por la última cifra de l
   assert.equal(parsed.transactions[0]?.extractionEvidence?.sameVisualRow, true);
   assert.equal(parsed.reconciliation.status, "valid", parsed.reconciliation.reason);
   assert.match(parsed.transactions[0]?.description ?? "", /123\.45/);
+});
+
+test("Rappi OCR reconstruye ejemplos legibles del reporte y mantiene en revisión la corriente incompleta", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Cargos regulares (no a meses) + $22,526.21",
+    "Cargos compras a meses (capital) + $0.00",
+    "Pagos y abonos - $19,161.36",
+    "Saldo deudor total $13,470.03",
+    "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+    "__PDF_PAGE_3__",
+    "2026-02-22 2026-02-23 REST REINA DE LOS MARE +$566.50",
+    "2026-02-23 2026-02-24 DESGLOSE DE MOVIMIENTOS +$1,022.25",
+    "2026-02-24 2026-02-26 CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES +$90.00",
+    "2026-02-24 2026-02-24 POR -$400.00",
+    "2026-02-21 2026-02-24 EXTRA K ADOLFO PRIETO +$77.00",
+    "2026-02-21 2026-02-21 LIB ROSARIO CASTELLANO +$72.25",
+    "2026-02-21 2026-02-24 MERPAGO*GAJREST +$511.50",
+    "2026-02-21 2026-02-21 CHILI S INSURGENTES +$458.70",
+    "2026-02-26 2026-02-22 OP BRUESAL II +$490.00",
+    "2026-02-21 2026-02-27 MERPAGO*CLUBCITOMX +$150.00",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({
+    source: "Rappi",
+    fileName: "rappi-reporte-febrero.pdf",
+    mode: "ocr",
+    text,
+  });
+
+  assert.equal(parsed.transactions.length, 7);
+  assert.deepEqual(parsed.transactions.map((row) => row.rawDescription), [
+    "REST REINA DE LOS MARE",
+    "EXTRA K ADOLFO PRIETO",
+    "LIB ROSARIO CASTELLANO",
+    "MERPAGO*GAJREST",
+    "CHILI S INSURGENTES",
+    "OP BRUESAL II",
+    "MERPAGO*CLUBCITOMX",
+  ]);
+  assert.equal(parsed.rejectedRowCount, 3);
+  assert.equal(parsed.reconciliation.status, "invalid");
+  assert.notEqual(parsed.reconciliation.extractedChargeTotal, parsed.summary.newTransactions);
 });
 
 test("Rappi OCR conserva la confianza real de la fila y no una constante global", () => {
