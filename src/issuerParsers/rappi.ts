@@ -11,7 +11,12 @@ const pageMarker = /^__pdf_page_(\d+)__$/;
 // flattened line. Weak date tokens remain diagnostic evidence, never a
 // financial row.
 const rowDateToken = String.raw`(?:\d{4}[-/.]\d{1,2}[-/.]\d{1,2}|\d{1,2}[-/.](?:\d{1,2}|[a-z]{3,12})[-/.]\d{2,4}|\d{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+(?:de\s+)?\d{2,4})`;
-const rowStart = new RegExp(`^(${rowDateToken})\\s+(${rowDateToken})\\s+(.+)$`, "i");
+// Some Rappi statements place the two date columns on a line by themselves,
+// then put the description and signed amount on the next physical line.
+// Keep that date-only line as a pending row so its continuation can supply
+// the evidence; finishRow still rejects it unless a complete description and
+// exactly one signed amount are present.
+const rowStart = new RegExp(`^(${rowDateToken})\\s+(${rowDateToken})(?:\\s+(.*))?$`, "i");
 const rowPairStart = new RegExp(`(?<![A-Za-z0-9.,])(?=${rowDateToken}\\s+${rowDateToken}\\s+)`, "i");
 // A signed token is a financial candidate only when it is not embedded in a
 // reference/code. The old expression could read `REF+12.34A` as the amount
@@ -128,7 +133,7 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
 
     const signedValue = selected[1] === "-" ? -amountCents : amountCents;
     const descriptionEnd = selected.index ?? raw.length;
-    const descriptionStart = match[0].length - match[3].length;
+    const descriptionStart = match[0].length - (match[3]?.length ?? 0);
     // Keep this before removing foreign-currency annotations. It is the
     // bounded source evidence shown in diagnostics; merchant cleanup receives
     // a separate, conservative view below.

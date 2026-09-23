@@ -250,6 +250,34 @@ test("Rappi fuente descarta encabezados y el fragmento ambiguo POR sin perder el
   assert.equal(parsed.transactions.some((row) => /desglose de movimientos|cargos, abonos y compras regulares/i.test(row.description)), false);
 });
 
+test("Rappi conserva una bonificación cuando las fechas quedaron en el renglón anterior", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Adeudo del periodo anterior = $0.00",
+    "Cargos regulares (no a meses) + $200.00",
+    "Cargos compras a meses (capital) + $0.00",
+    "Pagos y abonos - $64.33",
+    "Saldo deudor total $135.67",
+    "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+    "2026-08-01 2026-08-01 COMERCIO DE PRUEBA +$200.00",
+    "2026-08-02 2026-08-02",
+    "BONIFICACIÓN CON CASHBACK -$54.33",
+    "2026-08-03 2026-08-03 PAGO POR SPEI -$10.00",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({
+    source: "Rappi",
+    fileName: "rappi-fechas-en-linea-separada.pdf",
+    mode: "text",
+    text,
+  });
+
+  assert.equal(parsed.transactions.length, 3);
+  assert.equal(parsed.reconciliation.status, "valid", parsed.reconciliation.reason);
+  assert.equal(parsed.reconciliation.extractedChargeTotal, 200);
+  assert.equal(parsed.reconciliation.extractedPaymentTotal, 10);
+  assert.equal(parsed.reconciliation.extractedCreditTotal, 54.33);
+});
+
 test("RappiCard conserva la tabla cuando los movimientos cruzan un salto de página", () => {
   const text = [
     "Tarjeta de crédito RappiCard",
