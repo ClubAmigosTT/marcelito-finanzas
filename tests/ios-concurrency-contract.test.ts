@@ -248,7 +248,10 @@ test("Rappi deja diagnóstico rechazado para filas OCR visuales no seleccionadas
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /private static func rappiOCRRowDiagnostics\(/);
   assert.match(source, /rappi\.visual-row-not-reconstructed/);
-  assert.match(source, /rappi\.visual-row-rejected/);
+  assert.match(source, /rappi\.visual-row-unselected/);
+  assert.match(source, /rappi\.visual-stream-unreconciled/);
+  assert.match(source, /Fila candidata Rappi en revisión/);
+  assert.match(source, /Fila visual fuera de corriente/);
   assert.match(source, /selectedRappiOCRObservations = ocrObservations/);
   assert.match(source, /rowDiagnostics = Self\.rappiOCRRowDiagnostics\(/);
 });

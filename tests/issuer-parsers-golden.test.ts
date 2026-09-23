@@ -305,6 +305,48 @@ test("Rappi OCR selecciona el importe por columna y no por la última cifra de l
   assert.match(parsed.transactions[0]?.description ?? "", /123\.45/);
 });
 
+test("Rappi OCR reconstruye ejemplos legibles del reporte y mantiene en revisión la corriente incompleta", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Cargos regulares (no a meses) + $22,526.21",
+    "Cargos compras a meses (capital) + $0.00",
+    "Pagos y abonos - $19,161.36",
+    "Saldo deudor total $13,470.03",
+    "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+    "__PDF_PAGE_3__",
+    "2026-02-22 2026-02-23 REST REINA DE LOS MARE +$566.50",
+    "2026-02-23 2026-02-24 DESGLOSE DE MOVIMIENTOS +$1,022.25",
+    "2026-02-24 2026-02-26 CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES +$90.00",
+    "2026-02-24 2026-02-24 POR -$400.00",
+    "2026-02-21 2026-02-24 EXTRA K ADOLFO PRIETO +$77.00",
+    "2026-02-21 2026-02-21 LIB ROSARIO CASTELLANO +$72.25",
+    "2026-02-21 2026-02-24 MERPAGO*GAJREST +$511.50",
+    "2026-02-21 2026-02-21 CHILI S INSURGENTES +$458.70",
+    "2026-02-26 2026-02-22 OP BRUESAL II +$490.00",
+    "2026-02-21 2026-02-27 MERPAGO*CLUBCITOMX +$150.00",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({
+    source: "Rappi",
+    fileName: "rappi-reporte-febrero.pdf",
+    mode: "ocr",
+    text,
+  });
+
+  assert.equal(parsed.transactions.length, 7);
+  assert.deepEqual(parsed.transactions.map((row) => row.rawDescription), [
+    "REST REINA DE LOS MARE",
+    "EXTRA K ADOLFO PRIETO",
+    "LIB ROSARIO CASTELLANO",
+    "MERPAGO*GAJREST",
+    "CHILI S INSURGENTES",
+    "OP BRUESAL II",
+    "MERPAGO*CLUBCITOMX",
+  ]);
+  assert.equal(parsed.rejectedRowCount, 3);
+  assert.equal(parsed.reconciliation.status, "invalid");
+  assert.notEqual(parsed.reconciliation.extractedChargeTotal, parsed.summary.newTransactions);
+});
+
 test("Rappi OCR conserva la confianza real de la fila y no una constante global", () => {
   const text = [
     "Tarjeta de crédito RappiCard",

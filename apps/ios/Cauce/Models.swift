@@ -2197,12 +2197,20 @@ final class FinanceStore {
                 if !rawText.isEmpty {
                     detail += " · Texto detectado: \(rawText)"
                 }
+                let title: String
+                if row.reason.hasPrefix("rappi.visual-stream-unreconciled") {
+                    title = "Fila candidata Rappi en revisión"
+                } else if row.reason.hasPrefix("rappi.visual-row-unselected") {
+                    title = "Fila visual fuera de corriente"
+                } else {
+                    title = "Fila rechazada"
+                }
                 add(
                     id: "\(statementID)-row-\(row.id)-\(index)",
                     severity: reconciliationStatus == .valid ? .warning : .error,
                     source: source,
                     period: period,
-                    title: "Fila rechazada",
+                    title: title,
                     detail: detail.isEmpty ? "La fila no superó la validación de fecha, importe, signo o columna." : detail
                 )
             }
@@ -6798,13 +6806,21 @@ final class FinanceStore {
             let sign = visualLine.line.amount
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .first
+            // These lines have already passed the visual row builder: it
+            // found date anchors, a signed amount, and a usable description.
+            // When no complete candidate stream reconciles, the row was not
+            // rejected for missing those fields; the whole stream remains in
+            // review. Keep that distinction explicit in the audit report.
+            let rejectionReason = movements.isEmpty
+                ? "rappi.visual-stream-unreconciled: ninguna corriente completa concilió con los controles independientes; \(fallbackReason); la fila candidata queda fuera del libro"
+                : "rappi.visual-row-unselected: la corriente completa seleccionada no incluye esta fila visual; requiere revisión"
             rejected.append(OCRRowDiagnostic(
                 page: visualLine.page,
                 rawText: visualLine.line.text,
                 selectedColumn: "MONTO MXN",
                 selectedAmount: amount,
                 direction: sign == "-" || sign == "−" ? "in" : "out",
-                reason: "rappi.visual-row-rejected: la fila visual no produjo una fecha, importe firmado y descripción compatibles en la misma línea",
+                reason: rejectionReason,
                 accepted: false,
                 rowOrdinal: ordinal + 1,
                 rowBounds: MovementExtractionBounds(rect: visualLine.line.bounds)
