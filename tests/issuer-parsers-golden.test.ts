@@ -217,6 +217,39 @@ test("golden RappiCard conserva el emisor Banorte como evidencia legal y concili
   assert.equal(foreign?.category, "Transporte");
 });
 
+test("Rappi fuente descarta encabezados y el fragmento ambiguo POR sin perder el pago", () => {
+  const text = [
+    "Tarjeta de crédito RappiCard",
+    "Adeudo del periodo anterior = $10.00",
+    "Cargos regulares (no a meses) + $30.00",
+    "Pagos y abonos - $5.00",
+    "Saldo deudor total $35.00",
+    "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+    "__PDF_PAGE_3__",
+    "2026-08-01 2026-08-01 RESTAURANTE EJEMPLO +$10.00",
+    "2026-08-02 2026-08-02 DESGLOSE DE MOVIMIENTOS +$99.00",
+    "2026-08-02 2026-08-02 CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES +$88.00",
+    "2026-08-03 2026-08-03 POR -$7.00",
+    "2026-08-03 2026-08-03 COMERCIO DOS +$20.00",
+    "2026-08-04 2026-08-04 PAGO POR SPEI -$5.00",
+    "Total de cargos +$30.00",
+    "Total de abonos -$5.00",
+  ].join("\n");
+  const parsed = parseDeterministicStatement({
+    source: "Rappi",
+    fileName: "rappi-overlapping-row-headings.pdf",
+    mode: "ocr",
+    text,
+  });
+
+  assert.equal(parsed.reconciliation.status, "valid");
+  assert.equal(parsed.transactions.length, 3);
+  assert.equal(parsed.rejectedRowCount, 3);
+  assert.equal(parsed.transactions.filter((row) => row.kind === "cardPayment").length, 1);
+  assert.equal(parsed.transactions.some((row) => row.description.toLowerCase() === "por"), false);
+  assert.equal(parsed.transactions.some((row) => /desglose de movimientos|cargos, abonos y compras regulares/i.test(row.description)), false);
+});
+
 test("RappiCard conserva la tabla cuando los movimientos cruzan un salto de página", () => {
   const text = [
     "Tarjeta de crédito RappiCard",

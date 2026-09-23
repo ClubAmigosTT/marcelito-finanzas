@@ -46,6 +46,57 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertEqual(FinanceStore.reconcileStatementForTesting(kind: .card, summary: snapshot.summary, movements: snapshot.movements).status, .valid)
     }
 
+    func testNativeFallbackRejectsOverlappingHeadingsAndTruncatedPorRow() {
+        let textWithFalseRows = fixture.replacingOccurrences(
+            of: "2026-08-02 2026-08-02 PAGO POR SPEI -$40.00",
+            with: "2026-08-02 2026-08-02 DESGLOSE DE MOVIMIENTOS +$99.00\n"
+                + "2026-08-02 2026-08-02 CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES +$88.00\n"
+                + "2026-08-02 2026-08-02 POR -$7.00\n"
+                + "2026-08-02 2026-08-02 PAGO POR SPEI -$40.00"
+        )
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: textWithFalseRows,
+            fileName: "rappi-native-fallback.pdf",
+            rappiEvidenceMethod: "native-fallback-test"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 4)
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("desglose de movimientos") })
+        XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("cargos, abonos y compras regulares") })
+        XCTAssertFalse(snapshot.movements.contains { $0.title.caseInsensitiveCompare("por") == .orderedSame })
+        XCTAssertEqual(
+            FinanceStore.reconcileStatementForTesting(
+                kind: .card,
+                summary: snapshot.summary,
+                movements: snapshot.movements
+            ).status,
+            .valid
+        )
+    }
+
+    func testFullPagePaymentLabelRestoresAnIsolatedPorFragment() {
+        let lines = FinanceStore.rappiOCRMovementLinesForTesting([
+            OCRObservationFixture(
+                page: 2,
+                text: "2026-08-02 2026-08-02 POR -$40.00",
+                x: 0.05,
+                y: 0.70,
+                width: 0.80
+            ),
+            OCRObservationFixture(
+                page: 2,
+                text: "PAGO POR SPEI",
+                x: 0.32,
+                y: 0.70,
+                width: 0.28
+            ),
+        ])
+
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertTrue(lines[0].contains("PAGO POR SPEI"))
+        XCTAssertFalse(lines[0].hasSuffix(" POR -$40.00"))
+    }
+
     func testReconciledSelectableRappiLayerAvoidsVisionAndMissingRowDoesNotPass() {
         XCTAssertTrue(
             FinanceStore.selectableTextLayerReconcilesForTesting(

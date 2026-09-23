@@ -19,7 +19,7 @@ function loadEngine() {
 
 test("el bundle local de iOS expone el mismo contrato determinista de Rappi", () => {
   const engine = loadEngine();
-  assert.equal(engine?.version, "rappi-shared-engine-2026.09.16.2");
+  assert.equal(engine?.version, "rappi-shared-engine-2026.09.23.1");
   assert.equal(typeof engine?.parse, "function");
 
   const parsed = engine.parse({
@@ -119,6 +119,40 @@ test("el contrato compartido conserva geometría, confianza y metadatos OCR por 
   assert.equal(bounds?.width, 0.76);
   assert.equal(bounds?.height, 0.032);
   assert.match(parsed.transactions[1].extractionEvidence?.selectionReason ?? "", /signo OCR corregido/);
+});
+
+test("Rappi descarta encabezados y fragmentos de comercio sin perder filas completas", () => {
+  const engine = loadEngine();
+  const parsed = engine.parse({
+    fileName: "rappi-overlapping-row-headings.pdf",
+    mode: "ocr",
+    text: [
+      "Tarjeta de crédito RappiCard",
+      "Adeudo del periodo anterior = $10.00",
+      "Cargos regulares (no a meses) + $30.00",
+      "Pagos y abonos - $5.00",
+      "Saldo deudor total $35.00",
+      "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+      "__PDF_PAGE_3__",
+      "2026-08-01 2026-08-01 RESTAURANTE EJEMPLO +$10.00",
+      "2026-08-02 2026-08-02 DESGLOSE DE MOVIMIENTOS +$99.00",
+      "2026-08-02 2026-08-02 CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES +$88.00",
+      "2026-08-03 2026-08-03 POR -$7.00",
+      "2026-08-03 2026-08-03 COMERCIO DOS +$20.00",
+      "2026-08-04 2026-08-04 PAGO POR SPEI -$5.00",
+      "Total de cargos +$30.00",
+      "Total de abonos -$5.00",
+    ].join("\n"),
+  });
+
+  const descriptions = Array.from(parsed.transactions, (row) => row.description.toLowerCase());
+  assert.equal(parsed.reconciliation.status, "valid");
+  assert.equal(parsed.transactions.length, 3);
+  assert.equal(parsed.rejectedRowCount, 3);
+  assert.equal(descriptions.some((value) => value.includes("desglose de movimientos")), false);
+  assert.equal(descriptions.some((value) => value.includes("cargos, abonos y compras regulares")), false);
+  assert.equal(descriptions.some((value) => value === "por"), false);
+  assert.equal(parsed.transactions.filter((row) => row.kind === "cardPayment").length, 1);
 });
 
 test("iOS empaqueta y usa el puente compartido para ambos extractores Rappi", () => {

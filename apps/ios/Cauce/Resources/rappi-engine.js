@@ -337,6 +337,10 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
   const rowStart = new RegExp(`^(${rowDateToken})\\s+(${rowDateToken})\\s+(.+)$`, "i");
   const rowPairStart = new RegExp(`(?<![A-Za-z0-9.,])(?=${rowDateToken}\\s+${rowDateToken}\\s+)`, "i");
   const signedMoney = /(?<![A-Za-z0-9.,])([+-])\s*\$?\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})(?![A-Za-z0-9.,])/g;
+  function isAdministrativeOrTruncatedDescription(value) {
+    const compact = fold$1(value).replace(/[^a-z0-9]+/g, "");
+    return compact.startsWith("desglosedemovimientos") || compact.startsWith("cargosabonosycomprasregulares") || compact === "por";
+  }
   function amountAfter(text, label) {
     const match = text.match(new RegExp(`${label.source}[^$\\n]{0,100}\\$\\s*([\\d,]+\\.\\d{2})`, "i"));
     return money(match?.[1]);
@@ -413,6 +417,10 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
       const rawDescription = raw.slice(descriptionStart, descriptionEnd).replace(/\s+/g, " ").trim();
       const description = rawDescription.replace(/compra\s+en\s+el\s+extranjero/ig, "").replace(/tasa\s+de\s+conversi[oó]n\s+[^ ]+/ig, "").replace(/usd\s+\$?\s*[\d,.]+/ig, "").replace(/\s+/g, " ").trim();
       if (!description) {
+        rejectedRows.push(raw.slice(0, 240));
+        return;
+      }
+      if (isAdministrativeOrTruncatedDescription(description)) {
         rejectedRows.push(raw.slice(0, 240));
         return;
       }
@@ -640,7 +648,7 @@ ${row.text}`).join("\n")}` },
       rejectedRows: parsed.rejectedRows
     };
   }
-  const RAPPI_SHARED_ENGINE_VERSION = "rappi-shared-engine-2026.09.16.2";
+  const RAPPI_SHARED_ENGINE_VERSION = "rappi-shared-engine-2026.09.23.1";
   const rappiSharedEngine = {
     version: RAPPI_SHARED_ENGINE_VERSION,
     parse(input) {

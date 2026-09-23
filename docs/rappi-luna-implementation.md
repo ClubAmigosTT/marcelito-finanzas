@@ -6,6 +6,8 @@ Implementar la lectura fiable de los seis estados Rappi proporcionados y prepara
 
 Este documento acompaña la implementación actual en la rama de trabajo. No es una certificación de PDFKit/Vision: esa parte debe ejecutarse en macOS, simulador y un iPhone físico. No crear otra tarea ni publicar automáticamente por leer estas instrucciones. Respetar la autorización vigente de la conversación para commits, GitHub y TestFlight.
 
+La versión de este lector se actualizó el 23-sep-2026 a `ios-reader-recovery-2026.09.23.1` y el contrato compartido a `rappi-shared-engine-2026.09.23.1`. La certificación anterior para `.17.2` ya no corresponde y no habilita una publicación nueva; hay que repetir el corpus con la versión actual.
+
 ## Punto de partida verificado
 
 Luna debe continuar desde este estado y no desde una build anterior:
@@ -16,7 +18,7 @@ Luna debe continuar desde este estado y no desde una build anterior:
 - Tag de entrega visible: `ios-v1.0.112-bootstrap`, apuntando exactamente a `dfb79c4`.
 - Workflow de GitHub Actions: [iOS TestFlight 35164923657](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35164923657).
 - TestFlight: versión `1.0.112`, build `210`, estado `VALID`, disponible automáticamente para el grupo interno `Marcelito - Pruebas internas`.
-- Versión del lector que debe aparecer en los informes: `ios-reader-recovery-2026.09.17.2`.
+- Versión del lector que debe aparecer en los próximos informes: `ios-reader-recovery-2026.09.23.1`.
 - Versión web equivalente: `web-reader-deterministic-2026.09.16.2`.
 - Validaciones de código en verde sobre el head documentado: [Web Reader Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35096875411) y [iOS Validate](https://github.com/ClubAmigosTT/marcelito-finanzas/actions/runs/35096875442).
 - Auditoría local repetida el 16-sep-2026: `328/328` pruebas públicas, TypeScript, build Vite y auditoría pública en verde; la corrida privada web de los seis Rappi devolvió `6/6` válidos, `0` filas rechazadas, `0` fallas de manifiesto y `nativeOCRPending: 0`.
@@ -139,7 +141,7 @@ En esta rama ya existe una primera integración acotada y local:
 - `scripts/build-ios-rappi-engine.mjs` genera `apps/ios/Cauce/Resources/rappi-engine.js`; el artefacto se comprueba en CI para impedir divergencia entre fuente y bundle.
 - `apps/ios/Cauce/RappiSharedEngine.swift` ejecuta únicamente ese parser puro mediante JavaScriptCore. No intenta ejecutar PDF.js: PDFKit y Vision siguen siendo responsables de extraer texto, columnas, confianza y coordenadas.
 - `Models.swift` usa el motor compartido para `pdf-text` y `vision-ocr`, pero conserva en Swift la selección del conjunto completo, la conciliación y la compuerta de importación. Un fallo del recurso devuelve la ruta nativa de recuperación; no se mezclan filas de ambos conjuntos.
-- La versión del lector nativo es `ios-reader-recovery-2026.09.17.2` y la del motor es `rappi-shared-engine-2026.09.16.2`. Cualquier cambio de contrato exige actualizar ambas pruebas de bundle y la versión del lector.
+- La versión vigente del lector nativo es `ios-reader-recovery-2026.09.23.1` y la del motor es `rappi-shared-engine-2026.09.23.1`. Cualquier cambio de contrato exige actualizar ambas pruebas de bundle y la versión del lector.
 
 Antes de ejecutar XcodeGen, correr `npm ci`, `npm run rappi:engine:build`, `npm test` y `node node_modules/typescript/bin/tsc -b`. En macOS, Xcode debe ejecutar además `RappiSharedEngineTests` y el corpus privado. La existencia del bundle o el paso de la prueba sintética no certifican por sí solos los seis PDFs reales ni Vision en un iPhone.
 
@@ -214,9 +216,9 @@ MARCELITO_PDF_CORPUS_VERIFY=1 \
 bash apps/ios/scripts/run-native-corpus.sh
 ```
 
-Para la compuerta final de publicación, repetirlo con `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`. El informe debe contener los seis nombres esperados, la versión exacta `ios-reader-recovery-2026.09.17.2`, el método exacto que indique el manifiesto privado —para estos seis PDFs, `pdf-text`; un caso futuro puede requerir `vision-ocr`—, cero filas rechazadas y conciliación válida; además debe validarse en un iPhone físico. La certificación del runner se basa en el conjunto exacto del manifiesto, no en un mínimo fijo de archivos: así el corpus Rappi de seis PDFs puede certificarse y el mismo gate sigue aceptando un corpus más amplio. Si falta una sola evidencia, detenerse en revisión y no subir a TestFlight.
+Para la compuerta final de publicación, repetirlo con `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`. El informe debe contener los seis nombres esperados, la versión exacta `ios-reader-recovery-2026.09.23.1`, el método exacto que indique el manifiesto privado —para estos seis PDFs, `pdf-text`; un caso futuro puede requerir `vision-ocr`—, cero filas rechazadas y conciliación válida; además debe validarse en un iPhone físico. La certificación del runner se basa en el conjunto exacto del manifiesto, no en un mínimo fijo de archivos: así el corpus Rappi de seis PDFs puede certificarse y el mismo gate sigue aceptando un corpus más amplio. Si falta una sola evidencia, detenerse en revisión y no subir a TestFlight.
 
-Importante para esta entrega: la pantalla `Certificar estados con Vision` ahora tiene un perfil `rappi-focused` de seis o más estados exclusivamente Rappi procesados por el lector local (`pdf-text` u `vision-ocr`), además del perfil general de 10 o más archivos. Puede exportar un JSON sanitizado de seis Rappi para que el workflow valide la lectura del dispositivo. El manifiesto privado fija el método exacto esperado por cada PDF; por eso el informe del dispositivo no sustituye los goldens privados de filas y controles. Para la certificación más fuerte, usar también el runner anterior con `MARCELITO_PDF_CORPUS_MANIFEST` y conservar el informe/log fuera del repositorio. Solo después de que el perfil de dispositivo y el manifiesto exacto estén en `certified=true`, registrar en GitHub `MARCELITO_NATIVE_CORPUS_CERTIFIED=true` y `MARCELITO_NATIVE_CORPUS_READER_VERSION=ios-reader-recovery-2026.09.17.2`.
+Importante para esta entrega: la pantalla `Certificar estados con Vision` ahora tiene un perfil `rappi-focused` de seis o más estados exclusivamente Rappi procesados por el lector local (`pdf-text` u `vision-ocr`), además del perfil general de 10 o más archivos. Puede exportar un JSON sanitizado de seis Rappi para que el workflow valide la lectura del dispositivo. El manifiesto privado fija el método exacto esperado por cada PDF; por eso el informe del dispositivo no sustituye los goldens privados de filas y controles. Para la certificación más fuerte, usar también el runner anterior con `MARCELITO_PDF_CORPUS_MANIFEST` y conservar el informe/log fuera del repositorio. Solo después de que el perfil de dispositivo y el manifiesto exacto estén en `certified=true`, registrar en GitHub `MARCELITO_NATIVE_CORPUS_CERTIFIED=true` y `MARCELITO_NATIVE_CORPUS_READER_VERSION=ios-reader-recovery-2026.09.23.1`.
 
 Exigir evidencia de que se ejecutaron todos los documentos esperados: un test omitido por falta de archivos no es un aprobado. El runner usa simulador; completar además una prueba en iPhone físico con el flujo de importación y el visor. Medir duración, memoria y capacidad de cancelar. Windows puede validar TypeScript y contratos, pero no certificar PDFKit/Vision ni una compilación iOS.
 

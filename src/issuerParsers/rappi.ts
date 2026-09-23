@@ -18,6 +18,19 @@ const rowPairStart = new RegExp(`(?<![A-Za-z0-9.,])(?=${rowDateToken}\\s+${rowDa
 // and then trust the last numeric-looking fragment in the line.
 const signedMoney = /(?<![A-Za-z0-9.,])([+-])\s*\$?\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})(?![A-Za-z0-9.,])/g;
 
+function isAdministrativeOrTruncatedDescription(value: string) {
+  const compact = fold(value).replace(/[^a-z0-9]+/g, "");
+  // Date anchors can land beside a page heading when OCR bands overlap. The
+  // heading's neighboring amount is not a transaction unless the same visual
+  // row also provides a real merchant/payment description.
+  return compact.startsWith("desglosedemovimientos")
+    || compact.startsWith("cargosabonosycomprasregulares")
+    // A crop can preserve only the tail of `PAGO POR SPEI`. Do not turn that
+    // ambiguous fragment into an income/refund; the full-page observation
+    // must restore the complete issuer label first.
+    || compact === "por";
+}
+
 function amountAfter(text: string, label: RegExp) {
   const match = text.match(new RegExp(`${label.source}[^$\\n]{0,100}\\$\\s*([\\d,]+\\.\\d{2})`, "i"));
   return money(match?.[1]);
@@ -130,6 +143,10 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
       .replace(/\s+/g, " ")
       .trim();
     if (!description) {
+      rejectedRows.push(raw.slice(0, 240));
+      return;
+    }
+    if (isAdministrativeOrTruncatedDescription(description)) {
       rejectedRows.push(raw.slice(0, 240));
       return;
     }

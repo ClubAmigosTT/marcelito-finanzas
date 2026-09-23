@@ -528,6 +528,7 @@ struct ReaderPDFDiagnosticSnapshot {
     let ocrConfidenceNeedsReview: Bool
     let rowDiagnostics: [OCRRowDiagnostic]
     let reconciliation: StatementReconciliationRecord
+    let testDiagnostics: [String: String]
 }
 
 /// Small coordinate fixture used by the native reader contract tests. It
@@ -847,6 +848,7 @@ private struct PDFImportExtraction: Codable, @unchecked Sendable {
     /// Legacy compatibility markers; always false for new local extraction.
     var multimodalFallbackAttempted: Bool = false
     var multimodalFallbackError: String? = nil
+    var testDiagnostics: [String: String]? = nil
 }
 
 struct LedgerConsistencyCheck: Identifiable {
@@ -905,7 +907,7 @@ final class FinanceStore {
     // Bump whenever the local reader or its safety boundary changes. This
     // release removes the legacy remote-PDF fallback, so old rows must be
     // quarantined and rebuilt with PDFKit/Vision.
-    static let readerVersion = "ios-reader-recovery-2026.09.17.2"
+    static let readerVersion = "ios-reader-recovery-2026.09.23.1"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -1010,7 +1012,8 @@ final class FinanceStore {
     static func readerParseSnapshotForTesting(
         text: String,
         fileName: String,
-        sourceHint: String? = nil
+        sourceHint: String? = nil,
+        rappiEvidenceMethod: String = "pdf-text"
     ) -> ReaderParseSnapshot {
         let detection = sourceDetection(from: text, fileName: fileName)
         let source = sourceHint ?? detection.source
@@ -1025,7 +1028,7 @@ final class FinanceStore {
             // does not reconcile; this pure text seam remains deterministic.
             movements = parseAmexText(text, fileName: fileName)
         } else if source == "Rappi" {
-            movements = parseRappiText(text, fileName: fileName)
+            movements = parseRappiText(text, fileName: fileName, evidenceMethod: rappiEvidenceMethod)
         } else {
             movements = parse(text: text, fileName: fileName, sourceHint: source)
         }
@@ -1056,13 +1059,73 @@ final class FinanceStore {
 
     /// Exercise production PDFKit extraction, layout recovery and issuer
     /// parsing together, without caching or changing the user's ledger.
-    static func readerPDFSnapshotForTesting(data: Data) throws -> ReaderParseSnapshot {
-        let result = try extractPDF(data: data, fileName: "fixture.pdf", allowOCR: false,
+    static func readerPDFSnapshotForTesting(
+        data: Data,
+        fileName: String = "fixture.pdf"
+    ) throws -> ReaderParseSnapshot {
+        let result = try extractPDF(data: data, fileName: fileName, allowOCR: false,
                                     sourceOverride: nil, kindOverride: nil, learnedRules: [:])
         return ReaderParseSnapshot(sourceDetection: result.sourceDetection,
             source: result.source, accountKey: result.accountKey, kind: result.kind,
             period: result.period, movements: result.candidates, summary: result.summary)
     }
+
+    /// Compares the three selectable Rappi text streams used by production
+    /// without running Vision. Values are row counts and reconciliation
+    /// states only; extracted transaction text and amounts stay private.
+#if DEBUG
+    static func readerPDFTextPathSummaryForTesting(
+        data: Data,
+        fileName: String
+    ) throws -> [String: String] {
+        guard let document = PDFDocument(data: data) else {
+            throw FinanceImportError.unreadableDocument
+        }
+        let rawText = (0..<document.pageCount).compactMap { index -> String? in
+            guard let pageText = document.page(at: index)?.string,
+                  !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return "__PDF_PAGE_\(index + 1)__\n\(pageText)"
+        }.joined(separator: "\n")
+        let source = sourceDetection(from: rawText, fileName: fileName).source
+        let kind = statementKind(from: rawText, source: source)
+        let layoutText = SelectablePDFLayout.rappiText(from: document)
+        let paths = [
+            "pdfText": rawText,
+            "pageWise": rappiPageWiseSelectableText(from: document),
+            "layout": Self.rebuildRappiSelectableLines(layoutText)
+        ]
+        let dateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)\d{4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}(?!\d)"#
+        )
+        let signedAmountRegex = try? NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9.,])[+-]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+        )
+        let rowRegex = try? NSRegularExpression(
+            pattern: #"(?im)^\s*\d{4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}\s+\d{4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}.*[+-]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}"#
+        )
+        var report = ["pageCount": String(document.pageCount), "source": source]
+        for (name, text) in paths {
+            let candidates = parseRappiText(text, fileName: fileName, evidenceMethod: "pdf-text")
+            let statementSummary = summary(from: text, source: source)
+            let reconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
+                kind: kind,
+                summary: statementSummary,
+                movements: candidates
+            )
+            report["\(name)Rows"] = String(candidates.count)
+            report["\(name)Status"] = reconciliation.status.rawValue
+            let range = NSRange(text.startIndex..<text.endIndex, in: text)
+            report["\(name)DateTokens"] = String(dateRegex?.numberOfMatches(in: text, range: range) ?? 0)
+            report["\(name)SignedAmounts"] = String(signedAmountRegex?.numberOfMatches(in: text, range: range) ?? 0)
+            report["\(name)RowShapes"] = String(rowRegex?.numberOfMatches(in: text, range: range) ?? 0)
+            report["\(name)HasMovementHeading"] = String(
+                text.range(of: #"cargos\s*,\s*abonos\s+y\s+compras\s+regulares"#,
+                          options: [.regularExpression, .caseInsensitive]) != nil
+            )
+        }
+        return report
+    }
+#endif
 
     /// Runs the complete device reader, including Vision when the selectable
     /// layer cannot reconcile. This is used only by the explicit private PDF
@@ -1103,7 +1166,8 @@ final class FinanceStore {
             ocrColumnCalibrationNeedsReview: result.ocrColumnCalibrationNeedsReview,
             ocrConfidenceNeedsReview: result.ocrConfidenceNeedsReview,
             rowDiagnostics: result.rowDiagnostics,
-            reconciliation: reconciliation
+            reconciliation: reconciliation,
+            testDiagnostics: result.testDiagnostics ?? [:]
         )
     }
 
@@ -5463,6 +5527,7 @@ final class FinanceStore {
         }
         var movementColumnsCalibrated = true
         var rowDiagnostics: [OCRRowDiagnostic] = []
+        var rappiTestDiagnostics: [String: String] = [:]
         let parsedCandidates: [Movement]
         if usedOCR, source == "Santander" {
             var santanderResult = Self.parseSantanderTable(
@@ -5570,7 +5635,111 @@ final class FinanceStore {
                 : Self.summary(from: rappiPageWiseSelectableText, source: source)
             let ocrSummary = Self.summary(from: text, source: source)
             let duplicateRepairedOCRCandidates = Self.rappiOCRDuplicateRepairedCandidates(ocrCandidates)
+            let spatialOCRRepairVariants = Self.rappiOCRSpatialDuplicateRepairVariants(duplicateRepairedOCRCandidates)
             let evidenceBackedOCRCandidates = Self.rappiEvidenceBackedFallbackCandidates(ocrCandidates)
+#if DEBUG
+            func recordRappiStream(
+                _ name: String,
+                candidates: [Movement],
+                summary: StatementSummaryRecord?,
+                observations: [OCRObservation]? = nil
+            ) {
+                let reconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
+                    kind: kind,
+                    summary: summary,
+                    movements: candidates
+                )
+                rappiTestDiagnostics["\(name)Rows"] = String(candidates.count)
+                rappiTestDiagnostics["\(name)Status"] = reconciliation.status.rawValue
+                let reason = reconciliation.reason ?? ""
+                let reasonClasses = [
+                    "saldo final", "pagos y abonos", "nuevos cargos", "nuevas transacciones",
+                    "nacionales", "moneda extranjera", "no se reconstruyeron filas",
+                    "no se encontró total", "no se pudo determinar"
+                ].filter { reason.localizedCaseInsensitiveContains($0) }
+                rappiTestDiagnostics["\(name)ReasonClasses"] = reasonClasses.joined(separator: ",")
+                if name == "ocrWithMergedSummary"
+                    || name == "retryWithMergedSummary"
+                    || name == "spatialOCRRepair"
+                    || name == "retrySpatialOCRRepair" {
+                    let visualObservations = observations ?? ocrObservations
+                    let visualDiagnostics = Self.rappiOCRRowDiagnostics(
+                        observations: visualObservations,
+                        movements: candidates,
+                        fallbackReason: "diagnóstico"
+                    )
+                    let unmatchedVisualRows = visualDiagnostics.filter { !$0.accepted }.count
+                    let visualRows = Self.rappiOCRRowDiagnostics(
+                        observations: visualObservations,
+                        movements: [],
+                        fallbackReason: "diagnóstico"
+                    ).count
+                    rappiTestDiagnostics["\(name)VisualRows"] = String(visualRows)
+                    rappiTestDiagnostics["\(name)MatchedVisualRows"] = String(max(0, visualRows - unmatchedVisualRows))
+                    rappiTestDiagnostics["\(name)UnmatchedVisualRows"] = String(unmatchedVisualRows)
+
+                    var spatialDuplicatePairs = 0
+                    for leftIndex in candidates.indices {
+                        guard let leftEvidence = candidates[leftIndex].extractionEvidence,
+                              let leftBounds = leftEvidence.bounds,
+                              leftEvidence.page != nil else { continue }
+                        let leftRect = CGRect(x: leftBounds.x, y: leftBounds.y, width: leftBounds.width, height: leftBounds.height)
+                        for rightIndex in candidates.indices where rightIndex > leftIndex {
+                            let right = candidates[rightIndex]
+                            guard leftEvidence.page == right.extractionEvidence?.page,
+                                  candidates[leftIndex].date == right.date,
+                                  candidates[leftIndex].amount == right.amount,
+                                  candidates[leftIndex].flow == right.flow,
+                                  let rightBounds = right.extractionEvidence?.bounds else { continue }
+                            let rightRect = CGRect(x: rightBounds.x, y: rightBounds.y, width: rightBounds.width, height: rightBounds.height)
+                            let smallestArea = min(leftRect.width * leftRect.height, rightRect.width * rightRect.height)
+                            let overlap = leftRect.intersection(rightRect)
+                            guard smallestArea > 0,
+                                  !overlap.isNull,
+                                  !overlap.isEmpty,
+                                  overlap.width * overlap.height / smallestArea >= 0.65,
+                                  abs(leftRect.midY - rightRect.midY) <= 0.010 else { continue }
+                            spatialDuplicatePairs += 1
+                        }
+                    }
+                    rappiTestDiagnostics["\(name)SpatialDuplicatePairs"] = String(spatialDuplicatePairs)
+                }
+            }
+            func recordRappiSummary(_ name: String, _ summary: StatementSummaryRecord?) {
+                var fields: [String] = []
+                if summary?.previousBalance != nil { fields.append("previousBalance") }
+                if summary?.statementBalance != nil { fields.append("statementBalance") }
+                if summary?.debtBalance != nil { fields.append("debtBalance") }
+                if summary?.newCharges != nil { fields.append("newCharges") }
+                if summary?.newTransactions != nil { fields.append("newTransactions") }
+                if summary?.paymentsAndCredits != nil { fields.append("paymentsAndCredits") }
+                if summary?.paymentForNoInterest != nil { fields.append("paymentForNoInterest") }
+                rappiTestDiagnostics["\(name)Fields"] = fields.joined(separator: ",")
+            }
+            rappiTestDiagnostics["ocrMovementLineRecords"] = String(
+                Self.rappiOCRMovementLineRecords(from: ocrObservations).count
+            )
+            recordRappiStream("ocrWithMergedSummary", candidates: ocrCandidates, summary: summary)
+            recordRappiStream("duplicateOCRWithMergedSummary", candidates: duplicateRepairedOCRCandidates, summary: summary)
+            recordRappiStream(
+                "spatialOCRRepair",
+                candidates: spatialOCRRepairVariants.first ?? [],
+                summary: summary
+            )
+            recordRappiStream("ocrWithOCRSummary", candidates: ocrCandidates, summary: ocrSummary)
+            recordRappiStream("ocrWithSelectableSummary", candidates: ocrCandidates, summary: selectableSummary)
+            recordRappiStream("ocrWithLayoutSummary", candidates: ocrCandidates, summary: layoutSummary)
+            recordRappiStream("ocrWithPageWiseSummary", candidates: ocrCandidates, summary: pageWiseSummary)
+            recordRappiStream("duplicateOCRWithOCRSummary", candidates: duplicateRepairedOCRCandidates, summary: ocrSummary)
+            recordRappiStream("duplicateOCRWithSelectableSummary", candidates: duplicateRepairedOCRCandidates, summary: selectableSummary)
+            recordRappiStream("evidenceOCRWithOCRSummary", candidates: evidenceBackedOCRCandidates, summary: ocrSummary)
+            recordRappiStream("selectable", candidates: selectableCandidates, summary: selectableSummary)
+            recordRappiStream("layout", candidates: layoutCandidates, summary: layoutSummary)
+            recordRappiStream("pageWise", candidates: pageWiseCandidates, summary: pageWiseSummary)
+            recordRappiSummary("ocrSummary", ocrSummary)
+            recordRappiSummary("selectableSummary", selectableSummary)
+            recordRappiSummary("mergedSummary", summary)
+#endif
             // No OCR stream is a valid default. If every complete stream fails
             // the issuer reconciliation, retain only bounded diagnostics; a
             // raw OCR candidate set must never look like an extracted ledger.
@@ -5583,7 +5752,8 @@ final class FinanceStore {
                     (pageWiseCandidates, pageWiseSummary),
                     (layoutCandidates, layoutSummary),
                     (selectableCandidates, selectableSummary),
-                    (duplicateRepairedOCRCandidates, summary),
+                    (duplicateRepairedOCRCandidates, summary)
+                ] + spatialOCRRepairVariants.map { ($0, summary) } + [
                     (ocrCandidates, ocrSummary),
                     (evidenceBackedOCRCandidates, ocrSummary)
                 ],
@@ -5624,14 +5794,38 @@ final class FinanceStore {
                     confidenceByPage: retryConfidenceByPage
                 )
                 let retryDuplicateRepairedCandidates = Self.rappiOCRDuplicateRepairedCandidates(retryCandidates)
+                let retrySpatialOCRRepairVariants = Self.rappiOCRSpatialDuplicateRepairVariants(retryDuplicateRepairedCandidates)
                 let retryEvidenceBackedCandidates = Self.rappiEvidenceBackedFallbackCandidates(retryCandidates)
                 let retrySummary = Self.summary(from: retryText, source: source)
+#if DEBUG
+                rappiTestDiagnostics["retryOCRMovementLineRecords"] = String(
+                    Self.rappiOCRMovementLineRecords(from: retryObservations).count
+                )
+                recordRappiStream("retryWithOCRSummary", candidates: retryCandidates, summary: retrySummary)
+                recordRappiStream("retryWithSelectableSummary", candidates: retryCandidates, summary: selectableSummary)
+                recordRappiStream(
+                    "retryWithMergedSummary",
+                    candidates: retryCandidates,
+                    summary: summary,
+                    observations: retryObservations
+                )
+                recordRappiStream(
+                    "retrySpatialOCRRepair",
+                    candidates: retrySpatialOCRRepairVariants.first ?? [],
+                    summary: summary,
+                    observations: retryObservations
+                )
+                recordRappiStream("retryDuplicateWithOCRSummary", candidates: retryDuplicateRepairedCandidates, summary: retrySummary)
+                recordRappiSummary("retrySummary", retrySummary)
+#endif
                 let retrySelection = Self.reconciledRappiSelection(
                     candidateSets: [
                         (pageWiseCandidates, pageWiseSummary),
                         (layoutCandidates, layoutSummary),
                         (selectableCandidates, selectableSummary),
-                        (retryDuplicateRepairedCandidates, retrySummary),
+                        (retryDuplicateRepairedCandidates, retrySummary)
+                    ] + retrySpatialOCRRepairVariants.map { ($0, retrySummary) }
+                        + retrySpatialOCRRepairVariants.map { ($0, summary) } + [
                         (retryCandidates, retrySummary),
                         (retryEvidenceBackedCandidates, retrySummary)
                     ],
@@ -5808,7 +6002,8 @@ final class FinanceStore {
             ocrColumnCalibrationNeedsReview: ocrColumnCalibrationNeedsReview,
             ocrConfidenceNeedsReview: ocrConfidenceNeedsReview,
             rowDiagnostics: rowDiagnostics,
-            recoveryAttempts: recoveryAttempts
+            recoveryAttempts: recoveryAttempts,
+            testDiagnostics: usedOCR && source == "Rappi" ? rappiTestDiagnostics : nil
         )
     }
 
@@ -7072,40 +7267,42 @@ final class FinanceStore {
             fullPageObservations: fullPageObservations,
             retryDateAnchorsWhenUnobserved: retryDateAnchorsWhenUnobserved
         ) {
-            var candidates: [OCRObservation] = []
-            let passes: [([String]?, Bool)] = [
-                (["es-MX", "en-US"], true),
-                (["es", "en"], true),
-                (nil, false),
-            ]
-            for (languages, correction) in passes {
-                if let candidate = recognize(
-                    region: region,
-                    languages: languages,
-                    correctLanguage: correction
-                ) {
-                    candidates.append(candidate)
-                    let evidence = evidenceCounts(candidate.text)
-                    if evidence.dates >= 2, evidence.amounts >= 1 { break }
+            let selected = autoreleasepool { () -> OCRObservation? in
+                var candidates: [OCRObservation] = []
+                let passes: [([String]?, Bool)] = [
+                    (["es-MX", "en-US"], true),
+                    (["es", "en"], true),
+                    (nil, false),
+                ]
+                for (languages, correction) in passes {
+                    if let candidate = recognize(
+                        region: region,
+                        languages: languages,
+                        correctLanguage: correction
+                    ) {
+                        candidates.append(candidate)
+                        let evidence = evidenceCounts(candidate.text)
+                        if evidence.dates >= 2, evidence.amounts >= 1 { break }
+                    }
                 }
+                return candidates
+                    .filter({
+                        let evidence = evidenceCounts($0.text)
+                        return evidence.dates >= 2 && evidence.amounts >= 1
+                    })
+                    .max(by: { left, right in
+                        let leftEvidence = evidenceCounts(left.text)
+                        let rightEvidence = evidenceCounts(right.text)
+                        if leftEvidence.dates != rightEvidence.dates {
+                            return leftEvidence.dates < rightEvidence.dates
+                        }
+                        if leftEvidence.amounts != rightEvidence.amounts {
+                            return leftEvidence.amounts < rightEvidence.amounts
+                        }
+                        return left.confidence < right.confidence
+                    })
             }
-            guard let selected = candidates
-                .filter({
-                    let evidence = evidenceCounts($0.text)
-                    return evidence.dates >= 2 && evidence.amounts >= 1
-                })
-                .max(by: { left, right in
-                    let leftEvidence = evidenceCounts(left.text)
-                    let rightEvidence = evidenceCounts(right.text)
-                    if leftEvidence.dates != rightEvidence.dates {
-                        return leftEvidence.dates < rightEvidence.dates
-                    }
-                    if leftEvidence.amounts != rightEvidence.amounts {
-                        return leftEvidence.amounts < rightEvidence.amounts
-                    }
-                    return left.confidence < right.confidence
-                }) else { continue }
-            rows.append(selected)
+            if let selected { rows.append(selected) }
         }
         return rows
     }
@@ -7129,6 +7326,57 @@ final class FinanceStore {
                 text: text,
                 region: CGRect(x: 0.045, y: 0.90 - (CGFloat(index) * spacing), width: 0.91, height: spacing * 0.8),
                 confidence: 0.99
+            )
+        }
+        return rappiOCRMovementLines(from: observations)
+    }
+
+    /// Builds normalized OCR observations so title recovery can be tested
+    /// with a full-page label beside an isolated crop's truncated text.
+    static func rappiOCRMovementLinesForTesting(_ fixtures: [OCRObservationFixture]) -> [String] {
+        let dateRegex = try? NSRegularExpression(
+            pattern: #"(?i)(?<!\d)(?:\d{4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{1,2}|\d{1,2}\s*[-/.]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*\d{2,4})"#
+        )
+        let moneyRegex = try? NSRegularExpression(
+            pattern: #"(?<![A-Za-z0-9.,])[-+−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+        )
+        let observations = fixtures.map { fixture -> OCRObservation in
+            let textRange = NSRange(fixture.text.startIndex..<fixture.text.endIndex, in: fixture.text)
+            let characterCount = max(fixture.text.utf16.count, 1)
+
+            func boxes(matching regex: NSRegularExpression?) -> [OCRTextBox] {
+                (regex?.matches(in: fixture.text, range: textRange) ?? []).compactMap { match in
+                    guard let matchRange = Range(match.range, in: fixture.text) else { return nil }
+                    let minX = fixture.x + fixture.width * Double(match.range.location) / Double(characterCount)
+                    let tokenWidth = max(
+                        fixture.width * Double(match.range.length) / Double(characterCount),
+                        0.004
+                    )
+                    return OCRTextBox(
+                        text: String(fixture.text[matchRange]),
+                        boundingBox: CGRect(
+                            x: minX,
+                            y: fixture.y,
+                            width: min(tokenWidth, fixture.x + fixture.width - minX),
+                            height: fixture.height
+                        ),
+                        confidence: fixture.confidence
+                    )
+                }
+            }
+
+            return OCRObservation(
+                page: fixture.page,
+                text: fixture.text,
+                boundingBox: CGRect(
+                    x: fixture.x,
+                    y: fixture.y,
+                    width: fixture.width,
+                    height: fixture.height
+                ),
+                confidence: fixture.confidence,
+                dateBoxes: boxes(matching: dateRegex),
+                amountBoxes: boxes(matching: moneyRegex)
             )
         }
         return rappiOCRMovementLines(from: observations)
@@ -8002,6 +8250,24 @@ final class FinanceStore {
                 || value.hasSuffix(" pago por spei")
         }
 
+        func compactTitle(_ value: String) -> String {
+            value
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+        }
+
+        func isUnusableTitle(_ raw: String) -> Bool {
+            let compactRaw = compactTitle(raw)
+            if compactRaw.hasPrefix("desglosedemovimientos")
+                || compactRaw.hasPrefix("cargosabonosycomprasregulares") {
+                return true
+            }
+            let cleaned = cleanTitle(raw)
+            let compactCleaned = compactTitle(cleaned)
+            return compactCleaned == "por" || Self.isAdministrativeTitle(cleaned)
+        }
+
         func titleForRow(y: CGFloat, amount: OCRTextBox) -> String {
             let nearby = observations.filter { observation in
                 abs(observation.centerY - y) <= dateTolerance
@@ -8017,6 +8283,17 @@ final class FinanceStore {
                             && abs(box.centerY - amount.centerY) <= 0.012
                     }
                 }
+                let leftIsExplicitPayment = left.text.range(
+                    of: #"(?i)\bpago\s+por\s+spei\b"#,
+                    options: .regularExpression
+                ) != nil && (owns(left) || abs(left.centerY - y) <= 0.006)
+                let rightIsExplicitPayment = right.text.range(
+                    of: #"(?i)\bpago\s+por\s+spei\b"#,
+                    options: .regularExpression
+                ) != nil && (owns(right) || abs(right.centerY - y) <= 0.006)
+                if leftIsExplicitPayment != rightIsExplicitPayment {
+                    return leftIsExplicitPayment
+                }
                 if owns(left) != owns(right) { return owns(left) }
                 let leftDistance = abs(left.centerY - y)
                 let rightDistance = abs(right.centerY - y)
@@ -8030,6 +8307,7 @@ final class FinanceStore {
             var sourceFallback: String?
             for observation in ranked {
                 let raw = observation.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !isUnusableTitle(raw) else { continue }
                 if sourceFallback == nil, !raw.isEmpty {
                     sourceFallback = String(raw.prefix(120))
                 }
@@ -8052,6 +8330,7 @@ final class FinanceStore {
             guard matchingDates.first != nil else { return nil }
             let dates = Array(matchingDates.prefix(2)).map(\.text)
             let title = titleForRow(y: row.y, amount: row.amount)
+            guard !title.isEmpty, !isUnusableTitle(title) else { return nil }
             guard let amount = amountToken(from: row.amount.text, title: title) else { return nil }
             let rowBounds = observations
                 .filter { abs($0.centerY - row.y) <= dateTolerance }
@@ -8088,8 +8367,8 @@ final class FinanceStore {
             )
         }
 
-        // Full-page OCR and isolated-row OCR can both describe the same
-        // printed row. Merge only when the amount and vertical position agree;
+        // Full-page and cropped recovery passes can both describe the same
+        // printed row. Merge only when amount and vertical position agree;
         // equal values at different positions remain legitimate transactions.
         var unique: [RappiOCRMovementLine] = []
         for candidate in rawLines {
@@ -12626,7 +12905,7 @@ final class FinanceStore {
             "no de cuenta", "numero de cliente", "cuenta clabe", "rfc", "estado de cuenta",
             "estado de cue", "periodo", "periodo de facturacion", "saldo", "saldo disponible",
             "saldo insoluto", "total", "pagina", "fecha y detalle", "pago minimo", "referencia",
-            "movimientos del periodo"
+            "movimientos del periodo", "desglose de movimientos", "cargos abonos y compras regulares"
         ]
         if phrases.contains(where: { normalized == $0 || normalized.contains(" \($0) ") || normalized.hasPrefix("\($0) ") || normalized.hasSuffix(" \($0)") }) {
             return true
@@ -12975,6 +13254,13 @@ final class FinanceStore {
                 .lowercased()
                 .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
         }
+        func isUnusableRappiTitle(_ value: String) -> Bool {
+            let compact = compactSemanticTitle(value)
+            return compact == "por"
+                || compact.hasPrefix("desglosedemovimientos")
+                || compact.hasPrefix("cargosabonosycomprasregulares")
+                || Self.isAdministrativeTitle(value)
+        }
         let rowDateToken = #"(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[a-z]{3,12})\s*[-/.]\s*[0-9OBI]{2,4}|[0-9OBI]{1,2}\s+(?:de\s+)?[a-z]{3,12}\s+[0-9OBI]{2,4})"#
         let rowPrefixRegex = try? NSRegularExpression(
             // Vision may lose the posting date on a small row. Keep the
@@ -13058,7 +13344,7 @@ final class FinanceStore {
                     )
                     .replacingOccurrences(of: #"[;,:]+\s*$"#, with: "", options: .regularExpression)
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !title.isEmpty else { continue }
+                guard !title.isEmpty, !isUnusableRappiTitle(title) else { continue }
                 // `sourceText` keeps the complete visual row (dates, amount
                 // and any foreign-purchase metadata). `rawDescription` is the
                 // original merchant fragment only, so the UI can show useful
@@ -13337,6 +13623,114 @@ final class FinanceStore {
             }
         }
         return spatiallyDeduplicated.enumerated().compactMap { keep[$0.offset] ? $0.element : nil }
+    }
+
+    /// Proposes a narrowly bounded duplicate repair when a broad OCR region
+    /// and a precise row crop both describe the same printed transaction. The
+    /// caller may use a proposal only when the complete statement reconciles
+    /// exactly and visual row diagnostics leave no row unresolved.
+    private static func rappiOCRSpatialDuplicateRepairVariants(_ candidates: [Movement]) -> [[Movement]] {
+        func compact(_ value: String) -> String {
+            value
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+        }
+
+        func occurrenceCount(of needle: String, in haystack: String) -> Int {
+            guard !needle.isEmpty else { return 0 }
+            var count = 0
+            var start = haystack.startIndex
+            while start < haystack.endIndex,
+                  let range = haystack.range(of: needle, range: start..<haystack.endIndex) {
+                count += 1
+                start = range.upperBound
+            }
+            return count
+        }
+
+        func horizontalOverlapRatio(_ left: CGRect, _ right: CGRect) -> CGFloat {
+            let smallerWidth = min(left.width, right.width)
+            guard smallerWidth > 0 else { return 0 }
+            let overlap = max(0, min(left.maxX, right.maxX) - max(left.minX, right.minX))
+            return overlap / smallerWidth
+        }
+
+        struct CandidateInfo {
+            let movement: Movement
+            let page: Int
+            let bounds: CGRect
+            let compactTitle: String
+            let titleOccursOnceInSource: Bool
+        }
+        let candidateInfo: [CandidateInfo?] = candidates.map { movement in
+            guard movement.extractionEvidence?.method == "vision-ocr",
+                  let evidence = movement.extractionEvidence,
+                  let page = evidence.page,
+                  let bounds = evidence.bounds else { return nil }
+            let title = compact(movement.title)
+            let source = compact(evidence.sourceText ?? "")
+            return CandidateInfo(
+                movement: movement,
+                page: page,
+                bounds: CGRect(x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height),
+                compactTitle: title,
+                titleOccursOnceInSource: !title.isEmpty && occurrenceCount(of: title, in: source) == 1
+            )
+        }
+
+        var variants: [[Movement]] = []
+        var repairAll = Array(repeating: true, count: candidates.count)
+        for leftIndex in candidates.indices {
+            guard let left = candidateInfo[leftIndex] else { continue }
+            for rightIndex in candidates.indices where rightIndex > leftIndex {
+                guard let right = candidateInfo[rightIndex],
+                      left.page == right.page,
+                      left.movement.date == right.movement.date,
+                      left.movement.amount == right.movement.amount,
+                      left.movement.kind == right.movement.kind,
+                      left.movement.flow == right.movement.flow,
+                      left.movement.extractionEvidence?.selectedAmount == right.movement.extractionEvidence?.selectedAmount,
+                      left.compactTitle == right.compactTitle,
+                      left.titleOccursOnceInSource,
+                      right.titleOccursOnceInSource else { continue }
+
+                let narrowIndex = left.bounds.height <= right.bounds.height ? leftIndex : rightIndex
+                let broadIndex = narrowIndex == leftIndex ? rightIndex : leftIndex
+                let narrowRect = narrowIndex == leftIndex ? left.bounds : right.bounds
+                let broadRect = narrowIndex == leftIndex ? right.bounds : left.bounds
+                let verticalOverlap = max(0, min(narrowRect.maxY, broadRect.maxY) - max(narrowRect.minY, broadRect.minY))
+                guard narrowRect.height > 0,
+                      narrowRect.height <= 0.018,
+                      broadRect.height >= narrowRect.height * 3,
+                      broadRect.height <= 0.12,
+                      verticalOverlap / narrowRect.height >= 0.98,
+                      horizontalOverlapRatio(narrowRect, broadRect) >= 0.80 else { continue }
+
+                let removed = broadIndex
+                var variant = candidates
+                var retained = variant[narrowIndex]
+                // A broader observation carried the foreign-purchase marker
+                // while the isolated crop did not. Preserve that conservative
+                // classification on the precise retained row.
+                retained.foreignCurrency = left.movement.foreignCurrency || right.movement.foreignCurrency
+                variant[narrowIndex] = retained
+                variant.remove(at: removed)
+                variants.append(variant)
+                repairAll[removed] = false
+            }
+        }
+
+        if repairAll.contains(false) {
+            variants.append(candidates.enumerated().compactMap { repairAll[$0.offset] ? $0.element : nil })
+        }
+        var unique: [[Movement]] = []
+        var seen = Set<String>()
+        for variant in variants where !variant.isEmpty {
+            let key = variant.map { $0.id.uuidString }.sorted().joined(separator: ",")
+            if seen.insert(key).inserted { unique.append(variant) }
+        }
+        return unique
     }
 
     /// Pick one complete Rappi evidence stream. Candidate streams are never
