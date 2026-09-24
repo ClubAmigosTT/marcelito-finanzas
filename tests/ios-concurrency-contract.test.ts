@@ -136,7 +136,11 @@ test("Vision escala el render por página sin desbordar memoria", async () => {
   assert.match(source, /let maxPixels: CGFloat = 5_000_000/);
   assert.match(source, /render\(page, longEdge: 2_400\)/);
   assert.match(source, /render\(page, longEdge: 3_200\)/);
-  assert.match(source, /if baseConfidence < 0\.88/);
+  assert.match(source, /useSantanderFinancialOCRRetry = issuerHint\?\.localizedCaseInsensitiveCompare\("Santander"\)/);
+  assert.match(source, /baseConfidence < 0\.88\s*\|\|\s*\(useSantanderFinancialOCRRetry && \(baseFinancialConfidence \?\? 1\) < 0\.88\)/);
+  assert.match(source, /meanConfidence\(selectedObservations\) < 0\.88\s*\|\|\s*\(useSantanderFinancialOCRRetry/);
+  assert.match(source, /preferOCRPass\(\s*detailObservations,\s*over: selectedObservations,\s*includeFinancialConfidence: useSantanderFinancialOCRRetry/);
+  assert.match(source, /preferOCRPass\(\s*contrastObservations,\s*over: selectedObservations,\s*includeFinancialConfidence: useSantanderFinancialOCRRetry/);
   assert.match(source, /var selectedImage = cgImage/);
 });
 
