@@ -63,6 +63,10 @@ privado:
 - Santander exige conciliación válida, columnas fijas demostradas, evidencia
   visual (página, texto, importe y bounds) para cada fila y un par de saldos
   impresos (`saldo anterior`/`saldo impreso`) en cada diagnóstico aceptado.
+- BBVA exige conciliación válida, columnas `CARGOS`/`ABONOS`/`SALDO`
+  calibradas, evidencia visual completa para cada movimiento MXN y permite
+  únicamente diagnósticos auxiliares `USD/TC/AUT` explícitamente excluidos
+  del libro.
 - Rappi exige conciliación válida, evidencia visual completa y que cada fila
   seleccionada corresponda a una línea visual; una fila no seleccionada o
   rechazada mantiene el estado en revisión.
@@ -70,7 +74,7 @@ privado:
 La prueba no modifica los umbrales ni convierte una fila incierta en válida.
 Si falta cualquiera de esas señales, `requiresReview` permanece en `true` y
 las filas no entran al libro canónico ni a los KPI. La versión del lector que
-implementa este contrato es `ios-reader-recovery-2026.09.24.5`.
+implementa este contrato es `ios-reader-recovery-2026.09.24.6`.
 
 También puedes usar el runner reproducible desde esta carpeta o desde la raíz
 del repositorio; conserva el
@@ -104,7 +108,7 @@ cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
   --manifest /ruta/privada/rappi-regression-manifest.json \
-  --reader-version ios-reader-recovery-2026.09.24.5 \
+  --reader-version ios-reader-recovery-2026.09.24.6 \
   --require-certified
 ```
 

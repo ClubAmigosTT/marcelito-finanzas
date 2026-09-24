@@ -117,11 +117,11 @@ final class ReaderContractTests: XCTestCase {
 
     func testIndependentOCRProofRequiresCompleteIssuerEvidence() {
         let bounds = MovementExtractionBounds(x: 0.1, y: 0.2, width: 0.8, height: 0.03)
-        func movement(method: String = "vision-ocr", sameVisualRow: Bool? = true) -> Movement {
+        func movement(account: String = "Santander", method: String = "vision-ocr", sameVisualRow: Bool? = true) -> Movement {
             Movement(
                 date: .now,
                 title: "Compra de prueba",
-                account: "Santander",
+                account: account,
                 category: "Otros / Por revisar",
                 amount: -100,
                 flow: .expense,
@@ -211,6 +211,47 @@ final class ReaderContractTests: XCTestCase {
                 rowBounds: bounds
             )],
             columnsCalibrated: nil
+        ))
+        let bbvaDiagnostic = OCRRowDiagnostic(
+            page: 2,
+            rawText: "15/06 Compra de prueba -100.00 9900.00",
+            selectedColumn: "CARGOS",
+            selectedAmount: 100,
+            reason: "CARGOS determina salida; SALDO calibrado por encabezado",
+            accepted: true,
+            rowBounds: bounds
+        )
+        let bbvaForeignAuxiliary = OCRRowDiagnostic(
+            page: 2,
+            rawText: "USD 20.00 TC 17.10 AUT 123",
+            reason: "bbva.foreign-auxiliary: se conservó evidencia USD/TC/AUT, pero no se inventó un importe MXN",
+            accepted: true
+        )
+        XCTAssertTrue(FinanceStore.hasIndependentOCRProofForTesting(
+            source: "BBVA",
+            reconciliation: .valid,
+            candidates: [movement(account: "BBVA")],
+            diagnostics: [bbvaDiagnostic, bbvaForeignAuxiliary],
+            columnsCalibrated: true
+        ))
+        XCTAssertFalse(FinanceStore.hasIndependentOCRProofForTesting(
+            source: "BBVA",
+            reconciliation: .valid,
+            candidates: [movement(account: "BBVA")],
+            diagnostics: [bbvaDiagnostic, bbvaForeignAuxiliary],
+            columnsCalibrated: false
+        ))
+        XCTAssertFalse(FinanceStore.hasIndependentOCRProofForTesting(
+            source: "BBVA",
+            reconciliation: .valid,
+            candidates: [movement(account: "BBVA")],
+            diagnostics: [bbvaDiagnostic, OCRRowDiagnostic(
+                page: 2,
+                rawText: "fila BBVA pendiente",
+                reason: "fila BBVA rechazada",
+                accepted: false
+            )],
+            columnsCalibrated: true
         ))
     }
 
