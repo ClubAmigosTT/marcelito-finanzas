@@ -539,6 +539,11 @@ struct ReaderPDFDiagnosticSnapshot {
 /// Small coordinate fixture used by the native reader contract tests. It
 /// mirrors Vision's normalized page coordinates without shipping a user's PDF
 /// or image in the repository.
+struct OCRTextBoxFixture {
+    let text: String
+    let boundingBox: CGRect
+}
+
 struct OCRObservationFixture {
     let page: Int
     let text: String
@@ -547,6 +552,9 @@ struct OCRObservationFixture {
     let width: Double
     let height: Double
     let confidence: Double
+    let dateEvidenceText: String?
+    let dateEvidenceBounds: CGRect?
+    let amountEvidenceBoxes: [OCRTextBoxFixture]
 
     init(
         page: Int = 0,
@@ -555,7 +563,10 @@ struct OCRObservationFixture {
         y: Double,
         width: Double = 0.12,
         height: Double = 0.02,
-        confidence: Double = 0.99
+        confidence: Double = 0.99,
+        dateEvidenceText: String? = nil,
+        dateEvidenceBounds: CGRect? = nil,
+        amountEvidenceBoxes: [OCRTextBoxFixture] = []
     ) {
         self.page = page
         self.text = text
@@ -564,6 +575,9 @@ struct OCRObservationFixture {
         self.width = width
         self.height = height
         self.confidence = confidence
+        self.dateEvidenceText = dateEvidenceText
+        self.dateEvidenceBounds = dateEvidenceBounds
+        self.amountEvidenceBoxes = amountEvidenceBoxes
     }
 }
 
@@ -908,7 +922,7 @@ final class FinanceStore {
     /// when saved PDF results need a deliberate replay. This release forces
     /// older persisted snapshots through the current reader; the refresh stays
     /// explicit so a full Vision pass never blocks app launch.
-    static let readerVersion = "ios-reader-recovery-2026.09.23.3"
+    static let readerVersion = "ios-reader-recovery-2026.09.23.4"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -1298,7 +1312,13 @@ final class FinanceStore {
                     width: fixture.width,
                     height: fixture.height
                 ),
-                confidence: fixture.confidence
+                confidence: fixture.confidence,
+                dateBoxes: fixture.dateEvidenceText.flatMap { text in
+                    fixture.dateEvidenceBounds.map { [OCRTextBox(text: text, boundingBox: $0)] }
+                } ?? [],
+                amountBoxes: fixture.amountEvidenceBoxes.map {
+                    OCRTextBox(text: $0.text, boundingBox: $0.boundingBox)
+                }
             )
         }
         let result = parseSantanderTable(
@@ -5455,7 +5475,8 @@ final class FinanceStore {
             ? Self.ocrObservations(
                 from: document,
                 pageIndexes: rappiPages,
-                prioritizeNumericEvidence: selectableSource == "Rappi"
+                prioritizeNumericEvidence: selectableSource == "Rappi",
+                issuerHint: selectableSource
             )
             : []
         try Task.checkCancellation()
@@ -5501,7 +5522,7 @@ final class FinanceStore {
             return Self.ocrText(from: coverObservations)
         }()
         try Task.checkCancellation()
-        let ocrPageConfidences: [Double]? = {
+        var ocrPageConfidences: [Double]? = {
             guard usedOCR else { return nil }
             let grouped = Dictionary(grouping: ocrObservations, by: \.page)
             let relevantPages = grouped.keys.filter { page in
@@ -5512,12 +5533,34 @@ final class FinanceStore {
                 )
                 let hasDate = pageText.range(of: #"(?i)(?:\b\d{4}\s*[/-]\s*\d{1,2}\s*[/-]\s*\d{1,2}|\b\d{1,2}\s*[/-]\s*(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,})|\b\d{1,2}\s+(?:de\s+)?[A-Za-zÁÉÍÓÚáéíóú]{3,})"#, options: .regularExpression) != nil
                 let hasAmount = pageText.range(of: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#, options: .regularExpression) != nil
+                let tableHeaderLabels = ["fecha", "folio", "descripcion", "deposito", "retiro", "saldo"]
+                let hasTableHeader = tableHeaderLabels.allSatisfy { normalizedPageText.contains($0) }
                 let hasTableMarker = ["movimientos", "deposito", "depositos", "retiro", "retiros", "cargos", "abonos", "saldo", "descripcion", "detalle"]
                     .contains { normalizedPageText.contains($0) }
-                // Legal/marketing pages in a scanned statement often have no
-                // table signal and should not lower the quality of the actual
-                // movement pages. If a page has a date, amount, or table
-                // marker it remains part of the quality gate.
+                if selectableSource.localizedCaseInsensitiveCompare("Santander") == .orderedSame {
+                    // A disclosure page can contain incidental dates and
+                    // currency figures. For Santander, require either the
+                    // printed table header or date and amount tokens aligned
+                    // in the statement's fixed transaction columns.
+                    let dateAnchors = (grouped[page] ?? []).flatMap(\.dateBoxes).filter {
+                        $0.centerX <= 0.14 && $0.text.range(
+                            of: #"(?:\b\d{1,2}\s*[-/.]\s*(?:\d{1,2}|[a-záéíóú]{3,})|\b\d{1,2}\s+[a-záéíóú]{3,})"#,
+                            options: [.regularExpression, .caseInsensitive]
+                        ) != nil
+                    }
+                    let amountAnchors = (grouped[page] ?? []).flatMap(\.amountBoxes).filter {
+                        $0.centerX >= 0.60 && $0.text.range(
+                            of: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#,
+                            options: .regularExpression
+                        ) != nil
+                    }
+                    let hasAlignedFinancialCells = dateAnchors.contains { date in
+                        amountAnchors.contains { abs($0.centerY - date.centerY) <= 0.03 }
+                    }
+                    return hasTableHeader || hasAlignedFinancialCells
+                }
+                // Keep the existing page-scope heuristic for the other issuers;
+                // Santander uses the stricter header/column geometry above.
                 return hasDate || hasAmount || hasTableMarker
             }
             let pages = relevantPages.isEmpty ? Array(grouped.keys) : relevantPages
@@ -5526,14 +5569,26 @@ final class FinanceStore {
                 if selectableSource.localizedCaseInsensitiveCompare("Rappi") == .orderedSame {
                     return Self.rappiFinancialConfidence(for: observations, pageIndex: page)
                 }
+                if selectableSource.localizedCaseInsensitiveCompare("Santander") == .orderedSame {
+                    // Long Santander descriptions and tracking references can
+                    // be faint even when the date, movement and running
+                    // balance cells are clear. Score the same financial
+                    // tokens that authorize the row, while keeping the
+                    // existing per-row and per-page thresholds unchanged.
+                    let financialConfidences = observations.compactMap { observation -> Double? in
+                        guard !observation.dateBoxes.isEmpty || !observation.amountBoxes.isEmpty else {
+                            return nil
+                        }
+                        return observation.financialConfidence ?? observation.confidence
+                    }
+                    return financialConfidences.isEmpty
+                        ? 0
+                        : financialConfidences.reduce(0, +) / Double(financialConfidences.count)
+                }
                 return observations.map(\.confidence).reduce(0, +) / Double(observations.count)
             }
             return values.isEmpty ? nil : values
         }()
-        let ocrConfidence = ocrPageConfidences.map { pages in
-            pages.reduce(0, +) / Double(pages.count)
-        }
-
         let ocrSourceEvidence = Self.sourceDetection(from: text, fileName: fileName)
         // Rappi's embedded font can erase every digit from PDFKit while its
         // issuer header remains trustworthy. If Vision recovers the financial
@@ -5618,7 +5673,8 @@ final class FinanceStore {
                     from: document,
                     pageIndexes: nil,
                     prioritizeNumericEvidence: false,
-                    forceRegionRecovery: true
+                    forceRegionRecovery: true,
+                    issuerHint: source
                 )
                 try Task.checkCancellation()
                 let retryResult = Self.parseSantanderTable(
@@ -5999,6 +6055,29 @@ final class FinanceStore {
             // have no generic text parser. Both remain rejected when Vision
             // is unavailable instead of guessing rows from global numbers.
             parsedCandidates = []
+        }
+        if usedOCR, source.localizedCaseInsensitiveCompare("Santander") == .orderedSame {
+            // Score only pages that the Santander table parser identified as
+            // containing a dated physical row. Legal disclosures and glossary
+            // pages can contain dates/currency values in prose; they are not
+            // OCR evidence for this statement's transaction table. Missing
+            // rows still fail the independent totals and row-rejection gates.
+            let transactionPages = Set(rowDiagnostics.compactMap { $0.page }.map { $0 - 1 }).sorted()
+            let observationsByPage = Dictionary(grouping: ocrObservations, by: \.page)
+            let transactionPageConfidences = transactionPages.compactMap { page -> Double? in
+                let financialConfidences = (observationsByPage[page] ?? []).compactMap { observation -> Double? in
+                    guard !observation.dateBoxes.isEmpty || !observation.amountBoxes.isEmpty else { return nil }
+                    return observation.financialConfidence ?? observation.confidence
+                }
+                guard !financialConfidences.isEmpty else { return nil }
+                return financialConfidences.reduce(0, +) / Double(financialConfidences.count)
+            }
+            if !transactionPageConfidences.isEmpty {
+                ocrPageConfidences = transactionPageConfidences
+            }
+        }
+        let ocrConfidence = ocrPageConfidences.map { pages in
+            pages.reduce(0, +) / Double(pages.count)
         }
         let candidates = parsedCandidates.map { candidate -> Movement in
             var corrected = candidate
@@ -7569,7 +7648,8 @@ final class FinanceStore {
         from document: PDFDocument,
         pageIndexes: Set<Int>? = nil,
         prioritizeNumericEvidence: Bool = false,
-        forceRegionRecovery: Bool = false
+        forceRegionRecovery: Bool = false,
+        issuerHint: String? = nil
     ) -> [OCRObservation] {
         var observations: [OCRObservation] = []
         let ciContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -7796,6 +7876,37 @@ final class FinanceStore {
             return pageObservations.map(\.confidence).reduce(0, +) / Double(pageObservations.count)
         }
 
+        func meanFinancialConfidence(_ pageObservations: [OCRObservation]) -> Double? {
+            let values = pageObservations.compactMap { observation -> Double? in
+                guard !observation.dateBoxes.isEmpty || !observation.amountBoxes.isEmpty else { return nil }
+                return observation.financialConfidence ?? observation.confidence
+            }
+            guard !values.isEmpty else { return nil }
+            return values.reduce(0, +) / Double(values.count)
+        }
+
+        let useSantanderFinancialOCRRetry = issuerHint?.localizedCaseInsensitiveCompare("Santander") == .orderedSame
+
+        func preferOCRPass(
+            _ candidate: [OCRObservation],
+            over current: [OCRObservation],
+            includeFinancialConfidence: Bool
+        ) -> Bool {
+            let candidateOverall = meanConfidence(candidate)
+            let currentOverall = meanConfidence(current)
+            let overallImproved = candidateOverall > currentOverall
+            let candidateFinancial = meanFinancialConfidence(candidate)
+            let currentFinancial = meanFinancialConfidence(current)
+            let financialImproved = candidateFinancial.map { value in
+                value > (currentFinancial ?? -1)
+            } ?? false
+            return overallImproved || (
+                includeFinancialConfidence
+                    && financialImproved
+                    && candidateOverall >= currentOverall - 0.05
+            )
+        }
+
         let numericPattern = try? NSRegularExpression(
             pattern: #"(?i)(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])|(?<!\d)(?:[0-9OBI]{4}\s*[\/\-.]\s*[0-9OBI]{1,2}\s*[\/\-.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,3}(?:\s*[\/\-.]\s*|\s+)(?:\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:(?:\s*[\/\-.]\s*|\s+)\d{2,4})?)(?![A-Za-z])"#
         )
@@ -7974,27 +8085,41 @@ final class FinanceStore {
                 var selectedObservations = baseObservations
                 var selectedImage = cgImage
                 let baseConfidence = meanConfidence(baseObservations)
+                let baseFinancialConfidence = meanFinancialConfidence(baseObservations)
                 // Small print and faint scan artifacts can produce a high
                 // count of low-confidence tokens even when the page is
-                // otherwise readable. Re-render only weak pages at a larger
-                // long edge; the pixel cap above keeps this bounded.
-                if baseConfidence < 0.88,
+                // otherwise readable. Include the financial-token average so
+                // clear prose cannot hide faint dates and amounts. The pixel
+                // cap keeps this detail pass bounded.
+                if (baseConfidence < 0.88
+                    || (useSantanderFinancialOCRRetry && (baseFinancialConfidence ?? 1) < 0.88)),
                    let detailImage = render(page, longEdge: 3_200) {
                     let detailObservations = recognize(detailImage, page: pageIndex)
                     guard !Task.isCancelled else { return }
-                    if meanConfidence(detailObservations) > meanConfidence(selectedObservations) {
+                    if preferOCRPass(
+                        detailObservations,
+                        over: selectedObservations,
+                        includeFinancialConfidence: useSantanderFinancialOCRRetry
+                    ) {
                         selectedObservations = detailObservations
                         selectedImage = detailImage
                     }
                 }
                 // A contrast pass is attempted only for visually weak pages.
                 // It is bounded to one temporary image and the original
-                // result wins whenever the retry does not improve confidence.
-                if meanConfidence(selectedObservations) < 0.88,
+                // result wins whenever neither financial nor page confidence
+                // improves.
+                if (meanConfidence(selectedObservations) < 0.88
+                    || (useSantanderFinancialOCRRetry
+                        && (meanFinancialConfidence(selectedObservations) ?? 1) < 0.88)),
                    let contrastImage = enhancedImage(from: selectedImage) {
                     let contrastObservations = recognize(contrastImage, page: pageIndex)
                     guard !Task.isCancelled else { return }
-                    if meanConfidence(contrastObservations) > meanConfidence(selectedObservations) {
+                    if preferOCRPass(
+                        contrastObservations,
+                        over: selectedObservations,
+                        includeFinancialConfidence: useSantanderFinancialOCRRetry
+                    ) {
                         selectedObservations = contrastObservations
                         // Keep the image that produced the selected evidence in
                         // sync with the observations. Rappi's cover crop below
@@ -10930,17 +11055,28 @@ final class FinanceStore {
     /// Change scale and whitespace only; never expand into neighbouring cells.
     private static func santanderRetryImage(_ crop: CGImage, scale: CGFloat) -> CGImage? {
         let padding: CGFloat = 20
-        let size = CGSize(width: CGFloat(crop.width) * scale + padding * 2,
-                          height: CGFloat(crop.height) * scale + padding * 2)
-        let format = UIGraphicsImageRendererFormat()
-        format.scale = 1
-        format.opaque = true
-        return UIGraphicsImageRenderer(size: size, format: format).image { context in
-            UIColor.white.setFill()
-            context.fill(CGRect(origin: .zero, size: size))
-            UIImage(cgImage: crop).draw(in: CGRect(x: padding, y: padding,
-                width: CGFloat(crop.width) * scale, height: CGFloat(crop.height) * scale))
-        }.cgImage
+        let width = Int((CGFloat(crop.width) * scale + padding * 2).rounded())
+        let height = Int((CGFloat(crop.height) * scale + padding * 2).rounded())
+        guard width > 0, height > 0,
+              let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+              ) else { return nil }
+        context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .high
+        context.draw(crop, in: CGRect(
+            x: padding,
+            y: padding,
+            width: CGFloat(crop.width) * scale,
+            height: CGFloat(crop.height) * scale
+        ))
+        return context.makeImage()
     }
 
     private static func parseSantanderTable(
@@ -11195,6 +11331,12 @@ final class FinanceStore {
         )
         var parsed: [Movement] = []
         var diagnostics: [OCRRowDiagnostic] = []
+        struct DateAnchor {
+            let box: CGRect
+            let text: String
+            let confidence: Double
+            let sourceObservation: OCRObservation
+        }
         struct PhysicalRow {
             let observations: [OCRObservation]
             let band: CGRect
@@ -11211,7 +11353,12 @@ final class FinanceStore {
 
         // Phase one retains physical rows, including a readable printed balance
         // when another cell is invalid. No preceding accepted row is consulted.
-        func extractCells(_ row: [OCRObservation]) -> [[OCRObservation]] {
+        func extractCells(
+            _ row: [OCRObservation],
+            band: CGRect,
+            anchorIndex: Int,
+            anchors: [DateAnchor]
+        ) -> [[OCRObservation]] {
             var cells = Array(repeating: [OCRObservation](), count: 3)
             for observation in row {
                 let tokens: [OCRTextBox]
@@ -11229,6 +11376,15 @@ final class FinanceStore {
                     }
                 }
                 for token in tokens {
+                    let tokenY = token.boundingBox.midY
+                    guard tokenY >= band.minY && tokenY <= band.maxY else { continue }
+                    let nearestAnchors = anchors.enumerated().map { index, anchor in
+                        (index, abs(anchor.box.midY - tokenY))
+                    }.sorted { $0.1 < $1.1 }
+                    guard nearestAnchors.first?.0 == anchorIndex,
+                          nearestAnchors.count == 1 || nearestAnchors[1].1 - nearestAnchors[0].1 >= 0.002 else {
+                        continue
+                    }
                     guard let cell = (0..<3).first(where: {
                         token.boundingBox.minX >= cellEdges[$0]
                             && token.boundingBox.maxX <= cellEdges[$0 + 1]
@@ -11262,17 +11418,83 @@ final class FinanceStore {
                     boundingBox: observation.boundingBox, confidence: observation.confidence,
                     dateBoxes: observation.dateBoxes)
             }
+            var parseFailureReason: String?
             physical.movement = parseSantanderRow(metadata + physical.cells.flatMap { $0 },
                 dateRegex: dateRegex, amountRegex: amountRegex, defaultYear: defaultYear,
                 previousRunningBalance: nil, columns: columns, dateMaxX: dateMaxX,
-                titleBounds: titleBounds, requireFixedMovementColumn: true)?.movement
-            if physical.movement == nil { physical.problem = "santander.date-description-or-amount-invalid" }
+                titleBounds: titleBounds, requireFixedMovementColumn: true,
+                failureReason: { parseFailureReason = $0 })?.movement
+            if physical.movement == nil {
+                physical.problem = parseFailureReason ?? "santander.date-description-or-amount-invalid"
+            }
         }
 
         // Keep only one rendered page in memory. These bounded numeric crops
         // are triggered by cell/equation failures, even on a high-confidence page.
         var renderedPage: Int?
         var renderedImage: CGImage?
+        var renderedDateAnchorsPage: Int?
+        var renderedDateAnchors: [CGRect] = []
+        func highResolutionDateAnchors(in image: CGImage, pageIndex: Int) -> [CGRect] {
+            if renderedDateAnchorsPage == pageIndex { return renderedDateAnchors }
+            renderedDateAnchorsPage = pageIndex
+            let request = VNRecognizeTextRequest()
+            request.recognitionLevel = .accurate
+            request.usesLanguageCorrection = true
+            request.recognitionLanguages = ["en-US"]
+            request.customWords = [
+                "SANTANDER", "BBVA", "BANCOMER", "AMERICAN EXPRESS", "AMEX",
+                "RAPPICARD", "RAPPI", "PAGO POR SPEI", "BONIFICACIÓN CON CASHBACK",
+                "DEPÓSITOS", "RETIROS", "CARGOS", "ABONOS", "SALDO",
+                "DESCRIPCIÓN", "DETALLE", "MOVIMIENTOS", "FECHA",
+                "MAYO", "JUNIO", "JULIO", "AGOSTO", "SEPTIEMBRE",
+                "OCTUBRE", "NOVIEMBRE", "DICIEMBRE",
+            ]
+            guard (try? VNImageRequestHandler(cgImage: image, options: [:]).perform([request])) != nil else {
+                renderedDateAnchors = []
+                return []
+            }
+            renderedDateAnchors = (request.results ?? []).compactMap { result -> CGRect? in
+                guard let candidate = result.topCandidates(1).first else { return nil }
+                let text = candidate.string
+                let range = NSRange(text.startIndex..<text.endIndex, in: text)
+                let boundedDate = dateRegex.firstMatch(in: text, range: range).flatMap { match -> CGRect? in
+                    guard let textRange = Range(match.range, in: text),
+                          let box = try? candidate.boundingBox(for: textRange),
+                          box.boundingBox.midX <= dateMaxX else { return nil }
+                    return box.boundingBox
+                }
+                let normalized = text.folding(
+                    options: [.diacriticInsensitive, .caseInsensitive],
+                    locale: .current
+                )
+                let hasDate = boundedDate != nil || dateRegex.firstMatch(in: text, range: range) != nil
+                let isDateCell = hasDate
+                    && (boundedDate?.midX ?? result.boundingBox.midX) <= dateMaxX
+                    && !normalized.contains("periodo")
+                    && !normalized.contains("corte")
+                    && !normalized.contains("pagina")
+                return isDateCell ? (boundedDate ?? result.boundingBox) : nil
+            }.sorted { $0.midY > $1.midY }
+            return renderedDateAnchors
+        }
+        func highResolutionBand(near currentBand: CGRect, in image: CGImage, pageIndex: Int) -> CGRect? {
+            let anchors = highResolutionDateAnchors(in: image, pageIndex: pageIndex)
+            guard let index = anchors.indices.min(by: {
+                abs(anchors[$0].midY - currentBand.midY) < abs(anchors[$1].midY - currentBand.midY)
+            }), abs(anchors[index].midY - currentBand.midY) <= 0.05 else { return nil }
+            let anchor = anchors[index]
+            let upper = min(anchor.maxY + 0.004, 1)
+            // Leave a small clear margin after the next date anchor. The
+            // simulator's PDFKit render can shift this boundary by a few
+            // pixels versus the original PDF raster; a 0.002 gap keeps the
+            // adjacent date row outside the amount crop while retaining the
+            // full current-row baseline.
+            let lower = index + 1 < anchors.count ? anchors[index + 1].maxY + 0.002 : 0
+            let numericBottom = max(lower, anchor.minY - 0.006)
+            guard upper > numericBottom else { return nil }
+            return CGRect(x: tableLeft, y: numericBottom, width: tableSpan, height: upper - numericBottom)
+        }
         func retryCells(_ physical: inout PhysicalRow) {
             guard !physical.retried, let document, let pageIndex = physical.observations.first?.page,
                   let page = document.page(at: pageIndex) else { return }
@@ -11285,24 +11507,50 @@ final class FinanceStore {
                 renderedPage = pageIndex
             }
             guard let image = renderedImage else { return }
+            let retryBand = highResolutionBand(near: physical.band, in: image, pageIndex: pageIndex)
+                ?? physical.band
             // Recover the failed cell independently. A noisy crop of an
             // already readable withdrawal must not prevent reading its saldo.
             // Equation failures (no structural problem) still retry all cells.
             var recovered = physical.cells
             let targetCells = Array(Set(santanderRetryCells(problem: physical.problem)
                 + (physical.balance == nil ? [2] : []))).sorted()
-            var outcomes: [String] = []
+            let beforeRetryCounts = physical.cells.map { $0.count }.map(String.init).joined(separator: "-")
+            var outcomes = [
+                "pre-cells-\(beforeRetryCounts)",
+                "band-y\(Int((retryBand.minY * 1_000).rounded()))-h\(Int((retryBand.height * 1_000).rounded()))"
+            ]
             for cell in targetCells {
-                let region = CGRect(x: cellEdges[cell], y: physical.band.minY,
-                    width: cellEdges[cell + 1] - cellEdges[cell], height: physical.band.height)
+                var cropMinY = retryBand.minY
+                var cropMaxY = retryBand.maxY
+                let tokenBounds = physical.cells[cell]
+                    .map(\.boundingBox)
+                    .reduce(CGRect.null) { $0.union($1) }
+                if !tokenBounds.isNull {
+                    let focusedMinY = max(retryBand.minY, tokenBounds.minY - 0.004)
+                    let focusedMaxY = min(retryBand.maxY, tokenBounds.maxY + 0.004)
+                    if focusedMaxY > focusedMinY {
+                        cropMinY = focusedMinY
+                        cropMaxY = focusedMaxY
+                    }
+                }
+                // When a first pass already located this cell's token, keep
+                // the retry crop tight around that printed token. The date
+                // anchor can span a taller description block, and including
+                // nearby rows in a balance crop can make independent Vision
+                // scales disagree even though the original token was clear.
+                let region = CGRect(x: cellEdges[cell], y: cropMinY,
+                    width: cellEdges[cell + 1] - cellEdges[cell], height: cropMaxY - cropMinY)
                 let pixels = santanderCropPixelRect(region, width: image.width, height: image.height)
+                let pixelSize = "px-\(Int(pixels.width))x\(Int(pixels.height))"
                 physical.retryOutcome = "crop-unavailable-cell-\(cell)"
                 guard !pixels.isEmpty, let crop = image.cropping(to: pixels) else {
-                    outcomes.append("crop-unavailable-cell-\(cell)"); continue
+                    outcomes.append("crop-unavailable-cell-\(cell)-\(pixelSize)"); continue
                 }
                 var readings: [String?] = []
                 var confidences: [Double] = []
-                for scale: CGFloat in [1, 1.5, 2] {
+                let retryScales: [CGFloat] = [1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4]
+                for scale in retryScales {
                     guard let variant = santanderRetryImage(crop, scale: scale) else {
                         readings.append(nil); continue
                     }
@@ -11317,14 +11565,36 @@ final class FinanceStore {
                         .trimmingCharacters(in: .whitespacesAndNewlines))
                     confidences.append(contentsOf: candidates.map { Double($0.confidence) })
                 }
-                physical.retryTexts[cell] = zip(["1x", "1.5x", "2x"], readings)
+                var voteIDs: [String: Int] = [:]
+                var nextVoteID = 1
+                let votePattern = readings.map { reading -> String in
+                    guard let reading,
+                          let normalized = santanderNormalizedCellReading(reading),
+                          !normalized.isEmpty,
+                          let amount = parseAmount(normalized) else { return "0" }
+                    let key = NSDecimalNumber(decimal: amount).stringValue
+                    if let existing = voteIDs[key] { return String(existing) }
+                    let assigned = nextVoteID
+                    voteIDs[key] = assigned
+                    nextVoteID += 1
+                    return String(assigned)
+                }.joined(separator: "-")
+                outcomes.append("votes-cell-\(cell)-\(votePattern)")
+                let retryScaleLabels = retryScales.map { scale in
+                    scale == scale.rounded() ? "\(Int(scale))x" : "\(scale)x"
+                }
+                physical.retryTexts[cell] = zip(retryScaleLabels, readings)
                     .map { "\($0.0): \($0.1 ?? "<read-error>")" }.joined(separator: "\n")
                 guard let text = santanderCellConsensus(readings) else {
                     // A disputed reread cannot silently retain an old value.
                     recovered[cell] = []
-                    outcomes.append("no-consensus-cell-\(cell)"); continue
+                    outcomes.append("no-consensus-cell-\(cell)-\(pixelSize)"); continue
                 }
-                if text.isEmpty { recovered[cell] = []; outcomes.append("blank-cell-\(cell)"); continue }
+                if text.isEmpty {
+                    recovered[cell] = []
+                    outcomes.append("blank-cell-\(cell)-\(pixelSize)")
+                    continue
+                }
                 // Consensus returns one normalized monetary value; validate the
                 // entire normalized token before creating a recovered observation.
                 let matches = allMatches(in: text, regex: amountRegex)
@@ -11332,11 +11602,11 @@ final class FinanceStore {
                 guard matches.count == 1,
                       matches[0].text.trimmingCharacters(in: .whitespacesAndNewlines) == text,
                       parseAmount(text) != nil else {
-                    outcomes.append("ambiguous-crop-cell-\(cell)"); continue
+                    outcomes.append("ambiguous-crop-cell-\(cell)-\(pixelSize)"); continue
                 }
                 recovered[cell] = [OCRObservation(page: pageIndex, text: text, boundingBox: region,
                     confidence: confidences.min() ?? 0)]
-                outcomes.append("read-cell-\(cell)")
+                outcomes.append("read-cell-\(cell)-\(pixelSize)")
             }
             physical.cells = recovered
             physical.retryOutcome = outcomes.joined(separator: ",")
@@ -11345,30 +11615,53 @@ final class FinanceStore {
 
         for page in byPage.keys.sorted() {
             let pageObservations = byPage[page] ?? []
-            let anchors = pageObservations.compactMap { observation -> CGRect? in
+            let anchors = pageObservations.compactMap { observation -> DateAnchor? in
                 let normalized = observation.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
                 let boundedDate = observation.dateBoxes.first(where: { box in
                     box.centerX <= dateMaxX && firstMatch(in: box.text, regex: dateRegex) != nil
                 })
-                let hasDate = boundedDate != nil || firstMatch(in: observation.text, regex: dateRegex) != nil
-                let isDateCell = hasDate
-                    && (boundedDate?.centerX ?? observation.centerX) <= dateMaxX
+                let dateSource = boundedDate?.text ?? observation.text
+                guard let dateText = firstMatch(in: dateSource, regex: dateRegex)?.text else { return nil }
+                let dateBounds = boundedDate?.boundingBox ?? observation.boundingBox
+                let isDateCell =
+                    (boundedDate != nil || observation.boundingBox.minX < dateMaxX)
+                    && dateBounds.midX <= dateMaxX
                     && !normalized.contains("periodo")
                     && !normalized.contains("corte")
                     && !normalized.contains("pagina")
-                return isDateCell ? (boundedDate?.boundingBox ?? observation.boundingBox) : nil
-            }.sorted { $0.midY > $1.midY }
-            for (index, anchor) in anchors.enumerated() {
+                return isDateCell ? DateAnchor(box: dateBounds, text: dateText,
+                    confidence: observation.confidence, sourceObservation: observation) : nil
+            }.sorted { $0.box.midY > $1.box.midY }
+            for (index, dateAnchor) in anchors.enumerated() {
+                let anchor = dateAnchor.box
                 let upper = min(anchor.maxY + 0.004, 1)
-                let lower = index + 1 < anchors.count ? anchors[index + 1].maxY + 0.004 : 0
+                let lower = index + 1 < anchors.count ? anchors[index + 1].box.maxY + 0.004 : 0
                 let row = pageObservations.filter { $0.centerY <= upper && $0.centerY > lower }
                     .sorted { $0.centerY == $1.centerY ? $0.centerX < $1.centerX : $0.centerY > $1.centerY }
-                // Numeric cells occupy the date baseline; continuation lines
-                // belong to the description and cannot create money candidates.
+                var rowWithDate = row
+                // A Vision observation may contain several baselines: its
+                // substring date box can delimit this row while the parent's
+                // center falls just outside the selected band. Carry the
+                // exact date-bearing observation into the row so its own
+                // description text stays linked to that date.
+                if !rowWithDate.contains(where: {
+                    $0.page == dateAnchor.sourceObservation.page
+                        && $0.boundingBox == dateAnchor.sourceObservation.boundingBox
+                        && $0.text == dateAnchor.sourceObservation.text
+                }) {
+                    rowWithDate.insert(dateAnchor.sourceObservation, at: 0)
+                }
+                let dateEvidence = OCRObservation(page: page, text: dateAnchor.text,
+                    boundingBox: anchor, confidence: dateAnchor.confidence,
+                    dateBoxes: [OCRTextBox(text: dateAnchor.text, boundingBox: anchor)])
+                rowWithDate.insert(dateEvidence, at: 0)
+                // Financial substrings are assigned to their closest printed
+                // date anchor, even when Vision grouped several baselines in
+                // one parent observation.
                 let numericBottom = max(lower, anchor.minY - 0.006)
                 let band = CGRect(x: tableLeft, y: numericBottom, width: tableSpan, height: upper - numericBottom)
-                let numericRow = row.filter { $0.centerY >= band.minY }
-                var physical = PhysicalRow(observations: row, band: band, cells: extractCells(numericRow))
+                var physical = PhysicalRow(observations: rowWithDate, band: band,
+                    cells: extractCells(pageObservations, band: band, anchorIndex: index, anchors: anchors))
                 decode(&physical)
                 if physical.problem != nil { retryCells(&physical) }
                 physicalRows.append(physical)
@@ -11385,7 +11678,16 @@ final class FinanceStore {
                 guard let previousPrintedBalance, let balance = row.balance, let movement = row.movement else { return false }
                 return previousPrintedBalance + movement.amount == balance
             }
-            if physical.problem == nil, !equationMatches(physical) { retryCells(&physical) }
+            // A missing prior printed balance cannot validate or invalidate
+            // this row's equation. Retrying all cells in that case can erase
+            // already readable movement/balance evidence when a crop has no
+            // independent OCR consensus. Keep the row pending for the broken
+            // link, retain its printed balance, and let the next row resume.
+            if physical.problem == nil,
+               previousPrintedBalance != nil,
+               !equationMatches(physical) {
+                retryCells(&physical)
+            }
             var problem = physical.problem
             if problem == nil {
                 if previousPrintedBalance == nil { problem = "santander.previous-printed-balance-unavailable" }
@@ -11738,7 +12040,8 @@ final class FinanceStore {
         dateMaxX: CGFloat? = nil,
         titleBounds: (min: CGFloat, max: CGFloat)? = nil,
         requireFixedMovementColumn: Bool = false,
-        requireBalanceEquation: Bool = false
+        requireBalanceEquation: Bool = false,
+        failureReason: ((String) -> Void)? = nil
     ) -> SantanderRowResult? {
         let dateToken: String? = row.compactMap { observation in
             if let dateMaxX,
@@ -11753,8 +12056,12 @@ final class FinanceStore {
                   let match = firstMatch(in: observation.text, regex: dateRegex) else { return nil }
             return match.text
         }.first
-        guard let dateToken,
-              let date = parseDate(dateToken, defaultYear: defaultYear) else {
+        guard let dateToken else {
+            failureReason?("santander.row-date-missing")
+            return nil
+        }
+        guard let date = parseDate(dateToken, defaultYear: defaultYear) else {
+            failureReason?("santander.row-date-invalid")
             return nil
         }
 
@@ -11769,6 +12076,7 @@ final class FinanceStore {
             "estado de cuenta nomina"
         ]
         guard !ignoredPhrases.contains(where: { normalizedFullText.contains($0) }) else {
+            failureReason?("santander.row-administrative-text")
             return nil
         }
 
@@ -11854,7 +12162,10 @@ final class FinanceStore {
                 )
             }
         }
-        guard !amountCandidates.isEmpty else { return nil }
+        guard !amountCandidates.isEmpty else {
+            failureReason?("santander.row-movement-amount-missing")
+            return nil
+        }
 
         // On Santander's table the deposit and withdrawal columns sit before
         // the running balance. Prefer those columns so the balance is never
@@ -11907,7 +12218,10 @@ final class FinanceStore {
                 let populatedColumns = [depositCandidates, withdrawalCandidates]
                     .filter { !$0.isEmpty }
                 guard populatedColumns.count == 1,
-                      populatedColumns[0].count == 1 else { return nil }
+                      populatedColumns[0].count == 1 else {
+                    failureReason?("santander.row-movement-column-ambiguous")
+                    return nil
+                }
                 return populatedColumns[0][0]
             }
             return wholeRowMovement
@@ -11922,7 +12236,10 @@ final class FinanceStore {
                     return fallbackCandidates.first
                 }()
         }()
-        guard let selected else { return nil }
+        guard let selected else {
+            failureReason?("santander.row-movement-column-unresolved")
+            return nil
+        }
         let balanceCandidates = amountCandidates
             .filter { $0.x >= columns.balanceMinX && $0.x < 0.99 }
             .sorted { $0.order < $1.order }
@@ -11966,6 +12283,7 @@ final class FinanceStore {
             guard let balanceDelta,
                   deltaMatchesColumn,
                   (selectedColumn == "DEPÓSITO" ? balanceDelta > 0 : balanceDelta < 0) else {
+                failureReason?("santander.row-balance-equation-mismatch")
                 return nil
             }
         }
@@ -12048,7 +12366,18 @@ final class FinanceStore {
             title = title.replacingOccurrences(of: #"(?i)\s+RFC\s*$"#, with: "", options: .regularExpression)
         }
         title = cleanMerchantTitle(title)
-        guard title.count >= 3, title.rangeOfCharacter(from: .letters) != nil, !isAdministrativeTitle(title) else { return nil }
+        guard title.count >= 3 else {
+            failureReason?("santander.row-description-too-short")
+            return nil
+        }
+        guard title.rangeOfCharacter(from: .letters) != nil else {
+            failureReason?("santander.row-description-no-letters")
+            return nil
+        }
+        guard !isAdministrativeTitle(title) else {
+            failureReason?("santander.row-description-administrative")
+            return nil
+        }
 
         let titleNormalized = title.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
@@ -12150,6 +12479,16 @@ final class FinanceStore {
             "viaje", "hotel", "hospedaje", "aerolinea", "vuelo", "avion",
             "transporte", "uber", "taxi", "metro", "renta de auto", "destino", "equipaje"
         ].contains { titleNormalized.contains($0) }
+        let financialConfidence = row.compactMap { observation -> Double? in
+            let dateColumn = dateMaxX ?? CGFloat(0.24)
+            let hasDateEvidence = !observation.dateBoxes.isEmpty
+                || (observation.centerX <= dateColumn
+                    && firstMatch(in: observation.text, regex: dateRegex) != nil)
+            let hasAmountEvidence = !observation.amountBoxes.isEmpty
+                || !allMatches(in: observation.text, regex: amountRegex).isEmpty
+            guard hasDateEvidence || hasAmountEvidence else { return nil }
+            return observation.financialConfidence ?? observation.confidence
+        }.min() ?? row.map(\.confidence).min() ?? 0
 
         let movement = Movement(
             date: date,
@@ -12164,7 +12503,7 @@ final class FinanceStore {
             extractionEvidence: MovementExtractionEvidence(
                 method: "vision-ocr",
                 page: row.first.map { $0.page + 1 },
-                confidence: row.map(\.confidence).min() ?? 0,
+                confidence: financialConfidence,
                 sourceText: String(fullText.prefix(240)),
                 bounds: extractionBounds(for: row),
                 selectedColumn: selectedColumn,

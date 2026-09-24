@@ -452,6 +452,12 @@ final class NativeCorpusContractTests: XCTestCase {
         }
 
         var report: [[String: String]] = []
+        func recordDiagnosticItem(_ item: [String: String]) {
+            report.append(item)
+            guard let data = try? JSONSerialization.data(withJSONObject: item, options: [.sortedKeys]),
+                  let line = String(data: data, encoding: .utf8) else { return }
+            FileHandle.standardOutput.write(Data(("NATIVE_CORPUS_DIAGNOSTIC_ITEM " + line + "\n").utf8))
+        }
 
         for file in files {
             do {
@@ -473,6 +479,11 @@ final class NativeCorpusContractTests: XCTestCase {
                 let summary = result.snapshot.summary
                 var summaryFields: [String] = []
                 if summary?.previousBalance != nil { summaryFields.append("previousBalance") }
+                if summary?.cashBalance != nil { summaryFields.append("cashBalance") }
+                if summary?.depositTotal != nil { summaryFields.append("depositTotal") }
+                if summary?.withdrawalTotal != nil { summaryFields.append("withdrawalTotal") }
+                if summary?.depositCount != nil { summaryFields.append("depositCount") }
+                if summary?.withdrawalCount != nil { summaryFields.append("withdrawalCount") }
                 if summary?.statementBalance != nil { summaryFields.append("statementBalance") }
                 if summary?.debtBalance != nil { summaryFields.append("debtBalance") }
                 if summary?.newCharges != nil { summaryFields.append("newCharges") }
@@ -480,6 +491,71 @@ final class NativeCorpusContractTests: XCTestCase {
                 if summary?.paymentForNoInterest != nil { summaryFields.append("paymentForNoInterest") }
                 let acceptedDiagnosticRows = result.rowDiagnostics.filter(\.accepted).count
                 let candidateRows = result.reconciliation.extractedMovementCount ?? 0
+                let visionEvidence = result.snapshot.movements.compactMap { movement -> MovementExtractionEvidence? in
+                    guard let evidence = movement.extractionEvidence,
+                          evidence.method == "vision-ocr" else { return nil }
+                    return evidence
+                }
+                let lowConfidenceVisionRows = visionEvidence.filter { $0.confidence < 0.88 }.count
+                let lowestVisionConfidence = visionEvidence.map(\.confidence).min()
+                let lowConfidenceVisionRowsByPage = Dictionary(grouping: visionEvidence, by: { $0.page ?? 0 })
+                    .filter { _, rows in rows.contains(where: { $0.confidence < 0.88 }) }
+                    .keys.sorted()
+                    .map { page in
+                        let count = visionEvidence.filter { ($0.page ?? 0) == page && $0.confidence < 0.88 }.count
+                        return "p\(page)=\(count)"
+                    }
+                let missingStoredEvidenceRows = visionEvidence.filter { evidence in
+                    (evidence.page ?? 0) < 1
+                        || evidence.sourceText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false
+                        || !evidence.confidence.isFinite
+                }.count
+                let mismatchClasses = (result.reconciliation.reason ?? "")
+                    .components(separatedBy: ";")
+                    .compactMap { raw -> String? in
+                        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        let knownPrefixes = [
+                            "depósitos", "retiros", "cantidad de depósitos", "cantidad de retiros",
+                            "saldo final", "cargos", "nacionales", "moneda extranjera",
+                            "nuevas transacciones", "nuevos cargos", "pagos y abonos"
+                        ]
+                        if let label = knownPrefixes.first(where: { value.hasPrefix($0 + ":") }) { return label }
+                        if value.contains("no se reconstruyeron filas") { return "filas no reconstruidas" }
+                        if value.contains("importe(s) individual(es) superan") { return "importe individual excede total" }
+                        return value.isEmpty ? nil : "otro desajuste"
+                    }
+                let rejectedReasonClasses = Dictionary(grouping: rejectedRows) { row -> String in
+                    let reason = row.reason.lowercased()
+                    if reason.hasPrefix("rappi.visual-stream-unreconciled") { return "rappi.stream-unreconciled" }
+                    if reason.hasPrefix("rappi.visual-row-unselected") { return "rappi.row-unselected" }
+                    if reason.hasPrefix("rappi.visual-row-not-reconstructed") { return "rappi.row-not-reconstructed" }
+                    if let code = reason.range(of: #"^santander\.[a-z0-9.-]+"#,
+                                               options: .regularExpression) {
+                        return String(reason[code])
+                    }
+                    if reason.hasPrefix("fila amex rechazada") { return "amex.row-rejected" }
+                    if reason.hasPrefix("bbva.foreign-auxiliary") { return "bbva.foreign-auxiliary" }
+                    return "other-rejection"
+                }.mapValues(\.count)
+                let safeRejectedRows = rejectedRows.map { row -> String in
+                    let reason = row.reason.lowercased()
+                    let code = reason.range(of: #"^santander\.[a-z0-9.-]+"#,
+                                            options: .regularExpression)
+                        .map { String(reason[$0]) } ?? "other-rejection"
+                    let retry = reason.range(of: #"resultado ([a-z0-9-]+(?:,[a-z0-9-]+)*)"#,
+                                             options: .regularExpression)
+                        .map { String(reason[$0]).replacingOccurrences(of: "resultado ", with: "") }
+                        ?? "unknown"
+                    let amountPattern = #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
+                    let cellCounts = row.cellTexts?.map { matchCount(amountPattern, in: $0) }
+                        .map(String.init).joined(separator: "/") ?? "?"
+                    let retryCounts = row.cellRetryTexts?.map { matchCount(amountPattern, in: $0) }
+                        .map(String.init).joined(separator: "/") ?? "?"
+                    let bounds = row.rowBounds.map {
+                        "y\(Int(($0.y * 1_000).rounded()))-h\(Int(($0.height * 1_000).rounded()))"
+                    } ?? "bounds-unknown"
+                    return "p\(row.page.map(String.init) ?? "?")-r\(row.rowOrdinal.map(String.init) ?? "?"):\(code):\(retry):cells=\(cellCounts):retry-cells=\(retryCounts):\(bounds)"
+                }.sorted()
                 let requiresReview = result.ocrFallbackNeedsReview
                     || result.ocrColumnCalibrationNeedsReview
                     || result.ocrConfidenceNeedsReview
@@ -494,9 +570,24 @@ final class NativeCorpusContractTests: XCTestCase {
                     "rows": String(result.snapshot.movements.count),
                     "extractedRows": String(result.reconciliation.extractedMovementCount ?? result.snapshot.movements.count),
                     "requiresReview": String(requiresReview),
+                    "ocrFallbackNeedsReview": String(result.ocrFallbackNeedsReview),
+                    "ocrColumnCalibrationNeedsReview": String(result.ocrColumnCalibrationNeedsReview),
+                    "ocrConfidenceNeedsReview": String(result.ocrConfidenceNeedsReview),
+                    "ocrConfidencePercent": result.ocrConfidence.map { String(Int(($0 * 100).rounded())) } ?? "",
+                    "minimumPageConfidencePercent": result.ocrPageConfidences?.min().map { String(Int(($0 * 100).rounded())) } ?? "",
+                    "ocrPageConfidencePercentages": result.ocrPageConfidences?.map { String(Int(($0 * 100).rounded())) }.joined(separator: ",") ?? "",
+                    "visionRowsBelow88Confidence": String(lowConfidenceVisionRows),
+                    "visionRowsBelow80Confidence": String(visionEvidence.filter { $0.confidence < 0.80 }.count),
+                    "visionRows80To87Confidence": String(visionEvidence.filter { $0.confidence >= 0.80 && $0.confidence < 0.88 }.count),
+                    "minimumVisionRowConfidencePercent": lowestVisionConfidence.map { String(Int(($0 * 100).rounded())) } ?? "",
+                    "visionRowsBelow88ConfidenceByPage": lowConfidenceVisionRowsByPage.joined(separator: ","),
+                    "visionRowsMissingStoredEvidence": String(missingStoredEvidenceRows),
+                    "reconciliationMismatchClasses": mismatchClasses.joined(separator: ","),
+                    "rejectedReasonClasses": rejectedReasonClasses.keys.sorted().map { "\($0)=\(rejectedReasonClasses[$0] ?? 0)" }.joined(separator: ","),
                     "diagnosticRows": String(result.rowDiagnostics.count),
                     "acceptedDiagnosticRows": String(acceptedDiagnosticRows),
                     "rejectedRows": String(rejectedRows.count),
+                    "rejectedRowsSafe": safeRejectedRows.joined(separator: ","),
                     "rejectedRowsWithTwoISODateTokens": String(rejectedWithTwoDates),
                     "rejectedRowsWithOneSignedAmount": String(rejectedWithSignedAmount),
                     "candidateRows": String(candidateRows),
@@ -506,9 +597,9 @@ final class NativeCorpusContractTests: XCTestCase {
                 for (key, value) in result.testDiagnostics {
                     fileReport["reader.\(key)"] = value
                 }
-                report.append(fileReport)
+                recordDiagnosticItem(fileReport)
             } catch {
-                report.append([
+                recordDiagnosticItem([
                     "file": file.lastPathComponent,
                     "status": "reader-error",
                     "errorType": String(reflecting: type(of: error))

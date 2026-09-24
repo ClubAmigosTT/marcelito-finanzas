@@ -80,6 +80,73 @@ final class SantanderIndependentRowsTests: XCTestCase {
         }
     }
 
+    func testDetachedDateSubstringIsCarriedIntoItsPhysicalRow() {
+        let y = 0.82
+        let dateBounds = CGRect(x: 0.05, y: y, width: 0.08, height: 0.02)
+        let fixtures = header + [
+            OCRObservationFixture(
+                text: "17-JUL-2026 PAGO COMERCIO",
+                x: 0.05,
+                y: 0.80,
+                width: 0.30,
+                height: 0.10,
+                dateEvidenceText: "17-JUL-2026",
+                dateEvidenceBounds: dateBounds
+            ),
+            OCRObservationFixture(text: "30.00", x: 0.77, y: y, width: 0.07),
+            OCRObservationFixture(text: "970.00", x: 0.88, y: y, width: 0.07),
+            OCRObservationFixture(text: "TOTAL", x: 0.20, y: 0.10, width: 0.10)
+        ]
+
+        let result = FinanceStore.santanderTableSnapshotForTesting(
+            fixtures,
+            fileName: "julio-2026.pdf",
+            openingBalance: 1000
+        )
+
+        XCTAssertEqual(result.diagnostics.map(\.accepted), [true])
+        XCTAssertEqual(result.movements.map(\.amount), [-30])
+        XCTAssertEqual(result.movements.first?.date, Calendar(identifier: .gregorian).date(
+            from: DateComponents(year: 2026, month: 7, day: 17)
+        ))
+    }
+
+    func testFinancialTokensInMultilineOCRBoxFollowTheirPrintedDateRows() {
+        let firstY = 0.82
+        let secondY = 0.72
+        let combinedNumbers = OCRObservationFixture(
+            text: "30.00 970.00 40.00 930.00",
+            x: 0.60,
+            y: secondY,
+            width: 0.35,
+            height: 0.12,
+            amountEvidenceBoxes: [
+                OCRTextBoxFixture(text: "30.00", boundingBox: CGRect(x: 0.77, y: firstY, width: 0.07, height: 0.02)),
+                OCRTextBoxFixture(text: "970.00", boundingBox: CGRect(x: 0.88, y: firstY, width: 0.07, height: 0.02)),
+                OCRTextBoxFixture(text: "40.00", boundingBox: CGRect(x: 0.77, y: secondY, width: 0.07, height: 0.02)),
+                OCRTextBoxFixture(text: "930.00", boundingBox: CGRect(x: 0.88, y: secondY, width: 0.07, height: 0.02))
+            ]
+        )
+        let fixtures = header + [
+            OCRObservationFixture(text: "16-JUL-2026", x: 0.05, y: firstY, width: 0.08),
+            OCRObservationFixture(text: "PAGO COMERCIO UNO", x: 0.20, y: firstY, width: 0.25),
+            OCRObservationFixture(text: "17-JUL-2026", x: 0.05, y: secondY, width: 0.08),
+            OCRObservationFixture(text: "PAGO COMERCIO DOS", x: 0.20, y: secondY, width: 0.25),
+            combinedNumbers,
+            OCRObservationFixture(text: "TOTAL", x: 0.20, y: 0.10, width: 0.10)
+        ]
+
+        let result = FinanceStore.santanderTableSnapshotForTesting(
+            fixtures,
+            fileName: "julio-2026.pdf",
+            openingBalance: 1000
+        )
+
+        XCTAssertEqual(result.diagnostics.map(\.accepted), [true, true])
+        XCTAssertEqual(result.movements.map(\.amount), [-30, -40])
+        XCTAssertEqual(result.movements.map(\.title), ["PAGO COMERCIO UNO", "PAGO COMERCIO DOS"])
+    }
+
     func testDanglingRFCOnFirstDescriptionLineDoesNotRejectARealWithdrawal() {
         for amount in ["40.00", "63.00"] {
             let balance = amount == "40.00" ? "960.00" : "937.00"
@@ -125,6 +192,34 @@ final class SantanderIndependentRowsTests: XCTestCase {
         XCTAssertEqual(result.diagnostics.map(\.accepted), [true, false, false, true])
         XCTAssertTrue(result.diagnostics[2].reason.hasPrefix("santander.previous-printed-balance-unavailable;"))
         XCTAssertEqual(result.movements.map(\.amount), [-30, -50])
+    }
+
+    func testUnavailablePriorBalanceDoesNotRetryAndEraseReadableCurrentCells() throws {
+        let blankPDFData = UIGraphicsPDFRenderer(bounds: CGRect(x: 0, y: 0, width: 612, height: 792)).pdfData { context in
+            context.beginPage()
+        }
+        let result = read(row(1, amount: "30.00", balance: nil)
+            + row(2, amount: "30.00", balance: "940.00")
+            + row(3, amount: "40.00", balance: "900.00"),
+            pdf: try XCTUnwrap(PDFDocument(data: blankPDFData)))
+
+        XCTAssertEqual(result.diagnostics.map(\.accepted), [false, false, true])
+        XCTAssertTrue(result.diagnostics[1].reason.hasPrefix("santander.previous-printed-balance-unavailable;"))
+        XCTAssertTrue(result.diagnostics[1].reason.contains("relectura de celdas no"))
+        XCTAssertEqual(result.diagnostics[1].cellTexts, ["", "30.00", "940.00"])
+        XCTAssertEqual(result.movements.map(\.amount), [-40])
+    }
+
+    func testWeakDescriptionDoesNotLowerFinancialCellConfidence() {
+        let result = read([
+            OCRObservationFixture(text: "16-JUL-2026", x: 0.05, y: 0.82, width: 0.08, confidence: 0.98),
+            OCRObservationFixture(text: "PAGO COMERCIO", x: 0.20, y: 0.82, width: 0.25, confidence: 0.52),
+            OCRObservationFixture(text: "30.00", x: 0.77, y: 0.82, width: 0.07, confidence: 0.97),
+            OCRObservationFixture(text: "970.00", x: 0.88, y: 0.82, width: 0.07, confidence: 0.96)
+        ])
+
+        XCTAssertEqual(result.diagnostics.map(\.accepted), [true])
+        XCTAssertEqual(result.movements.first?.extractionEvidence?.confidence ?? -1, 0.96, accuracy: 0.001)
     }
 
     func testWrongPrintedBalanceOnlyBreaksAdjacentEquations() {
