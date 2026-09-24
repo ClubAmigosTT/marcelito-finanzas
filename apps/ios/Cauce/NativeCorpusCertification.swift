@@ -17,6 +17,10 @@ struct NativeCorpusFileReport: Codable, Identifiable {
     let sourceConfidence: Double
     let status: String
     let requiresReview: Bool
+    /// Strong issuer-specific evidence may complement a low raw Vision score.
+    /// The flag is true only after the native reader proves every visual row
+    /// and reconciles the statement; it is never a manual override.
+    let independentOCRProof: Bool
     let rows: Int
     /// Number of rows reconstructed before reconciliation quarantined them.
     /// Keeping this visible makes an invalid statement diagnosable instead of
@@ -38,7 +42,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case file, sourceFingerprint, source, accountKey, kind, mode,
-             sourceStatus, sourceConfidence, status, requiresReview, rows,
+             sourceStatus, sourceConfidence, status, requiresReview, independentOCRProof, rows,
              extractedRows,
              ocrConfidence, weakestOCRPage, ocrColumnsCalibrated,
              reconciliationValid, duplicate, errorCode, reconciliationReason,
@@ -55,6 +59,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
               !duplicate else { return false }
         guard mode != "multimodal-error" else { return false }
         if mode == "vision-ocr" || mode == "multimodal-ai" {
+            if independentOCRProof { return true }
             guard let ocrConfidence,
                   let weakestOCRPage,
                   ocrConfidence >= 0.88,
@@ -79,6 +84,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         sourceConfidence = summary.sourceDetection.confidence
         status = summary.reconciliation?.status.rawValue ?? StatementReconciliationStatus.pending.rawValue
         requiresReview = summary.requiresReview
+        independentOCRProof = summary.independentOCRProof
         rows = summary.imported
         extractedRows = summary.reconciliation?.extractedMovementCount ?? summary.imported
         ocrConfidence = summary.ocrConfidence
@@ -104,6 +110,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         sourceConfidence = 0
         status = StatementReconciliationStatus.invalid.rawValue
         requiresReview = true
+        independentOCRProof = false
         rows = 0
         extractedRows = 0
         ocrConfidence = nil
@@ -138,6 +145,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         try c.encode(sourceConfidence, forKey: .sourceConfidence)
         try c.encode(status, forKey: .status)
         try c.encode(requiresReview, forKey: .requiresReview)
+        try c.encode(independentOCRProof, forKey: .independentOCRProof)
         try c.encode(rows, forKey: .rows)
         try c.encode(extractedRows, forKey: .extractedRows)
         try c.encodeIfPresent(ocrConfidence, forKey: .ocrConfidence)
@@ -166,6 +174,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         sourceConfidence = summary.sourceDetection.confidence
         status = StatementReconciliationStatus.invalid.rawValue
         requiresReview = true
+        independentOCRProof = false
         rows = 0
         extractedRows = 0
         ocrConfidence = summary.ocrConfidence

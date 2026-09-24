@@ -53,6 +53,25 @@ pantalla de certificación; contiene el fragmento OCR, la columna, el importe y
 la razón de cada fila. No se incluye en `NATIVE_CORPUS_REPORT` ni en el JSON que
 se guarda en GitHub.
 
+### Prueba independiente de OCR
+
+El lector conserva la confianza bruta de Vision como señal diagnóstica. Una
+confianza baja solo puede dejar de bloquear un estado cuando existe una prueba
+independiente completa, registrada como `independentOCRProof` en el informe
+privado:
+
+- Santander exige conciliación válida, columnas fijas demostradas, evidencia
+  visual (página, texto, importe y bounds) para cada fila y un par de saldos
+  impresos (`saldo anterior`/`saldo impreso`) en cada diagnóstico aceptado.
+- Rappi exige conciliación válida, evidencia visual completa y que cada fila
+  seleccionada corresponda a una línea visual; una fila no seleccionada o
+  rechazada mantiene el estado en revisión.
+
+La prueba no modifica los umbrales ni convierte una fila incierta en válida.
+Si falta cualquiera de esas señales, `requiresReview` permanece en `true` y
+las filas no entran al libro canónico ni a los KPI. La versión del lector que
+implementa este contrato es `ios-reader-recovery-2026.09.24.5`.
+
 También puedes usar el runner reproducible desde esta carpeta o desde la raíz
 del repositorio; conserva el
 `.xcresult` y el log en un directorio temporal para adjuntarlos a la auditoría:
@@ -85,7 +104,7 @@ cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
   --manifest /ruta/privada/rappi-regression-manifest.json \
-  --reader-version ios-reader-recovery-2026.09.23.4 \
+  --reader-version ios-reader-recovery-2026.09.24.5 \
   --require-certified
 ```
 

@@ -115,6 +115,105 @@ final class ReaderContractTests: XCTestCase {
         ))
     }
 
+    func testIndependentOCRProofRequiresCompleteIssuerEvidence() {
+        let bounds = MovementExtractionBounds(x: 0.1, y: 0.2, width: 0.8, height: 0.03)
+        func movement(method: String = "vision-ocr", sameVisualRow: Bool? = true) -> Movement {
+            Movement(
+                date: .now,
+                title: "Compra de prueba",
+                account: "Santander",
+                category: "Otros / Por revisar",
+                amount: -100,
+                flow: .expense,
+                extractionEvidence: MovementExtractionEvidence(
+                    method: method,
+                    page: 2,
+                    confidence: 0.51,
+                    sourceText: "15/06 Compra de prueba -100.00 9900.00",
+                    bounds: bounds,
+                    selectedColumn: "RETIRO",
+                    selectedAmount: 100,
+                    sameVisualRow: sameVisualRow
+                )
+            )
+        }
+        let SantanderDiagnostic = OCRRowDiagnostic(
+            page: 2,
+            rawText: "15/06 Compra de prueba -100.00 9900.00",
+            selectedColumn: "RETIRO",
+            selectedAmount: 100,
+            reason: "santander.row-verified; ecuación del saldo corrido confirma",
+            accepted: true,
+            confidence: 0.51,
+            rowOrdinal: 1,
+            rowBounds: bounds
+        )
+        XCTAssertTrue(FinanceStore.hasIndependentOCRProofForTesting(
+            source: "Santander",
+            reconciliation: .valid,
+            candidates: [movement(sameVisualRow: true)],
+            diagnostics: [SantanderDiagnostic],
+            columnsCalibrated: true
+        ))
+        XCTAssertTrue(FinanceStore.hasIndependentOCRProofForTesting(
+            source: "Santander",
+            reconciliation: .valid,
+            candidates: [movement(sameVisualRow: true)],
+            diagnostics: [OCRRowDiagnostic(
+                page: 2,
+                rawText: "15/06 Compra de prueba -100.00 9900.00",
+                selectedColumn: "RETIRO",
+                selectedAmount: 100,
+                reason: "importe conservado; saldo excluido por geometría",
+                accepted: true,
+                rowBounds: bounds
+            )],
+            columnsCalibrated: true
+        ))
+        XCTAssertFalse(FinanceStore.hasIndependentOCRProofForTesting(
+            source: "Santander",
+            reconciliation: .valid,
+            candidates: [movement(sameVisualRow: true)],
+            diagnostics: [OCRRowDiagnostic(
+                page: 2,
+                rawText: "fila pendiente",
+                reason: "santander.row-movement-column-ambiguous",
+                accepted: false
+            )],
+            columnsCalibrated: true
+        ))
+        XCTAssertTrue(FinanceStore.hasIndependentOCRProofForTesting(
+            source: "Rappi",
+            reconciliation: .valid,
+            candidates: [movement(sameVisualRow: true)],
+            diagnostics: [OCRRowDiagnostic(
+                page: 2,
+                rawText: "15/06 Compra de prueba -100.00",
+                selectedColumn: "MONTO MXN",
+                selectedAmount: 100,
+                reason: "rappi.visual-row-verified",
+                accepted: true,
+                rowBounds: bounds
+            )],
+            columnsCalibrated: nil
+        ))
+        XCTAssertFalse(FinanceStore.hasIndependentOCRProofForTesting(
+            source: "Rappi",
+            reconciliation: .valid,
+            candidates: [movement(sameVisualRow: false)],
+            diagnostics: [OCRRowDiagnostic(
+                page: 2,
+                rawText: "15/06 Compra de prueba -100.00",
+                selectedColumn: "MONTO MXN",
+                selectedAmount: 100,
+                reason: "rappi.visual-row-unselected",
+                accepted: true,
+                rowBounds: bounds
+            )],
+            columnsCalibrated: nil
+        ))
+    }
+
     func testUncategorisedAccountingRowsRemainEligibleForTotals() {
         // Classification is an analytics enrichment step; it must not turn a
         // numerically reconciled statement into a quarantined statement.
