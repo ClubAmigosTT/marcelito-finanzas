@@ -500,6 +500,10 @@ struct ImportSummary {
     var recoveryAttempts: [String] = []
     /// Candidate rows for explicit private device audits only, including rejected statements.
     var auditRows: [NativeAuditRow] = []
+    /// Independent issuer proof that may complement a weak raw OCR score.
+    /// This is derived from the same extraction and reconciliation pass and is
+    /// exported only in the local certification evidence.
+    var independentOCRProof: Bool = false
     /// Legacy compatibility markers. They remain false for new imports and
     /// allow old diagnostic envelopes to be displayed without reusing their
     /// rows as canonical data.
@@ -922,7 +926,7 @@ final class FinanceStore {
     /// when saved PDF results need a deliberate replay. This release forces
     /// older persisted snapshots through the current reader; the refresh stays
     /// explicit so a full Vision pass never blocks app launch.
-    static let readerVersion = "ios-reader-recovery-2026.09.23.4"
+    static let readerVersion = "ios-reader-recovery-2026.09.24.5"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -1605,6 +1609,72 @@ final class FinanceStore {
             && kind != .unknown
             && sourceStatus == .verified
             && !ocrQualityNeedsReview
+    }
+
+    /// A low raw Vision score is not sufficient evidence to reject a row when
+    /// the issuer's own visual controls independently prove the complete
+    /// stream. This proof is deliberately narrower than a confidence waiver:
+    /// it requires a valid cent-level reconciliation, one visual record for
+    /// every candidate, and issuer-specific geometry/equation evidence. Rows
+    /// that do not satisfy every condition remain in review.
+    static func hasIndependentOCRProofForTesting(
+        source: String,
+        reconciliation: StatementReconciliationStatus,
+        candidates: [Movement],
+        diagnostics: [OCRRowDiagnostic],
+        columnsCalibrated: Bool?
+    ) -> Bool {
+        guard reconciliation == .valid,
+              !candidates.isEmpty,
+              diagnostics.count == candidates.count,
+              diagnostics.allSatisfy(\.accepted) else { return false }
+        let evidence = candidates.compactMap(\.extractionEvidence)
+        guard evidence.count == candidates.count,
+              evidence.allSatisfy({ evidence in
+                  evidence.method == "vision-ocr"
+                      && (evidence.page ?? 0) >= 1
+                      && evidence.sourceText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                      && evidence.selectedAmount != nil
+                      && evidence.bounds != nil
+              }) else { return false }
+
+        switch source.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "santander":
+            // The fixed Santander reader reads one movement column, one
+            // running balance and the date/description from the same physical
+            // row. The per-row equation and the complete diagnostic list are
+            // the independent proof that replaces a weak OCR confidence.
+            return columnsCalibrated == true
+                && zip(candidates, diagnostics).enumerated().allSatisfy { index, pair in
+                    let (movement, diagnostic) = pair
+                    let reason = [
+                        diagnostic.reason,
+                        movement.extractionEvidence?.selectionReason ?? ""
+                    ].joined(separator: "; ").folding(
+                        options: [.diacriticInsensitive, .caseInsensitive],
+                        locale: Locale(identifier: "es_MX")
+                    )
+                    // The first printed row has no prior balance inside the
+                    // statement. It still has to retain the visual saldo
+                    // cell; every subsequent row must prove its running-
+                    // balance equation or the whole stream remains pending.
+                    if index == 0 { return reason.contains("saldo") }
+                    let hasPrintedBalancePair = reason.contains("saldo anterior")
+                        && reason.contains("saldo impreso")
+                    return hasPrintedBalancePair
+                        || reason.contains("saldo corrido")
+                        || reason.contains("ecuacion")
+                }
+        case "rappi":
+            // Rappi has no running balance per row. Its independent proof is
+            // the complete visual-line mapping: every candidate retains a
+            // page, bounds and amount, and every printed visual line matched
+            // exactly one candidate. A stream with one unselected line stays
+            // quarantined even when the cover totals happen to reconcile.
+            return evidence.allSatisfy { $0.sameVisualRow == true }
+        default:
+            return false
+        }
     }
 
     /// Reconciles one OCR bank amount against the running-balance delta. It is
@@ -2912,11 +2982,20 @@ final class FinanceStore {
     private func hasSufficientOCRQuality(_ statement: StatementRecord) -> Bool {
         let hasOCRSignal = statement.ocrConfidence != nil || statement.ocrPageConfidences != nil
         guard hasOCRSignal else { return true }
+        let rows = movements.filter { $0.statementId == statement.id }
+        if Self.hasIndependentOCRProofForTesting(
+            source: statement.source,
+            reconciliation: statement.reconciliation?.status ?? .invalid,
+            candidates: rows,
+            diagnostics: statement.rowDiagnostics ?? [],
+            columnsCalibrated: statement.ocrColumnsCalibrated
+        ) {
+            return true
+        }
         if statement.source.caseInsensitiveCompare("Rappi") == .orderedSame {
             if statement.rowDiagnostics?.contains(where: { !$0.accepted }) == true {
                 return false
             }
-            let rows = movements.filter { $0.statementId == statement.id }
             return rows.allSatisfy { movement in
                 guard let evidence = movement.extractionEvidence,
                       evidence.method == "vision-ocr" else { return true }
@@ -6209,10 +6288,23 @@ final class FinanceStore {
         let ocrColumnCalibrationNeedsReview = extraction.ocrColumnCalibrationNeedsReview
         let weakestOCRPage = ocrPageConfidences?.min()
         let ocrConfidenceNeedsReview = extraction.ocrConfidenceNeedsReview
-        if ocrFallbackNeedsReview {
+        let gatedReconciliation = Self.santanderRowGate(reconciliation, source: source, diagnostics: extraction.rowDiagnostics)
+        let independentOCRProof = Self.hasIndependentOCRProofForTesting(
+            source: source,
+            reconciliation: gatedReconciliation.status,
+            candidates: fresh,
+            diagnostics: extraction.rowDiagnostics,
+            columnsCalibrated: ocrColumnsCalibrated
+        )
+        if ocrFallbackNeedsReview && !independentOCRProof {
             DiagnosticsRecorder.record(
                 stage: "import.ocr.review",
                 message: "\(url.lastPathComponent): se requiere revisión porque alguna fila OCR no conserva evidencia visual suficiente."
+            )
+        } else if independentOCRProof {
+            DiagnosticsRecorder.record(
+                stage: "import.ocr.proof",
+                message: "\(url.lastPathComponent): la confianza bruta de Vision fue compensada por evidencia visual completa y conciliación independiente."
             )
         }
         if ocrColumnCalibrationNeedsReview {
@@ -6230,11 +6322,14 @@ final class FinanceStore {
         }
         // A valid total is necessary but not sufficient for an automatic OCR
         // import. A weak amount/date read, an uncalibrated movement column or
-        // a rejected visual row must remain in diagnostics/quarantine. A
-        // merchant-only review reason is deliberately not included here: a
-        // financially valid row may still enter the book with its evidence.
-        let ocrQualityNeedsReview = usedOCR && Self.ocrQualityNeedsReview(extraction)
-        let gatedReconciliation = Self.santanderRowGate(reconciliation, source: source, diagnostics: extraction.rowDiagnostics)
+        // a rejected visual row must remain in diagnostics/quarantine. The
+        // only exception is the explicit independent proof above: it requires
+        // complete issuer-specific visual evidence, so it does not lower a
+        // threshold or accept an unresolved row.
+        let ocrQualityNeedsReview = usedOCR && Self.ocrQualityNeedsReview(
+            extraction,
+            reconciliation: gatedReconciliation
+        )
         let needsReview = fresh.isEmpty
             || summary == nil
             || detectedKind == .unknown
@@ -6349,6 +6444,7 @@ final class FinanceStore {
             pageCount: extraction.pageCount,
             rowDiagnostics: extraction.rowDiagnostics,
             recoveryAttempts: extraction.recoveryAttempts,
+            independentOCRProof: independentOCRProof,
             multimodalFallbackAttempted: extraction.multimodalFallbackAttempted,
             multimodalFallbackError: extraction.multimodalFallbackError
         )
@@ -6563,11 +6659,21 @@ final class FinanceStore {
             movements: fresh
         )
         let gatedReconciliation = Self.santanderRowGate(reconciliation, source: extraction.source, diagnostics: extraction.rowDiagnostics)
+        let independentOCRProof = Self.hasIndependentOCRProofForTesting(
+            source: extraction.source,
+            reconciliation: gatedReconciliation.status,
+            candidates: fresh,
+            diagnostics: extraction.rowDiagnostics,
+            columnsCalibrated: extraction.ocrColumnsCalibrated
+        )
         // The non-mutating inspection path is also used by the device corpus
         // certifier. It must apply the exact same OCR gates as a real import;
         // otherwise a weak/rejected row could be reported as certified simply
         // because the inspection did not persist it.
-        let ocrQualityNeedsReview = Self.ocrQualityNeedsReview(extraction)
+        let ocrQualityNeedsReview = Self.ocrQualityNeedsReview(
+            extraction,
+            reconciliation: gatedReconciliation
+        )
         let requiresReview = fresh.isEmpty
             || extraction.summary == nil
             || extraction.kind == .unknown
@@ -6599,16 +6705,27 @@ final class FinanceStore {
             rowDiagnostics: extraction.rowDiagnostics,
             recoveryAttempts: extraction.recoveryAttempts,
             auditRows: candidates.map(NativeAuditRow.init),
+            independentOCRProof: independentOCRProof,
             multimodalFallbackAttempted: extraction.multimodalFallbackAttempted,
             multimodalFallbackError: extraction.multimodalFallbackError
         )
     }
 
-    private static func ocrQualityNeedsReview(_ extraction: PDFImportExtraction) -> Bool {
+    private static func ocrQualityNeedsReview(
+        _ extraction: PDFImportExtraction,
+        reconciliation: StatementReconciliationRecord
+    ) -> Bool {
         guard extraction.usedOCR else { return false }
-        return extraction.ocrFallbackNeedsReview
+        let independentProof = hasIndependentOCRProofForTesting(
+            source: extraction.source,
+            reconciliation: reconciliation.status,
+            candidates: extraction.candidates,
+            diagnostics: extraction.rowDiagnostics,
+            columnsCalibrated: extraction.ocrColumnsCalibrated
+        )
+        return (extraction.ocrFallbackNeedsReview && !independentProof)
+            || (extraction.ocrConfidenceNeedsReview && !independentProof)
             || extraction.ocrColumnCalibrationNeedsReview
-            || extraction.ocrConfidenceNeedsReview
             || extraction.rowDiagnostics.contains { !$0.accepted }
     }
 

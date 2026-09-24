@@ -537,6 +537,15 @@ final class NativeCorpusContractTests: XCTestCase {
                     if reason.hasPrefix("bbva.foreign-auxiliary") { return "bbva.foreign-auxiliary" }
                     return "other-rejection"
                 }.mapValues(\.count)
+                let independentOCRProof = FinanceStore.hasIndependentOCRProofForTesting(
+                    source: result.snapshot.source,
+                    reconciliation: result.reconciliation.status,
+                    candidates: result.snapshot.movements,
+                    diagnostics: result.rowDiagnostics,
+                    columnsCalibrated: ["Santander", "BBVA"].contains(result.snapshot.source)
+                        ? !result.ocrColumnCalibrationNeedsReview
+                        : nil
+                )
                 let safeRejectedRows = rejectedRows.map { row -> String in
                     let reason = row.reason.lowercased()
                     let code = reason.range(of: #"^santander\.[a-z0-9.-]+"#,
@@ -556,9 +565,9 @@ final class NativeCorpusContractTests: XCTestCase {
                     } ?? "bounds-unknown"
                     return "p\(row.page.map(String.init) ?? "?")-r\(row.rowOrdinal.map(String.init) ?? "?"):\(code):\(retry):cells=\(cellCounts):retry-cells=\(retryCounts):\(bounds)"
                 }.sorted()
-                let requiresReview = result.ocrFallbackNeedsReview
+                let requiresReview = (result.ocrFallbackNeedsReview && !independentOCRProof)
+                    || (result.ocrConfidenceNeedsReview && !independentOCRProof)
                     || result.ocrColumnCalibrationNeedsReview
-                    || result.ocrConfidenceNeedsReview
                     || result.reconciliation.status != .valid
                 var fileReport: [String: String] = [
                     "file": file.lastPathComponent,
@@ -571,6 +580,7 @@ final class NativeCorpusContractTests: XCTestCase {
                     "extractedRows": String(result.reconciliation.extractedMovementCount ?? result.snapshot.movements.count),
                     "requiresReview": String(requiresReview),
                     "ocrFallbackNeedsReview": String(result.ocrFallbackNeedsReview),
+                    "independentOCRProof": String(independentOCRProof),
                     "ocrColumnCalibrationNeedsReview": String(result.ocrColumnCalibrationNeedsReview),
                     "ocrConfidenceNeedsReview": String(result.ocrConfidenceNeedsReview),
                     "ocrConfidencePercent": result.ocrConfidence.map { String(Int(($0 * 100).rounded())) } ?? "",
