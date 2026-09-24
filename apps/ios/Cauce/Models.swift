@@ -926,7 +926,7 @@ final class FinanceStore {
     /// when saved PDF results need a deliberate replay. This release forces
     /// older persisted snapshots through the current reader; the refresh stays
     /// explicit so a full Vision pass never blocks app launch.
-    static let readerVersion = "ios-reader-recovery-2026.09.24.5"
+    static let readerVersion = "ios-reader-recovery-2026.09.24.6"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v2"
@@ -1626,7 +1626,6 @@ final class FinanceStore {
     ) -> Bool {
         guard reconciliation == .valid,
               !candidates.isEmpty,
-              diagnostics.count == candidates.count,
               diagnostics.allSatisfy(\.accepted) else { return false }
         let evidence = candidates.compactMap(\.extractionEvidence)
         guard evidence.count == candidates.count,
@@ -1645,6 +1644,7 @@ final class FinanceStore {
             // row. The per-row equation and the complete diagnostic list are
             // the independent proof that replaces a weak OCR confidence.
             return columnsCalibrated == true
+                && diagnostics.count == candidates.count
                 && zip(candidates, diagnostics).enumerated().allSatisfy { index, pair in
                     let (movement, diagnostic) = pair
                     let reason = [
@@ -1671,7 +1671,31 @@ final class FinanceStore {
             // page, bounds and amount, and every printed visual line matched
             // exactly one candidate. A stream with one unselected line stays
             // quarantined even when the cover totals happen to reconcile.
-            return evidence.allSatisfy { $0.sameVisualRow == true }
+            return diagnostics.count == candidates.count
+                && evidence.allSatisfy { $0.sameVisualRow == true }
+        case "bbva":
+            // BBVA can print a foreign-currency auxiliary line (USD/TC/AUT)
+            // beside a domestic movement. Those accepted diagnostics are
+            // evidence that the line was intentionally excluded, not missing
+            // ledger rows. Count them separately while requiring every MXN
+            // candidate to retain complete visual evidence and calibrated
+            // CARGOS/ABONOS/SALDO geometry.
+            guard columnsCalibrated == true else { return false }
+            let foreignAuxiliaryCount = diagnostics.filter {
+                $0.reason.lowercased().hasPrefix("bbva.foreign-auxiliary")
+            }.count
+            let movementDiagnostics = diagnostics.filter {
+                !$0.reason.lowercased().hasPrefix("bbva.foreign-auxiliary")
+            }
+            guard diagnostics.filter({ !$0.accepted }).isEmpty,
+                  movementDiagnostics.count == candidates.count,
+                  movementDiagnostics.allSatisfy({
+                      $0.selectedAmount != nil
+                          && !($0.selectedColumn ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                  }) else {
+                return false
+            }
+            return true
         default:
             return false
         }
@@ -7031,22 +7055,34 @@ final class FinanceStore {
             guard let evidence = movement.extractionEvidence,
                   evidence.method == "vision-ocr",
                   evidence.page == line.page,
-                  decimalEquals(evidence.selectedAmount, parseRappiMoney(line.line.amount).map(absoluteDecimal)) else {
+                  let visualAmount = amountToken(from: line.line.amount, title: line.line.text),
+                  decimalEquals(evidence.selectedAmount, parseRappiMoney(visualAmount).map(absoluteDecimal)) else {
                 return false
             }
             guard let bounds = evidence.bounds else { return false }
             let lineCenterY = line.line.bounds.midY
             let movementCenterY = CGFloat(bounds.y + (bounds.height / 2))
+            let lineRect = line.line.bounds
+            let movementRect = CGRect(x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height)
             // The marker and the Movement evidence share Vision's normalized
             // bottom-left coordinate system. Keep a small tolerance for the
             // isolated crop's rounding without allowing adjacent rows to pair.
-            return abs(lineCenterY - movementCenterY) <= 0.022
+            // Foreign Rappi purchases can add USD/TC metadata on stacked OCR
+            // boxes; in that case the visual band is taller, so require the
+            // selected movement bounds to lie inside that same band.
+            let closeCenter = abs(lineCenterY - movementCenterY) <= 0.022
+            let tallAuxiliaryBand = lineRect.height >= 0.05
+                && lineRect.intersects(movementRect)
+                && lineRect.insetBy(dx: 0, dy: -0.004).contains(CGPoint(x: movementRect.midX, y: movementRect.midY))
+            return closeCenter || tallAuxiliaryBand
         }
 
         var rejected: [OCRRowDiagnostic] = []
         for (ordinal, visualLine) in visualLines.enumerated() {
             guard !movements.contains(where: { matches(visualLine, $0) }) else { continue }
-            let amount = parseRappiMoney(visualLine.line.amount).map(absoluteDecimal)
+            let amount = amountToken(from: visualLine.line.amount, title: visualLine.line.text)
+                .flatMap(parseRappiMoney)
+                .map(absoluteDecimal)
             let sign = visualLine.line.amount
                 .trimmingCharacters(in: .whitespacesAndNewlines)
                 .first
