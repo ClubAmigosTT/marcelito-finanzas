@@ -2,8 +2,24 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { verifyNativeCorpusReport, verifyNativeCorpusSummary } from "../scripts/verify-native-corpus-report.ts";
 
+const certifiedSummary = {
+  goldenRowAuditsPassed: 8,
+  goldenRowAuditsExpected: 8,
+  goldenRowAuditMismatches: 0,
+  independentProofFiles: 0,
+  independentProofExpected: 0,
+  rowGoldensComplete: true,
+};
+
+const certifiedRow = {
+  goldenRowAuditPassed: true,
+  goldenRowAuditMismatches: 0,
+  independentOCRProof: true,
+};
+
 test("el resumen nativo certificado pasa con la revisión esperada", () => {
   const result = verifyNativeCorpusSummary({
+    ...certifiedSummary,
     readerVersion: "ios-reader-test",
     files: "8",
     accepted: "8",
@@ -118,6 +134,7 @@ test("el resumen nativo no permite goldens aceptados fuera de accepted", () => {
 test("el reporte nativo exige una identidad enmascarada por PDF", () => {
   const result = verifyNativeCorpusReport([
     {
+      ...certifiedRow,
       file: "bbva.pdf",
       sourceFingerprint: "a".repeat(64),
       source: "BBVA",
@@ -132,6 +149,7 @@ test("el reporte nativo exige una identidad enmascarada por PDF", () => {
       expectedAccountKey: "bbva:4922",
     },
     {
+      ...certifiedRow,
       file: "amex.pdf",
       sourceFingerprint: "b".repeat(64),
       source: "Amex",
@@ -283,6 +301,7 @@ test("el reporte nativo compara estado y filas contra el golden", () => {
 test("el reporte nativo aplica umbrales OCR a estados promovidos", () => {
   const valid = verifyNativeCorpusReport([
     {
+      ...certifiedRow,
       file: "santander.pdf",
       sourceFingerprint: "a".repeat(64),
       source: "Santander",
@@ -327,8 +346,32 @@ test("el reporte nativo aplica umbrales OCR a estados promovidos", () => {
   assert.ok(weak.errors.some((error) => error.includes("columnas OCR calibradas")));
 });
 
+test("la prueba independiente permite OCR bruto bajo en tarjetas y conserva conciliación", () => {
+  const result = verifyNativeCorpusReport([{
+    ...certifiedRow,
+    file: "rappi-low-confidence.pdf",
+    sourceFingerprint: "f".repeat(64),
+    source: "Rappi",
+    kind: "card",
+    status: "valid",
+    mode: "vision-ocr",
+    sourceStatus: "verified",
+    sourceConfidence: 0.998,
+    requiresReview: false,
+    ocrConfidence: 0.56,
+    weakestOCRPage: 0.5,
+    ocrColumnsCalibrated: "",
+    rows: 108,
+    accountKey: "rappi:9040",
+    expectedAccountKey: "rappi:9040",
+    independentOCRProof: true,
+  }], 1);
+  assert.equal(result.ok, true, result.errors.join("; "));
+});
+
 test("el reporte nativo acepta respaldo multimodal conciliado sin exigir columnas Santander", () => {
   const result = verifyNativeCorpusReport([{
+    ...certifiedRow,
     file: "santander-ai.pdf",
     sourceFingerprint: "c".repeat(64),
     source: "Santander",
@@ -342,8 +385,30 @@ test("el reporte nativo acepta respaldo multimodal conciliado sin exigir columna
     weakestOCRPage: 0.84,
     rows: 43,
     accountKey: "santander:7079",
+    expectedAccountKey: "santander:7079",
   }], 1);
   assert.equal(result.ok, true);
+});
+
+test("el reporte nativo no puede certificar un estado desconocido o vacío", () => {
+  const result = verifyNativeCorpusReport([{
+    ...certifiedRow,
+    file: "santander-empty.pdf",
+    sourceFingerprint: "e".repeat(64),
+    source: "Santander",
+    kind: "unknown",
+    status: "valid",
+    mode: "pdf-text",
+    sourceStatus: "verified",
+    sourceConfidence: 0.998,
+    requiresReview: false,
+    rows: 0,
+    accountKey: "santander:7079",
+    expectedAccountKey: "santander:7079",
+  }], 1);
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("kind=unknown")));
+  assert.ok(result.errors.some((error) => error.includes("al menos una fila")));
 });
 
 test("el reporte nativo compara método, calibración y límites de revisión", () => {

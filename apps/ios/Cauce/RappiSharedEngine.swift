@@ -262,8 +262,12 @@ final class RappiSharedEngine: @unchecked Sendable {
               parts[0] >= 1900, (1...12).contains(parts[1]), (1...31).contains(parts[2]) else {
             return nil
         }
+        // The parser returns a calendar date, not an instant. Build the
+        // Foundation value in the device calendar so formatting it later
+        // cannot move the printed operation date to the previous day (for
+        // example, UTC midnight becomes the prior evening in Mexico).
         var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        calendar.timeZone = .current
         var components = DateComponents()
         components.calendar = calendar
         components.timeZone = calendar.timeZone

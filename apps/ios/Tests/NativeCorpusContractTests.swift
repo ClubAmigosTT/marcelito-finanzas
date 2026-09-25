@@ -45,10 +45,27 @@ final class NativeCorpusContractTests: XCTestCase {
 
     /// A private corpus may carry its golden expectations in a file outside
     /// the repository.  The public fixture below stays synthetic, while a
-    /// macOS/iPhone run can point at a local manifest containing hashes and
-    /// issuer controls for real statements.  No PDF bytes or descriptions
-    /// are read from the manifest.
+    /// macOS/iPhone run can point at a local manifest containing hashes,
+    /// issuer controls and reviewed row references for real statements.
+    /// No PDF bytes or full transaction descriptions are copied into the
+    /// redacted certification report.
     private struct ExternalManifest: Decodable {
+        /// A manually reviewed row contract kept beside the private PDF
+        /// corpus.  It is never printed in the redacted certification report.
+        /// The title is a substring rather than a full description so the
+        /// reference can be minimal while still proving that the parser did
+        /// not select a balance, tax or foreign-currency reference row.
+        struct RowExpectation: Decodable {
+            let date: String
+            let page: Int?
+            let signedAmount: String
+            let titleContains: String
+            /// Financial meaning is part of the row contract. It is optional
+            /// only so old diagnostic manifests can still be read; a valid
+            /// release golden is not complete until every row supplies it.
+            let kind: String?
+        }
+
         struct Summary: Decodable {
             let previousBalance: Decimal?
             let cashBalance: Decimal?
@@ -141,6 +158,7 @@ final class NativeCorpusContractTests: XCTestCase {
             let columnsCalibrated: Bool?
             let maxRejectedRows: Int?
             let maxUncategorized: Int?
+            let rowExpectations: [RowExpectation]?
         }
 
         let schemaVersion: Int?
@@ -171,6 +189,8 @@ final class NativeCorpusContractTests: XCTestCase {
         let columnsCalibrated: Bool?
         let maxRejectedRows: Int?
         let maxUncategorized: Int?
+        let rowExpectations: [ExternalManifest.RowExpectation]
+        let rowContractComplete: Bool
 
         init(
             sourceFingerprint: String,
@@ -194,7 +214,8 @@ final class NativeCorpusContractTests: XCTestCase {
             expectedMethod: String? = nil,
             columnsCalibrated: Bool? = nil,
             maxRejectedRows: Int? = nil,
-            maxUncategorized: Int? = nil
+            maxUncategorized: Int? = nil,
+            rowExpectations: [ExternalManifest.RowExpectation] = []
         ) {
             self.sourceFingerprint = sourceFingerprint
             self.source = source
@@ -218,6 +239,10 @@ final class NativeCorpusContractTests: XCTestCase {
             self.columnsCalibrated = columnsCalibrated
             self.maxRejectedRows = maxRejectedRows
             self.maxUncategorized = maxUncategorized
+            self.rowExpectations = rowExpectations
+            self.rowContractComplete = status != .valid
+                || (rowExpectations.count == rows
+                    && rowExpectations.allSatisfy { $0.kind?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false })
         }
     }
 
@@ -244,15 +269,22 @@ final class NativeCorpusContractTests: XCTestCase {
         let manifestURL = try corpusURL(rawPath)
         let data = try Data(contentsOf: manifestURL, options: .mappedIfSafe)
         let manifest = try JSONDecoder().decode(ExternalManifest.self, from: data)
-        if let schemaVersion = manifest.schemaVersion, schemaVersion != 1 {
+        guard manifest.schemaVersion == 1 else {
             throw NSError(
                 domain: "NativeCorpusManifest",
                 code: 6,
                 userInfo: [NSLocalizedDescriptionKey: "schemaVersion no compatible en el manifiesto privado."]
             )
         }
-        if let readerVersion = manifest.readerVersion,
-           readerVersion != FinanceStore.readerVersion {
+        guard let readerVersion = manifest.readerVersion,
+              !readerVersion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw NSError(
+                domain: "NativeCorpusManifest",
+                code: 7,
+                userInfo: [NSLocalizedDescriptionKey: "El manifiesto privado necesita readerVersion."]
+            )
+        }
+        if readerVersion != FinanceStore.readerVersion {
             throw NSError(
                 domain: "NativeCorpusManifest",
                 code: 7,
@@ -282,6 +314,13 @@ final class NativeCorpusContractTests: XCTestCase {
                     userInfo: [NSLocalizedDescriptionKey: "Entrada inválida en el manifiesto privado: \(entry.file)."]
                 )
             }
+            if status == .valid, kind == .unknown {
+                throw NSError(
+                    domain: "NativeCorpusManifest",
+                    code: 13,
+                    userInfo: [NSLocalizedDescriptionKey: "Un golden válido necesita emisor y tipo identificados en \(entry.file)."]
+                )
+            }
             let normalizedSource = entry.source.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !normalizedSource.isEmpty, normalizedSource != "Desconocido" else {
                 throw NSError(
@@ -290,19 +329,19 @@ final class NativeCorpusContractTests: XCTestCase {
                     userInfo: [NSLocalizedDescriptionKey: "Falta el emisor de \(entry.file)."]
                 )
             }
-            if let accountKey = entry.accountKey,
-               accountKey.range(of: #"^[a-z0-9]+:\d{4}$"#, options: [.regularExpression, .caseInsensitive]) == nil {
+            guard let accountKey = entry.accountKey,
+                  accountKey.range(of: #"^[a-z0-9]+:\d{4}$"#, options: [.regularExpression, .caseInsensitive]) != nil else {
                 throw NSError(
                     domain: "NativeCorpusManifest",
                     code: 4,
                     userInfo: [NSLocalizedDescriptionKey: "La cuenta de \(entry.file) debe usar emisor:últimos4."]
                 )
             }
-            if status == .valid, (entry.rows == nil || (entry.rows ?? -1) < 0) {
+            if status == .valid, (entry.rows == nil || (entry.rows ?? 0) < 1) {
                 throw NSError(
                     domain: "NativeCorpusManifest",
                     code: 5,
-                    userInfo: [NSLocalizedDescriptionKey: "Un golden válido necesita rows entero en \(entry.file)."]
+                    userInfo: [NSLocalizedDescriptionKey: "Un golden válido necesita al menos una fila en \(entry.file)."]
                 )
             }
             if let expectedMethod = entry.expectedMethod,
@@ -327,11 +366,39 @@ final class NativeCorpusContractTests: XCTestCase {
                     userInfo: [NSLocalizedDescriptionKey: "Los límites de revisión no pueden ser negativos en \(entry.file)."]
                 )
             }
+            let rowExpectations = entry.rowExpectations ?? []
+            for row in rowExpectations {
+                let dateIsValid = row.date.range(of: #"^\d{4}-\d{2}-\d{2}$"#, options: .regularExpression) != nil
+                let amountIsValid = row.signedAmount.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .range(of: #"^-?\d+(?:[.,]\d{1,2})?$"#, options: .regularExpression) != nil
+                guard dateIsValid, amountIsValid, !row.titleContains.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw NSError(
+                        domain: "NativeCorpusManifest",
+                        code: 11,
+                        userInfo: [NSLocalizedDescriptionKey: "Una expectativa de fila es inválida en \(entry.file)."]
+                    )
+                }
+                if let kind = row.kind,
+                   MovementKind(rawValue: kind.trimmingCharacters(in: .whitespacesAndNewlines)) == nil {
+                    throw NSError(
+                        domain: "NativeCorpusManifest",
+                        code: 14,
+                        userInfo: [NSLocalizedDescriptionKey: "El tipo de movimiento no es válido en (entry.file)."]
+                    )
+                }
+                if let page = row.page, page < 1 {
+                    throw NSError(
+                        domain: "NativeCorpusManifest",
+                        code: 12,
+                        userInfo: [NSLocalizedDescriptionKey: "La página de una expectativa debe ser positiva en \(entry.file)."]
+                    )
+                }
+            }
             let summary = entry.summary
             decoded[file] = Expectation(
                 sourceFingerprint: fingerprint,
                 source: normalizedSource,
-                accountKey: entry.accountKey ?? "",
+                accountKey: accountKey,
                 kind: kind,
                 status: status,
                 rows: entry.rows ?? 0,
@@ -350,7 +417,8 @@ final class NativeCorpusContractTests: XCTestCase {
                 expectedMethod: entry.expectedMethod,
                 columnsCalibrated: entry.columnsCalibrated,
                 maxRejectedRows: entry.maxRejectedRows,
-                maxUncategorized: entry.maxUncategorized
+                maxUncategorized: entry.maxUncategorized,
+                rowExpectations: rowExpectations
             )
         }
         return decoded
@@ -377,6 +445,62 @@ final class NativeCorpusContractTests: XCTestCase {
     private func percentText(_ value: Double?) -> String {
         guard let value, value.isFinite else { return "" }
         return String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), value)
+    }
+
+    private func normalizedReferenceText(_ value: String) -> String {
+        value
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+            .replacingOccurrences(of: #"[^A-Za-z0-9]+"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func referenceDecimal(_ raw: String) -> Decimal? {
+        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+        let comma = value.lastIndex(of: ",")
+        let dot = value.lastIndex(of: ".")
+        let normalized: String
+        if let comma, let dot {
+            normalized = comma > dot
+                ? value.replacingOccurrences(of: ".", with: "").replacingOccurrences(of: ",", with: ".")
+                : value.replacingOccurrences(of: ",", with: "")
+        } else if comma != nil {
+            normalized = value.replacingOccurrences(of: ",", with: ".")
+        } else {
+            normalized = value
+        }
+        return Decimal(string: normalized, locale: Locale(identifier: "en_US_POSIX"))
+    }
+
+    /// Exact row-level audit against the separately reviewed private golden.
+    /// Only a boolean and a mismatch count leave this test; descriptions and
+    /// amounts remain inside the runner and are never printed to CI.
+    private func auditRows(
+        expected: [ExternalManifest.RowExpectation],
+        actual: [NativeAuditRow]
+    ) -> (passed: Bool, mismatchCount: Int) {
+        guard expected.count == actual.count else {
+            return (false, max(expected.count, actual.count))
+        }
+        var mismatches = 0
+        for (expectedRow, actualRow) in zip(expected, actual) {
+            if actualRow.date != expectedRow.date { mismatches += 1; continue }
+            if let expectedPage = expectedRow.page, actualRow.page != expectedPage { mismatches += 1; continue }
+            guard let expectedAmount = referenceDecimal(expectedRow.signedAmount),
+                  let actualAmount = referenceDecimal(actualRow.signedAmount) else {
+                mismatches += 1
+                continue
+            }
+            let amountDelta = abs(NSDecimalNumber(decimal: expectedAmount - actualAmount).doubleValue)
+            if amountDelta > 0.005 { mismatches += 1; continue }
+            let expectedTitle = normalizedReferenceText(expectedRow.titleContains)
+            let actualTitle = normalizedReferenceText(actualRow.title)
+            if expectedTitle.isEmpty || !actualTitle.contains(expectedTitle) { mismatches += 1 }
+            if let expectedKind = expectedRow.kind,
+               actualRow.kind != expectedKind { mismatches += 1 }
+        }
+        return (mismatches == 0, mismatches)
     }
 
     /// Lightweight real-file smoke test for a corpus supplied out-of-band on
@@ -622,6 +746,156 @@ final class NativeCorpusContractTests: XCTestCase {
         throw XCTSkip("Informe emitido solo para diagnóstico; el corpus sigue sin certificarse.")
     }
 
+    /// Writes the private candidate-row companion used to compare the native
+    /// reader with an independent implementation. This is deliberately opt-in
+    /// and writes outside the repository: candidate rows contain private
+    /// descriptions and amounts and are not a certification artifact.
+    func testPrivateNativeCorpusAuditExportWhenRequested() async throws {
+        guard ["1", "true", "yes"].contains(
+            ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_EXPORT_PRIVATE_DIAGNOSTICS"]?.lowercased() ?? ""
+        ) else {
+            throw XCTSkip("Define MARCELITO_PDF_CORPUS_EXPORT_PRIVATE_DIAGNOSTICS=1 para exportar filas privadas.")
+        }
+        guard let rawDirectory = ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_DIR"],
+              !rawDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw XCTSkip("Define MARCELITO_PDF_CORPUS_DIR para exportar filas privadas.")
+        }
+
+        let directory = try corpusURL(rawDirectory, isDirectory: true)
+        waitForSimulatorCorpusIfNeeded(rawPath: rawDirectory, directory: directory)
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+        .filter { $0.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !files.isEmpty else {
+            throw XCTSkip("MARCELITO_PDF_CORPUS_DIR no contiene PDFs.")
+        }
+
+        let report = await FinanceStore().certifyNativeCorpus(from: files)
+        let temporaryURL = try report.writeDiagnosticsTemporaryFile()
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
+        let requestedOutput = ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_PRIVATE_EXPORT"]
+            .flatMap { value -> URL? in
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : URL(fileURLWithPath: trimmed)
+            }
+            ?? directory.appendingPathComponent(".native-corpus-private-audit.json")
+        if FileManager.default.fileExists(atPath: requestedOutput.path) {
+            try FileManager.default.removeItem(at: requestedOutput)
+        }
+        try FileManager.default.copyItem(at: temporaryURL, to: requestedOutput)
+
+        let rowCount = report.diagnostics.reduce(0) { total, file in
+            total + (file.candidateRows?.count ?? 0)
+        }
+        let missingAccountKeys = report.diagnostics.filter { file in
+            file.accountKey?.range(of: #"^[a-z0-9]+:\d{4}$"#, options: [.regularExpression, .caseInsensitive]) == nil
+        }.count
+        XCTAssertEqual(
+            missingAccountKeys,
+            0,
+            "El lector no puede exportar un corpus privado con cuentas sin identidad enmascarada."
+        )
+        let marker: [String: Any] = [
+            "files": report.diagnostics.count,
+            "candidateRows": rowCount,
+            "readerVersion": report.readerVersion,
+            "missingAccountKeys": missingAccountKeys
+        ]
+        let markerData = try JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys])
+        FileHandle.standardOutput.write(Data(("NATIVE_CORPUS_PRIVATE_EXPORT " + (String(data: markerData, encoding: .utf8) ?? "{}") + "\n").utf8))
+        XCTAssertEqual(report.diagnostics.count, files.count, "El export privado debe conservar todos los PDFs.")
+    }
+
+    /// Exports the row view after the same importing path used by the app.
+    /// `certifyNativeCorpus` intentionally inspects without committing; this
+    /// companion catches any title or kind normalization applied during the
+    /// real ledger import before a private golden is accepted.
+    func testPrivateNativeCorpusImportAuditExportWhenRequested() throws {
+        guard let requestedImportExport = ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_IMPORT_PRIVATE_EXPORT"],
+              !requestedImportExport.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw XCTSkip("Define MARCELITO_PDF_CORPUS_IMPORT_PRIVATE_EXPORT=/ruta/import-audit.json para exportar la vista de importación.")
+        }
+        guard let rawDirectory = ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_DIR"],
+              !rawDirectory.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            throw XCTSkip("Define MARCELITO_PDF_CORPUS_DIR para exportar filas privadas.")
+        }
+        let directory = try corpusURL(rawDirectory, isDirectory: true)
+        let files = try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+        .filter { $0.pathExtension.caseInsensitiveCompare("pdf") == .orderedSame }
+        .sorted { $0.lastPathComponent < $1.lastPathComponent }
+        guard !files.isEmpty else {
+            throw XCTSkip("MARCELITO_PDF_CORPUS_DIR no contiene PDFs.")
+        }
+
+        let store = FinanceStore()
+        var diagnostics: [NativeCorpusDiagnosticFile] = []
+        for (index, file) in files.enumerated() {
+            let result = try store.importPDF(
+                from: file,
+                allowOCR: true,
+                preserveExistingOnEmpty: false,
+                requireValidReconciliation: false
+            )
+            diagnostics.append(
+                NativeCorpusDiagnosticFile(
+                    file: "document-\(String(format: "%02d", index + 1)).pdf",
+                    sourceFileName: file.lastPathComponent,
+                    source: result.source,
+                    mode: result.extractionProvider == "multimodal"
+                        ? "multimodal-ai"
+                        : (result.multimodalFallbackAttempted
+                            ? "multimodal-error"
+                            : (result.usedOCR ? "vision-ocr" : "pdf-text")),
+                    status: result.reconciliation?.status.rawValue ?? StatementReconciliationStatus.pending.rawValue,
+                    reconciliationReason: result.reconciliation?.reason,
+                    multimodalFallbackAttempted: result.multimodalFallbackAttempted,
+                    multimodalFallbackError: result.multimodalFallbackError,
+                    rows: result.rowDiagnostics,
+                    sourceFingerprint: result.sourceFingerprint,
+                    accountKey: result.accountKey,
+                    period: result.period,
+                    candidateRows: result.auditRows,
+                    declaredControls: result.summary,
+                    reconciliation: result.reconciliation
+                )
+            )
+        }
+        defer { store.clearLocalData() }
+        let report = NativeCorpusDiagnosticReport(
+            schemaVersion: 1,
+            generatedAt: .now,
+            readerVersion: FinanceStore.readerVersion,
+            files: diagnostics
+        )
+        let temporaryURL = try report.writeTemporaryFile()
+        defer { try? FileManager.default.removeItem(at: temporaryURL) }
+        let requestedOutput = URL(fileURLWithPath: requestedImportExport)
+        if FileManager.default.fileExists(atPath: requestedOutput.path) {
+            try FileManager.default.removeItem(at: requestedOutput)
+        }
+        try FileManager.default.copyItem(at: temporaryURL, to: requestedOutput)
+        let rowCount = diagnostics.reduce(0) { $0 + ($1.candidateRows?.count ?? 0) }
+        let marker: [String: Any] = [
+            "files": diagnostics.count,
+            "candidateRows": rowCount,
+            "readerVersion": FinanceStore.readerVersion,
+            "missingAccountKeys": diagnostics.filter {
+                $0.accountKey?.range(of: #"^[a-z0-9]+:\d{4}$"#, options: [.regularExpression, .caseInsensitive]) == nil
+            }.count
+        ]
+        let markerData = try JSONSerialization.data(withJSONObject: marker, options: [.sortedKeys])
+        FileHandle.standardOutput.write(Data(("NATIVE_CORPUS_PRIVATE_IMPORT_EXPORT " + (String(data: markerData, encoding: .utf8) ?? "{}") + "\n").utf8))
+        XCTAssertEqual(diagnostics.count, files.count, "El export de importación debe conservar todos los PDFs.")
+    }
+
     /// Measures the text-only reader path before Vision is allowed to run.
     /// The report deliberately includes only document identity, row counts,
     /// and reconciliation state; it never prints extracted financial data.
@@ -779,6 +1053,12 @@ final class NativeCorpusContractTests: XCTestCase {
         var goldenAutoAccepted = 0
         var goldenFalseAccepted = 0
         var unresolvedOCR = 0
+        var goldenRowAuditsPassed = 0
+        var goldenRowAuditMismatches = 0
+        var independentProofFiles = 0
+        let requireCertified = ["1", "true", "yes"].contains(
+            ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED"]?.lowercased() ?? ""
+        )
 
         for file in files {
             guard let expected = runExpectations[file.lastPathComponent] else { continue }
@@ -813,6 +1093,26 @@ final class NativeCorpusContractTests: XCTestCase {
             let extractedRows = result.reconciliation?.extractedMovementCount ?? result.imported
             let actualMethod = result.usedOCR ? "vision-ocr" : "pdf-text"
             let rejectedRows = diagnostics.filter { !$0.accepted }.count
+            let rowAudit = auditRows(expected: expected.rowExpectations, actual: result.auditRows)
+            // Only promoted valid files contribute to the release golden
+            // counters.  A pending file may legitimately have no reviewed
+            // rows yet; counting that empty comparison as a passed golden
+            // would make the summary internally inconsistent.
+            if expected.status == .valid {
+                if rowAudit.passed { goldenRowAuditsPassed += 1 }
+                goldenRowAuditMismatches += rowAudit.mismatchCount
+            }
+            if result.independentOCRProof { independentProofFiles += 1 }
+            if requireCertified && expected.status == .valid {
+                XCTAssertTrue(
+                    expected.rowContractComplete,
+                    file.lastPathComponent + " necesita una expectativa exacta por cada movimiento"
+                )
+                XCTAssertTrue(
+                    rowAudit.passed,
+                    file.lastPathComponent + " no coincide fila por fila con el golden privado"
+                )
+            }
             let statementID = store.statements.first(where: { $0.sourceFingerprint == actualFingerprint })?.id
             let uncategorizedRows = statementID.map { id in
                 store.movements
@@ -941,9 +1241,11 @@ final class NativeCorpusContractTests: XCTestCase {
             let autoAccepted = result.reconciliation?.status == .valid
                 && result.sourceDetection.status == .verified
                 && !result.requiresReview
+            let rowAuditSupportsAcceptance = expected.status != .valid || rowAudit.passed
+            let provenAutoAccepted = autoAccepted && rowAuditSupportsAcceptance
             if autoAccepted {
                 automaticAcceptances += 1
-                if expected.status == .valid {
+                if expected.status == .valid && rowAudit.passed {
                     goldenAutoAccepted += 1
                 } else {
                     // A scan that becomes valid before its golden is promoted
@@ -953,7 +1255,7 @@ final class NativeCorpusContractTests: XCTestCase {
                     goldenFalseAccepted += 1
                 }
             }
-            if result.usedOCR && !autoAccepted {
+            if result.usedOCR && !provenAutoAccepted {
                 unresolvedOCR += 1
             }
 
@@ -979,6 +1281,9 @@ final class NativeCorpusContractTests: XCTestCase {
                 "diagnosticRows": String(result.rowDiagnostics.count),
                 "acceptedDiagnosticRows": String(result.rowDiagnostics.filter(\.accepted).count),
                 "rejectedRows": String(rejectedRows),
+                "goldenRowAuditPassed": String(rowAudit.passed),
+                "goldenRowAuditMismatches": String(rowAudit.mismatchCount),
+                "independentOCRProof": String(result.independentOCRProof),
                 "uncategorizedRows": String(uncategorizedRows),
                 "expectedPreviousBalance": decimalText(expected.previousBalance),
                 "extractedPreviousBalance": decimalText(result.summary?.previousBalance),
@@ -1021,6 +1326,15 @@ final class NativeCorpusContractTests: XCTestCase {
         let expectedValidCount = runExpectations.values.filter { $0.status == .valid }.count
         let expectedPendingCount = runExpectations.values.filter { $0.status != .valid }.count
         let exactCorpus = Set(files.map(\.lastPathComponent)) == Set(runExpectations.keys)
+        let validExpectationsHaveRows = runExpectations.values
+            .filter { $0.status == .valid }
+            .allSatisfy { $0.rowContractComplete }
+        let validFilesHaveRowAudits = goldenRowAuditsPassed == expectedValidCount
+            && goldenRowAuditMismatches == 0
+        let visionFiles = report.filter {
+            ["vision-ocr", "multimodal-ai"].contains($0["mode"] ?? "")
+        }.count
+        let independentProofComplete = independentProofFiles >= visionFiles
         // The private manifest is the scope of certification.  Do not impose
         // an unrelated fixed corpus size here: a focused Rappi regression
         // corpus currently contains six PDFs, while a broader release corpus
@@ -1033,9 +1347,9 @@ final class NativeCorpusContractTests: XCTestCase {
             && goldenAutoAccepted == expectedValidCount
             && automaticAcceptancePrecision >= 0.97
             && unresolvedOCR == 0
-        let requireCertified = ["1", "true", "yes"].contains(
-            ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED"]?.lowercased() ?? ""
-        )
+            && validExpectationsHaveRows
+            && validFilesHaveRowAudits
+            && independentProofComplete
         if requireCertified {
             XCTAssertTrue(
                 certified,
@@ -1053,6 +1367,12 @@ final class NativeCorpusContractTests: XCTestCase {
             "goldenFalseAccepted": String(goldenFalseAccepted),
             "automaticAcceptancePrecision": String(format: "%.4f", locale: Locale(identifier: "en_US_POSIX"), automaticAcceptancePrecision),
             "unresolvedOCR": String(unresolvedOCR),
+            "goldenRowAuditsPassed": String(goldenRowAuditsPassed),
+            "goldenRowAuditsExpected": String(expectedValidCount),
+            "goldenRowAuditMismatches": String(goldenRowAuditMismatches),
+            "independentProofFiles": String(independentProofFiles),
+            "independentProofExpected": String(visionFiles),
+            "rowGoldensComplete": String(validExpectationsHaveRows),
             "requireCertified": String(requireCertified),
             "certified": String(certified)
         ]

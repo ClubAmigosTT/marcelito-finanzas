@@ -17,6 +17,9 @@ function row(index: number, overrides: Record<string, unknown> = {}) {
     rows: 11,
     reconciliationValid: true,
     duplicate: false,
+    goldenRowAuditPassed: true,
+    goldenRowAuditMismatches: 0,
+    independentOCRProof: true,
     ...overrides,
   };
 }
@@ -36,6 +39,12 @@ function report(rows: Array<Record<string, unknown>>) {
     goldenFalseAccepted: 0,
     automaticAcceptancePrecision: 1,
     unresolvedOCR: 0,
+    goldenRowAuditsPassed: rows.length,
+    goldenRowAuditsExpected: rows.length,
+    goldenRowAuditMismatches: 0,
+    independentProofFiles: rows.filter((row) => ["vision-ocr", "multimodal-ai"].includes(String(row.mode))).length,
+    independentProofExpected: rows.filter((row) => ["vision-ocr", "multimodal-ai"].includes(String(row.mode))).length,
+    rowGoldensComplete: true,
     certified: true,
   };
 }
@@ -142,4 +151,77 @@ test("el informe híbrido acepta una lectura multimodal conciliada", () => {
     10,
   );
   assert.equal(result.ok, true);
+});
+
+test("la prueba independiente permite OCR bruto bajo en tarjetas", () => {
+  const rows = Array.from({ length: 10 }, (_, index) => row(index + 1));
+  rows[0] = row(1, {
+    source: "Rappi",
+    accountKey: "rappi:9040",
+    kind: "card",
+    mode: "vision-ocr",
+    ocrConfidence: 0.56,
+    weakestOCRPage: 0.5,
+    independentOCRProof: true,
+  });
+  const result = verifyNativeDeviceReport(
+    report(rows),
+    "ios-reader-2026.08.31.14",
+    10,
+    { expectedFiles: 10, requireRowAudit: true, requireIndependentProof: true },
+  );
+  assert.equal(result.ok, true, result.errors.join("; "));
+});
+
+test("la compuerta estricta exige auditoría exacta e independencia OCR", () => {
+  const rows = Array.from({ length: 10 }, (_, index) => row(index + 1));
+  rows[0] = row(1, {
+    mode: "vision-ocr",
+    ocrConfidence: 0.94,
+    weakestOCRPage: 0.84,
+    ocrColumnsCalibrated: true,
+  });
+  const result = verifyNativeDeviceReport(
+    report(rows),
+    "ios-reader-2026.08.31.14",
+    10,
+    { expectedFiles: 10, requireRowAudit: true, requireIndependentProof: true },
+  );
+  assert.equal(result.ok, true, result.errors.join("; "));
+
+  const incomplete = verifyNativeDeviceReport(
+    {
+      ...report(rows),
+      rowGoldensComplete: false,
+      goldenRowAuditsPassed: 9,
+      goldenRowAuditMismatches: 1,
+      independentProofFiles: 0,
+    },
+    "ios-reader-2026.08.31.14",
+    10,
+    { expectedFiles: 10, requireRowAudit: true, requireIndependentProof: true },
+  );
+  assert.equal(incomplete.ok, false);
+  assert.ok(incomplete.errors.some((error) => error.includes("goldens completos")));
+  assert.ok(incomplete.errors.some((error) => error.includes("discrepancias")));
+  assert.ok(incomplete.errors.some((error) => error.includes("prueba independiente")));
+});
+
+test("el informe estricto rechaza archivos privados, estados sin filas y emisores desconocidos", () => {
+  const rows = Array.from({ length: 10 }, (_, index) => row(index + 1));
+  rows[0] = row(1, {
+    file: "Estado-de-cuenta-agosto-2026.pdf",
+    kind: "unknown",
+    rows: 0,
+  });
+  const result = verifyNativeDeviceReport(
+    report(rows),
+    "ios-reader-2026.08.31.14",
+    10,
+    { expectedFiles: 10, requireRowAudit: true, requireIndependentProof: true },
+  );
+  assert.equal(result.ok, false);
+  assert.ok(result.errors.some((error) => error.includes("nombre de archivo no está redactado")));
+  assert.ok(result.errors.some((error) => error.includes("kind=unknown")));
+  assert.ok(result.errors.some((error) => error.includes("al menos una fila")));
 });

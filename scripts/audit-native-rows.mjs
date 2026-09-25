@@ -12,10 +12,12 @@ export function cents(value) {
 
 /** Compares a private iPhone export with a separately reviewed reference.
  * Outputs ordinals and field names only, never private descriptions or amounts.
- * A passing row audit is NOT corpus certification or proof of classification.
+ * A passing row audit is NOT corpus certification, but it does include the
+ * exact movement classification so a visually reviewed reference cannot
+ * certify only dates and totals.
  */
 export function auditNativeRows(reference, report, readerVersion) {
-  const normalize = value => value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/g, ' ').trim();
+  const normalize = value => value.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').replace(/\s+/g, ' ').trim();
   const errors = [];
   if (reference?.schemaVersion !== 1 || reference?.referenceMethod !== 'visual-independent') errors.push('reference-schema');
   if (report?.schemaVersion !== 1) errors.push('report-schema');
@@ -34,10 +36,16 @@ export function auditNativeRows(reference, report, readerVersion) {
     const matches = actual.filter(item => item.sourceFingerprint === hash);
     if (matches.length !== 1) { errors.push(`${label}:missing-or-duplicate-export`); continue; }
     const received = matches[0];
-    for (const field of ['source', 'accountKey', 'period']) {
+    for (const field of ['source', 'accountKey']) {
       if (typeof file[field] !== 'string' || !file[field] || received[field] !== file[field]) errors.push(`${label}:${field}`);
     }
-    const rows = Array.isArray(file.rows) ? file.rows : [];
+    if (file.period !== undefined
+        && (typeof file.period !== 'string' || !file.period || received.period !== file.period)) {
+      errors.push(`${label}:period`);
+    }
+    const rows = Array.isArray(file.rowExpectations)
+      ? file.rowExpectations
+      : (Array.isArray(file.rows) ? file.rows : []);
     const candidates = Array.isArray(received.candidateRows) ? received.candidateRows : [];
     if (!rows.length || rows.length !== candidates.length) errors.push(`${label}:row-count`);
     for (const [ordinal, row] of rows.entries()) {
@@ -49,6 +57,8 @@ export function auditNativeRows(reference, report, readerVersion) {
       if (cents(row.signedAmount) === null || cents(got.signedAmount) !== cents(row.signedAmount)) errors.push(`${prefix}:signedAmount`);
       if (typeof row.titleContains !== 'string' || !row.titleContains || typeof got.title !== 'string'
           || !normalize(got.title).includes(normalize(row.titleContains))) errors.push(`${prefix}:description`);
+      const allowedKinds = new Set(['Compra', 'Pago de tarjeta', 'Traspaso propio', 'Ingreso', 'Crédito contable', 'Devolución', 'MSI', 'Interés', 'Comisión', 'Otro']);
+      if (typeof row.kind !== 'string' || !allowedKinds.has(row.kind) || got.kind !== row.kind) errors.push(`${prefix}:kind`);
     }
     if (file.controls) {
       const amounts = rows.map(row => cents(row.signedAmount));

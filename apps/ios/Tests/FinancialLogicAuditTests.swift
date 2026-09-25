@@ -77,9 +77,9 @@ final class FinancialLogicAuditTests: XCTestCase {
 
     func testSignedCashAndNoInventedObligations() {
         withStore { store in
-            let bank = statement("BBVA", key: "bbva:1", kind: .bank, summary: StatementSummaryRecord(cashBalance: -500))
+            let bank = statement("BBVA", key: "bbva:0001", kind: .bank, summary: StatementSummaryRecord(cashBalance: -500))
             XCTAssertEqual(store.statementMetricForTesting(bank).cashBalance, -500)
-            let card = statement("Amex", key: "amex:1", kind: .card,
+            let card = statement("Amex", key: "amex:0001", kind: .card,
                 summary: StatementSummaryRecord(previousBalance: 5000, newCharges: 1000, msiOriginalDeferred: 12000))
             let metric = store.statementMetricForTesting(card)
             XCTAssertNil(metric.paymentForNoInterest)
@@ -91,8 +91,8 @@ final class FinancialLogicAuditTests: XCTestCase {
     func testAllCardsIncludedAndMissingValueNotZero() {
         withStore { store in
             store.statements = [
-                statement("Amex", key: "amex:1", kind: .card, summary: StatementSummaryRecord(creditLimit: 10000, creditAvailable: 5000, paymentForNoInterest: 300, msiPending: 1200)),
-                statement("Amex", key: "amex:2", kind: .card, summary: StatementSummaryRecord(creditLimit: 10000, paymentForNoInterest: 400, msiPending: 800))
+                statement("Amex", key: "amex:0001", kind: .card, summary: StatementSummaryRecord(creditLimit: 10000, creditAvailable: 5000, paymentForNoInterest: 300, msiPending: 1200)),
+                statement("Amex", key: "amex:0002", kind: .card, summary: StatementSummaryRecord(creditLimit: 10000, paymentForNoInterest: 400, msiPending: 800))
             ]
             XCTAssertEqual(store.latestMsiPending, 2000)
             XCTAssertEqual(store.latestPaymentForNoInterest, 700)
@@ -139,7 +139,7 @@ final class FinancialLogicAuditTests: XCTestCase {
         }
     }
 
-    func testMissingBBVAIdentityJoinsOnlyKnownAccountAndReplacesRepeatedPeriod() {
+    func testMissingBBVAIdentityRemainsSeparateAndDoesNotReplaceRepeatedPeriod() {
         withStore { store in
             let known = statement("BBVA", key: "bbva:4922", kind: .bank, period: "15/03/2026 - 14/04/2026")
             let firstJuly = statement("BBVA", key: nil, kind: .bank, period: "15/07/2026 - 14/08/2026",
@@ -156,12 +156,11 @@ final class FinancialLogicAuditTests: XCTestCase {
 
             store.normalizeFinanceForTesting()
 
-            XCTAssertEqual(store.statements.count, 2)
-            XCTAssertTrue(store.statements.allSatisfy { $0.accountKey == "bbva:4922" })
+            XCTAssertEqual(store.statements.count, 3)
+            XCTAssertEqual(store.statements.filter { $0.accountKey == nil }.count, 2)
+            XCTAssertTrue(store.statements.contains { $0.id == firstJuly.id })
             XCTAssertTrue(store.statements.contains { $0.id == replacementJuly.id })
-            XCTAssertFalse(store.statements.contains { $0.id == firstJuly.id })
-            XCTAssertEqual(store.movements.count, 1)
-            XCTAssertEqual(store.movements.first?.statementId, replacementJuly.id)
+            XCTAssertEqual(store.movements.count, 2)
         }
     }
 

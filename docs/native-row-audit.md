@@ -30,7 +30,8 @@ las filas y los totales al centavo. No subir los PDFs a la CI pública.
 Una compilación correcta y un informe del lector web no certifican PDFKit/Vision.
 La prueba `NativeRowAuditTests` usa los PDFs privados con el extractor de producción
 y compara cada ocurrencia contra una referencia transcrita de las páginas originales.
-Se comprueban cuenta, emisor, periodo, fecha, página, descripción e importe con signo.
+Se comprueban cuenta, emisor, periodo, fecha, página, descripción, tipo de
+movimiento e importe con signo.
 La comparación conserva ocurrencias repetidas y detecta errores que se compensan
 en una suma. El diagnóstico usa ordinales y campos, sin imprimir datos privados.
 
@@ -95,16 +96,17 @@ Después de ejecutar el certificador en el iPhone, usar **Compartir diagnóstico
 por fila** y comparar localmente:
 
 ```powershell
-node scripts/audit-native-rows.mjs private-corpus/independent-rows.json <exportacion-privada.json> ios-reader-recovery-2026.09.23.3
+node scripts/audit-native-rows.mjs private-corpus/independent-rows.json <exportacion-privada.json> ios-reader-recovery-2026.09.25.14
 ```
 
 La comparación se hace por huella, no por nombre. Exige coincidencia de filas,
-signos, fechas, páginas, descripción y versión; rechaza archivos sin referencia,
+signos, fechas, páginas, descripción, tipo de movimiento y versión; rechaza archivos sin referencia,
 duplicados y exportaciones antiguas sin candidatos. Los importes se comparan en
 centavos enteros sin redondear. Solo imprime ordinales y campos discrepantes.
-Un resultado correcto no certifica clasificación, conciliación nativa ni toda
-la colección: se necesita además el informe de certificación y referencia
-completa. No subir estos dos archivos privados al repositorio ni a CI público.
+La referencia debe incluir `kind` en cada fila válida. El resultado correcto no
+certifica por sí solo la conciliación nativa ni toda la colección: se necesita
+además el informe de certificación y referencia completa. No subir estos dos
+archivos privados al repositorio ni a CI público.
 
 Referencia privada revisada: cuatro archivos BBVA y Santander de agosto. Este
 último requiere OCR en la extracción local comprobada; su referencia visual no

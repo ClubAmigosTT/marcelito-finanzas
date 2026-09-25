@@ -9,6 +9,7 @@ const pdfDiagnosticPath = new URL("../apps/ios/Cauce/PDFExtractionDiagnostic.swi
 const pdfCachePath = new URL("../apps/ios/Cauce/PDFReadingCache.swift", import.meta.url);
 const appPath = new URL("../apps/ios/Cauce/CauceApp.swift", import.meta.url);
 const aiClassificationPath = new URL("../apps/ios/Cauce/AIClassification.swift", import.meta.url);
+const diagnosticsViewPath = new URL("../apps/ios/Cauce/Diagnostics.swift", import.meta.url);
 const certificationViewPath = new URL("../apps/ios/Cauce/NativeCorpusCertification.swift", import.meta.url);
 const nativeCorpusPath = new URL("../apps/ios/Tests/NativeCorpusContractTests.swift", import.meta.url);
 const nativeCorpusRunnerPath = new URL("../apps/ios/scripts/run-native-corpus.sh", import.meta.url);
@@ -472,6 +473,19 @@ test("iOS usa el proveedor seleccionado solo para enriquecer gastos después de 
   assert.match(certification, /multimodalFallbackAttempted/);
   assert.match(certification, /static let targetPrecision = 0\.97/);
   assert.match(certification, /conciliar cada archivo al 100%/);
+});
+
+test("el diagnóstico del dispositivo no se presenta como certificación de publicación", async () => {
+  const [diagnostics, certification] = await Promise.all([
+    readFile(diagnosticsViewPath, "utf8"),
+    readFile(certificationViewPath, "utf8"),
+  ]);
+  assert.match(diagnostics, /Section\("Diagnóstico del lector"\)/);
+  assert.match(diagnostics, /Diagnosticar estados con Vision/);
+  assert.match(diagnostics, /runner privado con auditoría fila por fila/);
+  assert.match(certification, /navigationTitle\("Diagnóstico del lector"\)/);
+  assert.match(certification, /Este informe mide el lector local y no contiene las referencias golden privadas/);
+  assert.doesNotMatch(certification, /guárdalo como docs\/native-corpus-certification\.json/);
 });
 
 test("iOS permite elegir Gemini, Zen o NVIDIA sin incluir claves en el código", async () => {

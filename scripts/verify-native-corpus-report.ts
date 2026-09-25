@@ -13,6 +13,12 @@ type NativeCorpusSummary = {
   goldenFalseAccepted?: string | number;
   automaticAcceptancePrecision?: string | number;
   unresolvedOCR?: string | number;
+  goldenRowAuditsPassed?: string | number;
+  goldenRowAuditsExpected?: string | number;
+  goldenRowAuditMismatches?: string | number;
+  independentProofFiles?: string | number;
+  independentProofExpected?: string | number;
+  rowGoldensComplete?: string | boolean;
   certified?: string | boolean;
 };
 
@@ -41,6 +47,9 @@ type NativeCorpusReportRow = {
   expectedAccountKey?: string;
   rejectedRows?: string | number;
   uncategorizedRows?: string | number;
+  goldenRowAuditPassed?: string | boolean;
+  goldenRowAuditMismatches?: string | number;
+  independentOCRProof?: string | boolean;
 };
 
 type ReportVerification = {
@@ -85,6 +94,10 @@ function booleanField(value: NativeCorpusSummary["certified"]) {
   return value === true || ["true", "1", "yes"].includes(String(value ?? "").toLowerCase());
 }
 
+function booleanToken(value: unknown) {
+  return value === true || ["true", "1", "yes"].includes(String(value ?? "").trim().toLowerCase());
+}
+
 /**
  * Verifies the machine-readable native Vision result before a human copies
  * its certification into the distribution gate. This intentionally accepts
@@ -102,6 +115,11 @@ export function verifyNativeCorpusSummary(summary: NativeCorpusSummary, expected
   const goldenFalseAccepted = countField(summary, "goldenFalseAccepted");
   const precision = numberField(summary, "automaticAcceptancePrecision");
   const unresolvedOCR = countField(summary, "unresolvedOCR");
+  const goldenRowAuditsPassed = countField(summary, "goldenRowAuditsPassed");
+  const goldenRowAuditsExpected = countField(summary, "goldenRowAuditsExpected");
+  const goldenRowAuditMismatches = countField(summary, "goldenRowAuditMismatches");
+  const independentProofFiles = countField(summary, "independentProofFiles");
+  const independentProofExpected = countField(summary, "independentProofExpected");
 
   if (!summary.readerVersion) errors.push("el informe no incluye readerVersion");
   if (expectedReaderVersion && summary.readerVersion !== expectedReaderVersion) {
@@ -133,6 +151,19 @@ export function verifyNativeCorpusSummary(summary: NativeCorpusSummary, expected
     errors.push(`precisión automática ${precision ?? "ausente"} fuera del objetivo 0.97`);
   }
   if (unresolvedOCR === undefined || unresolvedOCR !== 0) errors.push(`quedan ${unresolvedOCR ?? "desconocido"} OCR sin resolver`);
+  if (goldenRowAuditsPassed === undefined || goldenRowAuditsExpected === undefined || goldenRowAuditMismatches === undefined) {
+    errors.push("faltan contadores de auditoría exacta por fila");
+  } else {
+    if (goldenRowAuditsExpected !== expectedValid) errors.push("goldenRowAuditsExpected no coincide con expectedValid");
+    if (goldenRowAuditsPassed !== goldenRowAuditsExpected) errors.push("no todos los goldens tienen auditoría exacta aprobada");
+    if (goldenRowAuditMismatches !== 0) errors.push(`hay ${goldenRowAuditMismatches} discrepancias de filas`);
+  }
+  if (independentProofFiles === undefined || independentProofExpected === undefined) {
+    errors.push("faltan contadores de prueba independiente");
+  } else if (independentProofFiles !== independentProofExpected) {
+    errors.push("independentProofFiles no coincide con independentProofExpected");
+  }
+  if (!booleanField(summary.rowGoldensComplete)) errors.push("el manifiesto no contiene goldens completos por fila");
   if (!booleanField(summary.certified)) errors.push("el runner no marcó certified=true");
 
   return { ok: errors.length === 0, errors, summary };
@@ -180,6 +211,9 @@ export function verifyNativeCorpusReport(
     if (!["valid", "pending", "invalid"].includes(status)) {
       errors.push(`${label}: status no es valid/pending/invalid`);
     }
+    if (status === "valid" && kind === "unknown") {
+      errors.push(`${label}: un estado válido no puede conservar kind=unknown`);
+    }
     const mode = typeof row.mode === "string" ? row.mode.trim() : "";
     if (!["pdf-text", "vision-ocr", "multimodal-ai"].includes(mode)) {
       errors.push(`${label}: mode no es pdf-text/vision-ocr/multimodal-ai`);
@@ -224,13 +258,22 @@ export function verifyNativeCorpusReport(
         || columnsToken === "false"
         || columnsToken === "1"
         || columnsToken === "0";
-      if (mode === "vision-ocr" && !columnsValid) {
+      // Rappi and Amex are card layouts; bank-column calibration does not
+      // apply to them. BBVA/Santander OCR must still report an explicit
+      // calibration boolean.
+      const bankColumnsRequired = source === "BBVA" || source === "Santander";
+      if (mode === "vision-ocr" && bankColumnsRequired && !columnsValid) {
         errors.push(`${label}: ocrColumnsCalibrated no es booleano`);
       }
       const reviewIsFalse = reviewToken === false || reviewToken === "false" || reviewToken === "0" || reviewToken === "no";
+      const independentProof = booleanToken(row.independentOCRProof);
       if (status === "valid" && reviewIsFalse) {
-        if (ocrConfidence < 0.88) errors.push(`${label}: OCR válido con confianza media menor a 0.88`);
-        if (weakestOCRPage < 0.78) errors.push(`${label}: OCR válido con página menor a 0.78`);
+        // A low raw Vision score is acceptable only when the exact independent
+        // row proof and statement reconciliation are present. The native
+        // reader uses the same exception; without it these thresholds remain
+        // hard blockers.
+        if (!independentProof && ocrConfidence < 0.88) errors.push(`${label}: OCR válido con confianza media menor a 0.88`);
+        if (!independentProof && weakestOCRPage < 0.78) errors.push(`${label}: OCR válido con página menor a 0.78`);
         if (mode === "vision-ocr" && source === "Santander" && columnsToken !== true && columnsToken !== "true" && columnsToken !== "1") {
           errors.push(`${label}: Santander válido sin columnas OCR calibradas`);
         }
@@ -239,11 +282,27 @@ export function verifyNativeCorpusReport(
     const rowCount = Number(row.rows);
     if (!Number.isInteger(rowCount) || rowCount < 0) {
       errors.push(`${label}: rows no es un entero no negativo`);
+    } else if (status === "valid" && rowCount < 1) {
+      errors.push(`${label}: un estado válido debe contener al menos una fila`);
+    }
+    const rowAuditPassed = booleanToken(row.goldenRowAuditPassed);
+    const rowAuditMismatches = numericValue(row.goldenRowAuditMismatches);
+    if (status === "valid") {
+      if (!rowAuditPassed) errors.push(`${label}: auditoría exacta por fila no aprobada`);
+      if (!Number.isInteger(rowAuditMismatches) || rowAuditMismatches !== 0) {
+        errors.push(`${label}: discrepancias en auditoría exacta por fila`);
+      }
+      if ((mode === "vision-ocr" || mode === "multimodal-ai") && !booleanToken(row.independentOCRProof)) {
+        errors.push(`${label}: falta prueba independiente de OCR`);
+      }
     }
     const actual = typeof row.accountKey === "string" ? row.accountKey.trim() : "";
     const expected = typeof row.expectedAccountKey === "string" ? row.expectedAccountKey.trim() : "";
     if (!actual || !/^[a-z0-9]+:\d{4}$/i.test(actual)) {
       errors.push(`${label}: accountKey no está en formato emisor:últimos4`);
+    }
+    if (status === "valid" && (!expected || !/^[a-z0-9]+:\d{4}$/i.test(expected))) {
+      errors.push(`${label}: falta expectedAccountKey enmascarado para el golden válido`);
     }
     if (expected && actual !== expected) {
       errors.push(`${label}: accountKey ${actual || "ausente"} no coincide con ${expected}`);
@@ -366,7 +425,7 @@ async function main() {
   const manifestErrors: string[] = [];
   if (manifestPath) {
     try {
-        const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
+      const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as {
           readerVersion?: string;
           files?: Array<{
             file?: string;
@@ -382,6 +441,11 @@ async function main() {
             maxUncategorized?: number;
           }>;
         };
+      if (!manifest.readerVersion) {
+        manifestErrors.push("el manifiesto necesita readerVersion");
+      } else if (expectedReaderVersion && manifest.readerVersion !== expectedReaderVersion) {
+        manifestErrors.push(`readerVersion del manifiesto ${manifest.readerVersion} no coincide con ${expectedReaderVersion}`);
+      }
       expectedEntries = (manifest.files ?? [])
         .filter((entry): entry is {
           file: string;
@@ -424,11 +488,14 @@ async function main() {
         if (!entry.kind || !["bank", "card", "unknown"].includes(entry.kind.trim())) {
           manifestErrors.push(`${label}: el manifiesto necesita kind válido`);
         }
+        if (entry.status === "valid" && entry.kind?.trim() === "unknown") {
+          manifestErrors.push(`${label}: un golden válido no puede conservar kind=unknown`);
+        }
         if (!entry.status || !["valid", "pending", "invalid"].includes(entry.status.trim())) {
           manifestErrors.push(`${label}: el manifiesto necesita status valid/pending/invalid`);
         }
-        if (entry.status === "valid" && (!Number.isInteger(entry.rows) || (entry.rows ?? -1) < 0)) {
-          manifestErrors.push(`${label}: un golden valid necesita rows entero no negativo`);
+        if (entry.status === "valid" && (!Number.isInteger(entry.rows) || (entry.rows ?? 0) < 1)) {
+          manifestErrors.push(`${label}: un golden válido necesita al menos una fila`);
         }
         if (entry.expectedMethod && !["pdf-text", "vision-ocr"].includes(entry.expectedMethod)) {
           manifestErrors.push(`${label}: expectedMethod inválido`);

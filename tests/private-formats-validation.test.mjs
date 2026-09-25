@@ -15,9 +15,9 @@ function fixture() {
       files: [{ ...identity, kind: 'bank', status: 'valid', sourceStatus: 'verified', requiresReview: 'false', mode: 'vision-ocr',
         ocrColumnsCalibrated: 'true', rows: '1', extractedPreviousBalance: '100', extractedCashBalance: '90', extractedDeposits: '0', extractedWithdrawals: '10' }] },
     rows: { schemaVersion: 1, readerVersion: 'test-reader', files: [{ ...identity, status: 'valid', mode: 'vision-ocr',
-      rows: [{ accepted: true, rawText: 'sample' }], candidateRows: [{ date: '2026-01-02', page: 1, title: 'sample store', signedAmount: '-10' }] }] },
+      rows: [{ accepted: true, rawText: 'sample' }], candidateRows: [{ date: '2026-01-02', page: 1, title: 'sample store', signedAmount: '-10', kind: 'Ingreso' }] }] },
     reference: { schemaVersion: 1, referenceMethod: 'visual-independent', files: [{ ...identity,
-      rows: [{ date: '2026-01-02', page: 1, titleContains: 'sample', signedAmount: '-10' }] }] },
+      rows: [{ date: '2026-01-02', page: 1, titleContains: 'sample', signedAmount: '-10', kind: 'Ingreso' }] }] },
   };
 }
 
@@ -56,9 +56,9 @@ test('row errors cannot be hidden by a valid statement status', () => {
 });
 test('compensating row errors cannot pass equal totals', () => {
   const f = fixture(); f.manifest.files[0].rows = 2; f.native.files[0].rows = '2';
-  f.reference.files[0].rows = [1, 2].map(page => ({ date: '2026-01-02', page, titleContains: 'sample', signedAmount: '-5' }));
+  f.reference.files[0].rows = [1, 2].map(page => ({ date: '2026-01-02', page, titleContains: 'sample', signedAmount: '-5', kind: 'Ingreso' }));
   f.rows.files[0].rows.push({ accepted: true, rawText: 'sample' });
-  f.rows.files[0].candidateRows = [1, 2].map(page => ({ date: '2026-01-02', page, title: 'sample', signedAmount: page === 1 ? '-4' : '-6' }));
+  f.rows.files[0].candidateRows = [1, 2].map(page => ({ date: '2026-01-02', page, title: 'sample', signedAmount: page === 1 ? '-4' : '-6', kind: 'Ingreso' }));
   const r = validateBank(f);
   assert.equal(r.passed, false);
   assert.ok(r.documents[0].errors.some(x => x.endsWith('signedAmount')));
