@@ -267,7 +267,16 @@ final class NativeCorpusContractTests: XCTestCase {
         }
 
         let manifestURL = try corpusURL(rawPath)
-        let data = try Data(contentsOf: manifestURL, options: .mappedIfSafe)
+        // A simulator test host may expose the private corpus through a
+        // security-scoped file provider that refuses memory mapping for a
+        // non-PDF sidecar. Retry with a regular read before declaring the
+        // manifest missing; the PDF reader itself remains unchanged.
+        let data: Data
+        do {
+            data = try Data(contentsOf: manifestURL, options: .mappedIfSafe)
+        } catch {
+            data = try Data(contentsOf: manifestURL)
+        }
         let manifest = try JSONDecoder().decode(ExternalManifest.self, from: data)
         guard manifest.schemaVersion == 1 else {
             throw NSError(
@@ -1033,7 +1042,8 @@ final class NativeCorpusContractTests: XCTestCase {
         do {
             runExpectations = try expectationsForRun()
         } catch {
-            XCTFail("No se pudo leer MARCELITO_PDF_CORPUS_MANIFEST: \(error.localizedDescription)")
+            let manifestPath = ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_MANIFEST"] ?? "<no definido>"
+            XCTFail("No se pudo leer MARCELITO_PDF_CORPUS_MANIFEST (\(manifestPath)): \(error.localizedDescription)")
             return
         }
         let files = try FileManager.default.contentsOfDirectory(

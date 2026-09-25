@@ -86,7 +86,7 @@ private struct RappiEngineBounds: Decodable {
 /// intentionally not a PDF.js runtime: JavaScriptCore receives only the
 /// bounded text/layout contract emitted locally by PDFKit or Vision.
 final class RappiSharedEngine: @unchecked Sendable {
-    static let version = "rappi-shared-engine-2026.09.23.1"
+    static let version = "rappi-shared-engine-2026.09.25.2"
     static let shared = RappiSharedEngine()
 
     private let context: JSContext?

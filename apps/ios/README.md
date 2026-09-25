@@ -74,7 +74,7 @@ privado:
 La prueba no modifica los umbrales ni convierte una fila incierta en válida.
 Si falta cualquiera de esas señales, `requiresReview` permanece en `true` y
 las filas no entran al libro canónico ni a los KPI. La versión del lector que
-implementa este contrato es `ios-reader-recovery-2026.09.25.14`.
+implementa este contrato es `ios-reader-recovery-2026.09.25.15`.
 
 También puedes usar el runner reproducible desde esta carpeta o desde la raíz
 del repositorio; conserva el
@@ -108,7 +108,7 @@ cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
   --manifest /ruta/privada/rappi-regression-manifest.json \
-  --reader-version ios-reader-recovery-2026.09.25.14 \
+  --reader-version ios-reader-recovery-2026.09.25.15 \
   --require-certified
 ```
 
@@ -210,7 +210,7 @@ esas referencias privadas:
 npm run pdf:native:report -- \
   --log /ruta/privada/xcodebuild.log \
   --output docs/native-corpus-certification.json \
-  --reader-version ios-reader-recovery-2026.09.25.14 \
+  --reader-version ios-reader-recovery-2026.09.25.15 \
   --expected-files 22
 ```
 

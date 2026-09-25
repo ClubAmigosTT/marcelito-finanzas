@@ -23,6 +23,34 @@ const rowPairStart = new RegExp(`(?<![A-Za-z0-9.,])(?=${rowDateToken}\\s+${rowDa
 // and then trust the last numeric-looking fragment in the line.
 const signedMoney = /(?<![A-Za-z0-9.,])([+-])\s*\$?\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})(?![A-Za-z0-9.,])/g;
 
+/**
+ * Rappi prints operation date before charge date. Vision can return the two
+ * date columns in reverse order when a row contains the foreign-currency
+ * annotation below the merchant. Preserve the operation date for a plausible
+ * one-week posting gap, but keep the first column when the second token is
+ * implausibly far away (for example `2026-05-2`, where OCR dropped the final
+ * digit from a same-period charge date).
+ */
+function operationDate(
+  operationToken: string,
+  chargeToken: string | undefined,
+  text: string,
+  fileName: string,
+) {
+  const operation = parseIssuerDate(operationToken, text, fileName);
+  const charge = chargeToken ? parseIssuerDate(chargeToken, text, fileName) : undefined;
+  if (!operation) return charge;
+  if (charge && charge < operation) {
+    const operationTime = Date.parse(`${operation}T00:00:00Z`);
+    const chargeTime = Date.parse(`${charge}T00:00:00Z`);
+    const gapDays = Number.isFinite(operationTime) && Number.isFinite(chargeTime)
+      ? Math.abs(operationTime - chargeTime) / 86_400_000
+      : Number.POSITIVE_INFINITY;
+    if (gapDays <= 7) return charge;
+  }
+  return operation;
+}
+
 function isAdministrativeOrTruncatedDescription(value: string) {
   const compact = fold(value).replace(/[^a-z0-9]+/g, "");
   // Date anchors can land beside a page heading when OCR bands overlap. The
@@ -110,7 +138,7 @@ function parseMoneyRows(input: DeterministicParseInput, sameVisualRow: boolean |
       rejectedRows.push(raw.slice(0, 240));
       return;
     }
-    const date = parseIssuerDate(match[1], input.text, input.fileName);
+    const date = operationDate(match[1], match[2], input.text, input.fileName);
     if (!date) {
       rejectedRows.push(raw.slice(0, 240));
       return;
@@ -340,7 +368,7 @@ function parseLayoutRows(input: DeterministicParseInput) {
       return;
     }
     const firstDate = normalizeDate(pending.dates[0]);
-    const secondDate = normalizeDate(pending.dates[1] ?? pending.dates[0]);
+    const secondDate = normalizeDate(pending.dates[1] ?? pending.dates[0]) ?? firstDate;
     if (!firstDate || !secondDate) {
       pending = undefined;
       return;

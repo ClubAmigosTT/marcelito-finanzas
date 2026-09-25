@@ -9,7 +9,7 @@ import { parseRappi } from "./issuerParsers/rappi.ts";
  * contract is the single source of truth for row boundaries, signs, merchant
  * identity, categories and reconciliation.
  */
-export const RAPPI_SHARED_ENGINE_VERSION = "rappi-shared-engine-2026.09.23.1";
+export const RAPPI_SHARED_ENGINE_VERSION = "rappi-shared-engine-2026.09.25.2";
 
 export type RappiSharedEngineInput = Omit<DeterministicParseInput, "source"> & {
   source?: "Rappi";

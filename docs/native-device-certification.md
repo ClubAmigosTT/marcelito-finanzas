@@ -189,7 +189,7 @@ sanitizado que sí entra al repositorio:
 npm run pdf:native:report -- \
   --log /ruta/privada/xcodebuild.log \
   --output docs/native-corpus-certification.json \
-  --reader-version ios-reader-recovery-2026.09.25.14 \
+  --reader-version ios-reader-recovery-2026.09.25.15 \
   --expected-files 22
 ```
 
