@@ -53,6 +53,13 @@ export function parseBBVA(input: DeterministicParseInput): DeterministicParseRes
       continue;
     }
     const amountCents = deposit ?? -(charge ?? 0);
+    const normalizedDescription = fold(description);
+    const isRefund = /devolucion|reembolso|bonificacion/.test(normalizedDescription);
+    const isMsi = /msi|meses sin intereses|meses en automatico|diferid/.test(normalizedDescription);
+    const isInterest = /interes/.test(normalizedDescription);
+    const isFee = /comision|anualidad/.test(normalizedDescription);
+    const isCardPayment = /\bpago\b.*(?:\btarjeta\b|\bamex\b|\bamerican express\b|\bamericanexpress\b|\bcredito\b)/.test(normalizedDescription);
+    const isOwnTransfer = /entre cuentas|cuenta propia|mismo titular|traspaso interno|autotransferencia/.test(normalizedDescription);
     const confidence = Math.max(0, Math.min(1, Math.min(...line.words.map((word) => word.confidence))));
     rows.push(makeTransaction({
       parser: "bbva-movements-v1",
@@ -62,7 +69,19 @@ export function parseBBVA(input: DeterministicParseInput): DeterministicParseRes
       description,
       account: "BBVA",
       amountCents,
-      kind: /spei|transfer|traspaso/i.test(description) ? "bankTransfer" : amountCents > 0 ? "income" : "purchase",
+      kind: isRefund && amountCents > 0
+        ? "refund"
+        : isMsi
+          ? "msi"
+          : isInterest
+            ? "interest"
+            : isFee
+              ? "fee"
+              : isCardPayment && amountCents < 0
+                ? "cardPayment"
+                : isOwnTransfer
+                  ? "bankTransfer"
+                  : amountCents > 0 ? "income" : "purchase",
       page: line.page,
       mode: input.mode,
       confidence,

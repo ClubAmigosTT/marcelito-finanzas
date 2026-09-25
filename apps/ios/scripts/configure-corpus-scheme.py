@@ -9,6 +9,9 @@ KEYS = (
     "MARCELITO_PDF_CORPUS_MANIFEST",
     "MARCELITO_PDF_ROW_MANIFEST",
     "MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED",
+    "MARCELITO_PDF_CORPUS_EXPORT_PRIVATE_DIAGNOSTICS",
+    "MARCELITO_PDF_CORPUS_PRIVATE_EXPORT",
+    "MARCELITO_PDF_CORPUS_IMPORT_PRIVATE_EXPORT",
 )
 
 
@@ -28,8 +31,15 @@ def configure(path, environ):
         value = environ.get(key, "").strip()
         if not value:
             continue
-        if key != "MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED" and not value.startswith("app-documents://"):
-            value = str(Path(value).resolve(strict=True))
+        flag_key = key in {
+        "MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED",
+        "MARCELITO_PDF_CORPUS_EXPORT_PRIVATE_DIAGNOSTICS",
+        }
+        if not flag_key and not value.startswith("app-documents://"):
+            value = str(Path(value).expanduser().resolve(strict=key not in {
+                "MARCELITO_PDF_CORPUS_PRIVATE_EXPORT",
+                "MARCELITO_PDF_CORPUS_IMPORT_PRIVATE_EXPORT",
+            }))
         ET.SubElement(variables, "EnvironmentVariable", {
             "key": key, "value": value, "isEnabled": "YES",
         })

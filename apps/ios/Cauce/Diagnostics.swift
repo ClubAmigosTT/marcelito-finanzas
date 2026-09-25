@@ -421,13 +421,13 @@ struct DiagnosticsView: View {
                     }
                 }
 
-                Section("Certificación del lector") {
+                Section("Diagnóstico del lector") {
                     Button {
                         isNativeCorpusPresented = true
                     } label: {
-                        Label("Certificar estados con Vision", systemImage: "viewfinder")
+                        Label("Diagnosticar estados con Vision", systemImage: "viewfinder")
                     }
-                    Text("Ejecuta el mismo lector PDFKit/Vision en el iPhone sobre tus estados privados y genera un informe sanitizado para la publicación.")
+                    Text("Ejecuta el mismo lector PDFKit/Vision en el iPhone sobre tus estados privados y genera un informe de diagnóstico. La publicación requiere además el runner privado con auditoría fila por fila.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }

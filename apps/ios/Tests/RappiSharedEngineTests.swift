@@ -65,4 +65,31 @@ final class RappiSharedEngineTests: XCTestCase {
         XCTAssertEqual(rows[0].extractionEvidence?.bounds?.x, 0.12)
         XCTAssertTrue(rows[1].extractionEvidence?.selectionReason?.contains("signo OCR corregido") == true)
     }
+
+    func testDateOnlyRowsStayOnThePrintedCalendarDayAfterSwiftBridge() throws {
+        let rows = try XCTUnwrap(RappiSharedEngine.shared.parseMovements(
+            text: [
+                "Tarjeta de crédito RappiCard",
+                "Adeudo del periodo anterior = $0.00",
+                "Cargos regulares (no a meses) + $10.00",
+                "Cargos compras a meses (capital) + $0.00",
+                "Pagos y abonos - $0.00",
+                "Saldo deudor total $10.00",
+                "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+                "__PDF_PAGE_3__",
+                "2026-08-01 2026-08-02 COMERCIO EJEMPLO +$10.00",
+                "Total de cargos +$10.00",
+                "Total de abonos -$0.00"
+            ].joined(separator: "\n"),
+            fileName: "rappi-date-contract.pdf",
+            evidenceMethod: "vision-ocr"
+        ))
+
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.timeZone = .current
+        formatter.dateFormat = "yyyy-MM-dd"
+        XCTAssertEqual(formatter.string(from: try XCTUnwrap(rows.first?.date)), "2026-08-01")
+    }
 }

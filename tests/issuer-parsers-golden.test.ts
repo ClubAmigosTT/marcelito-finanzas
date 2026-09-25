@@ -12,7 +12,14 @@ const line = (page: number, words: Array<[number, string, number?]>): DocumentLa
 
 const layout = (...lines: DocumentLayoutLine[]): DocumentLayout => ({ pages: [{ page: 1, lines }] });
 
-function santanderFixture(opening: string, deposits: string, withdrawals: string, closing: string) {
+function santanderFixture(
+  opening: string,
+  deposits: string,
+  withdrawals: string,
+  closing: string,
+  depositDescription = "ABONO PAGO DE NOMINA",
+  withdrawalDescription = "PAGO TRANSFERENCIA",
+) {
   const text = [
     "Banco Santander México, S.A.",
     "Cuenta de cheques",
@@ -26,8 +33,8 @@ function santanderFixture(opening: string, deposits: string, withdrawals: string
   return { text, layout: layout(
     line(1, [[0.10, "Detalle de movimientos cuenta de cheques."]]),
     line(1, [[0.06, "FECHA"], [0.14, "FOLIO"], [0.20, "DESCRIPCION"], [0.63, "DEPOSITO"], [0.75, "RETIRO"], [0.88, "SALDO"]]),
-    line(1, [[0.06, "01-JUL-2026"], [0.14, "0000001"], [0.20, "ABONO PAGO DE NOMINA"], [0.66, deposits], [0.90, String((Number(opening.replace(/,/g, "")) + Number(deposits.replace(/,/g, ""))).toFixed(2))]]),
-    line(1, [[0.06, "02-JUL-2026"], [0.14, "0000002"], [0.20, "PAGO TRANSFERENCIA"], [0.77, withdrawals], [0.90, closing]]),
+    line(1, [[0.06, "01-JUL-2026"], [0.14, "0000001"], [0.20, depositDescription], [0.66, deposits], [0.90, String((Number(opening.replace(/,/g, "")) + Number(deposits.replace(/,/g, ""))).toFixed(2))]]),
+    line(1, [[0.06, "02-JUL-2026"], [0.14, "0000002"], [0.20, withdrawalDescription], [0.77, withdrawals], [0.90, closing]]),
     line(1, [[0.20, "TOTAL"], [0.66, deposits], [0.77, withdrawals]]),
   ) };
 }
@@ -41,6 +48,7 @@ test("golden Santander julio concilia al centavo desde la tabla de cheques", () 
   assert.equal(parsed.summary.cashBalance, 55_627.93);
   assert.equal(parsed.reconciliation.status, "valid");
   assert.deepEqual(parsed.transactions.map((row) => row.amount), [40_833.38, -73_007.21]);
+  assert.deepEqual(parsed.transactions.map((row) => row.kind), ["income", "purchase"]);
 });
 
 test("golden Santander agosto concilia al centavo desde la tabla de cheques", () => {
@@ -49,6 +57,53 @@ test("golden Santander agosto concilia al centavo desde la tabla de cheques", ()
   assert.equal(parsed.summary.depositTotal, 36_187.42);
   assert.equal(parsed.summary.withdrawalTotal, 64_161.11);
   assert.equal(parsed.summary.cashBalance, 27_654.24);
+  assert.equal(parsed.reconciliation.status, "valid");
+});
+
+test("las reglas bancarias distinguen pago de tarjeta de SPEI externo", () => {
+  const input = santanderFixture(
+    "1,000.00",
+    "500.00",
+    "300.00",
+    "1,200.00",
+    "ABONO PAGO DE NOMINA",
+    "DOMICILIACION PAGO SERVICIO AMERICAN EXPRESS",
+  );
+  const parsed = parseDeterministicStatement({ source: "Santander", fileName: "Santander-semantics.pdf", mode: "ocr", ...input });
+  assert.deepEqual(parsed.transactions.map((row) => row.kind), ["income", "cardPayment"]);
+
+  const spei = parseDeterministicStatement({
+    source: "Santander",
+    fileName: "Santander-semantics.pdf",
+    mode: "ocr",
+    ...santanderFixture("1,000.00", "0.00", "300.00", "700.00", "ABONO PAGO DE NOMINA", "PAGO TRANSFERENCIA SPEI"),
+  });
+  assert.equal(spei.transactions[1]?.kind, "purchase");
+});
+
+test("BBVA conserva comisiones como comisión y no como compra", () => {
+  const parsed = parseDeterministicStatement({
+    source: "BBVA",
+    fileName: "BBVA-fee.pdf",
+    mode: "text",
+    text: [
+      "BBVA MEXICO, S.A.",
+      "Saldo Anterior 1,000.00",
+      "Depósitos / Abonos (+) 0 0.00",
+      "Retiros / Cargos (-) 1 50.00",
+      "Saldo Final 950.00",
+      "Detalle de Movimientos Realizados",
+      "Total de Movimientos",
+      "TOTAL IMPORTE CARGOS 50.00 TOTAL MOVIMIENTOS CARGOS 1",
+      "TOTAL IMPORTE ABONOS 0.00 TOTAL MOVIMIENTOS ABONOS 0",
+    ].join("\n"),
+    layout: layout(
+      line(2, [[0.02, "Detalle de Movimientos Realizados"]]),
+      line(2, [[0.03, "OPER"], [0.10, "LIQ"], [0.18, "DESCRIPCION"], [0.64, "CARGOS"], [0.70, "ABONOS"]]),
+      line(2, [[0.03, "01/AGO"], [0.18, "COMISION CAJERO RED"], [0.64, "50.00"]]),
+    ),
+  });
+  assert.equal(parsed.transactions[0]?.kind, "fee");
   assert.equal(parsed.reconciliation.status, "valid");
 });
 
@@ -88,6 +143,8 @@ test("golden BBVA agosto usa solo Detalle de Movimientos Realizados", () => {
   assert.equal(parsed.summary.withdrawalTotal, 22_058.69);
   assert.equal(parsed.summary.cashBalance, 1_030.94);
   assert.equal(parsed.transactions.length, 11);
+  assert.equal(parsed.transactions.filter((row) => row.kind === "bankTransfer").length, 0);
+  assert.equal(parsed.transactions.filter((row) => row.kind === "income").length, 2);
   assert.equal(parsed.reconciliation.status, "valid");
 });
 

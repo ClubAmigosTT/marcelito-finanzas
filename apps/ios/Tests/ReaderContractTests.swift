@@ -422,6 +422,29 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(snapshot.accountKey?.contains("9988776655") == true)
     }
 
+    func testAccountIdentityFallsBackToSelectableHeaderWhenOCROmitsIt() {
+        let selectableHeader = """
+        BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
+        Estado de Cuenta
+        No. de Cuenta 9988776655
+        Detalle de Movimientos Realizados
+        """
+        let visionRowsOnly = """
+        BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
+        FECHA DESCRIPCION CARGOS ABONOS SALDO
+        05/ENE PAGO CUENTA DE TERCERO 100.00 5,000.00
+        """
+
+        XCTAssertEqual(
+            FinanceStore.readerAccountKeyForTesting(
+                primaryText: visionRowsOnly,
+                administrativeText: selectableHeader,
+                source: "BBVA"
+            ),
+            "bbva:6655"
+        )
+    }
+
     func testBBVAInstitutionalEvidenceWinsBeforeMovementTable() {
         let text = """
         BBVA México, Institución de Banca Múltiple, Grupo Financiero BBVA México
@@ -1445,6 +1468,8 @@ final class ReaderContractTests: XCTestCase {
 
         XCTAssertEqual(rows.count, 2)
         XCTAssertEqual(rows.map(\.amount), [Decimal(string: "-30.00")!, Decimal(string: "500.00")!])
+        XCTAssertEqual(rows[0].kind, .purchase, "una transferencia sin evidencia de cuenta propia sigue siendo un egreso revisable")
+        XCTAssertEqual(rows[1].kind, .income, "ABONO de una cuenta bancaria no es crédito de tarjeta")
         XCTAssertEqual(rows.map { $0.extractionEvidence?.selectedColumn }, ["RETIRO", "DEPÓSITO"])
         XCTAssertEqual(rows.map { $0.extractionEvidence?.page }, [1, 2])
         XCTAssertFalse(rows[0].title.localizedCaseInsensitiveContains("clave de rastreo"))
@@ -1897,6 +1922,8 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(rows.count, 3)
         XCTAssertEqual(rows.map(\.amount), [-30, -30, 500])
         XCTAssertEqual(rows[2].flow, .income)
+        XCTAssertEqual(rows[0].kind, .purchase)
+        XCTAssertFalse(rows[0].title.hasPrefix("4309379"), "el folio impreso no debe entrar al concepto")
         XCTAssertTrue(rows[0].title.localizedCaseInsensitiveContains("transferencia"))
         XCTAssertFalse(rows.contains {
             $0.title.contains("5,559.79")
@@ -2475,6 +2502,7 @@ final class ReaderContractTests: XCTestCase {
         let statement = StatementRecord(
             id: UUID(),
             source: "Santander",
+            accountKey: "santander:7079",
             period: "agosto 2026",
             fileName: "estado-santander.pdf",
             importedAt: .now,
@@ -2515,6 +2543,7 @@ final class ReaderContractTests: XCTestCase {
         let statement = StatementRecord(
             id: UUID(),
             source: "BBVA",
+            accountKey: "bbva:4922",
             period: "agosto 2026",
             fileName: "estado-bbva.pdf",
             importedAt: .now,
@@ -2557,6 +2586,7 @@ final class ReaderContractTests: XCTestCase {
         let statement = StatementRecord(
             id: statementID,
             source: "BBVA",
+            accountKey: "bbva:4922",
             period: "agosto 2026",
             fileName: "bbva.pdf",
             importedAt: .now,

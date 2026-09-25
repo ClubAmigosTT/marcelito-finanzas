@@ -11,6 +11,7 @@ final class NativeRowAuditTests: XCTestCase {
         let page: Int
         let signedAmount: String
         let titleContains: String
+        let kind: String? = nil
     }
 
     private struct File: Decodable {
@@ -57,6 +58,9 @@ final class NativeRowAuditTests: XCTestCase {
             if wanted.titleContains.isEmpty || received.title.range(of: wanted.titleContains, options: [.caseInsensitive, .diacriticInsensitive]) == nil {
                 errors.append("\(prefix):description")
             }
+            if let expectedKind = wanted.kind, received.kind?.rawValue != expectedKind {
+                errors.append("\(prefix):kind")
+            }
         }
         return errors
     }
@@ -98,6 +102,10 @@ final class NativeRowAuditTests: XCTestCase {
             let label = "document-\(index + 1)"
             guard available.contains(file.file), !file.rows.isEmpty else {
                 XCTFail("\(label): missing PDF or empty row reference"); continue
+            }
+            if required {
+                XCTAssertTrue(file.rows.allSatisfy { $0.kind?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false },
+                              "\(label): la referencia certificable debe incluir kind en cada fila")
             }
             let data = try Data(contentsOf: directory.appendingPathComponent(file.file))
             let fingerprint = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()

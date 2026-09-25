@@ -9,7 +9,7 @@ on:
         default: "1.0.0"
         type: string
       corpus_certifier:
-        description: "Bootstrap: incluir la herramienta de certificación local (no omite otras validaciones)"
+        description: "No usar para publicar: el workflow falla si no hay corpus certificado"
         required: true
         default: false
         type: boolean
@@ -158,51 +158,30 @@ jobs:
 
       - name: Exigir certificación del corpus nativo real
         env:
-          NATIVE_CORPUS_CERTIFIED: ${{ vars.MARCELITO_NATIVE_CORPUS_CERTIFIED }}
-          NATIVE_CORPUS_READER_VERSION: ${{ vars.MARCELITO_NATIVE_CORPUS_READER_VERSION }}
-          # Environment protection only permits the release tag path in this
-          # repository. A -bootstrap suffix is therefore an explicit, visible
-          # equivalent of the workflow_dispatch boolean input; it never marks
-          # the native corpus as certified.
+          # A bootstrap build is intentionally not a release path. It used to
+          # let a TestFlight upload proceed before the private row contract was
+          # available, which made the visible OCR result indistinguishable from
+          # a certified reader.
           CORPUS_CERTIFIER_BOOTSTRAP: ${{ inputs.corpus_certifier == true || endsWith(github.ref_name, '-bootstrap') }}
         shell: bash
         run: |
           set -euo pipefail
-          # The certifier build is a controlled bootstrap used to install the
-          # on-device Vision tool. It still runs all parsing, unit and signing
-          # checks; only the final corpus gate is deferred until the user
-          # exports its sanitised report from the iPhone.
           if [[ "${CORPUS_CERTIFIER_BOOTSTRAP:-false}" == "true" ]]; then
-            echo "::warning title=Build de certificación::Se incluye la herramienta local de Vision; esta ejecución no certifica el corpus ni sustituye la compuerta de publicación."
-            exit 0
-          fi
-          if [[ -f "docs/native-corpus-certification.json" ]]; then
-            echo "Se encontró el informe sanitizado del dispositivo; se validará contra la versión actual del lector."
-            npm run pdf:native:verify-device -- \
-              --report docs/native-corpus-certification.json \
-              --reader-version "$(sed -n 's/.*static let readerVersion = "\([^"]*\)".*/\1/p' apps/ios/Cauce/Models.swift | head -n 1)" \
-              --minimum-files 10
-            exit 0
-          fi
-          # macOS runners still ship Bash 3.2, which does not support the
-          # `${var,,}` lowercase expansion. Normalize portably with `tr` so
-          # the certification gate fails for the intended reason instead of a
-          # shell syntax error.
-          native_corpus_certified_normalized="$(printf '%s' "${NATIVE_CORPUS_CERTIFIED:-}" | tr '[:upper:]' '[:lower:]')"
-          if [[ "$native_corpus_certified_normalized" != "true" ]]; then
-            echo "::error title=Corpus nativo sin certificar::Ejecuta el runner privado con Vision y registra MARCELITO_NATIVE_CORPUS_CERTIFIED=true antes de publicar."
+            echo "::error title=Publicación bloqueada::El modo bootstrap instala la herramienta, pero no puede subir una build a TestFlight. Genera primero el informe estricto del corpus privado."
             exit 1
           fi
-          if [[ -z "${NATIVE_CORPUS_READER_VERSION:-}" ]]; then
-            echo "::error title=Falta versión certificada::Registra MARCELITO_NATIVE_CORPUS_READER_VERSION con la versión del lector usada para certificar el corpus."
+          if [[ ! -f "docs/native-corpus-certification.json" ]]; then
+            echo "::error title=Falta certificación fila por fila::Guarda el informe sanitizado del corpus privado en docs/native-corpus-certification.json; no se acepta una variable booleana ni un informe parcial."
             exit 1
           fi
-          current_reader_version="$(sed -n 's/.*static let readerVersion = "\([^"]*\)".*/\1/p' apps/ios/Cauce/Models.swift | head -n 1)"
-          if [[ -z "$current_reader_version" || "$NATIVE_CORPUS_READER_VERSION" != "$current_reader_version" ]]; then
-            echo "::error title=Corpus desactualizado::La certificación declarada ($NATIVE_CORPUS_READER_VERSION) no corresponde al lector actual ($current_reader_version). Ejecuta de nuevo el corpus nativo."
-            exit 1
-          fi
-          echo "Corpus nativo certificado para la revisión declarada: $NATIVE_CORPUS_READER_VERSION"
+          echo "Se encontró el informe sanitizado del dispositivo; se validará contra la versión actual del lector y los 22 PDFs del corpus aprobado."
+          npm run pdf:native:verify-device -- \
+            --report docs/native-corpus-certification.json \
+            --reader-version "$(sed -n 's/.*static let readerVersion = "\([^"]*\)".*/\1/p' apps/ios/Cauce/Models.swift | head -n 1)" \
+            --minimum-files 22 \
+            --expected-files 22 \
+            --require-row-audit \
+            --require-independent-proof
 
       - name: Guardar contrato nativo de prepublicación
         if: always()

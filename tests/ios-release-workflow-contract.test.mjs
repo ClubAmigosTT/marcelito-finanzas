@@ -8,14 +8,18 @@ const testsDirectory = dirname(fileURLToPath(import.meta.url));
 const workflowPath = resolve(testsDirectory, "..", ".github", "workflows", "ios-testflight.yml");
 const workflow = await readFile(workflowPath, "utf8");
 
-test("el release tag bootstrap permite instalar el certificador sin certificar el corpus", () => {
+test("el release tag bootstrap nunca publica sin la auditoría estricta", () => {
   assert.match(workflow, /endsWith\(github\.ref_name, '-bootstrap'\)/);
   assert.match(workflow, /version="\$\{version%-bootstrap\}"/);
 
   const bootstrapGate = workflow.indexOf("if [[ \"${CORPUS_CERTIFIER_BOOTSTRAP:-false}\" == \"true\" ]]");
-  const certificationGate = workflow.indexOf("native_corpus_certified_normalized=");
+  const certificationGate = workflow.indexOf("--require-row-audit");
   assert.ok(bootstrapGate >= 0, "falta la compuerta explícita de bootstrap");
-  assert.ok(certificationGate > bootstrapGate, "la compuerta de certificación debe seguir después del bootstrap");
+  assert.ok(certificationGate > bootstrapGate, "la auditoría estricta debe seguir después del bootstrap");
+  assert.match(workflow, /--expected-files 22/);
+  assert.match(workflow, /--require-independent-proof/);
+  assert.match(workflow, /Publicación bloqueada/);
+  assert.doesNotMatch(workflow, /MARCELITO_NATIVE_CORPUS_CERTIFIED/);
 });
 
 test("TestFlight rechaza una versión de marketing menor a la ya publicada", () => {

@@ -926,10 +926,10 @@ final class FinanceStore {
     /// when saved PDF results need a deliberate replay. This release forces
     /// older persisted snapshots through the current reader; the refresh stays
     /// explicit so a full Vision pass never blocks app launch.
-    static let readerVersion = "ios-reader-recovery-2026.09.24.6"
+    static let readerVersion = "ios-reader-recovery-2026.09.25.14"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
-    private static let accountIdentityParserVersion = "masked-header-v2"
+    private static let accountIdentityParserVersion = "masked-header-v3"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -1088,6 +1088,18 @@ final class FinanceStore {
             source: result.source, accountKey: result.accountKey, kind: result.kind,
             period: result.period, movements: result.candidates, summary: result.summary)
     }
+
+#if DEBUG
+    /// Keep the Vision-to-selectable administrative fallback covered by a
+    /// deterministic test without exporting any PDF text.
+    static func readerAccountKeyForTesting(
+        primaryText: String,
+        administrativeText: String,
+        source: String
+    ) -> String? {
+        accountKey(preferredText: primaryText, administrativeText: administrativeText, source: source)
+    }
+#endif
 
     /// Compares the three selectable Rappi text streams used by production
     /// without running Vision. Values are row counts and reconciliation
@@ -3056,6 +3068,17 @@ final class FinanceStore {
             && hasTextEvidence
     }
 
+    /// A statement may feed the operational ledger only when its own reader
+    /// evidence produced a privacy-preserving issuer/last-four identity.
+    /// Missing identities are never repaired from another statement.
+    static func hasVerifiedAccountIdentity(_ statement: StatementRecord) -> Bool {
+        guard let key = statement.accountKey?.trimmingCharacters(in: .whitespacesAndNewlines),
+              key.range(of: #"^[a-z0-9]+:\d{4}$"#, options: [.regularExpression, .caseInsensitive]) != nil else {
+            return false
+        }
+        return true
+    }
+
     static func hasMissingImportEvidence(_ movement: Movement) -> Bool {
         guard movement.statementId != nil, movement.extractionEvidence?.method != "manual" else { return false }
         guard let evidence = movement.extractionEvidence else { return true }
@@ -3091,6 +3114,9 @@ final class FinanceStore {
             || statement.source.caseInsensitiveCompare("Desconocido") == .orderedSame {
             reasons.append("El banco o el tipo de documento no están identificados con evidencia suficiente.")
         }
+        if !Self.hasVerifiedAccountIdentity(statement) {
+            reasons.append("La cuenta no tiene una identidad enmascarada demostrada por este PDF.")
+        }
         if statement.ocrColumnsCalibrated == false { reasons.append("No se identificaron con seguridad las columnas de cargos, abonos y saldo.") }
         if !hasSufficientOCRQuality(statement) { reasons.append("La lectura visual tiene confianza insuficiente; revisa la legibilidad del PDF.") }
         if statement.requiresReview { reasons.append("El lector marcó este estado para revisión de su evidencia.") }
@@ -3105,6 +3131,7 @@ final class FinanceStore {
                 .caseInsensitiveCompare("Desconocido") != .orderedSame
             && statement.kind != .unknown
             && hasVerifiedSourceEvidence(statement)
+            && Self.hasVerifiedAccountIdentity(statement)
             // A Santander scan must have its visual transaction columns
             // calibrated. Keep this as an independent gate instead of
             // trusting only `requiresReview`, so stale/corrupt persisted data
@@ -3783,11 +3810,10 @@ final class FinanceStore {
         invalidateDerivedProjections()
     }
 
-    /// Repairs an issuer account that was split because some PDFs did not
-    /// expose their masked number to the reader. We only infer a missing key
-    /// when every identified statement for the same issuer and document kind
-    /// agrees on exactly one account. If two real accounts are present, the
-    /// unidentified records remain separate instead of being guessed.
+    /// Deduplicates statements only after the PDF reader supplied a masked
+    /// account identity. A missing key is never inferred from another file;
+    /// the unidentified record remains separate and blocked until its own PDF
+    /// is reread with sufficient administrative evidence.
     ///
     /// Once identity is stable, a second PDF for the exact same account and
     /// cutoff period replaces the older record. A fully reconciled/current
@@ -3807,22 +3833,10 @@ final class FinanceStore {
             return "\(source)|\(statementKind(statement).rawValue)"
         }
 
-        let identifiedByScope = Dictionary(grouping: statements.filter { $0.accountKey != nil }, by: sourceScope)
-            .mapValues { Set($0.compactMap(\.accountKey)) }
+        // Do not infer or collapse unidentified statements. Two genuine
+        // accounts from the same issuer can share a cutoff period; a verified
+        // masked key from this PDF is required before replacement is safe.
         var changed = false
-        for index in statements.indices where statements[index].accountKey == nil {
-            let scope = sourceScope(statements[index])
-            guard statementKind(statements[index]) != .unknown,
-                  let candidates = identifiedByScope[scope],
-                  candidates.count == 1,
-                  let resolved = candidates.first else { continue }
-            statements[index].accountKey = resolved
-            changed = true
-        }
-
-        // Do not collapse unidentified statements. Two genuine accounts from
-        // the same issuer can share a cutoff period; a verified masked key is
-        // required before replacement is safe.
         let identified = statements.filter { $0.accountKey != nil }
         let groups = Dictionary(grouping: identified) { statement in
             "\(sourceScope(statement))|\(statement.accountKey!)|\(statementPeriodIdentity(statement.period))"
@@ -5708,9 +5722,27 @@ final class FinanceStore {
         _ = kindOverride
         let sourceDetection = detectedSourceEvidence
         let source = sourceDetection.source
-        let accountKey = detectedSourceEvidence.source == source
-            ? Self.maskedAccountKey(from: text, source: source)
+        var accountKey = detectedSourceEvidence.source == source
+            ? Self.accountKey(preferredText: text, administrativeText: extractedText, source: source)
             : nil
+        if accountKey == nil, allowOCR, detectedSourceEvidence.source == source {
+            // Some BBVA PDFs expose the administrative labels in PDFKit but
+            // omit the number itself from the selectable layer. Recover only
+            // that bounded header identity with Vision; never feed this pass
+            // into movement parsing or reconciliation.
+            let administrativePageIndexes = Set(0..<min(document.pageCount, 2))
+            let administrativeObservations = Self.ocrObservations(
+                from: document,
+                pageIndexes: administrativePageIndexes,
+                prioritizeNumericEvidence: true,
+                issuerHint: source
+            )
+            let administrativeText = Self.ocrText(from: administrativeObservations)
+            accountKey = Self.maskedAccountKey(from: administrativeText, source: source)
+            if accountKey != nil {
+                recoveryAttempts.append("vision-account-header")
+            }
+        }
         let kind = Self.statementKind(from: text, source: source)
         // Parse issuer controls before Santander rows so the first printed
         // running balance can be verified against the official opening
@@ -6468,6 +6500,10 @@ final class FinanceStore {
             pageCount: extraction.pageCount,
             rowDiagnostics: extraction.rowDiagnostics,
             recoveryAttempts: extraction.recoveryAttempts,
+            // Keep the exact candidate rows produced by the import path in
+            // the private audit envelope. The canonical ledger may quarantine
+            // them, but the verifier must still compare every extracted row.
+            auditRows: candidates.map(NativeAuditRow.init),
             independentOCRProof: independentOCRProof,
             multimodalFallbackAttempted: extraction.multimodalFallbackAttempted,
             multimodalFallbackError: extraction.multimodalFallbackError
@@ -10386,7 +10422,6 @@ final class FinanceStore {
             || titleNormalized.contains("pago de tarjeta")
             || (titleNormalized.contains("pago")
                 && (titleNormalized.contains("tarjeta") || titleNormalized.contains("amex") || titleNormalized.contains("american express") || titleNormalized.contains("americanexpress") || titleNormalized.contains("credito") || kind == .card))
-            || (normalizedFullText.contains("pago") && (normalizedFullText.contains("american express") || normalizedFullText.contains("americanexpress")))
         let isIncome = titleNormalized.contains("nomina")
             || titleNormalized.contains("sueldo")
             || titleNormalized.contains("salario")
@@ -11021,9 +11056,11 @@ final class FinanceStore {
 
         let titleNormalized = title.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let isRefund = titleNormalized.contains("devolucion") || titleNormalized.contains("reembolso") || titleNormalized.contains("bonificacion")
+        let hasAmexToken = titleNormalized.range(of: #"\bamex\b"#, options: .regularExpression) != nil
+        let hasAmericanExpressToken = titleNormalized.range(of: #"\bamericanexpress\b"#, options: .regularExpression) != nil
+        let hasCreditToken = titleNormalized.range(of: #"\bcredito\b"#, options: .regularExpression) != nil
         let isCardPayment = titleNormalized.contains("pago de tarjeta")
-            || (titleNormalized.contains("pago") && (titleNormalized.contains("amex") || titleNormalized.contains("american express") || titleNormalized.contains("americanexpress") || titleNormalized.contains("credito")))
-            || (normalizedFullText.contains("pago") && (normalizedFullText.contains("american express") || normalizedFullText.contains("americanexpress")))
+            || (titleNormalized.contains("pago") && (hasAmexToken || titleNormalized.contains("american express") || hasAmericanExpressToken || hasCreditToken))
         let isTransfer = titleNormalized.contains("transfer") || titleNormalized.contains("traspaso") || titleNormalized.contains("spei")
         let explicitOwnTransfer = titleNormalized.contains("entre cuentas")
             || titleNormalized.contains("cuenta propia")
@@ -12511,6 +12548,15 @@ final class FinanceStore {
             .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Vision can place the printed folio in the same wide description
+        // box. It is administrative metadata, not part of the concept; only
+        // remove a leading numeric token when the following word is a known
+        // Santander movement label.
+        title = title.replacingOccurrences(
+            of: #"(?i)^\s*\d{4,8}\s+(?=(?:pago|cargo|consumo|abono|nomina|transferencia|retiro)\b)"#,
+            with: "",
+            options: .regularExpression
+        )
         // In this fixed table, RFC may end the first description line while
         // its identifier is on a continuation outside Vision's row box.
         // Remove only that dangling label, not the administrative guard and
@@ -12543,6 +12589,9 @@ final class FinanceStore {
             || titleNormalized.contains("abono")
             || titleNormalized.contains("recibido")
             || titleNormalized.contains("transferencia recibida")
+        let isRefund = titleNormalized.contains("devolucion")
+            || titleNormalized.contains("reembolso")
+            || titleNormalized.contains("bonificacion")
         let semanticWithdrawal = !semanticDeposit && (
             titleNormalized.contains("retiro")
                 || titleNormalized.contains("cargo")
@@ -12552,9 +12601,11 @@ final class FinanceStore {
                 || titleNormalized.contains("traspaso")
                 || titleNormalized.contains("spei")
         )
+        let hasAmexToken = titleNormalized.range(of: #"\bamex\b"#, options: .regularExpression) != nil
+        let hasAmericanExpressToken = titleNormalized.range(of: #"\bamericanexpress\b"#, options: .regularExpression) != nil
+        let hasCreditToken = titleNormalized.range(of: #"\bcredito\b"#, options: .regularExpression) != nil
         let isCardPayment = titleNormalized.contains("pago de tarjeta")
-            || (titleNormalized.contains("pago") && (titleNormalized.contains("amex") || titleNormalized.contains("american express") || titleNormalized.contains("americanexpress") || titleNormalized.contains("credito")))
-            || (normalizedFullText.contains("pago") && (normalizedFullText.contains("american express") || normalizedFullText.contains("americanexpress")))
+            || (titleNormalized.contains("pago") && (hasAmexToken || titleNormalized.contains("american express") || hasAmericanExpressToken || hasCreditToken))
         let isTransfer = titleNormalized.contains("transfer")
             || titleNormalized.contains("traspaso")
             || titleNormalized.contains("spei")
@@ -12613,7 +12664,9 @@ final class FinanceStore {
             : "Santander"
         let category = category(for: titleNormalized, flow: flow)
         let kind: MovementKind
-        if titleNormalized.contains("msi") || titleNormalized.contains("meses sin intereses") || titleNormalized.contains("diferid") {
+        if isRefund && flow == .income {
+            kind = .refund
+        } else if titleNormalized.contains("msi") || titleNormalized.contains("meses sin intereses") || titleNormalized.contains("diferid") {
             kind = .msi
         } else if titleNormalized.contains("interes") {
             kind = .interest
@@ -12624,7 +12677,10 @@ final class FinanceStore {
         } else if isTransfer && explicitOwnTransfer {
             kind = .bankTransfer
         } else if flow == .income {
-            kind = titleNormalized.contains("credito") || titleNormalized.contains("abono") ? .credit : .income
+            // A bank deposit is real income unless a specific refund/credit
+            // rule above proved otherwise. `abono` describes the column, not
+            // an issuer-side card credit.
+            kind = .income
         } else {
             kind = .purchase
         }
@@ -15250,6 +15306,20 @@ final class FinanceStore {
             return "\(issuer):\(String(digits.suffix(4)))"
         }
         return nil
+    }
+
+    /// Resolve the account identity from administrative evidence before
+    /// considering OCR. Vision is allowed to supply movement rows, but it can
+    /// omit the printed account number; the selectable first-page layer keeps
+    /// that identity recoverable without inferring it from filenames, rows or
+    /// another statement.
+    private static func accountKey(
+        preferredText: String,
+        administrativeText: String,
+        source: String
+    ) -> String? {
+        maskedAccountKey(from: preferredText, source: source)
+            ?? maskedAccountKey(from: administrativeText, source: source)
     }
 
     private static func categoryRuleKey(_ value: String) -> String {

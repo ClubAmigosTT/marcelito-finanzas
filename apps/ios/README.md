@@ -74,7 +74,7 @@ privado:
 La prueba no modifica los umbrales ni convierte una fila incierta en válida.
 Si falta cualquiera de esas señales, `requiresReview` permanece en `true` y
 las filas no entran al libro canónico ni a los KPI. La versión del lector que
-implementa este contrato es `ios-reader-recovery-2026.09.24.6`.
+implementa este contrato es `ios-reader-recovery-2026.09.25.14`.
 
 También puedes usar el runner reproducible desde esta carpeta o desde la raíz
 del repositorio; conserva el
@@ -108,7 +108,7 @@ cd ../..
 npm run pdf:native:verify -- \
   --log /ruta/al/xcodebuild.log \
   --manifest /ruta/privada/rappi-regression-manifest.json \
-  --reader-version ios-reader-recovery-2026.09.24.6 \
+  --reader-version ios-reader-recovery-2026.09.25.14 \
   --require-certified
 ```
 
@@ -152,18 +152,15 @@ en macOS. El corpus real no se incluye en CI porque contiene estados privados:
 la certificación completa debe ejecutarse manualmente con
 `MARCELITO_PDF_CORPUS_DIR` y `MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED=1`.
 
-Para no depender de una Mac, los builds recientes incluyen un certificador en
-**Resumen > Opciones > Diagnóstico > Certificar estados con Vision**. Selecciona
+Para no depender de una Mac, los builds recientes incluyen un diagnóstico en
+**Resumen > Opciones > Diagnóstico > Diagnosticar estados con Vision**. Selecciona
 los estados privados directamente en el iPhone, ejecuta el lector nativo y
-comparte el informe JSON sanitizado. El informe de certificación no contiene
-PDFs, descripciones, saldos ni importes; solo hashes y señales de calidad. El
-botón separado **Compartir diagnóstico por fila** es privado y sí incluye el
-texto OCR necesario para depurar una extracción. Guárdalo como
-`docs/native-corpus-certification.json` para que el workflow lo valide antes de
-publicar. La primera build que instala esta herramienta se ejecuta con la
-opción de bootstrap del workflow; después la compuerta acepta el perfil
-general de al menos 10 estados o el perfil `rappi-focused` de al menos seis
-tarjetas Rappi procesadas con texto nativo o `vision-ocr`.
+comparte el informe JSON sanitizado. Ese informe mide el lector y no contiene
+PDFs, descripciones, saldos ni importes; por sí solo no demuestra que cada
+movimiento sea correcto. La publicación exige además el runner privado con el
+manifiesto de filas exactas. El botón separado **Compartir diagnóstico por
+fila** es privado y sí incluye el texto OCR necesario para depurar una
+extracción; no se debe guardar en Git.
 
 Para una auditoría con expectativas doradas, el runner nativo admite además
 `MARCELITO_PDF_CORPUS_MANIFEST` apuntando a un JSON privado fuera del checkout.
@@ -187,6 +184,42 @@ MARCELITO_PDF_CORPUS_VERIFY=1 \
 El fixture público sigue siendo el predeterminado cuando no se define la
 variable. Ninguno de estos modos copia PDFs, descripciones o importes privados
 al repositorio.
+
+Cada entrada `valid` del manifiesto privado debe incluir `rowExpectations` con
+una referencia revisada por fila, en el mismo orden que el lector devuelve:
+
+```json
+{
+  "date": "2026-08-14",
+  "page": 2,
+  "signedAmount": "-123.45",
+  "titleContains": "comercio revisado",
+  "kind": "Compra"
+}
+```
+
+La fecha y el importe se comparan con tolerancia de medio centavo; la página,
+cuando se declara, debe coincidir; el concepto se normaliza solo para ignorar
+mayúsculas, acentos y espacios repetidos; `kind` debe coincidir exactamente.
+Si falta una fila, sobra una fila o hay cualquier discrepancia, el archivo
+queda bloqueado y no alimenta totales.
+Después de una corrida certificada, genera el artefacto público sin copiar
+esas referencias privadas:
+
+```bash
+npm run pdf:native:report -- \
+  --log /ruta/privada/xcodebuild.log \
+  --output docs/native-corpus-certification.json \
+  --reader-version ios-reader-recovery-2026.09.25.14 \
+  --expected-files 22
+```
+
+El constructor vuelve a verificar el resumen y cada archivo antes de escribir
+el JSON; solo conserva hashes, cuenta enmascarada, conteos, calidad y las
+banderas de auditoría. La compuerta de TestFlight exige exactamente los 22
+archivos aprobados, `--require-row-audit` y `--require-independent-proof`.
+El modo bootstrap falla deliberadamente si intenta publicar, y una variable
+booleana nunca puede sustituir el informe.
 
 La autenticación usa Keychain y Face ID. La aplicación inicia sin movimientos de muestra: importa tus PDFs desde Archivos, revisa banco, periodo y movimientos, y los guarda solo en ese dispositivo. Los estados escaneados pueden quedar pendientes de revisión sin inventar filas.
 

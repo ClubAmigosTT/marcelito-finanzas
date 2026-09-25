@@ -46,7 +46,7 @@ MARCELITO_PDF_CORPUS_MANIFEST="$PWD/private-corpus/amex-santander/santander/cont
 
 Repetir con `amex` en ambas rutas y el destino del log. No usar un log de
 pruebas sintéticas de CI como sustituto. El exportador del iPhone se abre desde
-"Certificar lector" → elegir solo los PDFs de ese banco → ejecutar →
+"Diagnosticar estados con Vision" → elegir solo los PDFs de ese banco → ejecutar el diagnóstico →
 "Compartir diagnóstico por fila". Debe usar la versión que exige el validador.
 
 La referencia independiente por defecto es `private-corpus/independent-rows.json`.

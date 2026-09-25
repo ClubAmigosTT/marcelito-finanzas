@@ -32,6 +32,10 @@ struct NativeCorpusFileReport: Codable, Identifiable {
     let reconciliationValid: Bool
     let duplicate: Bool
     let errorCode: String?
+    /// Exact comparison against a separately reviewed private row golden.
+    /// A structural read alone cannot certify a financial row.
+    let goldenRowAuditPassed: Bool
+    let goldenRowAuditMismatches: Int
     let reconciliationReason: String?
     let multimodalFallbackAttempted: Bool
     let multimodalFallbackError: String?
@@ -45,7 +49,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
              sourceStatus, sourceConfidence, status, requiresReview, independentOCRProof, rows,
              extractedRows,
              ocrConfidence, weakestOCRPage, ocrColumnsCalibrated,
-             reconciliationValid, duplicate, errorCode, reconciliationReason,
+             reconciliationValid, duplicate, errorCode, goldenRowAuditPassed, goldenRowAuditMismatches, reconciliationReason,
              multimodalFallbackAttempted, multimodalFallbackError
     }
 
@@ -57,6 +61,7 @@ struct NativeCorpusFileReport: Codable, Identifiable {
               !requiresReview,
               reconciliationValid,
               !duplicate else { return false }
+        guard goldenRowAuditPassed, goldenRowAuditMismatches == 0 else { return false }
         guard mode != "multimodal-error" else { return false }
         if mode == "vision-ocr" || mode == "multimodal-ai" {
             if independentOCRProof { return true }
@@ -93,6 +98,11 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         reconciliationValid = summary.reconciliation?.status == .valid
         duplicate = false
         errorCode = Self.redactedRowError(summary.rowDiagnostics.first(where: { !$0.accepted })?.reason)
+        // The interactive device certifier does not have the separately
+        // reviewed private row manifest. Keep this false until the private
+        // corpus runner proves every row against that manifest.
+        goldenRowAuditPassed = false
+        goldenRowAuditMismatches = summary.auditRows.isEmpty ? 1 : summary.auditRows.count
         reconciliationReason = summary.reconciliation?.reason
         multimodalFallbackAttempted = summary.multimodalFallbackAttempted
         multimodalFallbackError = summary.multimodalFallbackError
@@ -119,6 +129,8 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         reconciliationValid = false
         duplicate = false
         self.errorCode = errorCode
+        goldenRowAuditPassed = false
+        goldenRowAuditMismatches = 1
         reconciliationReason = nil
         multimodalFallbackAttempted = false
         multimodalFallbackError = nil
@@ -154,6 +166,8 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         try c.encode(reconciliationValid, forKey: .reconciliationValid)
         try c.encode(duplicate, forKey: .duplicate)
         try c.encodeIfPresent(errorCode, forKey: .errorCode)
+        try c.encode(goldenRowAuditPassed, forKey: .goldenRowAuditPassed)
+        try c.encode(goldenRowAuditMismatches, forKey: .goldenRowAuditMismatches)
         try c.encode(multimodalFallbackAttempted, forKey: .multimodalFallbackAttempted)
         // Detailed reconciliation and transport errors remain in memory/UI
         // and in the explicit private report, never the public JSON.
@@ -183,6 +197,8 @@ struct NativeCorpusFileReport: Codable, Identifiable {
         reconciliationValid = false
         duplicate = true
         errorCode = "duplicate-pdf"
+        goldenRowAuditPassed = false
+        goldenRowAuditMismatches = max(1, summary.imported)
         reconciliationReason = "Este PDF ya fue seleccionado anteriormente."
         multimodalFallbackAttempted = summary.multimodalFallbackAttempted
         multimodalFallbackError = summary.multimodalFallbackError
@@ -417,6 +433,15 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
     let goldenFalseAccepted: Int
     let automaticAcceptancePrecision: Double
     let unresolvedOCR: Int
+    /// These counters are deliberately zero/blocked for the interactive
+    /// device report. Exact row goldens live in the private corpus runner;
+    /// a structural device scan cannot claim that proof by itself.
+    let goldenRowAuditsPassed: Int
+    let goldenRowAuditsExpected: Int
+    let goldenRowAuditMismatches: Int
+    let independentProofFiles: Int
+    let independentProofExpected: Int
+    let rowGoldensComplete: Bool
     let certified: Bool
     /// The general release corpus remains 10+ files. A focused regression can
     /// use the explicit Rappi profile only when every selected file is a
@@ -437,6 +462,8 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
         case schemaVersion, generatedAt, readerVersion, files, accepted,
              blocked, expectedValid, expectedPending, goldenAutoAccepted,
              goldenFalseAccepted, automaticAcceptancePrecision, unresolvedOCR,
+             goldenRowAuditsPassed, goldenRowAuditsExpected, goldenRowAuditMismatches,
+             independentProofFiles, independentProofExpected, rowGoldensComplete,
              certified, certificationScope, financialDataRedacted, generatedBy
     }
 
@@ -459,6 +486,12 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
         goldenFalseAccepted = 0
         automaticAcceptancePrecision = files.isEmpty ? 0 : Double(accepted) / Double(files.count)
         unresolvedOCR = files.filter { ["vision-ocr", "multimodal-ai", "multimodal-error"].contains($0.mode) && !$0.accepted }.count
+        goldenRowAuditsPassed = files.filter { $0.goldenRowAuditPassed && $0.goldenRowAuditMismatches == 0 }.count
+        goldenRowAuditsExpected = files.count
+        goldenRowAuditMismatches = files.reduce(0) { $0 + max(0, $1.goldenRowAuditMismatches) }
+        independentProofFiles = files.filter(\.independentOCRProof).count
+        independentProofExpected = files.filter { ["vision-ocr", "multimodal-ai"].contains($0.mode) }.count
+        rowGoldensComplete = files.isEmpty ? false : goldenRowAuditsPassed == goldenRowAuditsExpected && goldenRowAuditMismatches == 0
         let isFocusedRappi = files.count >= Self.focusedRappiMinimumFileCount
             && files.allSatisfy {
                 $0.source.localizedCaseInsensitiveCompare("Rappi") == .orderedSame
@@ -473,6 +506,8 @@ struct NativeCorpusCertificationReport: Codable, Identifiable {
             && blocked == 0
             && automaticAcceptancePrecision >= Self.targetPrecision
             && unresolvedOCR == 0
+            && rowGoldensComplete
+            && independentProofFiles == independentProofExpected
         financialDataRedacted = true
         generatedBy = files.contains { $0.mode == "multimodal-ai" }
             ? "ios-hybrid-device"
@@ -625,7 +660,7 @@ struct NativeCorpusCertificationView: View {
                                 Text(status)
                             }
                             .tint(Color.marcelitoNavy)
-                            Button("Cancelar certificación", role: .cancel) {
+                            Button("Cancelar diagnóstico", role: .cancel) {
                                 cancelCertification()
                             }
                             .buttonStyle(.borderless)
@@ -640,7 +675,7 @@ struct NativeCorpusCertificationView: View {
             }
             .scrollIndicators(.hidden)
             .background(Color.marcelitoCream.ignoresSafeArea())
-            .navigationTitle("Certificar lector")
+            .navigationTitle("Diagnóstico del lector")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
@@ -656,7 +691,7 @@ struct NativeCorpusCertificationView: View {
             .sheet(isPresented: $isAISettingsPresented) {
                 AISettingsView()
             }
-            .alert("No se pudo ejecutar la certificación", isPresented: Binding(
+            .alert("No se pudo ejecutar el diagnóstico", isPresented: Binding(
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
             )) {
@@ -675,12 +710,12 @@ struct NativeCorpusCertificationView: View {
 
     private var introCard: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("Certificación privada en el dispositivo", systemImage: "checkmark.shield.fill")
+            Label("Diagnóstico privado en el dispositivo", systemImage: "stethoscope")
                 .font(.headline)
             Text("El lector usa PDFKit y Vision dentro del iPhone. El proveedor de IA seleccionado no recibe PDFs: se usa opcionalmente después para clasificar gastos ya conciliados. El informe exportado contiene únicamente hashes y resultados de calidad.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            Text("La compuerta general requiere al menos \(NativeCorpusCertificationReport.minimumFileCount) archivos. El perfil enfocado Rappi requiere \(NativeCorpusCertificationReport.focusedRappiMinimumFileCount) estados Rappi leídos localmente con texto nativo u OCR de Vision.")
+            Text("La compuerta general requiere al menos \(NativeCorpusCertificationReport.minimumFileCount) archivos. El perfil enfocado Rappi requiere \(NativeCorpusCertificationReport.focusedRappiMinimumFileCount) estados Rappi leídos localmente con texto nativo u OCR de Vision. Esta pantalla mide el lector, pero la publicación exige además una auditoría privada fila por fila.")
                 .font(.caption)
                 .foregroundStyle(Color.marcelitoNavyMid)
         }
@@ -716,7 +751,7 @@ struct NativeCorpusCertificationView: View {
                 Button {
                     runCertification()
                 } label: {
-                    Label("Ejecutar lector", systemImage: "viewfinder")
+                    Label("Ejecutar diagnóstico", systemImage: "viewfinder")
                         .frame(maxWidth: .infinity, minHeight: 42)
                         // The parent card sets a navy foreground style. Keep
                         // the prominent action legible on its navy fill on
@@ -760,7 +795,7 @@ struct NativeCorpusCertificationView: View {
     private func resultCard(_ report: NativeCorpusCertificationReport) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Label(
-                report.certified ? "Corpus certificado" : "Corpus bloqueado",
+                report.certified ? "Diagnóstico completo" : "Publicación bloqueada",
                 systemImage: report.certified ? "checkmark.seal.fill" : "exclamationmark.triangle.fill"
             )
             .font(.headline)
@@ -772,11 +807,7 @@ struct NativeCorpusCertificationView: View {
                 NativeCorpusMetric(title: "Por resolver", value: "\(report.unresolvedOCR)")
             }
 
-            Text(report.certified
-                ? (report.certificationScope == "rappi-focused"
-                    ? "Perfil Rappi enfocado certificado. Comparte este informe JSON y guárdalo como docs/native-corpus-certification.json; la siguiente build podrá validarlo sin una Mac."
-                    : "Perfil general certificado. Comparte este informe JSON y guárdalo como docs/native-corpus-certification.json; la siguiente build podrá validarlo sin una Mac.")
-                : "Corrige los archivos bloqueados y vuelve a ejecutar el lector. El informe no habilita publicación hasta alcanzar 97%, cubrir el tamaño del perfil elegido y conciliar cada archivo al 100%.")
+            Text("Este informe mide el lector local y no contiene las referencias golden privadas. Debes conciliar cada archivo al 100%; la publicación seguirá bloqueada hasta que el runner privado compare fecha, importe y concepto de todos los movimientos y registre esa evidencia.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
@@ -820,7 +851,7 @@ struct NativeCorpusCertificationView: View {
 
             if let exportURL {
                 ShareLink(item: exportURL) {
-                    Label("Compartir informe JSON", systemImage: "square.and.arrow.up")
+                        Label("Compartir diagnóstico JSON", systemImage: "square.and.arrow.up")
                         .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.marcelitoPrimary)
@@ -871,19 +902,19 @@ struct NativeCorpusCertificationView: View {
             }
             guard !Task.isCancelled else {
                 isRunning = false
-                status = "Certificación cancelada."
+                status = "Diagnóstico cancelado."
                 return
             }
             report = result
             progress = 1
-            status = result.certified ? "Certificación lista." : "Hay archivos que requieren revisión."
+            status = result.certified ? "Diagnóstico listo." : "Hay archivos que requieren revisión."
             exportURL = try? result.writeTemporaryFile()
             diagnosticExportURL = try? result.writeDiagnosticsTemporaryFile()
             isRunning = false
             DiagnosticsRecorder.record(
                 level: result.certified ? "info" : "error",
                 stage: "native.corpus",
-                message: "Certificación en dispositivo: \(result.accepted)/\(result.files.count) aceptados; precisión \(Int((result.automaticAcceptancePrecision * 100).rounded()))%."
+                message: "Diagnóstico en dispositivo: \(result.accepted)/\(result.files.count) aceptados; precisión \(Int((result.automaticAcceptancePrecision * 100).rounded()))%."
             )
         }
     }
@@ -892,7 +923,7 @@ struct NativeCorpusCertificationView: View {
         certificationTask?.cancel()
         certificationTask = nil
         isRunning = false
-        status = "Cancelando la certificación…"
+        status = "Cancelando el diagnóstico…"
     }
 }
 

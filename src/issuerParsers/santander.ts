@@ -37,6 +37,13 @@ export function parseSantander(input: DeterministicParseInput): DeterministicPar
       return;
     }
     const amountCents = pending.deposit ?? -(pending.withdrawal ?? 0);
+    const normalizedDescription = fold(pending.description);
+    const isRefund = /devolucion|reembolso|bonificacion/.test(normalizedDescription);
+    const isMsi = /msi|meses sin intereses|meses en automatico|diferid/.test(normalizedDescription);
+    const isInterest = /interes/.test(normalizedDescription);
+    const isFee = /comision|anualidad/.test(normalizedDescription);
+    const isCardPayment = /\bpago\b.*(?:\btarjeta\b|\bamex\b|\bamerican express\b|\bamericanexpress\b|\bcredito\b)/.test(normalizedDescription);
+    const isOwnTransfer = /entre cuentas|cuenta propia|mismo titular|traspaso interno|autotransferencia/.test(normalizedDescription);
     rows.push(makeTransaction({
       parser: "santander-checking-v1",
       fileName: input.fileName,
@@ -45,7 +52,23 @@ export function parseSantander(input: DeterministicParseInput): DeterministicPar
       description: pending.description,
       account: "Santander",
       amountCents,
-      kind: /transfer|traspaso|spei/i.test(pending.description) ? "bankTransfer" : amountCents > 0 ? "income" : "purchase",
+      // A transfer description is only a candidate for an internal transfer.
+      // The reconciliation layer needs counterpart/owner evidence before
+      // excluding it from spend. Until then, an incoming bank row is income,
+      // an outgoing row is a real outflow, and a returned payment is a refund.
+      kind: isRefund && amountCents > 0
+        ? "refund"
+        : isMsi
+          ? "msi"
+          : isInterest
+            ? "interest"
+            : isFee
+              ? "fee"
+              : isCardPayment && amountCents < 0
+                ? "cardPayment"
+                : isOwnTransfer
+                  ? "bankTransfer"
+                  : amountCents > 0 ? "income" : "purchase",
       page: pending.line.page,
       mode: input.mode,
       confidence: pending.confidence,
