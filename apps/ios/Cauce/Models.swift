@@ -926,7 +926,7 @@ final class FinanceStore {
     /// when saved PDF results need a deliberate replay. This release forces
     /// older persisted snapshots through the current reader; the refresh stays
     /// explicit so a full Vision pass never blocks app launch.
-    static let readerVersion = "ios-reader-recovery-2026.09.25.14"
+    static let readerVersion = "ios-reader-recovery-2026.09.25.15"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v3"
@@ -1693,11 +1693,8 @@ final class FinanceStore {
             // candidate to retain complete visual evidence and calibrated
             // CARGOS/ABONOS/SALDO geometry.
             guard columnsCalibrated == true else { return false }
-            let foreignAuxiliaryCount = diagnostics.filter {
-                $0.reason.lowercased().hasPrefix("bbva.foreign-auxiliary")
-            }.count
             let movementDiagnostics = diagnostics.filter {
-                !$0.reason.lowercased().hasPrefix("bbva.foreign-auxiliary")
+                !isBBVAForeignAuxiliaryDiagnostic($0)
             }
             guard diagnostics.filter({ !$0.accepted }).isEmpty,
                   movementDiagnostics.count == candidates.count,
@@ -1711,6 +1708,20 @@ final class FinanceStore {
         default:
             return false
         }
+    }
+
+    /// Vision can add punctuation, accents or a short explanatory prefix to
+    /// the diagnostic for a USD/TC/AUT auxiliary line. Keep the exclusion
+    /// rule semantic so a clearly identified foreign-currency annotation does
+    /// not quarantine an otherwise complete BBVA MXN stream merely because
+    /// the device rendered the label differently.
+    private static func isBBVAForeignAuxiliaryDiagnostic(_ diagnostic: OCRRowDiagnostic) -> Bool {
+        let normalized = diagnostic.reason
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let compact = normalized.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+        return compact.hasPrefix("bbvaforeignauxiliary")
+            || (compact.contains("bbva") && compact.contains("foreign") && compact.contains("auxiliary"))
     }
 
     /// Reconciles one OCR bank amount against the running-balance delta. It is
@@ -5816,7 +5827,8 @@ final class FinanceStore {
                     retryObservations,
                     fileName: fileName,
                     openingBalance: summary?.previousBalance,
-                    document: document
+                    document: document,
+                    recoverMissingDateRows: true
                 )
                 let retryReconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
                     kind: kind,
@@ -5902,6 +5914,15 @@ final class FinanceStore {
             let duplicateRepairedOCRCandidates = Self.rappiOCRDuplicateRepairedCandidates(ocrCandidates)
             let spatialOCRRepairVariants = Self.rappiOCRSpatialDuplicateRepairVariants(duplicateRepairedOCRCandidates)
             let evidenceBackedOCRCandidates = Self.rappiEvidenceBackedFallbackCandidates(ocrCandidates)
+            let isolatedOCRStream = Self.rappiIsolatedOCRCandidates(
+                from: ocrObservations,
+                fileName: fileName,
+                confidenceByPage: confidenceByPage
+            )
+            let isolatedOCRCandidates = isolatedOCRStream?.candidates ?? []
+            let isolatedSpatialOCRCandidates = Self.rappiIsolatedSpatiallyDeduplicatedCandidates(
+                isolatedOCRCandidates
+            )
 #if DEBUG
             func recordRappiStream(
                 _ name: String,
@@ -5926,7 +5947,11 @@ final class FinanceStore {
                 if name == "ocrWithMergedSummary"
                     || name == "retryWithMergedSummary"
                     || name == "spatialOCRRepair"
-                    || name == "retrySpatialOCRRepair" {
+                    || name == "retrySpatialOCRRepair"
+                    || name == "isolatedOCRWithMergedSummary"
+                    || name == "isolatedSpatialOCRWithMergedSummary"
+                    || name == "retryIsolatedOCRWithMergedSummary"
+                    || name == "retryIsolatedSpatialOCRWithMergedSummary" {
                     let visualObservations = observations ?? ocrObservations
                     let visualDiagnostics = Self.rappiOCRRowDiagnostics(
                         observations: visualObservations,
@@ -5998,6 +6023,8 @@ final class FinanceStore {
             recordRappiStream("duplicateOCRWithOCRSummary", candidates: duplicateRepairedOCRCandidates, summary: ocrSummary)
             recordRappiStream("duplicateOCRWithSelectableSummary", candidates: duplicateRepairedOCRCandidates, summary: selectableSummary)
             recordRappiStream("evidenceOCRWithOCRSummary", candidates: evidenceBackedOCRCandidates, summary: ocrSummary)
+            recordRappiStream("isolatedOCRWithMergedSummary", candidates: isolatedOCRCandidates, summary: summary, observations: isolatedOCRStream?.observations)
+            recordRappiStream("isolatedSpatialOCRWithMergedSummary", candidates: isolatedSpatialOCRCandidates, summary: summary, observations: isolatedOCRStream?.observations)
             recordRappiStream("selectable", candidates: selectableCandidates, summary: selectableSummary)
             recordRappiStream("layout", candidates: layoutCandidates, summary: layoutSummary)
             recordRappiStream("pageWise", candidates: pageWiseCandidates, summary: pageWiseSummary)
@@ -6014,6 +6041,8 @@ final class FinanceStore {
             var diagnosticRappiOCRObservations = ocrObservations
             var selected = Self.reconciledRappiSelection(
                 candidateSets: [
+                    (isolatedSpatialOCRCandidates, summary),
+                    (isolatedOCRCandidates, summary),
                     (pageWiseCandidates, pageWiseSummary),
                     (layoutCandidates, layoutSummary),
                     (selectableCandidates, selectableSummary),
@@ -6025,11 +6054,23 @@ final class FinanceStore {
                 kind: kind
             )
 
+            func candidateIDsMatch(_ left: [Movement], _ right: [Movement]) -> Bool {
+                !left.isEmpty
+                    && left.count == right.count
+                    && Set(left.map(\.id)) == Set(right.map(\.id))
+            }
+
             if let selected {
                 selectedRappiSummary = selected.summary
                 selectedRappiCandidates = selected.candidates
                 if selected.candidates.contains(where: { $0.extractionEvidence?.method == "vision-ocr" }) {
-                    selectedRappiOCRObservations = ocrObservations
+                    if let isolatedOCRStream,
+                       candidateIDsMatch(selected.candidates, isolatedSpatialOCRCandidates)
+                        || candidateIDsMatch(selected.candidates, isolatedOCRCandidates) {
+                        selectedRappiOCRObservations = isolatedOCRStream.observations
+                    } else {
+                        selectedRappiOCRObservations = ocrObservations
+                    }
                 }
             } else if allowOCR {
                 // The first full-page OCR pass is intentionally conservative,
@@ -6063,6 +6104,15 @@ final class FinanceStore {
                 let retrySpatialOCRRepairVariants = Self.rappiOCRSpatialDuplicateRepairVariants(retryDuplicateRepairedCandidates)
                 let retryEvidenceBackedCandidates = Self.rappiEvidenceBackedFallbackCandidates(retryCandidates)
                 let retrySummary = Self.summary(from: retryText, source: source)
+                let retryIsolatedOCRStream = Self.rappiIsolatedOCRCandidates(
+                    from: retryObservations,
+                    fileName: fileName,
+                    confidenceByPage: retryConfidenceByPage
+                )
+                let retryIsolatedOCRCandidates = retryIsolatedOCRStream?.candidates ?? []
+                let retryIsolatedSpatialOCRCandidates = Self.rappiIsolatedSpatiallyDeduplicatedCandidates(
+                    retryIsolatedOCRCandidates
+                )
 #if DEBUG
                 rappiTestDiagnostics["retryOCRMovementLineRecords"] = String(
                     Self.rappiOCRMovementLineRecords(from: retryObservations).count
@@ -6082,10 +6132,14 @@ final class FinanceStore {
                     observations: retryObservations
                 )
                 recordRappiStream("retryDuplicateWithOCRSummary", candidates: retryDuplicateRepairedCandidates, summary: retrySummary)
+                recordRappiStream("retryIsolatedOCRWithMergedSummary", candidates: retryIsolatedOCRCandidates, summary: summary, observations: retryIsolatedOCRStream?.observations)
+                recordRappiStream("retryIsolatedSpatialOCRWithMergedSummary", candidates: retryIsolatedSpatialOCRCandidates, summary: summary, observations: retryIsolatedOCRStream?.observations)
                 recordRappiSummary("retrySummary", retrySummary)
 #endif
                 let retrySelection = Self.reconciledRappiSelection(
                     candidateSets: [
+                        (retryIsolatedSpatialOCRCandidates, summary),
+                        (retryIsolatedOCRCandidates, summary),
                         (pageWiseCandidates, pageWiseSummary),
                         (layoutCandidates, layoutSummary),
                         (selectableCandidates, selectableSummary),
@@ -6102,7 +6156,13 @@ final class FinanceStore {
                     selectedRappiSummary = retrySelection.summary
                     selectedRappiCandidates = retrySelection.candidates
                     if retrySelection.candidates.contains(where: { $0.extractionEvidence?.method == "vision-ocr" }) {
-                        selectedRappiOCRObservations = retryObservations
+                        if let retryIsolatedOCRStream,
+                           candidateIDsMatch(retrySelection.candidates, retryIsolatedSpatialOCRCandidates)
+                            || candidateIDsMatch(retrySelection.candidates, retryIsolatedOCRCandidates) {
+                            selectedRappiOCRObservations = retryIsolatedOCRStream.observations
+                        } else {
+                            selectedRappiOCRObservations = retryObservations
+                        }
                     }
                 } else if retryCandidates.count > ocrCandidates.count {
                     // The retry is useful as forensic evidence even when it
@@ -8520,6 +8580,92 @@ final class FinanceStore {
         }.joined(separator: "\n")
     }
 
+    /// Builds a candidate stream exclusively from the bounded row crops. A
+    /// full-page Vision pass can emit several readings for one printed row;
+    /// the isolated observations keep one physical band per candidate and
+    /// therefore provide a useful independent recovery path on devices whose
+    /// page-level grouping differs from the simulator. The accounting gate
+    /// still decides whether this stream is usable.
+    private static func rappiIsolatedOCRCandidates(
+        from observations: [OCRObservation],
+        fileName: String,
+        confidenceByPage: [Int: Double]
+    ) -> (candidates: [Movement], observations: [OCRObservation])? {
+        let isolated = observations
+            .filter { $0.page > 0 && $0.isolatedRappiRow }
+            .sorted {
+                $0.page == $1.page ? $0.centerY > $1.centerY : $0.page < $1.page
+            }
+        guard !isolated.isEmpty else { return nil }
+        let text = rappiOCRText(from: isolated)
+        let candidates = parseRappiText(
+            text,
+            fileName: fileName,
+            evidenceMethod: "vision-ocr",
+            confidenceByPage: confidenceByPage
+        )
+        return (candidates, isolated)
+    }
+
+    /// Merge only overlapping isolated bands that carry the same date and
+    /// signed amount. Different vertical bands remain separate, so two real
+    /// purchases with the same amount cannot be collapsed. This repairs a
+    /// duplicated rule/date region without choosing an arbitrary subset of
+    /// unrelated transactions.
+    private static func rappiIsolatedSpatiallyDeduplicatedCandidates(
+        _ candidates: [Movement]
+    ) -> [Movement] {
+        func isBetter(_ candidate: Movement, than existing: Movement) -> Bool {
+            let candidateHasMerchant = candidate.title.rangeOfCharacter(from: .letters) != nil
+            let existingHasMerchant = existing.title.rangeOfCharacter(from: .letters) != nil
+            if candidateHasMerchant != existingHasMerchant { return candidateHasMerchant }
+            return (candidate.extractionEvidence?.confidence ?? 0) > (existing.extractionEvidence?.confidence ?? 0)
+        }
+
+        func overlapRatio(_ left: CGRect, _ right: CGRect) -> CGFloat {
+            let intersection = left.intersection(right)
+            guard !intersection.isNull, !intersection.isEmpty else { return 0 }
+            let smallerArea = min(left.width * left.height, right.width * right.height)
+            guard smallerArea > 0 else { return 0 }
+            return (intersection.width * intersection.height) / smallerArea
+        }
+
+        var result: [Movement] = []
+        for candidate in candidates {
+            guard candidate.extractionEvidence?.method == "vision-ocr",
+                  let evidence = candidate.extractionEvidence,
+                  let page = evidence.page,
+                  let selectedAmount = evidence.selectedAmount,
+                  let bounds = evidence.bounds else {
+                result.append(candidate)
+                continue
+            }
+            let candidateRect = CGRect(x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height)
+            if let index = result.firstIndex(where: { existing in
+                guard let existingEvidence = existing.extractionEvidence,
+                      existingEvidence.method == "vision-ocr",
+                      existingEvidence.page == page,
+                      existingEvidence.selectedAmount == selectedAmount,
+                      existing.date == candidate.date,
+                      existing.flow == candidate.flow,
+                      let existingBounds = existingEvidence.bounds else { return false }
+                let existingRect = CGRect(
+                    x: existingBounds.x,
+                    y: existingBounds.y,
+                    width: existingBounds.width,
+                    height: existingBounds.height
+                )
+                return abs(existingRect.midY - candidateRect.midY) <= 0.014
+                    && overlapRatio(existingRect, candidateRect) >= 0.65
+            }) {
+                if isBetter(candidate, than: result[index]) { result[index] = candidate }
+            } else {
+                result.append(candidate)
+            }
+        }
+        return result
+    }
+
     /// Rebuilds Rappi's movement table from the substring geometry returned by
     /// Vision. A single Vision observation can span several printed rows (the
     /// affected Banorte PDFs often return four dates and four amounts as one
@@ -10756,10 +10902,16 @@ final class FinanceStore {
             let raw = row.map(\.text).joined(separator: " ")
             let normalized = raw
                 .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-            let compact = normalized.replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
-            return normalized.contains("usd")
-                && compact.contains("tc")
-                && compact.contains("aut")
+            let compact = normalized.replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+            let foreignCurrency = normalized.contains("usd")
+                || compact.contains("dls")
+                || normalized.contains("moneda extranjera")
+            let exchangeRate = compact.contains("tc")
+                || compact.contains("tipodecambio")
+                || compact.contains("tipocambio")
+            let authorization = compact.contains("aut")
+                || compact.contains("autoriz")
+            return foreignCurrency && exchangeRate && authorization
         }
 
         for page in observationsByPage.keys.sorted() {
@@ -10849,7 +11001,8 @@ final class FinanceStore {
                             selectedAmount: result.selectedAmount,
                             direction: result.movement.amount >= 0 ? "in" : "out",
                             reason: result.reason,
-                            accepted: true
+                            accepted: true,
+                            rowBounds: extractionBounds(for: row)
                         )
                     )
                     previousRunningBalance = result.runningBalance
@@ -10864,6 +11017,7 @@ final class FinanceStore {
                                 ? "bbva.foreign-auxiliary: se conservó evidencia USD/TC/AUT, pero no se inventó un importe MXN"
                                 : "fila BBVA rechazada: fecha, importe, dirección de columna o descripción no demostrables",
                             accepted: foreignAuxiliary,
+                            rowBounds: extractionBounds(for: row),
                             cellTexts: foreignAuxiliary ? ["USD/TC/AUT sin importe MXN demostrable"] : nil
                         )
                     )
@@ -11273,7 +11427,8 @@ final class FinanceStore {
         _ observations: [OCRObservation],
         fileName: String,
         openingBalance: Decimal? = nil,
-        document: PDFDocument? = nil
+        document: PDFDocument? = nil,
+        recoverMissingDateRows: Bool = false
     ) -> SantanderOCRParseResult {
         guard let dateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-.]\s*(\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*(\d{2,4}))?(?![A-Za-z])"#
@@ -11624,8 +11779,8 @@ final class FinanceStore {
         var renderedPage: Int?
         var renderedImage: CGImage?
         var renderedDateAnchorsPage: Int?
-        var renderedDateAnchors: [CGRect] = []
-        func highResolutionDateAnchors(in image: CGImage, pageIndex: Int) -> [CGRect] {
+        var renderedDateAnchors: [DateAnchor] = []
+        func highResolutionDateAnchors(in image: CGImage, pageIndex: Int) -> [DateAnchor] {
             if renderedDateAnchorsPage == pageIndex { return renderedDateAnchors }
             renderedDateAnchorsPage = pageIndex
             let request = VNRecognizeTextRequest()
@@ -11644,15 +11799,15 @@ final class FinanceStore {
                 renderedDateAnchors = []
                 return []
             }
-            renderedDateAnchors = (request.results ?? []).compactMap { result -> CGRect? in
+            renderedDateAnchors = (request.results ?? []).compactMap { result -> DateAnchor? in
                 guard let candidate = result.topCandidates(1).first else { return nil }
                 let text = candidate.string
                 let range = NSRange(text.startIndex..<text.endIndex, in: text)
-                let boundedDate = dateRegex.firstMatch(in: text, range: range).flatMap { match -> CGRect? in
+                let boundedDate = dateRegex.firstMatch(in: text, range: range).flatMap { match -> (text: String, box: CGRect)? in
                     guard let textRange = Range(match.range, in: text),
                           let box = try? candidate.boundingBox(for: textRange),
                           box.boundingBox.midX <= dateMaxX else { return nil }
-                    return box.boundingBox
+                    return (String(text[textRange]), box.boundingBox)
                 }
                 let normalized = text.folding(
                     options: [.diacriticInsensitive, .caseInsensitive],
@@ -11660,42 +11815,71 @@ final class FinanceStore {
                 )
                 let hasDate = boundedDate != nil || dateRegex.firstMatch(in: text, range: range) != nil
                 let isDateCell = hasDate
-                    && (boundedDate?.midX ?? result.boundingBox.midX) <= dateMaxX
+                    && (boundedDate?.box.midX ?? result.boundingBox.midX) <= dateMaxX
                     && !normalized.contains("periodo")
                     && !normalized.contains("corte")
                     && !normalized.contains("pagina")
-                return isDateCell ? (boundedDate ?? result.boundingBox) : nil
-            }.sorted { $0.midY > $1.midY }
+                guard isDateCell,
+                      let dateText = boundedDate?.text ?? dateRegex.firstMatch(in: text, range: range).flatMap({ match in
+                          guard let textRange = Range(match.range, in: text) else { return nil }
+                          return String(text[textRange])
+                      }) else { return nil }
+                let dateBox = boundedDate?.box ?? result.boundingBox
+                let source = OCRObservation(
+                    page: pageIndex,
+                    text: dateText,
+                    boundingBox: dateBox,
+                    confidence: Double(candidate.confidence),
+                    dateBoxes: [OCRTextBox(text: dateText, boundingBox: dateBox, confidence: Double(candidate.confidence))]
+                )
+                return DateAnchor(
+                    box: dateBox,
+                    text: dateText,
+                    confidence: Double(candidate.confidence),
+                    sourceObservation: source
+                )
+            }.sorted { $0.box.midY > $1.box.midY }
             return renderedDateAnchors
         }
         func highResolutionBand(near currentBand: CGRect, in image: CGImage, pageIndex: Int) -> CGRect? {
             let anchors = highResolutionDateAnchors(in: image, pageIndex: pageIndex)
             guard let index = anchors.indices.min(by: {
-                abs(anchors[$0].midY - currentBand.midY) < abs(anchors[$1].midY - currentBand.midY)
-            }), abs(anchors[index].midY - currentBand.midY) <= 0.05 else { return nil }
-            let anchor = anchors[index]
+                abs(anchors[$0].box.midY - currentBand.midY) < abs(anchors[$1].box.midY - currentBand.midY)
+            }), abs(anchors[index].box.midY - currentBand.midY) <= 0.05 else { return nil }
+            let anchor = anchors[index].box
             let upper = min(anchor.maxY + 0.004, 1)
             // Leave a small clear margin after the next date anchor. The
             // simulator's PDFKit render can shift this boundary by a few
             // pixels versus the original PDF raster; a 0.002 gap keeps the
             // adjacent date row outside the amount crop while retaining the
             // full current-row baseline.
-            let lower = index + 1 < anchors.count ? anchors[index + 1].maxY + 0.002 : 0
+            let lower = index + 1 < anchors.count ? anchors[index + 1].box.maxY + 0.002 : 0
             let numericBottom = max(lower, anchor.minY - 0.006)
             guard upper > numericBottom else { return nil }
             return CGRect(x: tableLeft, y: numericBottom, width: tableSpan, height: upper - numericBottom)
         }
-        func retryCells(_ physical: inout PhysicalRow) {
-            guard !physical.retried, let document, let pageIndex = physical.observations.first?.page,
-                  let page = document.page(at: pageIndex) else { return }
-            physical.retried = true
-            physical.retryOutcome = "render-unavailable"
+        func highResolutionImage(for pageIndex: Int) -> CGImage? {
+            guard let document, let page = document.page(at: pageIndex) else { return nil }
             if renderedPage != pageIndex {
                 let bounds = page.bounds(for: .mediaBox)
-                let scale = min(3200 / max(bounds.width, bounds.height), sqrt(5_000_000 / max(bounds.width * bounds.height, 1)))
-                renderedImage = page.thumbnail(of: CGSize(width: bounds.width * scale, height: bounds.height * scale), for: .mediaBox).cgImage
+                let scale = min(
+                    3200 / max(bounds.width, bounds.height),
+                    sqrt(5_000_000 / max(bounds.width * bounds.height, 1))
+                )
+                renderedImage = page.thumbnail(
+                    of: CGSize(width: bounds.width * scale, height: bounds.height * scale),
+                    for: .mediaBox
+                ).cgImage
                 renderedPage = pageIndex
             }
+            return renderedImage
+        }
+        func retryCells(_ physical: inout PhysicalRow) {
+            guard !physical.retried, let document, let pageIndex = physical.observations.first?.page,
+                  document.page(at: pageIndex) != nil else { return }
+            physical.retried = true
+            physical.retryOutcome = "render-unavailable"
+            _ = highResolutionImage(for: pageIndex)
             guard let image = renderedImage else { return }
             let retryBand = highResolutionBand(near: physical.band, in: image, pageIndex: pageIndex)
                 ?? physical.band
@@ -11805,7 +11989,7 @@ final class FinanceStore {
 
         for page in byPage.keys.sorted() {
             let pageObservations = byPage[page] ?? []
-            let anchors = pageObservations.compactMap { observation -> DateAnchor? in
+            var anchors = pageObservations.compactMap { observation -> DateAnchor? in
                 let normalized = observation.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
                 let boundedDate = observation.dateBoxes.first(where: { box in
                     box.centerX <= dateMaxX && firstMatch(in: box.text, regex: dateRegex) != nil
@@ -11822,6 +12006,23 @@ final class FinanceStore {
                 return isDateCell ? DateAnchor(box: dateBounds, text: dateText,
                     confidence: observation.confidence, sourceObservation: observation) : nil
             }.sorted { $0.box.midY > $1.box.midY }
+            if recoverMissingDateRows,
+               let image = highResolutionImage(for: page) {
+                let upperTableY = page == titleAnchor.page ? titleAnchor.lowerY + 0.020 : 1
+                let lowerTableY = page == endAnchor.page ? endAnchor.centerY - 0.020 : 0
+                let recovered = highResolutionDateAnchors(in: image, pageIndex: page).filter { candidate in
+                    candidate.box.maxY <= upperTableY
+                        && candidate.box.minY >= lowerTableY
+                        && candidate.box.midX <= dateMaxX
+                        && !anchors.contains { existing in
+                            abs(existing.box.midY - candidate.box.midY) <= 0.012
+                        }
+                }
+                if !recovered.isEmpty {
+                    anchors.append(contentsOf: recovered)
+                    anchors.sort { $0.box.midY > $1.box.midY }
+                }
+            }
             for (index, dateAnchor) in anchors.enumerated() {
                 let anchor = dateAnchor.box
                 let upper = min(anchor.maxY + 0.004, 1)
@@ -13986,8 +14187,32 @@ final class FinanceStore {
                     range: NSRange(pending.startIndex..<pending.endIndex, in: pending)
                   ),
                   let firstRange = Range(match.range(at: 1), in: pending),
-                  let bodyRange = Range(match.range(at: 3), in: pending),
-                  let date = parseDate(String(pending[firstRange])) else { return }
+                  let bodyRange = Range(match.range(at: 3), in: pending) else { return }
+            let firstDate = parseDate(String(pending[firstRange]))
+            let secondDate: Date? = {
+                let secondNSRange = match.range(at: 2)
+                guard secondNSRange.location != NSNotFound,
+                      let secondRange = Range(secondNSRange, in: pending) else { return nil }
+                return parseDate(String(pending[secondRange]))
+            }()
+            // Rappi prints operation date before charge date, but Vision can
+            // return those columns reversed on a foreign-currency row. Keep
+            // the earlier date only for a plausible posting gap. A much
+            // earlier second token is commonly a truncated OCR date such as
+            // `2026-05-2`; in that case the first column remains the reliable
+            // operation date.
+            let date: Date?
+            if let firstDate {
+                if let secondDate, secondDate < firstDate {
+                    let gapDays = abs(Calendar(identifier: .gregorian).dateComponents([.day], from: secondDate, to: firstDate).day ?? Int.max)
+                    date = gapDays <= 7 ? secondDate : firstDate
+                } else {
+                    date = firstDate
+                }
+            } else {
+                date = secondDate
+            }
+            guard let date else { return }
             // Vision may emit ISO dates, slash dates, or Spanish month names
             // depending on the page. The old ISO-only gate silently dropped
             // every row on otherwise legible pages such as Rappi June.

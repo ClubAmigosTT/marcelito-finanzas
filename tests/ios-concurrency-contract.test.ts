@@ -278,7 +278,7 @@ test("el visor PDF enfoca la región OCR con la convención de Vision", async ()
 
 test("Rappi no cruza controles entre candidatos y sus propios resúmenes", async () => {
   const source = await readFile(modelsPath, "utf8");
-  assert.match(source, /candidateSets: \[\s*\(pageWiseCandidates, pageWiseSummary\)/);
+  assert.match(source, /candidateSets: \[\s*\(isolatedSpatialOCRCandidates, summary\),\s*\(isolatedOCRCandidates, summary\),\s*\(pageWiseCandidates, pageWiseSummary\)/);
   assert.match(source, /for \(candidates, summary\) in candidateSets/);
   assert.doesNotMatch(source, /candidateSets: \[\s*pageWiseCandidates/);
 });

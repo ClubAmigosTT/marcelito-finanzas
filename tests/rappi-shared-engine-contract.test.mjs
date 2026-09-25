@@ -19,7 +19,7 @@ function loadEngine() {
 
 test("el bundle local de iOS expone el mismo contrato determinista de Rappi", () => {
   const engine = loadEngine();
-  assert.equal(engine?.version, "rappi-shared-engine-2026.09.23.1");
+  assert.equal(engine?.version, "rappi-shared-engine-2026.09.25.2");
   assert.equal(typeof engine?.parse, "function");
 
   const parsed = engine.parse({
@@ -81,6 +81,52 @@ test("el motor compartido normaliza fechas OCR localizadas antes de cruzar con S
     "2026-08-02",
     "2026-08-03",
   ]);
+});
+
+test("el motor compartido conserva la fecha de operación si Vision invierte las columnas", () => {
+  const engine = loadEngine();
+  const parsed = engine.parse({
+    fileName: "rappi-reversed-date-columns.pdf",
+    mode: "ocr",
+    text: [
+      "Tarjeta de crédito RappiCard",
+      "Adeudo del periodo anterior = $0.00",
+      "Cargos regulares (no a meses) + $10.00",
+      "Cargos compras a meses (capital) + $0.00",
+      "Pagos y abonos - $0.00",
+      "Saldo deudor total $10.00",
+      "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+      "2026-06-21 2026-06-20 PINGPOD* EVT U1150 US +$10.00",
+      "Total de cargos +$10.00",
+      "Total de abonos -$0.00",
+    ].join("\n"),
+  });
+
+  assert.equal(parsed.reconciliation.status, "valid");
+  assert.equal(parsed.transactions[0]?.date, "2026-06-20");
+});
+
+test("el motor compartido conserva la primera fecha ante un token OCR truncado", () => {
+  const engine = loadEngine();
+  const parsed = engine.parse({
+    fileName: "rappi-truncated-charge-date.pdf",
+    mode: "ocr",
+    text: [
+      "Tarjeta de crédito RappiCard",
+      "Adeudo del periodo anterior = $0.00",
+      "Cargos regulares (no a meses) + $43.50",
+      "Cargos compras a meses (capital) + $0.00",
+      "Pagos y abonos - $0.00",
+      "Saldo deudor total $43.50",
+      "CARGOS, ABONOS Y COMPRAS REGULARES (NO A MESES)",
+      "2026-05-27 2026-05-2 OXXO AMSTERDAM +$43.50",
+      "Total de cargos +$43.50",
+      "Total de abonos -$0.00",
+    ].join("\n"),
+  });
+
+  assert.equal(parsed.reconciliation.status, "valid");
+  assert.equal(parsed.transactions[0]?.date, "2026-05-27");
 });
 
 test("el contrato compartido conserva geometría, confianza y metadatos OCR por fila", () => {

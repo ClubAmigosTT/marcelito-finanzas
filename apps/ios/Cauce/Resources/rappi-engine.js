@@ -337,6 +337,18 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
   const rowStart = new RegExp(`^(${rowDateToken})\\s+(${rowDateToken})(?:\\s+(.*))?$`, "i");
   const rowPairStart = new RegExp(`(?<![A-Za-z0-9.,])(?=${rowDateToken}\\s+${rowDateToken}\\s+)`, "i");
   const signedMoney = /(?<![A-Za-z0-9.,])([+-])\s*\$?\s*((?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2})(?![A-Za-z0-9.,])/g;
+  function operationDate(operationToken, chargeToken, text, fileName) {
+    const operation = parseIssuerDate(operationToken, text, fileName);
+    const charge = chargeToken ? parseIssuerDate(chargeToken, text, fileName) : void 0;
+    if (!operation) return charge;
+    if (charge && charge < operation) {
+      const operationTime = Date.parse(`${operation}T00:00:00Z`);
+      const chargeTime = Date.parse(`${charge}T00:00:00Z`);
+      const gapDays = Number.isFinite(operationTime) && Number.isFinite(chargeTime) ? Math.abs(operationTime - chargeTime) / 864e5 : Number.POSITIVE_INFINITY;
+      if (gapDays <= 7) return charge;
+    }
+    return operation;
+  }
   function isAdministrativeOrTruncatedDescription(value) {
     const compact2 = fold$1(value).replace(/[^a-z0-9]+/g, "");
     return compact2.startsWith("desglosedemovimientos") || compact2.startsWith("cargosabonosycomprasregulares") || compact2 === "por";
@@ -395,7 +407,7 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
         rejectedRows.push(raw.slice(0, 240));
         return;
       }
-      const date = parseIssuerDate(match[1], input.text, input.fileName);
+      const date = operationDate(match[1], match[2], input.text, input.fileName);
       if (!date) {
         rejectedRows.push(raw.slice(0, 240));
         return;
@@ -574,7 +586,7 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
         return;
       }
       const firstDate = normalizeDate(pending.dates[0]);
-      const secondDate = normalizeDate(pending.dates[1] ?? pending.dates[0]);
+      const secondDate = normalizeDate(pending.dates[1] ?? pending.dates[0]) ?? firstDate;
       if (!firstDate || !secondDate) {
         pending = void 0;
         return;
@@ -648,7 +660,7 @@ ${row.text}`).join("\n")}` },
       rejectedRows: parsed.rejectedRows
     };
   }
-  const RAPPI_SHARED_ENGINE_VERSION = "rappi-shared-engine-2026.09.23.1";
+  const RAPPI_SHARED_ENGINE_VERSION = "rappi-shared-engine-2026.09.25.2";
   const rappiSharedEngine = {
     version: RAPPI_SHARED_ENGINE_VERSION,
     parse(input) {
