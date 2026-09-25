@@ -2259,7 +2259,8 @@ struct StatementSummaryEditor: View {
                                     allowOCR: true,
                                     preserveExistingOnEmpty: false,
                                     sourceOverride: source,
-                                    kindOverride: statementKind
+                                    kindOverride: statementKind,
+                                    forceFresh: true
                                 )
                                 dismiss()
                             } catch {
