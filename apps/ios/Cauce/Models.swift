@@ -6572,7 +6572,8 @@ final class FinanceStore {
 
     private static func extractPDFUsingCache(
         data: Data, fileName: String, allowOCR: Bool,
-        sourceOverride: String?, kindOverride: StatementKind?, learnedRules: [String: String]
+        sourceOverride: String?, kindOverride: StatementKind?, learnedRules: [String: String],
+        forceFresh: Bool = false
     ) throws -> PDFImportExtraction {
         let fingerprint = pdfFingerprint(data)
         let keyData = try JSONSerialization.data(withJSONObject: [
@@ -6583,10 +6584,17 @@ final class FinanceStore {
         ], options: [.sortedKeys])
         let key = pdfFingerprint(keyData)
         let cache = PDFReadingCache.local
-        if var cached = cache?.load(PDFImportExtraction.self, key: key),
+        if !forceFresh,
+           var cached = cache?.load(PDFImportExtraction.self, key: key),
            cached.sourceFingerprint == fingerprint {
             cached.documentData = data
             return cached
+        }
+        if forceFresh {
+            DiagnosticsRecorder.record(
+                stage: "import.cache.bypass",
+                message: "\(fileName): relectura explícita solicitada; se ignoró la extracción cacheada."
+            )
         }
         let result = try extractPDF(data: data, fileName: fileName, allowOCR: allowOCR,
                                     sourceOverride: sourceOverride, kindOverride: kindOverride,
@@ -6640,7 +6648,8 @@ final class FinanceStore {
         preserveExistingOnEmpty: Bool = false,
         requireValidReconciliation: Bool = false,
         sourceOverride: String? = nil,
-        kindOverride: StatementKind? = nil
+        kindOverride: StatementKind? = nil,
+        forceFresh: Bool = false
     ) throws -> ImportSummary {
         let didStartAccessing = url.startAccessingSecurityScopedResource()
         defer {
@@ -6662,7 +6671,8 @@ final class FinanceStore {
             allowOCR: allowOCR,
             sourceOverride: sourceOverride,
             kindOverride: kindOverride,
-            learnedRules: learnedRules
+            learnedRules: learnedRules,
+            forceFresh: forceFresh
         )
         return try applyPDFExtraction(
             extraction,
@@ -6683,6 +6693,7 @@ final class FinanceStore {
         sourceOverride: String? = nil,
         kindOverride: StatementKind? = nil,
         normalizeAfterImport: Bool = true,
+        forceFresh: Bool = false,
         stage: ((String) -> Void)? = nil
     ) async throws -> ImportSummary {
         let didStartAccessing = url.startAccessingSecurityScopedResource()
@@ -6704,7 +6715,8 @@ final class FinanceStore {
                     allowOCR: allowOCR,
                     sourceOverride: sourceOverride,
                     kindOverride: kindOverride,
-                    learnedRules: learnedRules
+                    learnedRules: learnedRules,
+                    forceFresh: forceFresh
                 )
             }
         }

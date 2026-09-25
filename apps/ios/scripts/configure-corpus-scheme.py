@@ -12,6 +12,7 @@ KEYS = (
     "MARCELITO_PDF_CORPUS_EXPORT_PRIVATE_DIAGNOSTICS",
     "MARCELITO_PDF_CORPUS_PRIVATE_EXPORT",
     "MARCELITO_PDF_CORPUS_IMPORT_PRIVATE_EXPORT",
+    "MARCELITO_PDF_CORPUS_FORCE_FRESH",
 )
 
 
@@ -32,8 +33,9 @@ def configure(path, environ):
         if not value:
             continue
         flag_key = key in {
-        "MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED",
-        "MARCELITO_PDF_CORPUS_EXPORT_PRIVATE_DIAGNOSTICS",
+            "MARCELITO_PDF_CORPUS_REQUIRE_CERTIFIED",
+            "MARCELITO_PDF_CORPUS_EXPORT_PRIVATE_DIAGNOSTICS",
+            "MARCELITO_PDF_CORPUS_FORCE_FRESH",
         }
         if not flag_key and not value.startswith("app-documents://"):
             value = str(Path(value).expanduser().resolve(strict=key not in {

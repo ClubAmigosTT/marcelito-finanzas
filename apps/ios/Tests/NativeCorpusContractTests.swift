@@ -845,13 +845,29 @@ final class NativeCorpusContractTests: XCTestCase {
         }
 
         let store = FinanceStore()
+        let forceFresh = ["1", "true", "yes"].contains(
+            ProcessInfo.processInfo.environment["MARCELITO_PDF_CORPUS_FORCE_FRESH"]?.lowercased() ?? ""
+        )
         var diagnostics: [NativeCorpusDiagnosticFile] = []
         for (index, file) in files.enumerated() {
+            // Seed the successful extraction cache first, then exercise the
+            // explicit-refresh path against that same key. This keeps the
+            // private corpus check honest about the button's cache bypass.
+            if forceFresh {
+                _ = try store.importPDF(
+                    from: file,
+                    allowOCR: true,
+                    preserveExistingOnEmpty: false,
+                    requireValidReconciliation: false,
+                    forceFresh: false
+                )
+            }
             let result = try store.importPDF(
                 from: file,
                 allowOCR: true,
                 preserveExistingOnEmpty: false,
-                requireValidReconciliation: false
+                requireValidReconciliation: false,
+                forceFresh: forceFresh
             )
             diagnostics.append(
                 NativeCorpusDiagnosticFile(
