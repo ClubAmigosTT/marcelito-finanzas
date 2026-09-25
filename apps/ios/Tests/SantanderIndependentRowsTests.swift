@@ -7,6 +7,7 @@ import UIKit
 final class SantanderIndependentRowsTests: XCTestCase {
     func testCellConsensusRequiresRepeatedCompleteReadings() {
         XCTAssertEqual(FinanceStore.santanderCellConsensus(["54,977.93", "54977.93", nil]), "54,977.93")
+        XCTAssertEqual(FinanceStore.santanderCellConsensus(["54.977.93", "54.977.93", nil]), "54977.93")
         XCTAssertEqual(FinanceStore.santanderCellConsensus(["", "", nil]), "")
         XCTAssertNil(FinanceStore.santanderCellConsensus(["54,977.93", nil, "noise"]))
         XCTAssertNil(FinanceStore.santanderCellConsensus(["54,977.93", "54,977.93", "4,977.93"]))

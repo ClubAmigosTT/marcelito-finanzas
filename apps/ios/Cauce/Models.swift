@@ -7640,6 +7640,33 @@ final class FinanceStore {
             )
         }
 
+        /// Vision on a physical device can reject a very wide, short row crop
+        /// (the Rappi rows are only ~80–100 px tall at the 2,400 px render),
+        /// or it can preserve the dates while dropping the amount. Upscale the
+        /// bounded band before recognition; the synthetic evidence remains
+        /// anchored to the original page region, so this cannot move a row or
+        /// broaden its accounting scope.
+        func upscaledRowImage(_ crop: CGImage) -> CGImage? {
+            let minimumHeight = 160
+            let scale = max(1.0, CGFloat(minimumHeight) / CGFloat(max(crop.height, 1)))
+            let width = max(1, Int((CGFloat(crop.width) * scale).rounded()))
+            let height = max(minimumHeight, Int((CGFloat(crop.height) * scale).rounded()))
+            guard let context = CGContext(
+                data: nil,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return nil }
+            context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+            context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+            context.interpolationQuality = .high
+            context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return context.makeImage()
+        }
+
         func recognize(region: CGRect, languages: [String]?, correctLanguage: Bool) -> OCRObservation? {
             guard !Task.isCancelled else { return nil }
             // Physically crop the pixels. A Vision ROI alone can still group
@@ -7651,7 +7678,9 @@ final class FinanceStore {
                 width: region.width * CGFloat(image.width),
                 height: region.height * CGFloat(image.height)
             ).integral.intersection(bounds)
-            guard !crop.isEmpty, let rowImage = image.cropping(to: crop) else { return nil }
+            guard !crop.isEmpty,
+                  let croppedRowImage = image.cropping(to: crop) else { return nil }
+            let rowImage = upscaledRowImage(croppedRowImage) ?? croppedRowImage
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = correctLanguage
@@ -11383,6 +11412,18 @@ final class FinanceStore {
         }
         let complete = #"^\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}$"#
         if text.range(of: complete, options: .regularExpression) != nil { return text }
+        // Vision occasionally reads the thousands separator and decimal point
+        // as the same glyph (`54.977.93`).  Keep this recovery strictly to a
+        // grouped monetary shape: every interior group must contain exactly
+        // three digits and the final group exactly two cents.  This cannot
+        // turn an account/reference number or an ambiguous decimal into a
+        // balance.
+        let punctuatedGrouping = #"^\$?\d{1,3}(?:[.,]\d{3})+[.,]\d{2}$"#
+        if text.range(of: punctuatedGrouping, options: .regularExpression) != nil {
+            let digits = text.filter { $0.isASCII && $0.isNumber }
+            guard digits.count >= 4 else { return nil }
+            return String(digits.dropLast(2)) + "." + String(digits.suffix(2))
+        }
         let spaced = #"^\$?\d{1,3}(?:[ ,]\d{3})+(?:[ .]\d{2})$"#
         let joinedCents = #"^\$?\d{1,3}(?:[ ,]\d{3})*[ ]\d{5}$"#
         guard text.range(of: spaced, options: .regularExpression) != nil
