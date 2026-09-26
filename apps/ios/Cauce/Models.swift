@@ -934,7 +934,7 @@ final class FinanceStore {
     /// device. Keep this token separate from `readerVersion`: the public
     /// corpus certificate describes the reader contract, while this token is
     /// an operational cache/replay invalidation for a shipped build.
-    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.26.1"
+    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.26.2"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -1687,8 +1687,9 @@ final class FinanceStore {
             // Rappi has no running balance per row. Its independent proof is
             // the complete visual-line mapping: every candidate retains a
             // page, bounds and amount, and every printed visual line matched
-            // exactly one candidate. A stream with one unselected line stays
-            // quarantined even when the cover totals happen to reconcile.
+            // exactly one candidate. The diagnostic builder removes only the
+            // bounded foreign-band duplicate before this check; an independent
+            // unselected line still keeps the stream quarantined.
             return diagnostics.count == candidates.count
                 && evidence.allSatisfy { $0.sameVisualRow == true }
         case "bbva":
@@ -1714,6 +1715,19 @@ final class FinanceStore {
         default:
             return false
         }
+    }
+
+    /// Geometry-only seam for the foreign-band duplicate rule. It is kept
+    /// separate from OCR parsing so the precise containment guard can be
+    /// regression-tested without shipping a private PDF in the test target.
+    static func rappiForeignAuxiliaryBandCoversLineForTesting(
+        lineBounds: CGRect,
+        selectedBounds: CGRect
+    ) -> Bool {
+        rappiSelectedAuxiliaryBandContainsLine(
+            lineRect: lineBounds,
+            movementRect: selectedBounds
+        )
     }
 
     /// Vision can add punctuation, accents or a short explanatory prefix to
@@ -7224,7 +7238,10 @@ final class FinanceStore {
     /// Adds a rejected diagnostic for every visual Rappi row that did not
     /// become one of the selected OCR movements. A reconciled total alone is
     /// not enough evidence: a missing date, amount or sign must remain visible
-    /// to the user and keep the document out of automatic import. This helper
+    /// to the user and keep the document out of automatic import. The one
+    /// bounded exception is the short duplicate line Vision emits inside a
+    /// selected tall foreign-currency band; that line is covered by the same
+    /// selected amount and is not a second financial movement. This helper
     /// runs for the OCR candidate stream that won reconciliation, or for a
     /// rejected stream when no complete source could be certified. A valid
     /// selectable-text stream does not get penalized by an unused OCR attempt.
@@ -7289,7 +7306,19 @@ final class FinanceStore {
             let tallAuxiliaryBand = lineRect.height >= 0.05
                 && lineRect.intersects(movementRect)
                 && lineRect.insetBy(dx: 0, dy: -0.004).contains(CGPoint(x: movementRect.midX, y: movementRect.midY))
-            return closeCenter || tallAuxiliaryBand
+            // A foreign Rappi row can be emitted twice: once as the complete
+            // tall band (merchant + USD/TC annotation) and once as the small
+            // bottom line containing only the MXN amount. The selected
+            // movement keeps the tall band, so accept a same-amount visual
+            // line whose center is inside that band. Without this containment
+            // check the duplicate is reported as an unselected row and the
+            // otherwise cent-reconciled statement remains unnecessarily in
+            // review.
+            let selectedAuxiliaryBandContainsLine = Self.rappiSelectedAuxiliaryBandContainsLine(
+                lineRect: lineRect,
+                movementRect: movementRect
+            )
+            return closeCenter || tallAuxiliaryBand || selectedAuxiliaryBandContainsLine
         }
 
         var rejected: [OCRRowDiagnostic] = []
@@ -7323,6 +7352,17 @@ final class FinanceStore {
             ))
         }
         return accepted + rejected
+    }
+
+    private static func rappiSelectedAuxiliaryBandContainsLine(
+        lineRect: CGRect,
+        movementRect: CGRect
+    ) -> Bool {
+        movementRect.height >= 0.06
+            && movementRect.height >= lineRect.height * 2.5
+            && movementRect.insetBy(dx: -0.01, dy: -0.004).contains(
+                CGPoint(x: lineRect.midX, y: lineRect.midY)
+            )
     }
 
     /// Rappi prints “Ver notas en la sección NOTAS ACLARATORIAS” in the footer
