@@ -930,6 +930,11 @@ final class FinanceStore {
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v3"
+    /// Extraction fixes must be replayed against PDFs that are already on the
+    /// device. Keep this token separate from `readerVersion`: the public
+    /// corpus certificate describes the reader contract, while this token is
+    /// an operational cache/replay invalidation for a shipped build.
+    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.25.2"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -951,6 +956,7 @@ final class FinanceStore {
     private let canonicalRebuildKey = "marcelito.canonicalRebuild.v1"
     private let canonicalRebuildReaderVersionKey = "marcelito.canonicalRebuild.readerVersion.v1"
     private let canonicalRebuildExpectedCountKey = "marcelito.canonicalRebuild.expectedCount.v1"
+    private let extractionReplayVersionKey = "marcelito.extractionReplayVersion.v1"
     private let normalizedLedgerReaderVersionKey = "marcelito.ledger.normalizedReaderVersion.v1"
     private let ledgerEnvelopeKey = "marcelito.ledger.active.v1"
     private let ledgerBackupKey = "marcelito.ledger.backup.v1"
@@ -4388,6 +4394,23 @@ final class FinanceStore {
                 defaults.set(Self.readerVersion, forKey: normalizedLedgerReaderVersionKey)
             }
         }
+        // A reader fix can be shipped with the same certified reader contract
+        // while still needing to be executed against every PDF already saved
+        // on the device.  The old build had no replay marker, so this is the
+        // migration that turns the stale cards into a real extraction pass;
+        // no upload is required from the user.
+        let storedExtractionReplayVersion = defaults.string(forKey: extractionReplayVersionKey)
+        if hasStoredSources && storedExtractionReplayVersion != Self.extractionReplayVersion {
+            defaults.set(false, forKey: canonicalRebuildKey)
+            defaults.removeObject(forKey: canonicalRebuildReaderVersionKey)
+            defaults.removeObject(forKey: normalizedLedgerReaderVersionKey)
+            DiagnosticsRecorder.record(
+                stage: "extraction.replay.pending",
+                message: "Se invalidó la extracción guardada para repetirla con la revisión \(Self.extractionReplayVersion)."
+            )
+        } else if !hasStoredSources {
+            defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
+        }
         refreshCanonicalRebuildStatus()
         DiagnosticsRecorder.record(
             stage: "store.init",
@@ -4674,6 +4697,7 @@ final class FinanceStore {
         defaults.removeObject(forKey: canonicalRebuildKey)
         defaults.removeObject(forKey: canonicalRebuildReaderVersionKey)
         defaults.removeObject(forKey: canonicalRebuildExpectedCountKey)
+        defaults.removeObject(forKey: extractionReplayVersionKey)
         defaults.removeObject(forKey: normalizedLedgerReaderVersionKey)
         defaults.removeObject(forKey: ledgerEnvelopeKey)
         defaults.removeObject(forKey: ledgerBackupKey)
@@ -4721,12 +4745,16 @@ final class FinanceStore {
     private func refreshCanonicalRebuildStatus() {
         let defaults = UserDefaults.standard
         let hasSources = !statements.isEmpty || !storedPDFURLs.isEmpty
+        let extractionReplayPending = hasSources
+            && defaults.string(forKey: extractionReplayVersionKey) != Self.extractionReplayVersion
         // A statement imported after the last rebuild can still carry an
         // older reader revision. Treat that as a rebuild trigger even when
         // the previous rebuild was marked complete.
         let hasOutdatedStatement = statements.contains { !isCurrentReader($0) }
         let pending: Bool
-        if hasOutdatedStatement && hasSources {
+        if extractionReplayPending {
+            pending = true
+        } else if hasOutdatedStatement && hasSources {
             pending = true
         } else {
             pending = Self.needsCanonicalRebuild(
@@ -4833,6 +4861,7 @@ final class FinanceStore {
         guard !candidates.isEmpty else {
             defaults.set(true, forKey: canonicalRebuildKey)
             defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
+            defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
             defaults.set(true, forKey: numericRepairKey)
             defaults.set("complete", forKey: rebuildStateKey)
             defaults.removeObject(forKey: ledgerBackupKey)
@@ -4882,6 +4911,7 @@ final class FinanceStore {
         }
         defaults.set(true, forKey: canonicalRebuildKey)
         defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
+        defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
         defaults.set(true, forKey: numericRepairKey)
         defaults.set("complete", forKey: rebuildStateKey)
         defaults.removeObject(forKey: ledgerBackupKey)
@@ -5111,6 +5141,7 @@ final class FinanceStore {
         persist()
         defaults.set(true, forKey: canonicalRebuildKey)
         defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
+        defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
         defaults.set(true, forKey: numericRepairKey)
         defaults.set("complete", forKey: rebuildStateKey)
         defaults.removeObject(forKey: ledgerBackupKey)
@@ -5923,6 +5954,18 @@ final class FinanceStore {
             let isolatedSpatialOCRCandidates = Self.rappiIsolatedSpatiallyDeduplicatedCandidates(
                 isolatedOCRCandidates
             )
+            // Keep a small, release-safe route trace in the private PDF
+            // diagnostic.  Counts are enough to distinguish a physical
+            // Vision over-segmentation from a reconciliation failure; no
+            // merchant text or amounts are exported here.
+            rappiTestDiagnostics["ocrObservationCount"] = String(ocrObservations.count)
+            rappiTestDiagnostics["ocrMovementLineRecords"] = String(
+                Self.rappiOCRMovementLineRecords(from: ocrObservations).count
+            )
+            rappiTestDiagnostics["isolatedObservationCount"] = String(isolatedOCRStream?.observations.count ?? 0)
+            rappiTestDiagnostics["isolatedRows"] = String(isolatedOCRCandidates.count)
+            rappiTestDiagnostics["isolatedSpatialRows"] = String(isolatedSpatialOCRCandidates.count)
+            rappiTestDiagnostics["ruleFirstRowRouting"] = "enabled"
 #if DEBUG
             func recordRappiStream(
                 _ name: String,
@@ -6039,6 +6082,14 @@ final class FinanceStore {
             var selectedRappiSummary = summary
             var selectedRappiOCRObservations: [OCRObservation]? = nil
             var diagnosticRappiOCRObservations = ocrObservations
+            var selectedRappiRoute = "none"
+
+            func candidateIDsMatch(_ left: [Movement], _ right: [Movement]) -> Bool {
+                !left.isEmpty
+                    && left.count == right.count
+                    && Set(left.map(\.id)) == Set(right.map(\.id))
+            }
+
             var selected = Self.reconciledRappiSelection(
                 candidateSets: [
                     (isolatedSpatialOCRCandidates, summary),
@@ -6054,15 +6105,14 @@ final class FinanceStore {
                 kind: kind
             )
 
-            func candidateIDsMatch(_ left: [Movement], _ right: [Movement]) -> Bool {
-                !left.isEmpty
-                    && left.count == right.count
-                    && Set(left.map(\.id)) == Set(right.map(\.id))
-            }
-
             if let selected {
                 selectedRappiSummary = selected.summary
                 selectedRappiCandidates = selected.candidates
+                selectedRappiRoute = candidateIDsMatch(selected.candidates, isolatedSpatialOCRCandidates)
+                    ? "initial-isolated-spatial"
+                    : candidateIDsMatch(selected.candidates, isolatedOCRCandidates)
+                        ? "initial-isolated"
+                        : "initial-text-or-full-page"
                 if selected.candidates.contains(where: { $0.extractionEvidence?.method == "vision-ocr" }) {
                     if let isolatedOCRStream,
                        candidateIDsMatch(selected.candidates, isolatedSpatialOCRCandidates)
@@ -6113,6 +6163,13 @@ final class FinanceStore {
                 let retryIsolatedSpatialOCRCandidates = Self.rappiIsolatedSpatiallyDeduplicatedCandidates(
                     retryIsolatedOCRCandidates
                 )
+                rappiTestDiagnostics["retryOCRObservationCount"] = String(retryObservations.count)
+                rappiTestDiagnostics["retryOCRMovementLineRecords"] = String(
+                    Self.rappiOCRMovementLineRecords(from: retryObservations).count
+                )
+                rappiTestDiagnostics["retryIsolatedObservationCount"] = String(retryIsolatedOCRStream?.observations.count ?? 0)
+                rappiTestDiagnostics["retryIsolatedRows"] = String(retryIsolatedOCRCandidates.count)
+                rappiTestDiagnostics["retryIsolatedSpatialRows"] = String(retryIsolatedSpatialOCRCandidates.count)
 #if DEBUG
                 rappiTestDiagnostics["retryOCRMovementLineRecords"] = String(
                     Self.rappiOCRMovementLineRecords(from: retryObservations).count
@@ -6155,6 +6212,11 @@ final class FinanceStore {
                     selected = retrySelection
                     selectedRappiSummary = retrySelection.summary
                     selectedRappiCandidates = retrySelection.candidates
+                    selectedRappiRoute = candidateIDsMatch(retrySelection.candidates, retryIsolatedSpatialOCRCandidates)
+                        ? "retry-isolated-spatial"
+                        : candidateIDsMatch(retrySelection.candidates, retryIsolatedOCRCandidates)
+                            ? "retry-isolated"
+                            : "retry-text-or-full-page"
                     if retrySelection.candidates.contains(where: { $0.extractionEvidence?.method == "vision-ocr" }) {
                         if let retryIsolatedOCRStream,
                            candidateIDsMatch(retrySelection.candidates, retryIsolatedSpatialOCRCandidates)
@@ -6170,6 +6232,8 @@ final class FinanceStore {
                     diagnosticRappiOCRObservations = retryObservations
                 }
             }
+            rappiTestDiagnostics["selectedRoute"] = selectedRappiRoute
+            rappiTestDiagnostics["selectedRows"] = String(selectedRappiCandidates.count)
             if selected == nil {
                 recoveryAttempts.append("rappi-unsafe-candidate-stream-rejected")
             }
@@ -6529,6 +6593,7 @@ final class FinanceStore {
             if !canonicalRebuildPending && !statements.contains(where: { !isCurrentReader($0) }) {
                 defaults.set(true, forKey: canonicalRebuildKey)
                 defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
+                defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
                 defaults.set(true, forKey: numericRepairKey)
                 defaults.set(Self.readerVersion, forKey: normalizedLedgerReaderVersionKey)
             }
@@ -6577,7 +6642,8 @@ final class FinanceStore {
     ) throws -> PDFImportExtraction {
         let fingerprint = pdfFingerprint(data)
         let keyData = try JSONSerialization.data(withJSONObject: [
-            "reader": readerVersion, "fingerprint": fingerprint, "fileName": fileName,
+            "reader": readerVersion, "replay": extractionReplayVersion,
+            "fingerprint": fingerprint, "fileName": fileName,
             "accountIdentity": accountIdentityParserVersion,
             "allowOCR": allowOCR, "source": sourceOverride ?? "",
             "kind": kindOverride?.rawValue ?? "", "rules": learnedRules,
@@ -7496,12 +7562,21 @@ final class FinanceStore {
     private static func rappiTableRowRegions(
         in image: CGImage,
         fullPageObservations: [OCRObservation] = [],
-        retryDateAnchorsWhenUnobserved: Bool = true
+        retryDateAnchorsWhenUnobserved: Bool = true,
+        preferRuleRegions: Bool = true
     ) -> [CGRect] {
         let ruleRegions = rappiRuleRowRegions(in: image)
         let observedDateRegions = rappiDateAnchoredRowRegions(from: fullPageObservations)
         let dateRegions: [CGRect]
-        if ruleRegions.isEmpty {
+        if preferRuleRegions && !ruleRegions.isEmpty {
+            // Printed rules are the row boundary.  On physical devices Vision
+            // can expose an extra date anchor for a wrapped/foreign fragment;
+            // letting those anchors replace the rules turns one printed row
+            // into several OCR bands (the 138-vs-108 failure).  The explicit
+            // recovery pass below can still use date anchors when the rules
+            // are genuinely absent or incomplete.
+            dateRegions = []
+        } else if ruleRegions.isEmpty {
             // With no printed rules, date anchors are the only bounded way to
             // discover visual rows. Reuse the full-page pass when possible;
             // otherwise pay for the isolated date-anchor pass.
@@ -7608,7 +7683,8 @@ final class FinanceStore {
         from image: CGImage,
         page: Int,
         fullPageObservations: [OCRObservation] = [],
-        retryDateAnchorsWhenUnobserved: Bool = true
+        retryDateAnchorsWhenUnobserved: Bool = true,
+        preferRuleRegions: Bool = true
     ) -> [OCRObservation] {
         let dateRegex = try? NSRegularExpression(
             pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
@@ -7724,7 +7800,8 @@ final class FinanceStore {
         for region in rappiTableRowRegions(
             in: image,
             fullPageObservations: fullPageObservations,
-            retryDateAnchorsWhenUnobserved: retryDateAnchorsWhenUnobserved
+            retryDateAnchorsWhenUnobserved: retryDateAnchorsWhenUnobserved,
+            preferRuleRegions: preferRuleRegions
         ) {
             if Task.isCancelled { break }
             let selected = autoreleasepool { () -> OCRObservation? in
@@ -7769,6 +7846,8 @@ final class FinanceStore {
     }
 
     static func rappiTableRowRegionsForTesting(_ image: CGImage) -> [CGRect] {
+        // Keep the test helper on the same default rule-first route as the
+        // production pass while preserving its small public contract.
         rappiTableRowRegions(in: image, retryDateAnchorsWhenUnobserved: false)
     }
 
@@ -7776,7 +7855,8 @@ final class FinanceStore {
         rappiVisualRowObservations(
             from: image,
             page: page,
-            retryDateAnchorsWhenUnobserved: false
+            retryDateAnchorsWhenUnobserved: false,
+            preferRuleRegions: true
         ).map(\.text)
     }
 
@@ -8425,7 +8505,8 @@ final class FinanceStore {
                     let visualRows = Self.rappiVisualRowObservations(
                         from: selectedImage,
                         page: pageIndex,
-                        fullPageObservations: selectedObservations
+                        fullPageObservations: selectedObservations,
+                        preferRuleRegions: !forceRegionRecovery
                     )
                     guard !Task.isCancelled else { return }
                     if !visualRows.isEmpty {

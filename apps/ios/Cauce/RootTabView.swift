@@ -13,6 +13,8 @@ struct RootTabView: View {
     }
 
     @State private var selectedTab: Tab = .summary
+    @Environment(FinanceStore.self) private var store
+    @State private var automaticReplayStarted = false
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -46,6 +48,15 @@ struct RootTabView: View {
         .toolbarBackground(.ultraThinMaterial, for: .tabBar)
         .toolbarBackground(.visible, for: .tabBar)
         .toolbarColorScheme(.light, for: .tabBar)
+        // A reader update must actually touch the PDFs already on the device.
+        // Start the pending replay once after authentication; the existing
+        // single-flight rebuild keeps a simultaneous manual tap harmless.
+        .task {
+            guard !automaticReplayStarted else { return }
+            automaticReplayStarted = true
+            guard store.hasCanonicalRebuildPending else { return }
+            _ = await store.rebuildCanonicalLedgerIfNeededAsync()
+        }
     }
 }
 

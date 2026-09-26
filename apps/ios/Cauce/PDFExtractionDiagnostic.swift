@@ -28,6 +28,9 @@ enum PDFExtractionDiagnostic {
         let ocrConfidenceNeedsReview: Bool?
         let reconciliation: StatementReconciliationRecord?
         let rowDiagnostics: [OCRRowDiagnostic]?
+        /// Release-safe route evidence.  This contains counts and status
+        /// labels only; it never includes merchant names or amounts.
+        let testDiagnostics: [String: String]?
 
         init(_ snapshot: ReaderParseSnapshot) {
             self.init(snapshot, metadata: nil)
@@ -51,6 +54,9 @@ enum PDFExtractionDiagnostic {
             ocrConfidenceNeedsReview = metadata?.ocrConfidenceNeedsReview
             reconciliation = metadata?.reconciliation
             rowDiagnostics = metadata?.rowDiagnostics
+            testDiagnostics = metadata?.testDiagnostics.isEmpty == false
+                ? metadata?.testDiagnostics
+                : nil
             var missing: [String] = []
             if snapshot.period == "Periodo no identificado" { missing.append("period") }
             if snapshot.accountKey == nil { missing.append("accountKey") }
