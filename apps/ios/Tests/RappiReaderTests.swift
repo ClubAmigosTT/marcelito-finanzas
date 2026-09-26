@@ -791,6 +791,21 @@ final class RappiReaderTests: XCTestCase {
         XCTAssertTrue(diagnostics.allSatisfy(\.accepted))
     }
 
+    func testForeignAuxiliaryLineInsideSelectedBandIsNotASecondMovement() {
+        let selectedBand = CGRect(x: 0.045, y: 0.6179, width: 0.91, height: 0.0945)
+        let shortForeignLine = CGRect(x: 0.0658, y: 0.6869, width: 0.8329, height: 0.0143)
+        let adjacentRow = CGRect(x: 0.045, y: 0.7079, width: 0.91, height: 0.0299)
+
+        XCTAssertTrue(FinanceStore.rappiForeignAuxiliaryBandCoversLineForTesting(
+            lineBounds: shortForeignLine,
+            selectedBounds: selectedBand
+        ))
+        XCTAssertFalse(FinanceStore.rappiForeignAuxiliaryBandCoversLineForTesting(
+            lineBounds: adjacentRow,
+            selectedBounds: selectedBand
+        ))
+    }
+
     func testVisualRowOCRReadsPixelsAndKeepsPaymentSeparateFromPurchase() throws {
         let size = CGSize(width: 1224, height: 1584)
         let format = UIGraphicsImageRendererFormat()

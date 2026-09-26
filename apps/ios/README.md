@@ -68,8 +68,11 @@ privado:
   únicamente diagnósticos auxiliares `USD/TC/AUT` explícitamente excluidos
   del libro.
 - Rappi exige conciliación válida, evidencia visual completa y que cada fila
-  seleccionada corresponda a una línea visual; una fila no seleccionada o
-  rechazada mantiene el estado en revisión.
+  seleccionada corresponda a una línea visual. Una línea no seleccionada solo
+  se excluye de la compuerta cuando es el fragmento corto duplicado de una
+  misma compra extranjera cuya banda visual completa ya fue seleccionada; una
+  fila independiente no seleccionada o rechazada mantiene el estado en
+  revisión.
 
 La prueba no modifica los umbrales ni convierte una fila incierta en válida.
 Si falta cualquiera de esas señales, `requiresReview` permanece en `true` y
