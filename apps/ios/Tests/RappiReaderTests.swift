@@ -578,7 +578,11 @@ final class RappiReaderTests: XCTestCase {
             ("2026-08-02", "2026-08-02", "PAGO POR SPEI", "-$40.00"),
             ("2026-08-03", "2026-08-03", "BONIFICACION CASHBACK", "-$10.00"),
         ]
-        for separatorY in stride(from: 150, through: 150 + rows.count * 46, by: 46) {
+        // Include a boundary very close to the rendered page edge.  Device
+        // PDFs can place the first continuation row above the old 1% scan
+        // cutoff; the rule pass must still produce the same one-band-per-row
+        // inventory there.
+        for separatorY in stride(from: 4, through: 4 + rows.count * 46, by: 46) {
             for y in separatorY..<(separatorY + 2) {
                 for x in 30..<582 {
                     let pixel = (y * bytesPerRow) + (x * bytesPerPixel)

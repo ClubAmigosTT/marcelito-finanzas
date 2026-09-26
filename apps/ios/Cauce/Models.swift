@@ -934,7 +934,7 @@ final class FinanceStore {
     /// device. Keep this token separate from `readerVersion`: the public
     /// corpus certificate describes the reader contract, while this token is
     /// an operational cache/replay invalidation for a shipped build.
-    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.25.2"
+    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.26.1"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -6105,14 +6105,35 @@ final class FinanceStore {
                 kind: kind
             )
 
+            if selected == nil,
+               let variant = Self.reconciledRappiVariantSelection(
+                   baseCandidates: isolatedSpatialOCRCandidates,
+                   alternateCandidateSets: [
+                       ocrCandidates,
+                       duplicateRepairedOCRCandidates,
+                       evidenceBackedOCRCandidates
+                   ] + spatialOCRRepairVariants,
+                   summary: summary,
+                   kind: kind
+               ) {
+                // This is still one OCR stream after row-level repair: the
+                // alternate rows are accepted only because the combined set
+                // reconciles exactly.  Keep the full OCR observations for
+                // the row-level evidence view so both sources remain auditable.
+                selected = variant
+                selectedRappiRoute = "initial-cross-stream-variant"
+            }
+
             if let selected {
                 selectedRappiSummary = selected.summary
                 selectedRappiCandidates = selected.candidates
-                selectedRappiRoute = candidateIDsMatch(selected.candidates, isolatedSpatialOCRCandidates)
-                    ? "initial-isolated-spatial"
-                    : candidateIDsMatch(selected.candidates, isolatedOCRCandidates)
-                        ? "initial-isolated"
-                        : "initial-text-or-full-page"
+                if selectedRappiRoute == "none" {
+                    selectedRappiRoute = candidateIDsMatch(selected.candidates, isolatedSpatialOCRCandidates)
+                        ? "initial-isolated-spatial"
+                        : candidateIDsMatch(selected.candidates, isolatedOCRCandidates)
+                            ? "initial-isolated"
+                            : "initial-text-or-full-page"
+                }
                 if selected.candidates.contains(where: { $0.extractionEvidence?.method == "vision-ocr" }) {
                     if let isolatedOCRStream,
                        candidateIDsMatch(selected.candidates, isolatedSpatialOCRCandidates)
@@ -6208,15 +6229,35 @@ final class FinanceStore {
                     ],
                     kind: kind
                 )
-                if let retrySelection {
+                var resolvedRetrySelection = retrySelection
+                if resolvedRetrySelection == nil,
+                   let variant = Self.reconciledRappiVariantSelection(
+                       baseCandidates: retryIsolatedSpatialOCRCandidates,
+                       alternateCandidateSets: [
+                           retryCandidates,
+                           retryDuplicateRepairedCandidates,
+                           retryEvidenceBackedCandidates,
+                           ocrCandidates,
+                           duplicateRepairedOCRCandidates,
+                           evidenceBackedOCRCandidates
+                       ] + retrySpatialOCRRepairVariants + spatialOCRRepairVariants,
+                       summary: summary,
+                       kind: kind
+                   ) {
+                    resolvedRetrySelection = variant
+                    selectedRappiRoute = "retry-cross-stream-variant"
+                }
+                if let retrySelection = resolvedRetrySelection {
                     selected = retrySelection
                     selectedRappiSummary = retrySelection.summary
                     selectedRappiCandidates = retrySelection.candidates
-                    selectedRappiRoute = candidateIDsMatch(retrySelection.candidates, retryIsolatedSpatialOCRCandidates)
-                        ? "retry-isolated-spatial"
-                        : candidateIDsMatch(retrySelection.candidates, retryIsolatedOCRCandidates)
-                            ? "retry-isolated"
-                            : "retry-text-or-full-page"
+                    if selectedRappiRoute != "retry-cross-stream-variant" {
+                        selectedRappiRoute = candidateIDsMatch(retrySelection.candidates, retryIsolatedSpatialOCRCandidates)
+                            ? "retry-isolated-spatial"
+                            : candidateIDsMatch(retrySelection.candidates, retryIsolatedOCRCandidates)
+                                ? "retry-isolated"
+                                : "retry-text-or-full-page"
+                    }
                     if retrySelection.candidates.contains(where: { $0.extractionEvidence?.method == "vision-ocr" }) {
                         if let retryIsolatedOCRStream,
                            candidateIDsMatch(retrySelection.candidates, retryIsolatedSpatialOCRCandidates)
@@ -7377,8 +7418,13 @@ final class FinanceStore {
         let left = max(0, Int((CGFloat(sampleWidth) * 0.055).rounded()))
         let right = min(sampleWidth, Int((CGFloat(sampleWidth) * 0.945).rounded()))
         guard right - left > 20 else { return [] }
-        let firstY = max(0, Int((CGFloat(sampleHeight) * 0.045).rounded()))
-        let lastY = min(sampleHeight, Int((CGFloat(sampleHeight) * 0.985).rounded()))
+        // Keep the scan close to the physical page edges.  The last printed
+        // row on a continuation page can sit below 4.5% of the image; the
+        // previous bound silently discarded that row when its lower rule was
+        // the only boundary visible to the pixel pass.  Header/footer noise
+        // is still rejected by the gap and row-evidence gates below.
+        let firstY = 0
+        let lastY = sampleHeight
         var linePixels: [Int] = []
         linePixels.reserveCapacity(sampleHeight / 12)
         for y in firstY..<lastY {
@@ -7567,15 +7613,40 @@ final class FinanceStore {
     ) -> [CGRect] {
         let ruleRegions = rappiRuleRowRegions(in: image)
         let observedDateRegions = rappiDateAnchoredRowRegions(from: fullPageObservations)
+
+        // A rule inventory can miss a row at a page edge or across a broken
+        // rule.  Add a date band only when it sits in a real coverage gap:
+        // the neighbouring rule centers must leave room for a whole row.  A
+        // simple "all date anchors" union reintroduces the old 138-row
+        // over-segmentation because Vision sometimes emits a second date
+        // anchor for a wrapped foreign-currency fragment.
+        func isUncoveredRuleGap(_ region: CGRect) -> Bool {
+            guard !ruleRegions.isEmpty else { return true }
+            let centers = ruleRegions.map(\.midY).sorted(by: >)
+            let nearestDistance = centers.map { abs($0 - region.midY) }.min() ?? 1
+            guard nearestDistance > 0.017 else { return false }
+            guard let first = centers.first, let last = centers.last else { return true }
+            if region.midY > first || region.midY < last {
+                return true
+            }
+            for pair in zip(centers, centers.dropFirst()) {
+                let upper = pair.0
+                let lower = pair.1
+                guard region.midY <= upper, region.midY >= lower else { continue }
+                // A missing row creates roughly two normal row spacings in
+                // one rule gap.  Duplicate OCR anchors stay inside a normal
+                // gap and are intentionally ignored.
+                return upper - lower >= 0.040
+            }
+            return false
+        }
+
         let dateRegions: [CGRect]
         if preferRuleRegions && !ruleRegions.isEmpty {
-            // Printed rules are the row boundary.  On physical devices Vision
-            // can expose an extra date anchor for a wrapped/foreign fragment;
-            // letting those anchors replace the rules turns one printed row
-            // into several OCR bands (the 138-vs-108 failure).  The explicit
-            // recovery pass below can still use date anchors when the rules
-            // are genuinely absent or incomplete.
-            dateRegions = []
+            // Printed rules remain primary.  Date anchors are supplemental
+            // only for a demonstrable uncovered gap, which recovers edge
+            // rows without turning one printed row into several OCR bands.
+            dateRegions = observedDateRegions.filter(isUncoveredRuleGap)
         } else if ruleRegions.isEmpty {
             // With no printed rules, date anchors are the only bounded way to
             // discover visual rows. Reuse the full-page pass when possible;
@@ -7585,13 +7656,14 @@ final class FinanceStore {
                 : observedDateRegions
         } else if !observedDateRegions.isEmpty,
                   observedDateRegions.count >= ruleRegions.count {
-            dateRegions = observedDateRegions
+            dateRegions = observedDateRegions.filter(isUncoveredRuleGap)
         } else if !fullPageObservations.isEmpty || retryDateAnchorsWhenUnobserved {
             // A short full-page inventory is itself a signal that the first
             // pass missed numeric rows. Pay for one bounded retry only in
             // that case; the retry remains independent from the rule bands.
             let retriedDateRegions = rappiDateAnchoredRowRegions(in: image)
-            dateRegions = retriedDateRegions.isEmpty ? observedDateRegions : retriedDateRegions
+            let fallback = retriedDateRegions.isEmpty ? observedDateRegions : retriedDateRegions
+            dateRegions = fallback.filter(isUncoveredRuleGap)
         } else {
             // Rules already provide complete row boundaries when the caller
             // has no full-page observations (for example, a lightweight
@@ -7623,8 +7695,34 @@ final class FinanceStore {
             pattern: #"(?<![A-Za-z0-9.,])\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         )
         let range = NSRange(text.startIndex..<text.endIndex, in: text)
-        let dateMatches = dateRegex?.matches(in: text, range: range) ?? []
-        let amountMatches = signedMoneyRegex?.matches(in: text, range: range) ?? []
+        let rawDateMatches = dateRegex?.matches(in: text, range: range) ?? []
+        let rawAmountMatches = signedMoneyRegex?.matches(in: text, range: range) ?? []
+
+        func matchText(_ match: NSTextCheckingResult) -> String? {
+            guard let matchRange = Range(match.range, in: text) else { return nil }
+            return String(text[matchRange])
+                .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+        }
+
+        // A crop can duplicate the same cell when Vision returns both the
+        // source glyph and its antialiased shadow.  Accept repeated copies of
+        // one date pair/one signed amount, but never collapse two different
+        // transactions that happen to share a band.
+        let dateMatches: [NSTextCheckingResult] = {
+            guard rawDateMatches.count > 2 else { return rawDateMatches }
+            let first = Array(rawDateMatches.prefix(2))
+            let keys = Set(first.compactMap(matchText))
+            return rawDateMatches.dropFirst(2).allSatisfy { keys.contains(matchText($0) ?? "") }
+                ? first
+                : []
+        }()
+        let amountMatches: [NSTextCheckingResult] = {
+            guard rawAmountMatches.count > 1 else { return rawAmountMatches }
+            let keys = Set(rawAmountMatches.compactMap(matchText))
+            return keys.count == 1 ? [rawAmountMatches[0]] : []
+        }()
         let semanticText = text
             .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
             .lowercased()
@@ -14796,6 +14894,120 @@ final class FinanceStore {
             guard let summary else { continue }
             if verifier.reconcileStatement(kind: kind, summary: summary, movements: candidates).status == .valid {
                 return (candidates, summary)
+            }
+        }
+        return nil
+    }
+
+    /// Repairs a near-complete visual stream by borrowing at most two rows
+    /// from an independent OCR reading.  The normal selector intentionally
+    /// refuses to merge streams; that is correct when one stream is complete,
+    /// but it also means a rule-band pass with 106 rows cannot recover the two
+    /// rows that a full-page pass saw.  This bounded repair keeps the base
+    /// stream as the anchor, rejects physical duplicates, and still requires
+    /// the complete candidate set to reconcile against every printed control.
+    private static func reconciledRappiVariantSelection(
+        baseCandidates: [Movement],
+        alternateCandidateSets: [[Movement]],
+        summary: StatementSummaryRecord?,
+        kind: StatementKind
+    ) -> (candidates: [Movement], summary: StatementSummaryRecord)? {
+        guard !baseCandidates.isEmpty, let summary else { return nil }
+        let verifier = FinanceStore(reconciliationOnly: true)
+
+        func compact(_ value: String) -> String {
+            value
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
+                .lowercased()
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+        }
+
+        func sameLogicalRow(_ left: Movement, _ right: Movement) -> Bool {
+            guard left.extractionEvidence?.method == "vision-ocr",
+                  right.extractionEvidence?.method == "vision-ocr",
+                  left.date == right.date,
+                  left.amount == right.amount,
+                  left.flow == right.flow,
+                  left.kind == right.kind,
+                  left.foreignCurrency == right.foreignCurrency,
+                  let leftEvidence = left.extractionEvidence,
+                  let rightEvidence = right.extractionEvidence,
+                  leftEvidence.page == rightEvidence.page else { return false }
+            let leftTitle = compact(left.title)
+            let rightTitle = compact(right.title)
+            let titleMatches = !leftTitle.isEmpty && leftTitle == rightTitle
+            let leftSource = compact(leftEvidence.sourceText ?? "")
+            let rightSource = compact(rightEvidence.sourceText ?? "")
+            let sourceMatches = !leftSource.isEmpty && leftSource == rightSource
+            if let leftBounds = leftEvidence.bounds,
+               let rightBounds = rightEvidence.bounds {
+                let leftRect = CGRect(x: leftBounds.x, y: leftBounds.y, width: leftBounds.width, height: leftBounds.height)
+                let rightRect = CGRect(x: rightBounds.x, y: rightBounds.y, width: rightBounds.width, height: rightBounds.height)
+                let overlap = leftRect.intersection(rightRect)
+                let smallerArea = min(leftRect.width * leftRect.height, rightRect.width * rightRect.height)
+                let overlapRatio = smallerArea > 0 && !overlap.isNull && !overlap.isEmpty
+                    ? (overlap.width * overlap.height) / smallerArea
+                    : 0
+                // Geometry is the stronger duplicate proof: independent OCR
+                // passes can spell the merchant differently, but they still
+                // point at the same printed band.  Keep equal-value rows on
+                // separate lines when their centers are farther apart.
+                return overlapRatio >= 0.30 || abs(leftRect.midY - rightRect.midY) <= 0.020
+            }
+            return titleMatches || sourceMatches
+        }
+
+        func reconciles(_ candidates: [Movement]) -> Bool {
+            verifier.reconcileStatement(kind: kind, summary: summary, movements: candidates).status == .valid
+        }
+
+        // Keep only bounded visual candidates.  Text-layer rows are already
+        // tested as their own complete stream and must not be mixed into this
+        // OCR-only repair.
+        var pool: [Movement] = []
+        var seenIDs = Set<UUID>()
+        for candidate in alternateCandidateSets.flatMap({ $0 }) {
+            guard candidate.extractionEvidence?.method == "vision-ocr",
+                  seenIDs.insert(candidate.id).inserted else { continue }
+            pool.append(candidate)
+        }
+        guard !pool.isEmpty else { return nil }
+
+        let addable = pool.filter { candidate in
+            !baseCandidates.contains(where: { sameLogicalRow($0, candidate) })
+        }
+
+        // A missing edge row is normally one of the first two alternatives.
+        // Try those cheap repairs before substitutions so the selected stream
+        // preserves the maximum amount of the rule-first evidence.
+        for candidate in addable {
+            let variant = baseCandidates + [candidate]
+            if reconciles(variant) { return (variant, summary) }
+        }
+        if addable.count > 1 {
+            for leftIndex in addable.indices {
+                for rightIndex in addable.indices where rightIndex > leftIndex {
+                    let left = addable[leftIndex]
+                    let right = addable[rightIndex]
+                    guard !sameLogicalRow(left, right) else { continue }
+                    let variant = baseCandidates + [left, right]
+                    if reconciles(variant) { return (variant, summary) }
+                }
+            }
+        }
+
+        // If one band selected a weaker reading of a row, permit one
+        // evidence-backed substitution while preserving the stream length.
+        // The replacement candidate must not duplicate another base row.
+        for baseIndex in baseCandidates.indices {
+            for candidate in pool {
+                guard !sameLogicalRow(baseCandidates[baseIndex], candidate),
+                      !baseCandidates.enumerated().contains(where: { index, existing in
+                          index != baseIndex && sameLogicalRow(existing, candidate)
+                      }) else { continue }
+                var variant = baseCandidates
+                variant[baseIndex] = candidate
+                if reconciles(variant) { return (variant, summary) }
             }
         }
         return nil
