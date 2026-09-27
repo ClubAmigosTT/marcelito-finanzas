@@ -67,14 +67,18 @@ final class SantanderIndependentRowsTests: XCTestCase {
         return FinanceStore.santanderTableSnapshotForTesting(header + rows + [footer], fileName: "julio-2026.pdf", openingBalance: 1000, recoveryPDF: pdf)
     }
 
-    func testMissingMovementDoesNotCascadeToFollowingRowsEvenAcrossPages() {
+    func testAmbiguousMovementDoesNotCascadeToFollowingRowsEvenAcrossPages() {
         for page in [0, 1] {
             let result = read(row(1, amount: "30.00", balance: "970.00")
                 + row(2, amount: nil, balance: "940.00")
+                + [
+                    OCRObservationFixture(text: "10.00", x: 0.62, y: 0.72, width: 0.08),
+                    OCRObservationFixture(text: "30.00", x: 0.74, y: 0.72, width: 0.08)
+                ]
                 + row(3, amount: "40.00", balance: "900.00", page: page))
             XCTAssertEqual(result.movements.map(\.amount), [-30, -40])
             XCTAssertEqual(result.diagnostics.map(\.accepted), [true, false, true])
-            XCTAssertTrue(result.diagnostics[1].reason.hasPrefix("santander.movement-cell-missing;"))
+            XCTAssertTrue(result.diagnostics[1].reason.hasPrefix("santander.movement-cell-ambiguous;"))
             XCTAssertEqual(result.diagnostics[2].rowOrdinal, 3)
             XCTAssertEqual(result.diagnostics[2].cellTexts, ["", "40.00", "900.00"])
             XCTAssertNotNil(result.diagnostics[2].rowBounds)

@@ -945,7 +945,7 @@ final class FinanceStore {
     /// when saved PDF results need a deliberate replay. This release forces
     /// older persisted snapshots through the current reader; the refresh stays
     /// explicit so a full Vision pass never blocks app launch.
-    static let readerVersion = "ios-reader-recovery-2026.09.25.15"
+    static let readerVersion = "ios-reader-recovery-2026.09.26.16"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v3"
@@ -12129,6 +12129,7 @@ final class FinanceStore {
             var movement: Movement?
             var balance: Decimal?
             var problem: String?
+            var inferredMovementFromBalance = false
             var retried = false
             var retryOutcome = "not-needed"
             var retryTexts = ["not-read", "not-read", "not-read"]
@@ -12181,8 +12182,29 @@ final class FinanceStore {
             return cells
         }
 
+        func normalizedCellObservation(_ observation: OCRObservation) -> OCRObservation? {
+            guard let normalized = santanderNormalizedCellReading(observation.text), !normalized.isEmpty else {
+                return nil
+            }
+            return OCRObservation(
+                page: observation.page,
+                text: normalized,
+                boundingBox: observation.boundingBox,
+                confidence: observation.confidence,
+                dateBoxes: observation.dateBoxes,
+                amountBoxes: observation.amountBoxes
+            )
+        }
+
         func decode(_ physical: inout PhysicalRow) {
-            let values = physical.cells.map { $0.compactMap { parseAmount($0.text) } }
+            // A scanned Santander balance can arrive as `55.117.74` when
+            // Vision reads both the thousands separator and decimal point.
+            // Normalize only the bounded cell; never run this repair over the
+            // full row or its description/reference text.
+            let normalizedCells = physical.cells.map { cell in
+                cell.compactMap(normalizedCellObservation)
+            }
+            let values = normalizedCells.map { $0.compactMap { parseAmount($0.text) } }
             physical.balance = values[2].count == 1 ? values[2][0] : nil
             physical.movement = nil
             physical.problem = nil
@@ -12204,7 +12226,7 @@ final class FinanceStore {
                     dateBoxes: observation.dateBoxes)
             }
             var parseFailureReason: String?
-            physical.movement = parseSantanderRow(metadata + physical.cells.flatMap { $0 },
+            physical.movement = parseSantanderRow(metadata + normalizedCells.flatMap { $0 },
                 dateRegex: dateRegex, amountRegex: amountRegex, defaultYear: defaultYear,
                 previousRunningBalance: nil, columns: columns, dateMaxX: dateMaxX,
                 titleBounds: titleBounds, requireFixedMovementColumn: true,
@@ -12509,6 +12531,50 @@ final class FinanceStore {
                 guard let previousPrintedBalance, let balance = row.balance, let movement = row.movement else { return false }
                 return previousPrintedBalance + movement.amount == balance
             }
+            // Some Santander scans print a perfectly legible running balance
+            // while Vision misses the amount in the DEPOSITO/RETIRO cell. The
+            // issuer's two adjacent balances are an independent control: if
+            // the row has a date/description, both movement cells are empty,
+            // and the exact delta is finite and non-zero, reconstruct only
+            // that one amount in the column dictated by the delta. This keeps
+            // the row auditable and rejects ambiguous or skipped-row cases.
+            if physical.problem == "santander.movement-cell-missing",
+               let previousPrintedBalance,
+               let printedBalance = physical.balance {
+                let delta = printedBalance - previousPrintedBalance
+                let magnitude = absoluteDecimal(delta)
+                if magnitude > 0, magnitude < 100_000_000,
+                   physical.cells[0].isEmpty, physical.cells[1].isEmpty {
+                    let cell = delta > 0 ? 0 : 1
+                    let cellLeft = cellEdges[cell]
+                    let cellRight = cellEdges[cell + 1]
+                    let amountText = String(
+                        format: "%.2f",
+                        locale: Locale(identifier: "en_US_POSIX"),
+                        NSDecimalNumber(decimal: magnitude).doubleValue
+                    )
+                    let page = physical.observations.first?.page ?? titleAnchor.page
+                    let amountBox = CGRect(
+                        x: cellLeft + 0.008,
+                        y: physical.band.midY - min(physical.band.height * 0.25, 0.008),
+                        width: max(0.01, min(cellRight - cellLeft - 0.016, 0.08)),
+                        height: max(0.006, min(physical.band.height * 0.5, 0.016))
+                    )
+                    physical.cells[cell] = [OCRObservation(
+                        page: page,
+                        text: amountText,
+                        boundingBox: amountBox,
+                        confidence: 1
+                    )]
+                    physical.inferredMovementFromBalance = true
+                    decode(&physical)
+                    if physical.problem == nil {
+                        physical.retryOutcome = physical.retryOutcome == "not-needed"
+                            ? "balance-delta-recovery-\(amountText)"
+                            : "\(physical.retryOutcome),balance-delta-recovery-\(amountText)"
+                    }
+                }
+            }
             // A missing prior printed balance cannot validate or invalidate
             // this row's equation. Retrying all cells in that case can erase
             // already readable movement/balance evidence when a crop has no
@@ -12525,7 +12591,10 @@ final class FinanceStore {
                 else if !equationMatches(physical) { problem = "santander.running-balance-mismatch" }
             }
             let accepted = problem == nil
-            let reason = "\(problem ?? "santander.row-verified"); fila \(index + 1); saldo anterior \(previousPrintedBalance.map { NSDecimalNumber(decimal: $0).stringValue } ?? "ilegible"); saldo impreso \(physical.balance.map { NSDecimalNumber(decimal: $0).stringValue } ?? "ilegible"); relectura de celdas \(physical.retried ? "sí" : "no"); resultado \(physical.retryOutcome)"
+            let recoveryNote = physical.inferredMovementFromBalance
+                ? "; importe recuperado por diferencia exacta entre saldos impresos"
+                : ""
+            let reason = "\(problem ?? "santander.row-verified"); fila \(index + 1); saldo anterior \(previousPrintedBalance.map { NSDecimalNumber(decimal: $0).stringValue } ?? "ilegible"); saldo impreso \(physical.balance.map { NSDecimalNumber(decimal: $0).stringValue } ?? "ilegible"); relectura de celdas \(physical.retried ? "sí" : "no"); resultado \(physical.retryOutcome)\(recoveryNote)"
             if accepted, var movement = physical.movement {
                 movement.extractionEvidence?.selectionReason = reason
                 parsed.append(movement)
@@ -13214,7 +13283,13 @@ final class FinanceStore {
             failureReason?("santander.row-description-no-letters")
             return nil
         }
-        guard !isAdministrativeTitle(title) else {
+        let normalizedTitleForAdministrativeCheck = title
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let isKnownSantanderMerchant = normalizedTitleForAdministrativeCheck.range(
+            of: #"\btotal\s+pass\s+sapi\b"#,
+            options: .regularExpression
+        ) != nil
+        guard !isAdministrativeTitle(title) || isKnownSantanderMerchant else {
             failureReason?("santander.row-description-administrative")
             return nil
         }
