@@ -395,16 +395,11 @@ enum ExpenseAIClassifier {
         // caller accidentally passes a quarantined row, income, refund, card
         // payment or own-account transfer, fail closed before any description
         // leaves the device.
-        guard movements.allSatisfy({ movement in
-            guard movement.flow == .expense else { return false }
-            switch movement.kind {
-            case .cardPayment?, .bankTransfer?, .refund?, .credit?, .msi?:
-                return false
-            default:
-                return true
-            }
-        }) else {
+        guard movements.allSatisfy(isEligibleForClassification) else {
             throw ClassificationError.invalidResponse("Se rechazó un movimiento que no era un gasto canónico elegible.")
+        }
+        guard Set(movements.map(\.id)).count == movements.count else {
+            throw ClassificationError.invalidResponse("Se rechazaron identificadores de movimiento duplicados.")
         }
 
         var classificationsByID: [UUID: AIClassification] = [:]
@@ -532,10 +527,21 @@ enum ExpenseAIClassifier {
             return BatchResult(classifications: [], receivedCount: 0, finishReason: nil, issues: [])
         }
 
-        let input = movements.map { movement in
-            [
-                "id": movement.id.uuidString,
-                "comercio": String((movement.normalizedMerchant ?? movement.displayMerchant ?? movement.title).prefix(180)),
+        // Use one-run opaque IDs so the provider cannot correlate a response
+        // with a stable on-device ledger row. Only merchant, date and amount
+        // accompany these temporary correlation tokens.
+        let requestIDsByMovementID = Dictionary(uniqueKeysWithValues: movements.map { ($0.id, UUID()) })
+        let movementIDsByRequestID = Dictionary(uniqueKeysWithValues: requestIDsByMovementID.map { ($0.value, $0.key) })
+        let input = try movements.map { movement -> [String: String] in
+            guard let requestID = requestIDsByMovementID[movement.id] else {
+                throw ClassificationError.invalidResponse("No se pudo asignar un código temporal al movimiento.")
+            }
+            guard let merchant = classificationMerchant(for: movement) else {
+                throw ClassificationError.invalidResponse("Se rechazó un movimiento sin comercio identificable.")
+            }
+            return [
+                "id": requestID.uuidString,
+                "comercio": String(merchant.prefix(180)),
                 "importe_mxn": NSDecimalNumber(decimal: movement.amount < 0 ? -movement.amount : movement.amount).stringValue,
                 "fecha": ISO8601DateFormatter().string(from: movement.date)
             ]
@@ -624,21 +630,22 @@ enum ExpenseAIClassifier {
             )
         }
 
-        let requested = Set(movements.map(\.id))
-        var seen = Set<UUID>()
+        let requested = Set(movementIDsByRequestID.keys)
+        var seenRequestIDs = Set<UUID>()
         var parsed: [AIClassification] = []
         var issues = requestIssues
         for payload in payloads {
             guard let rawID = payload.id,
-                  let movementID = UUID(uuidString: rawID) else {
+                  let requestID = UUID(uuidString: rawID) else {
                 issues.append("id-invalid")
                 continue
             }
-            guard requested.contains(movementID) else {
+            guard requested.contains(requestID),
+                  let movementID = movementIDsByRequestID[requestID] else {
                 issues.append("id-out-of-scope")
                 continue
             }
-            guard seen.insert(movementID).inserted else {
+            guard seenRequestIDs.insert(requestID).inserted else {
                 issues.append("id-duplicate")
                 continue
             }
@@ -673,6 +680,43 @@ enum ExpenseAIClassifier {
             finishReason: choice.finishReason,
             issues: Array(Set(issues)).sorted()
         )
+    }
+
+    private static func isEligibleForClassification(_ movement: Movement) -> Bool {
+        guard movement.flow == .expense, classificationMerchant(for: movement) != nil else { return false }
+        switch movement.kind {
+        case .cardPayment?, .bankTransfer?, .income?, .refund?, .credit?, .msi?:
+            return false
+        default:
+            break
+        }
+
+        // Defend the network boundary even if an older ledger row has no
+        // explicit kind yet. These are the same cues that would make the
+        // store treat the row as a payment, transfer, refund or MSI.
+        let text = [movement.title, movement.rawDescription, movement.normalizedMerchant, movement.displayMerchant]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+        let account = movement.account.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        if ["devolucion", "reembolso", "bonificacion", "meses sin intereses", "meses en automatico", "diferir", "diferid", "traspaso", "transferencia a", "pago por spei"].contains(where: text.contains) {
+            return false
+        }
+        if text.contains("msi") || (account.contains("rappi") && movement.amount > 0 && text.contains("cashback")) {
+            return false
+        }
+        if text.contains("pago") && ["tarjeta", "amex", "credito", "recibido"].contains(where: text.contains) {
+            return false
+        }
+        return true
+    }
+
+    private static func classificationMerchant(for movement: Movement) -> String? {
+        [movement.normalizedMerchant, movement.displayMerchant]
+            .compactMap { $0 }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first { !$0.isEmpty }
     }
 
     private static func responseFormat(for provider: ExpenseAIProvider) -> ResponseFormat? {

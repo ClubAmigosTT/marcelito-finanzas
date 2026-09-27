@@ -90,16 +90,7 @@ struct MovementsView: View {
         // Zen is enrichment for already accepted accounting rows only. A
         // quarantined OCR row must never reach the provider, even when the
         // user has enabled the provisional dashboard preview.
-        store.canonicalMovements.filter {
-            guard $0.flow == .expense,
-                  ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains($0.category) else { return false }
-            switch $0.kind {
-            case .cardPayment?, .bankTransfer?, .refund?, .credit?, .msi?:
-                return false
-            default:
-                return true
-            }
-        }
+        store.pendingClassifiableExpenseMovements
     }
 
     private var filtered: [Movement] {
@@ -512,7 +503,7 @@ struct MovementDetailView: View {
                     Text(option).tag(option)
                 }
             }
-            Text("La categoría se guarda al seleccionarla y se recordará para movimientos futuros del mismo comercio.")
+            Text("La categoría se guarda al seleccionarla y se recuerda para movimientos futuros y otros pendientes del mismo comercio.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             if let categorySaveMessage {
@@ -548,21 +539,85 @@ struct MovementDetailView: View {
     }
 }
 
+private struct ExpenseMerchantReviewGroup: Identifiable {
+    let key: String
+    let movements: [Movement]
+    let classifiableMovements: [Movement]
+
+    var id: String { key }
+    var count: Int { movements.count }
+    var total: Decimal { movements.reduce(0) { $0 + $1.expenseContribution } }
+    var displayName: String {
+        movements.first(where: { $0.displayMerchant?.isEmpty == false })?.displayMerchant
+            ?? movements.first(where: { $0.normalizedMerchant?.isEmpty == false })?.normalizedMerchant
+            ?? movements.first?.title
+            ?? "Comercio por revisar"
+    }
+    var representative: Movement {
+        classifiableMovements.max { left, right in
+            let leftConfidence = left.merchantConfidence ?? 0
+            let rightConfidence = right.merchantConfidence ?? 0
+            if leftConfidence != rightConfidence { return leftConfidence < rightConfidence }
+            return (left.normalizedMerchant ?? left.title).count < (right.normalizedMerchant ?? right.title).count
+        } ?? movements[0]
+    }
+}
+
+private struct ExpenseCategoryAISuggestion {
+    let category: String
+    let confidence: Double
+    let reason: String?
+}
+
 struct ExpensesView: View {
     @Environment(FinanceStore.self) private var store
     @State private var selectedCategory: ExpenseCategorySelection?
+    @State private var isAISettingsPresented = false
+    @State private var isAIConfirmationPresented = false
+    @State private var isAIProcessing = false
+    @State private var isAISetupPromptPresented = false
+    @State private var completionMessage: String?
+    @State private var errorMessage: String?
+    @State private var localRuleChangeCount = 0
+    @State private var aiSuggestionsByMerchant: [String: ExpenseCategoryAISuggestion] = [:]
+
+    private var pendingReviewGroups: [ExpenseMerchantReviewGroup] {
+        let eligibleIDs = Set(store.pendingClassifiableExpenseMovements.map(\.id))
+        let grouped = Dictionary(grouping: store.pendingExpenseCategoryMovements) { movement in
+            let key = store.categoryRuleKey(for: movement)
+            return key.count >= 3 ? key : "row:\(movement.id.uuidString)"
+        }
+        return grouped.map { pair in
+            let (key, movements) = pair
+            return ExpenseMerchantReviewGroup(
+                key: key,
+                movements: movements,
+                classifiableMovements: movements.filter { eligibleIDs.contains($0.id) }
+            )
+        }
+        .sorted {
+            if $0.total != $1.total { return $0.total > $1.total }
+            let order = $0.displayName.localizedCaseInsensitiveCompare($1.displayName)
+            return order == .orderedSame ? $0.key < $1.key : order == .orderedAscending
+        }
+    }
 
     private var groups: [(category: String, amount: Decimal)] {
         // Movements already contains the user's saved/manual category. The
         // expense dashboard must summarize the complete reconciled spend
         // ledger instead of borrowing one institution's latest cutoff period;
         // BBVA, Santander and Amex do not share the same statement dates.
-        Dictionary(grouping: store.netExpenseMovements, by: { $0.category })
+        let pendingIDs = Set(store.pendingExpenseCategoryMovements.map(\.id))
+        return Dictionary(grouping: store.netExpenseMovements.filter { !pendingIDs.contains($0.id) }, by: { $0.category })
             .map { (category: $0.key, amount: $0.value.reduce(0) { $0 + $1.expenseContribution }) }
             .sorted { $0.amount > $1.amount }
     }
 
-    private var total: Decimal { groups.reduce(0) { $0 + $1.amount } }
+    private var total: Decimal { store.consolidatedRealSpend }
+
+    private var pendingReviewTotal: Decimal {
+        pendingReviewGroups.reduce(0) { $0 + $1.total }
+    }
 
     private func expenseShare(for amount: Decimal) -> String {
         guard total > 0, amount >= 0, amount <= total else { return "—" }
@@ -580,7 +635,7 @@ struct ExpensesView: View {
 
     @ViewBuilder
     private var identifiedExpensesSection: some View {
-        Section("Gasto identificado") {
+        Section("Gasto clasificado") {
             ForEach(Array(groups.enumerated()), id: \.element.category) { index, item in
                 ExpenseRow(name: item.category, amount: item.amount, share: expenseShare(for: item.amount), color: expenseColor(for: index)) {
                     selectedCategory = ExpenseCategorySelection(category: item.category)
@@ -589,13 +644,81 @@ struct ExpensesView: View {
         }
     }
 
+    @ViewBuilder
+    private var pendingExpensesSection: some View {
+        if !pendingReviewGroups.isEmpty {
+            Section {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("\(pendingReviewGroups.count) comercios · \(store.pendingExpenseCategoryMovements.count) movimientos")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 8)
+                    Text(pendingReviewTotal, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                        .font(.subheadline.monospacedDigit())
+                }
+                .foregroundStyle(Color.marcelitoAmber)
+
+                Button(action: prepareAIClassification) {
+                    HStack(spacing: 9) {
+                        if isAIProcessing {
+                            ProgressView()
+                        } else {
+                            Image(systemName: "wand.and.stars")
+                        }
+                        Text(isAIProcessing ? "Clasificando…" : "Clasificar pendientes")
+                            .fontWeight(.semibold)
+                        Spacer()
+                        Text("\(store.pendingClassifiableExpenseMovements.count)")
+                            .monospacedDigit()
+                    }
+                    .foregroundStyle(Color.marcelitoNavy)
+                }
+                .disabled(isAIProcessing || store.pendingExpenseCategoryMovements.isEmpty)
+
+                ForEach(pendingReviewGroups) { group in
+                    let suggestion = aiSuggestionsByMerchant[group.key]
+                    NavigationLink {
+                        ExpenseMerchantReviewView(group: group, suggestion: suggestion) {
+                            aiSuggestionsByMerchant[group.key] = nil
+                        }
+                    } label: {
+                        HStack(spacing: 10) {
+                            Circle().fill(Color.marcelitoAmber).frame(width: 9, height: 9)
+                                .accessibilityHidden(true)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(group.displayName)
+                                    .lineLimit(1)
+                                Text(suggestion.map {
+                                    "Sugerencia: \($0.category) · \(Int(($0.confidence * 100).rounded()))%"
+                                } ?? (group.count == 1 ? "1 movimiento por revisar" : "\(group.count) movimientos por revisar"))
+                                    .font(.caption)
+                                    .foregroundStyle(suggestion == nil ? Color.secondary : Color.marcelitoAmber)
+                                    .lineLimit(1)
+                            }
+                            Spacer(minLength: 8)
+                            Text(group.total, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                                .monospacedDigit()
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.75)
+                        }
+                    }
+                }
+            } header: {
+                Text("Pendiente de clasificar")
+            } footer: {
+                Text("Las reglas locales corren primero. Si las activas, la IA recibe comercio, fecha, importe y un código aleatorio temporal por grupo, solo de gastos conciliados. No se envían cuentas, saldos ni PDFs; las sugerencias dudosas quedan aquí para confirmar.")
+            }
+        }
+    }
+
     private var readingSection: some View {
-        Section("Lectura") {
+        Section("Resumen") {
             VStack(alignment: .leading, spacing: 6) {
-                Text("\(groups.count) categorías explican")
+                Text("Gasto consolidado")
                 Text(total, format: .currency(code: "MXN").precision(.fractionLength(0)))
                     .font(.headline)
-                Text("Gasto neto: cargos menos reembolsos en su fecha de registro. Incluye capturas provisionales. Puedes corregir desde Cuentas > Ajustes.")
+                LabeledContent("Clasificado", value: groups.reduce(Decimal(0)) { $0 + $1.amount }.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                LabeledContent("Pendiente", value: pendingReviewTotal.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                Text("Gasto neto conciliado. Lo que sigue pendiente de clasificar aparece separado arriba; las capturas provisionales no se incluyen.")
                     .foregroundStyle(.secondary)
             }
         }
@@ -618,7 +741,7 @@ struct ExpensesView: View {
                     LedgerQualityBanner(store: store)
                     HistoricalDashboardBlockedCard(store: store)
                 }
-            } else if groups.isEmpty {
+            } else if groups.isEmpty && pendingReviewGroups.isEmpty {
                 ContentUnavailableView("Sin gastos", systemImage: "chart.pie", description: Text("Importa un estado de cuenta para construir tus categorías reales."))
             } else {
                 if store.dashboardIsProvisional {
@@ -626,7 +749,10 @@ struct ExpensesView: View {
                         LedgerQualityBanner(store: store)
                     }
                 }
-                identifiedExpensesSection
+                pendingExpensesSection
+                if !groups.isEmpty {
+                    identifiedExpensesSection
+                }
                 readingSection
                 reconciliationSection
             }
@@ -644,6 +770,213 @@ struct ExpensesView: View {
                 .sheet(item: $selectedCategory) { selection in
                     ExpenseCategoryDetailView(category: selection.category, store: store)
                 }
+                .sheet(isPresented: $isAISettingsPresented) {
+                    AISettingsView()
+                }
+                .confirmationDialog(
+                    "Clasificar pendientes con IA",
+                    isPresented: $isAIConfirmationPresented,
+                    titleVisibility: .visible
+                ) {
+                    Button("Enviar \(pendingReviewGroups.filter { !$0.classifiableMovements.isEmpty }.count) comercios") {
+                        classifyPendingMerchantGroups()
+                    }
+                    Button("Cancelar", role: .cancel) { }
+                } message: {
+                    let groupCount = pendingReviewGroups.filter { !$0.classifiableMovements.isEmpty }.count
+                    Text("Se enviarán comercio, fecha, importe y un código aleatorio temporal por cada uno de \(groupCount) comercios pendientes. No se envían PDFs, nombres de cuenta ni saldos. Primero se actualizaron las reglas locales (\(localRuleChangeCount) movimientos).")
+                }
+                .alert("Configura clasificación IA", isPresented: $isAISetupPromptPresented) {
+                    Button("Configurar") { isAISettingsPresented = true }
+                    Button("Ahora no", role: .cancel) { }
+                } message: {
+                    Text("Las reglas locales ya se aplicaron (\(localRuleChangeCount) movimientos). Para sugerir categorías de los comercios restantes, configura un proveedor de IA.")
+                }
+                .alert("Clasificación lista", isPresented: Binding(
+                    get: { completionMessage != nil },
+                    set: { if !$0 { completionMessage = nil } }
+                )) {
+                    Button("Aceptar", role: .cancel) { completionMessage = nil }
+                } message: {
+                    Text(completionMessage ?? "")
+                }
+                .alert("No se pudo clasificar", isPresented: Binding(
+                    get: { errorMessage != nil },
+                    set: { if !$0 { errorMessage = nil } }
+                )) {
+                    Button("Aceptar", role: .cancel) { errorMessage = nil }
+                    Button("Configurar IA") { isAISettingsPresented = true }
+                } message: {
+                    Text(errorMessage ?? "")
+                }
+        }
+    }
+
+    private func prepareAIClassification() {
+        localRuleChangeCount = store.applyDeterministicCategoryRules()
+        let groupsToClassify = pendingReviewGroups.filter { !$0.classifiableMovements.isEmpty }
+        guard !groupsToClassify.isEmpty else {
+            completionMessage = localRuleChangeCount > 0
+                ? "Las reglas locales clasificaron \(localRuleChangeCount) movimientos. No quedan gastos elegibles para IA."
+                : "No quedan gastos pendientes elegibles para IA. Los movimientos que requieren tipo contable se pueden revisar manualmente."
+            return
+        }
+        let provider = ExpenseAISettingsStore.selectedProvider
+        guard ExpenseAISettingsStore.apiKey(for: provider) != nil else {
+            isAISetupPromptPresented = true
+            return
+        }
+        isAIConfirmationPresented = true
+    }
+
+    private func classifyPendingMerchantGroups() {
+        let provider = ExpenseAISettingsStore.selectedProvider
+        guard let apiKey = ExpenseAISettingsStore.apiKey(for: provider) else {
+            isAISetupPromptPresented = true
+            return
+        }
+        let groupsToClassify = pendingReviewGroups.filter { !$0.classifiableMovements.isEmpty }
+        guard !groupsToClassify.isEmpty else { return }
+        let representatives = groupsToClassify.map(\.representative)
+        let groupByRepresentativeID = Dictionary(uniqueKeysWithValues: zip(representatives.map(\.id), groupsToClassify))
+        let model = ExpenseAISettingsStore.selectedModel(for: provider)
+        isAIProcessing = true
+        Task { @MainActor in
+            do {
+                let result = try await ExpenseAIClassifier.classify(
+                    movements: representatives,
+                    apiKey: apiKey,
+                    model: model,
+                    provider: provider
+                )
+                var accepted: [AIClassification] = []
+                for classification in result.classifications {
+                    guard let group = groupByRepresentativeID[classification.movementID] else { continue }
+                    guard ExpenseAIClassifier.allowedCategories.contains(classification.category) else { continue }
+                    let isHighConfidence = !classification.requiresReview
+                        && classification.confidence >= 0.8
+                        && classification.category != "Otros / Por revisar"
+                    if isHighConfidence {
+                        for movement in group.classifiableMovements {
+                            accepted.append(AIClassification(
+                                movementID: movement.id,
+                                category: classification.category,
+                                travelRelated: classification.travelRelated,
+                                tags: classification.tags,
+                                confidence: classification.confidence,
+                                requiresReview: false,
+                                reason: classification.reason
+                            ))
+                        }
+                        aiSuggestionsByMerchant[group.key] = nil
+                    } else if !["Otros / Por revisar", "Por revisar", "Sin categoría"].contains(classification.category) {
+                        aiSuggestionsByMerchant[group.key] = ExpenseCategoryAISuggestion(
+                            category: classification.category,
+                            confidence: classification.confidence,
+                            reason: classification.reason
+                        )
+                    } else {
+                        aiSuggestionsByMerchant[group.key] = nil
+                    }
+                }
+                let updated = store.applyAIClassifications(accepted)
+                let pendingCount = store.pendingExpenseCategoryMovements.count
+                let currentPendingKeys = Set(pendingReviewGroups.map(\.key))
+                aiSuggestionsByMerchant = aiSuggestionsByMerchant.filter { currentPendingKeys.contains($0.key) }
+                let suggestionsCount = aiSuggestionsByMerchant.count
+                DiagnosticsRecorder.record(
+                    level: suggestionsCount > 0 ? "warning" : "info",
+                    stage: "categories.expenses-ai",
+                    message: "Proveedor \(provider.displayName); modelo \(model); grupos enviados \(representatives.count); movimientos aplicados \(updated); sugerencias en revisión \(suggestionsCount)."
+                )
+                isAIProcessing = false
+                completionMessage = "Reglas locales: \(localRuleChangeCount) movimientos. IA aplicada: \(updated). Quedan \(pendingCount) movimientos por revisar; \(suggestionsCount) comercios tienen sugerencia pendiente de confirmación."
+            } catch {
+                isAIProcessing = false
+                DiagnosticsRecorder.record(
+                    level: "error",
+                    stage: "categories.expenses-ai",
+                    message: "Proveedor \(provider.displayName); modelo \(model); grupos enviados \(representatives.count); ejecución fallida antes de aplicar cambios."
+                )
+                errorMessage = error.localizedDescription
+            }
+        }
+    }
+}
+
+private struct ExpenseMerchantReviewView: View {
+    @Environment(FinanceStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    let group: ExpenseMerchantReviewGroup
+    let suggestion: ExpenseCategoryAISuggestion?
+    let onAccepted: () -> Void
+
+    var body: some View {
+        NavigationStack {
+            List {
+                Section("Comercio") {
+                    LabeledContent("Nombre", value: group.displayName)
+                    LabeledContent("Movimientos", value: "\(group.count)")
+                    LabeledContent("Total", value: group.total.formatted(.currency(code: "MXN")))
+                }
+                if let suggestion {
+                    Section("Sugerencia para revisar") {
+                        LabeledContent("Categoría", value: suggestion.category)
+                        LabeledContent("Confianza", value: "\(Int((suggestion.confidence * 100).rounded()))%")
+                        if let reason = suggestion.reason, !reason.isEmpty {
+                            Text(reason).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Button("Confirmar para este comercio") {
+                            guard store.updateCategory(for: group.representative, to: suggestion.category) else { return }
+                            onAccepted()
+                            dismiss()
+                        }
+                        .fontWeight(.semibold)
+                    }
+                } else if group.classifiableMovements.isEmpty {
+                    Section("Revisión manual") {
+                        Text("Este grupo no se envía a IA porque incluye movimientos que requieren una decisión contable. Abre un movimiento para revisar su tipo y categoría.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Section("Sin sugerencia automática") {
+                        Text("No hubo evidencia suficiente para proponer una categoría. Abre un movimiento para elegirla; esa decisión se guardará como regla para este comercio y sus otros pendientes.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                Section("Movimientos") {
+                    ForEach(group.movements) { movement in
+                        NavigationLink {
+                            MovementDetailView(movement: movement)
+                        } label: {
+                            HStack(spacing: 10) {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(movement.date, format: .dateTime.day().month(.abbreviated).year())
+                                        .font(.subheadline.weight(.semibold))
+                                    Text("\(movement.account) · \(movement.category)")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                Spacer(minLength: 8)
+                                Text(movement.expenseContribution, format: .currency(code: "MXN"))
+                                    .font(.subheadline.monospacedDigit())
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Revisar comercio")
+            .navigationBarTitleDisplayMode(.inline)
+            .listStyle(.insetGrouped)
+            .scrollContentBackground(.hidden)
+            .background(MarcelitoAmbientBackground())
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Cerrar") { dismiss() }
+                }
+            }
         }
     }
 }

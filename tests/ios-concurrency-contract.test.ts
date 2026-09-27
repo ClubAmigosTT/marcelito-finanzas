@@ -448,8 +448,9 @@ test("el clasificador iOS divide lotes y filtra respuestas fuera de alcance", as
   const source = await readFile(aiClassificationPath, "utf8");
   assert.match(source, /static let maxBatchSize = 5/);
   assert.match(source, /classifyBatch\(/);
-  assert.match(source, /requested\.contains\(movementID\)/);
-  assert.match(source, /seen\.insert\(movementID\)\.inserted/);
+  assert.match(source, /requested\.contains\(requestID\)/);
+  assert.match(source, /movementIDsByRequestID\[requestID\]/);
+  assert.match(source, /seenRequestIDs\.insert\(requestID\)\.inserted/);
   assert.match(source, /let usesDeterministicOptions = provider == \.nvidia \|\| provider == \.gemini/);
   assert.match(source, /maxTokens: usesDeterministicOptions \? 4096 : nil/);
   assert.match(source, /let firstPass = batchResult\.classifications\.isEmpty/);
