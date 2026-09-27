@@ -30,6 +30,78 @@ final class FinancialLogicAuditTests: XCTestCase {
                 evidence: ["encabezado verificado"], ignoredBodyMentions: []), readerVersion: FinanceStore.readerVersion)
     }
 
+    private func calendarDate(_ year: Int, _ month: Int, _ day: Int) -> Date {
+        Calendar(identifier: .gregorian).date(from: DateComponents(year: year, month: month, day: day))!
+    }
+
+    func testAccountStatementStatusTracksMonthlyCutoffAndDueDate() {
+        withStore { store in
+            store.statements = [
+                statement("BBVA", key: "bbva:4922", kind: .bank, period: "15/07/2026 - 14/08/2026"),
+                statement("BBVA", key: "bbva:4922", kind: .bank, period: "15/08/2026 - 14/09/2026")
+            ]
+
+            let current = store.accountStatementStatus(
+                for: "BBVA",
+                kind: .bank,
+                accountKey: "bbva:4922",
+                today: calendarDate(2026, 10, 13)
+            )
+            XCTAssertEqual(current.state, .current)
+            XCTAssertEqual(current.latestCutoff, calendarDate(2026, 9, 14))
+            XCTAssertEqual(current.nextCutoff, calendarDate(2026, 10, 14))
+            XCTAssertTrue(current.isUpToDate)
+
+            let due = store.accountStatementStatus(
+                for: "BBVA",
+                kind: .bank,
+                accountKey: "bbva:4922",
+                today: calendarDate(2026, 10, 14)
+            )
+            XCTAssertEqual(due.state, .due)
+            XCTAssertFalse(due.isUpToDate)
+        }
+    }
+
+    func testAccountStatementStatusTurnsRedForMissingOrUnreconciledState() {
+        withStore { store in
+            XCTAssertEqual(
+                store.accountStatementStatus(for: "Santander", kind: .bank, accountKey: nil, today: calendarDate(2026, 9, 26)).state,
+                .noStatement
+            )
+
+            var review = statement("Santander", key: "santander:7079", kind: .bank, period: "01/08/2026 - 31/08/2026")
+            review.requiresReview = true
+            store.statements = [review]
+            let status = store.accountStatementStatus(
+                for: "Santander",
+                kind: .bank,
+                accountKey: "santander:7079",
+                today: calendarDate(2026, 9, 1)
+            )
+            XCTAssertEqual(status.state, .needsReview)
+            XCTAssertFalse(status.isUpToDate)
+        }
+    }
+
+    func testAccountStatementStatusKeepsMonthEndCutoffAtNextMonthEnd() {
+        withStore { store in
+            store.statements = [
+                statement("Santander", key: "santander:7079", kind: .bank, period: "01/07/2026 - 31/08/2026")
+            ]
+
+            let status = store.accountStatementStatus(
+                for: "Santander",
+                kind: .bank,
+                accountKey: "santander:7079",
+                today: calendarDate(2026, 9, 29)
+            )
+            XCTAssertEqual(status.latestCutoff, calendarDate(2026, 8, 31))
+            XCTAssertEqual(status.nextCutoff, calendarDate(2026, 9, 30))
+            XCTAssertEqual(status.state, .current)
+        }
+    }
+
     func testRefundClosesCategoryCalendarMonthlyAndFlow() {
         withStore { store in
             store.movements = [row(-1000), row(200, kind: .refund)]

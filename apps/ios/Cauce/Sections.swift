@@ -1114,6 +1114,95 @@ private struct AccountSummaryRow: View {
     }
 }
 
+private struct AccountStatementStatusBanner: View {
+    @Environment(FinanceStore.self) private var store
+
+    let source: String
+    let kind: StatementKind
+    let accountKey: String?
+
+    private static let cutoffFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "es_MX")
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.dateFormat = "d MMM yyyy"
+        return formatter
+    }()
+
+    private var status: AccountStatementStatus {
+        store.accountStatementStatus(for: source, kind: kind, accountKey: accountKey)
+    }
+
+    private var tint: Color {
+        status.isUpToDate ? .marcelitoSuccess : .marcelitoDanger
+    }
+
+    private func dateText(_ date: Date?) -> String? {
+        date.map { Self.cutoffFormatter.string(from: $0) }
+    }
+
+    private var title: String {
+        switch status.state {
+        case .current: "Al día"
+        case .due: "Sube el siguiente estado"
+        case .needsReview: "Revisa el último estado"
+        case .noStatement: "Sube el primer estado"
+        }
+    }
+
+    private var detail: String {
+        switch status.state {
+        case .current:
+            guard let next = dateText(status.nextCutoff) else { return "Tu estado más reciente está listo." }
+            return "Siguiente estado: \(next)"
+        case .due:
+            guard let next = dateText(status.nextCutoff) else { return "Falta subir el siguiente estado." }
+            return "Debió llegar el \(next)"
+        case .needsReview:
+            return "El último estado aún no está conciliado."
+        case .noStatement:
+            return "Aún no hay un estado de cuenta para esta cuenta."
+        }
+    }
+
+    private var cutoffDetail: String? {
+        dateText(status.latestCutoff).map { "Último corte: \($0)" }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: status.isUpToDate ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                .font(.title3.weight(.semibold))
+                .foregroundStyle(tint)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(Color.marcelitoNavy)
+                Text(detail)
+                    .font(.subheadline)
+                    .foregroundStyle(Color.marcelitoNavy)
+                if let cutoffDetail {
+                    Text(cutoffDetail)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(14)
+        .background(tint.opacity(0.11), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(tint.opacity(0.28), lineWidth: 1)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Estado de cuenta")
+        .accessibilityValue([title, detail, cutoffDetail].compactMap { $0 }.joined(separator: ". "))
+    }
+}
+
 struct AccountsView: View {
     @Environment(FinanceStore.self) private var store
     @State private var selectedAccountID = ""
@@ -1513,11 +1602,14 @@ struct AccountsView: View {
         }
 
         if account.isPlaceholder || selectedStatements.isEmpty {
+            AccountStatementStatusBanner(source: account.source, kind: account.kind, accountKey: account.accountKey)
             emptyAccountView(account)
         } else {
             AccountSummaryRow(source: account.source, kind: account.kind, accountKey: account.accountKey)
                 .padding(16)
                 .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            AccountStatementStatusBanner(source: account.source, kind: account.kind, accountKey: account.accountKey)
 
             Text("Estados subidos")
                 .font(.headline)
