@@ -66,7 +66,10 @@ privado:
 - BBVA exige conciliación válida, columnas `CARGOS`/`ABONOS`/`SALDO`
   calibradas, evidencia visual completa para cada movimiento MXN y permite
   únicamente diagnósticos auxiliares `USD/TC/AUT` explícitamente excluidos
-  del libro.
+  del libro. Cuando Vision separa la celda estrecha de `FECHA OPER` de la
+  caja ancha que contiene `FECHA LIQ`, descripción e importe, ambas se unen
+  por su banda visual y se conserva la fecha de operación; una celda de fecha
+  sin compañero sigue bloqueando la aceptación.
 - Rappi exige conciliación válida, evidencia visual completa y que cada fila
   seleccionada corresponda a una línea visual. Una línea no seleccionada solo
   se excluye de la compuerta cuando es el fragmento corto duplicado de una

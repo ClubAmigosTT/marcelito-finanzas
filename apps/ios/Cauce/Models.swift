@@ -934,7 +934,7 @@ final class FinanceStore {
     /// device. Keep this token separate from `readerVersion`: the public
     /// corpus certificate describes the reader contract, while this token is
     /// an operational cache/replay invalidation for a shipped build.
-    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.26.2"
+    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.26.3"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -1397,6 +1397,30 @@ final class FinanceStore {
             )
         }
         return parseBBVAOCR(observations, fileName: fileName)
+    }
+
+    /// Exposes the BBVA row diagnostics to the native contract tests. The
+    /// production gate must distinguish a harmless split date cell from a
+    /// genuinely rejected movement, so testing only the candidate count is
+    /// not enough.
+    static func bbvaOCRDiagnosticsForTesting(
+        _ fixtures: [OCRObservationFixture],
+        fileName: String
+    ) -> [OCRRowDiagnostic] {
+        let observations = fixtures.map { fixture in
+            OCRObservation(
+                page: fixture.page,
+                text: fixture.text,
+                boundingBox: CGRect(
+                    x: fixture.x,
+                    y: fixture.y,
+                    width: fixture.width,
+                    height: fixture.height
+                ),
+                confidence: fixture.confidence
+            )
+        }
+        return parseBBVAOCRResult(observations, fileName: fileName).diagnostics
     }
 
     /// Reports whether the BBVA fixture contains a co-located FECHA /
@@ -11209,6 +11233,38 @@ final class FinanceStore {
             }
             var rows: [[OCRObservation]] = []
             var pendingRow: [OCRObservation] = []
+            // Vision can emit the FECHA OPER cell as a narrow standalone box
+            // and then emit the rest of the same printed row as a wider box
+            // that contains FECHA LIQ. Treating the narrow box as a complete
+            // row creates a false rejected diagnostic and also makes the
+            // movement use the liquidation date instead of the operation
+            // date. Hold standalone date cells until the rest of their visual
+            // band arrives; a date-only row with no companion is still flushed
+            // and remains rejected by the normal fail-closed path.
+            var pendingStandaloneDateCells: [OCRObservation] = []
+            let dateFragmentMergeTolerance: CGFloat = 0.014
+
+            func containsDate(_ observation: OCRObservation) -> Bool {
+                firstMatch(in: observation.text, regex: dateRegex) != nil
+            }
+
+            func isStandaloneDateCell(_ observation: OCRObservation) -> Bool {
+                guard let match = firstMatch(in: observation.text, regex: dateRegex),
+                      let range = Range(match.range, in: observation.text) else {
+                    return false
+                }
+                let remainder = observation.text.replacingCharacters(in: range, with: "")
+                // Punctuation/whitespace around the date is harmless, but an
+                // alphanumeric token means this is a complete OCR row box.
+                return remainder.rangeOfCharacter(from: .alphanumerics) == nil
+            }
+
+            func flushPendingStandaloneDateCells() {
+                guard !pendingStandaloneDateCells.isEmpty else { return }
+                rows.append(contentsOf: pendingStandaloneDateCells.map { [$0] })
+                pendingStandaloneDateCells.removeAll(keepingCapacity: true)
+            }
+
             for observation in pageObservations {
                 let normalized = observation.text.folding(
                     options: [.diacriticInsensitive, .caseInsensitive],
@@ -11225,11 +11281,46 @@ final class FinanceStore {
                     || normalized.contains("total movimientos cargos")
                     || normalized.contains("total movimientos abonos") {
                     if !pendingRow.isEmpty { rows.append(pendingRow); pendingRow.removeAll(keepingCapacity: true) }
+                    flushPendingStandaloneDateCells()
                     continue
                 }
                 if isDateCell {
-                    if !pendingRow.isEmpty { rows.append(pendingRow) }
-                    pendingRow = [observation]
+                    let standaloneDateCell = isStandaloneDateCell(observation)
+                    if standaloneDateCell {
+                        // Handle the unusual ordering where the wider
+                        // complete row box arrived just before the narrow
+                        // date cell. Same-band date evidence belongs to one
+                        // row and the operation date should remain first.
+                        if pendingRow.contains(where: {
+                            containsDate($0)
+                                && abs($0.centerY - observation.centerY) <= dateFragmentMergeTolerance
+                        }) {
+                            pendingRow.insert(observation, at: 0)
+                        } else {
+                            if !pendingRow.isEmpty {
+                                rows.append(pendingRow)
+                                pendingRow.removeAll(keepingCapacity: true)
+                            }
+                            if let last = pendingStandaloneDateCells.last,
+                               abs(last.centerY - observation.centerY) > dateFragmentMergeTolerance {
+                                flushPendingStandaloneDateCells()
+                            }
+                            pendingStandaloneDateCells.append(observation)
+                        }
+                    } else {
+                        if !pendingRow.isEmpty {
+                            rows.append(pendingRow)
+                            pendingRow.removeAll(keepingCapacity: true)
+                        }
+                        let nearDateFragments = pendingStandaloneDateCells.filter {
+                            abs($0.centerY - observation.centerY) <= dateFragmentMergeTolerance
+                        }
+                        pendingStandaloneDateCells = pendingStandaloneDateCells.filter {
+                            abs($0.centerY - observation.centerY) > dateFragmentMergeTolerance
+                        }
+                        flushPendingStandaloneDateCells()
+                        pendingRow = nearDateFragments + [observation]
+                    }
                 } else if !pendingRow.isEmpty {
                     let administrative = ["estado de cuenta", "resumen de movimientos", "saldo anterior", "saldo final", "fecha de corte", "numero de cuenta", "cuenta clabe", "rfc", "pagina"]
                     if administrative.contains(where: { normalized.contains($0) }) {
@@ -11238,9 +11329,14 @@ final class FinanceStore {
                     } else {
                         pendingRow.append(observation)
                     }
+                } else if !pendingStandaloneDateCells.isEmpty {
+                    pendingRow = pendingStandaloneDateCells
+                    pendingStandaloneDateCells.removeAll(keepingCapacity: true)
+                    pendingRow.append(observation)
                 }
             }
             if !pendingRow.isEmpty { rows.append(pendingRow) }
+            flushPendingStandaloneDateCells()
 
             for row in rows {
                 let rawText = row.map(\.text).joined(separator: " ")
