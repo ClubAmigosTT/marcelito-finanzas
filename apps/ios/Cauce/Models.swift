@@ -456,6 +456,25 @@ struct StatementRecord: Identifiable, Codable {
     var recoveryAttempts: [String]? = nil
 }
 
+/// Estado operativo de la carga de estados de una cuenta. La fecha de corte
+/// proviene del periodo leído del PDF; la siguiente fecha conserva el día de
+/// corte y avanza un mes, que es la cadencia de los estados soportados por la
+/// app. No se usa para alterar el libro ni para inventar movimientos.
+struct AccountStatementStatus: Equatable {
+    enum State: Equatable {
+        case noStatement
+        case needsReview
+        case due
+        case current
+    }
+
+    let state: State
+    let latestCutoff: Date?
+    let nextCutoff: Date?
+
+    var isUpToDate: Bool { state == .current }
+}
+
 func readerRecoveryLabel(_ value: String) -> String {
     switch value {
     case "pdf-text": return "texto PDF"
@@ -2818,6 +2837,59 @@ final class FinanceStore {
                 if leftDate != rightDate { return leftDate > rightDate }
                 return left.importedAt > right.importedAt
             }
+    }
+
+    /// Returns the upload reminder shown on the account screen. The reminder
+    /// is deliberately derived from the same period ordering used by the
+    /// ledger, so importing an older PDF cannot move the next-cutoff notice
+    /// backwards. A statement that is not reconciled is red even when its
+    /// period is recent: it still needs attention before the account can be
+    /// considered current.
+    func accountStatementStatus(
+        for source: String,
+        kind: StatementKind,
+        accountKey: String?,
+        today: Date = .now
+    ) -> AccountStatementStatus {
+        let accountStatements = statements(for: source, kind: kind, accountKey: accountKey)
+        guard let latest = accountStatements.first else {
+            return AccountStatementStatus(state: .noStatement, latestCutoff: nil, nextCutoff: nil)
+        }
+
+        let calendar = Calendar(identifier: .gregorian)
+        let latestCutoff = statementRange(from: latest.period)?.upperBound ?? statementEndDate(for: latest.id)
+        let nextCutoff: Date? = {
+            var cutoffMonthComponents = calendar.dateComponents([.year, .month], from: latestCutoff)
+            cutoffMonthComponents.day = 1
+            guard let monthStart = calendar.date(
+                from: cutoffMonthComponents
+            ),
+            let nextMonthStart = calendar.date(byAdding: .month, value: 1, to: monthStart),
+            let latestMonthRange = calendar.range(of: .day, in: .month, for: latestCutoff),
+            let nextMonthRange = calendar.range(of: .day, in: .month, for: nextMonthStart),
+            let latestDay = calendar.dateComponents([.day], from: latestCutoff).day else {
+                return nil
+            }
+            let day = latestDay == latestMonthRange.count
+                ? nextMonthRange.count
+                : min(latestDay, nextMonthRange.count)
+            return calendar.date(byAdding: .day, value: day - 1, to: nextMonthStart)
+        }()
+        let requiresReview = latest.requiresReview || latest.reconciliation?.status != .valid
+
+        if requiresReview {
+            return AccountStatementStatus(state: .needsReview, latestCutoff: latestCutoff, nextCutoff: nextCutoff)
+        }
+
+        let todayStart = calendar.startOfDay(for: today)
+        let nextStart = nextCutoff.map { calendar.startOfDay(for: $0) }
+        let state: AccountStatementStatus.State
+        if let nextStart, todayStart >= nextStart {
+            state = .due
+        } else {
+            state = .current
+        }
+        return AccountStatementStatus(state: state, latestCutoff: latestCutoff, nextCutoff: nextCutoff)
     }
 
     var totalNewTransactions: Decimal {
