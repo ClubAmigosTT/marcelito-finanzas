@@ -945,7 +945,7 @@ final class FinanceStore {
     /// when saved PDF results need a deliberate replay. This release forces
     /// older persisted snapshots through the current reader; the refresh stays
     /// explicit so a full Vision pass never blocks app launch.
-    static let readerVersion = "ios-reader-recovery-2026.09.26.16"
+    static let readerVersion = "ios-reader-recovery-2026.09.27.17"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
     private static let accountIdentityParserVersion = "masked-header-v3"
@@ -4067,10 +4067,13 @@ final class FinanceStore {
     private func isValidStoredMovement(_ movement: Movement) -> Bool {
         let hasReadableConcept = movement.title.rangeOfCharacter(from: .letters) != nil
         let hasEvidenceBackedRappiReviewConcept = Self.isEvidenceBackedRappiReviewConcept(movement)
+        let isKnownSantanderMerchant = Self.isEvidenceBackedSantanderMerchant(movement)
         guard movement.amount != 0,
               movement.title.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3,
               (hasReadableConcept || hasEvidenceBackedRappiReviewConcept),
-              (!Self.isAdministrativeTitle(movement.title) || Self.isSupportedScreenshotDescriptor(movement)) else { return false }
+              (!Self.isAdministrativeTitle(movement.title)
+               || Self.isSupportedScreenshotDescriptor(movement)
+               || isKnownSantanderMerchant) else { return false }
         switch movement.flow {
         case .income:
             guard movement.amount > 0 else { return false }
@@ -4114,6 +4117,30 @@ final class FinanceStore {
         let title = movement.title.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: Locale(identifier: "es_MX"))
         return title.range(of: #"(?i)^\s*TOTAL\s*PASS\b"#, options: .regularExpression) != nil
             || title.range(of: #"(?i)^\s*\d{3,}\s+RFC\s+[A-Z&Ñ]{3,4}\d{6}[A-Z0-9]{3}(?:\s|[,.;]|$)"#, options: .regularExpression) != nil
+    }
+
+    /// Santander's statement can print a legitimate merchant as `TOTAL PASS
+    /// SAPI`. The generic administrative-title guard also matches the word
+    /// `total`, so retain this issuer-specific merchant when the row already
+    /// passed the fixed-column parser and has a real amount.
+    private static func isKnownSantanderMerchantTitle(_ value: String) -> Bool {
+        let normalized = value.folding(
+            options: [.caseInsensitive, .diacriticInsensitive],
+            locale: Locale(identifier: "es_MX")
+        )
+        return normalized.range(of: #"\btotal\s+pass\s+sapi\b"#, options: .regularExpression) != nil
+    }
+
+    private static func isEvidenceBackedSantanderMerchant(_ movement: Movement) -> Bool {
+        guard isKnownSantanderMerchantTitle(movement.title),
+              let evidence = movement.extractionEvidence,
+              ["vision-ocr", "screenshot-vision"].contains(evidence.method.lowercased()),
+              evidence.confidence.isFinite,
+              (evidence.page ?? 0) > 0,
+              evidence.sourceText?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+              let selectedAmount = evidence.selectedAmount,
+              abs(selectedAmount) == abs(movement.amount) else { return false }
+        return true
     }
 
     private func reconcileStoredMovements() {

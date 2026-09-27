@@ -17,6 +17,25 @@ final class ReaderContractTests: XCTestCase {
             movement.extractionEvidence?.selectedAmount = -1
             XCTAssertFalse(store.movementBlockingReasons(movement).isEmpty, "The retained amount must agree")
         }
+        let importedSantanderMerchant = Movement(
+            date: .now,
+            title: "CONSUMO LOCAL AJENO TERMINACION 8934 03SEP26 TOTAL PASS SAPI Mexico City",
+            account: "Santander",
+            category: "Otros / Por revisar",
+            amount: Decimal(string: "-704.50")!,
+            flow: .expense,
+            extractionEvidence: MovementExtractionEvidence(
+                method: "vision-ocr",
+                page: 6,
+                confidence: 0.95,
+                sourceText: "03-SEP-2026 TOTAL PASS SAPI Mexico City 704.50",
+                selectedAmount: Decimal(string: "-704.50")!
+            )
+        )
+        XCTAssertTrue(
+            store.movementBlockingReasons(importedSantanderMerchant).isEmpty,
+            "A real Santander TOTAL PASS merchant must survive the administrative-title guard"
+        )
         for title in ["TOTAL IMPORTE CARGOS", "SALDO DISPONIBLE", "RFC ABC010101AB1"] {
             let movement = Movement(date: .now, title: title, account: "Santander", category: "Otros / Por revisar", amount: -100, flow: .expense,
                 extractionEvidence: MovementExtractionEvidence(method: "screenshot-vision", page: 2, confidence: 0.95, sourceText: "\(title) -100.00 MXN", selectedAmount: -100))
