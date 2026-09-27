@@ -1945,7 +1945,7 @@ final class FinanceStore {
         let evidencePercent = evidenceRows.isEmpty
             ? 100
             : Double(evidenceRows.count - missingEvidenceCount) / Double(evidenceRows.count) * 100
-        let expectedRebuildCount = UserDefaults.standard.integer(forKey: canonicalRebuildExpectedCountKey)
+        let rawExpectedRebuildCount = UserDefaults.standard.integer(forKey: canonicalRebuildExpectedCountKey)
         // A rebuild is complete when every expected source has a current
         // statement record and a reconciliation result, even if that result
         // is invalid or requires review. Comparing against `validated` made
@@ -1953,6 +1953,15 @@ final class FinanceStore {
         let reconstructedStatementCount = statements.filter {
             isCurrentReader($0) && $0.reconciliation != nil
         }.count
+        // Several PDFs can represent the same account/cutoff. The normalized
+        // ledger intentionally keeps one logical statement for that period,
+        // so a physical-file count must never exceed the statement count used
+        // by the quality gate. Otherwise a successful 24-state rebuild from
+        // 25 files (one duplicate upload) is reported as missing one state.
+        let expectedRebuildCount = Self.effectiveRebuildExpectedCount(
+            raw: rawExpectedRebuildCount,
+            statementCount: statementCount
+        )
         let missingRebuiltStatements = UserDefaults.standard.bool(forKey: canonicalRebuildKey)
             && expectedRebuildCount > 0
             && reconstructedStatementCount < expectedRebuildCount
@@ -3119,6 +3128,11 @@ final class FinanceStore {
 
     private func absolute(_ value: Decimal) -> Decimal { value < 0 ? -value : value }
 
+    private static func effectiveRebuildExpectedCount(raw: Int, statementCount: Int) -> Int {
+        guard raw > 0, statementCount > 0 else { return raw }
+        return min(raw, statementCount)
+    }
+
     private func statementKind(_ statement: StatementRecord) -> StatementKind {
         if let kind = statement.kind { return kind }
         if statement.source.localizedCaseInsensitiveContains("Amex") { return .card }
@@ -3599,6 +3613,9 @@ final class FinanceStore {
         let tolerance = Decimal(string: "0.01", locale: Locale(identifier: "en_US_POSIX")) ?? 0
         let magnitude: (Decimal) -> Decimal = { value in value < 0 ? -value : value }
         return magnitude(magnitude(left) - magnitude(right)) <= tolerance
+    }
+    static func effectiveRebuildExpectedCountForTesting(raw: Int, statementCount: Int) -> Int {
+        effectiveRebuildExpectedCount(raw: raw, statementCount: statementCount)
     }
 #endif
 
@@ -5013,6 +5030,7 @@ final class FinanceStore {
         )
         var importedCount = 0
         var invalidCount = 0
+        var failedCount = 0
         for (index, url) in candidates.enumerated() {
             progress?(index, candidates.count, url.lastPathComponent)
             do {
@@ -5038,6 +5056,7 @@ final class FinanceStore {
                 }
             } catch {
                 invalidCount += 1
+                failedCount += 1
                 DiagnosticsRecorder.record(
                     level: "error",
                     stage: "rebuild.error",
@@ -5046,6 +5065,23 @@ final class FinanceStore {
             }
             progress?(index + 1, candidates.count, url.lastPathComponent)
         }
+        guard failedCount == 0 else {
+            defaults.removeObject(forKey: rebuildStateKey)
+            defaults.removeObject(forKey: ledgerBackupKey)
+            canonicalRebuildPending = true
+            ledgerRefreshState = .failed
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "rebuild.failed",
+                message: "Se conservaron los datos anteriores porque falló la lectura de \(failedCount) PDF(s)."
+            )
+            return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount)
+        }
+        // Deduplicate same-period uploads before recording the count used by
+        // the quality gate. The physical file count can be larger than the
+        // logical statement count after normalization.
+        normalizeStoredLedger()
+        defaults.set(statements.count, forKey: canonicalRebuildExpectedCountKey)
         defaults.set(true, forKey: canonicalRebuildKey)
         defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
         defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
@@ -5275,6 +5311,7 @@ final class FinanceStore {
         lastImportedFile = scratch.lastImportedFile ?? lastImportedFile
         ledgerVersion = UUID()
         normalizeStoredLedger()
+        defaults.set(statements.count, forKey: canonicalRebuildExpectedCountKey)
         persist()
         defaults.set(true, forKey: canonicalRebuildKey)
         defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)

@@ -398,6 +398,23 @@ final class ReaderContractTests: XCTestCase {
         ))
     }
 
+    func testDuplicatePhysicalStatementDoesNotBlockCompletedRebuild() {
+        XCTAssertEqual(
+            FinanceStore.effectiveRebuildExpectedCountForTesting(raw: 25, statementCount: 24),
+            24,
+            "Un PDF duplicado del mismo corte no debe crear un estado faltante"
+        )
+        XCTAssertEqual(
+            FinanceStore.effectiveRebuildExpectedCountForTesting(raw: 24, statementCount: 24),
+            24
+        )
+        XCTAssertEqual(
+            FinanceStore.effectiveRebuildExpectedCountForTesting(raw: 25, statementCount: 0),
+            25,
+            "Sin estados reconstruidos todavía se conserva la expectativa para detectar una reconstrucción incompleta"
+        )
+    }
+
     func testInstitutionalHeaderWinsOverCounterpartyMention() {
         let text = """
         Grupo Financiero BBVA
