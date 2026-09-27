@@ -1585,6 +1585,66 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(rows.isEmpty)
     }
 
+    func testSantanderTableRecoversUnreadableMovementFromExactPrintedBalanceDelta() {
+        let fixtures = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.09, y: 0.98, width: 0.42),
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.92, width: 0.06),
+            OCRObservationFixture(text: "FOLIO", x: 0.13, y: 0.92, width: 0.05),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.20, y: 0.92, width: 0.14),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.62, y: 0.92, width: 0.07),
+            OCRObservationFixture(text: "RETIRO", x: 0.74, y: 0.92, width: 0.06),
+            OCRObservationFixture(text: "SALDO", x: 0.86, y: 0.92, width: 0.06),
+            OCRObservationFixture(text: "16-SEP-2026", x: 0.05, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "PAGO TRANSFERENCIA", x: 0.20, y: 0.82, width: 0.25),
+            OCRObservationFixture(text: "30.00", x: 0.74, y: 0.82, width: 0.06),
+            OCRObservationFixture(text: "970.00", x: 0.86, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "17-SEP-2026", x: 0.05, y: 0.72, width: 0.08),
+            OCRObservationFixture(text: "ABONO TRANSFERENCIA RECIBIDA", x: 0.20, y: 0.72, width: 0.28),
+            // The movement cell is intentionally absent. The printed saldo
+            // proves a +500.00 deposit from the prior 970.00 balance.
+            OCRObservationFixture(text: "1.470.00", x: 0.86, y: 0.72, width: 0.08),
+            OCRObservationFixture(text: "TOTAL", x: 0.20, y: 0.15, width: 0.08),
+        ]
+
+        let result = FinanceStore.santanderTableSnapshotForTesting(
+            fixtures,
+            fileName: "estado-septiembre-2026.pdf",
+            openingBalance: Decimal(string: "1000.00")!
+        )
+
+        XCTAssertEqual(result.movements.map(\.amount), [Decimal(string: "-30.00")!, Decimal(string: "500.00")!])
+        XCTAssertEqual(result.movements.last?.extractionEvidence?.selectedColumn, "DEPÓSITO")
+        XCTAssertTrue(result.movements.last?.extractionEvidence?.selectionReason?.contains("diferencia exacta entre saldos impresos") == true)
+        XCTAssertTrue(result.diagnostics.allSatisfy(\.accepted))
+    }
+
+    func testSantanderTableKeepsMerchantNamesThatContainTotal() {
+        let fixtures = [
+            OCRObservationFixture(text: "Detalle de movimientos cuenta de cheques", x: 0.09, y: 0.98, width: 0.42),
+            OCRObservationFixture(text: "FECHA", x: 0.05, y: 0.92, width: 0.06),
+            OCRObservationFixture(text: "FOLIO", x: 0.13, y: 0.92, width: 0.05),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.20, y: 0.92, width: 0.14),
+            OCRObservationFixture(text: "DEPOSITO", x: 0.62, y: 0.92, width: 0.07),
+            OCRObservationFixture(text: "RETIRO", x: 0.74, y: 0.92, width: 0.06),
+            OCRObservationFixture(text: "SALDO", x: 0.86, y: 0.92, width: 0.06),
+            OCRObservationFixture(text: "03-SEP-2026", x: 0.05, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "CONSUMO LOCAL TOTAL PASS SAPI Mexico City", x: 0.20, y: 0.82, width: 0.40),
+            OCRObservationFixture(text: "704.50", x: 0.74, y: 0.82, width: 0.06),
+            OCRObservationFixture(text: "295.50", x: 0.86, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "TOTAL", x: 0.20, y: 0.15, width: 0.08),
+        ]
+
+        let rows = FinanceStore.santanderTableRowsForTesting(
+            fixtures,
+            fileName: "estado-septiembre-2026.pdf",
+            openingBalance: Decimal(string: "1000.00")!
+        )
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows[0].amount, Decimal(string: "-704.50")!)
+        XCTAssertTrue(rows[0].title.localizedCaseInsensitiveContains("TOTAL PASS SAPI"))
+    }
+
     func testSantanderSummaryDoesNotTreatDaysInPeriodAsMovementCounts() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
             text: """
