@@ -38,7 +38,7 @@ test("Gastos resume todo el libro real y conserva las categorías manuales entre
   assert.ok(expensesStart >= 0 && expensesEnd > expensesStart);
   assert.equal((source.match(/store\.netExpenseMovements/g) ?? []).length, 2);
   assert.doesNotMatch(expenses, /currentPeriodExpenseMovements/);
-  assert.match(expenses, /Gasto neto: cargos menos reembolsos/);
+  assert.match(expenses, /Gasto neto conciliado\. Lo que sigue pendiente de clasificar aparece separado arriba/);
   assert.match(expenses, /expenseContribution/);
 });
 

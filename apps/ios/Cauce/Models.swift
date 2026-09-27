@@ -965,7 +965,7 @@ final class FinanceStore {
     /// survive a PDF re-import, whose row UUID is intentionally new.
     private let manualCategoryOverridesKey = "marcelito.categoryOverrides.v1"
     private let categoryTaxonomyVersionKey = "marcelito.categoryTaxonomyVersion.v1"
-    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.4"
+    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.5"
     private static let pendingCategoryNames: Set<String> = [
         "Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos",
         "Alimentos", "Comidas", "Servicios", "Compras", "Finanzas",
@@ -4028,7 +4028,7 @@ final class FinanceStore {
         // "Otros / Por revisar" is a queue, not a permanent user rule.  Build
         // 1.0.44 could retain that value as a manual override, which prevented
         // recognizable merchants such as OXXO and Uber from ever leaving the
-        // review bucket.  Drop those stale sentinels before applying v2.4.
+        // review bucket. Drop those stale sentinels before applying v2.5.
         var manualOverrides = defaults.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
         manualOverrides = manualOverrides.filter { !Self.pendingCategoryNames.contains($0.value) }
         defaults.set(manualOverrides, forKey: manualCategoryOverridesKey)
@@ -4037,11 +4037,10 @@ final class FinanceStore {
         for index in nextMovements.indices {
             let movement = nextMovements[index]
             guard movement.flow == .expense else { continue }
-            if let kind = movement.kind,
-               [.cardPayment, .bankTransfer, .income, .credit, .refund, .msi].contains(kind) {
+            if [.cardPayment, .bankTransfer, .income, .credit, .refund, .msi].contains(movementKind(movement)) {
                 continue
             }
-            let merchantText = movement.normalizedMerchant ?? movement.title
+            let merchantText = movement.normalizedMerchant ?? movement.displayMerchant ?? movement.title
             let key = Self.categoryRuleKey(merchantText)
             let normalizedTitle = Self.categoryText(merchantText)
             let manualCategory = manualOverrides[key]
@@ -4067,18 +4066,44 @@ final class FinanceStore {
     }
 
     var classifiableExpenseCount: Int {
-        canonicalMovements.filter(isClassifiableExpenseForCategory).count
+        canonicalMovements.filter {
+            isClassifiableExpenseForCategory($0)
+                && !$0.manuallyReviewed
+                && hasClassifiableMerchant($0)
+        }.count
     }
 
     var pendingExpenseCategoryCount: Int {
+        pendingClassifiableExpenseMovements.count
+    }
+
+    /// Canonical purchase rows that still need a human or model category.
+    /// This queue is deliberately derived from the validated ledger so an
+    /// unresolved OCR candidate can never be sent to an external classifier.
+    var pendingClassifiableExpenseMovements: [Movement] {
         canonicalMovements.filter {
-            isClassifiableExpenseForCategory($0) && Self.pendingCategoryNames.contains($0.category)
-        }.count
+            isClassifiableExpenseForCategory($0)
+                && !$0.manuallyReviewed
+                && hasClassifiableMerchant($0)
+                && Self.pendingCategoryNames.contains($0.category)
+        }
+    }
+
+    /// Pending expense rows shown in Gastos, including rows that require a
+    /// person because their accounting kind makes them ineligible for AI.
+    var pendingExpenseCategoryMovements: [Movement] {
+        netExpenseMovements.filter { Self.pendingCategoryNames.contains($0.category) }
     }
 
     private func isClassifiableExpenseForCategory(_ movement: Movement) -> Bool {
         guard movement.flow == .expense else { return false }
         return ![.cardPayment, .bankTransfer, .income, .credit, .refund, .msi].contains(movementKind(movement))
+    }
+
+    private func hasClassifiableMerchant(_ movement: Movement) -> Bool {
+        [movement.normalizedMerchant, movement.displayMerchant]
+            .compactMap { $0 }
+            .contains { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
     private func isValidStoredMovement(_ movement: Movement) -> Bool {
@@ -4589,35 +4614,58 @@ final class FinanceStore {
     @discardableResult
     func updateCategory(for movement: Movement, to category: String) -> Bool {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return false }
-        movements[index].category = category
-        movements[index].manuallyReviewed = true
-        var tags = Self.categoryTags(for: movements[index].title, category: category)
-        if movements[index].travelRelated, !tags.contains("viaje") {
-            tags.append("viaje")
+        let key = categoryRuleKey(for: movements[index])
+        func apply(_ targetIndex: Int, manuallyReviewed: Bool) {
+            let title = movements[targetIndex].normalizedMerchant ?? movements[targetIndex].displayMerchant ?? movements[targetIndex].title
+            movements[targetIndex].category = category
+            if manuallyReviewed { movements[targetIndex].manuallyReviewed = true }
+            var tags = Self.categoryTags(for: title, category: category)
+            if movements[targetIndex].travelRelated, !tags.contains("viaje") {
+                tags.append("viaje")
+            }
+            if category == "Viajes" {
+                movements[targetIndex].travelRelated = true
+            }
+            movements[targetIndex].classificationTags = tags
         }
-        if category == "Viajes" {
-            movements[index].travelRelated = true
-        }
-        movements[index].classificationTags = tags
-        let key = Self.categoryRuleKey(movements[index].title)
-        if !key.isEmpty {
+        apply(index, manuallyReviewed: true)
+        // Very short keys are shown as individual review rows in Gastos and
+        // must not become broad merchant rules (for example, two unrelated
+        // two-character OCR fragments).
+        if key.count >= 3 {
             var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
             var overrides = UserDefaults.standard.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
             // The review bucket must remain temporary. Persist final manual
             // choices, but never turn "Otros / Por revisar" into a rule that
             // blocks future deterministic or AI improvements.
-            if Self.pendingCategoryNames.contains(category) {
+            let isExpenseCategory = ExpenseAIClassifier.allowedCategories.contains(category)
+                && !Self.pendingCategoryNames.contains(category)
+            if Self.pendingCategoryNames.contains(category) || !isExpenseCategory {
                 overrides.removeValue(forKey: key)
             } else {
                 overrides[key] = category
             }
             UserDefaults.standard.set(overrides, forKey: manualCategoryOverridesKey)
-            if ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains(category) {
+            if Self.pendingCategoryNames.contains(category) || !isExpenseCategory {
                 rules.removeValue(forKey: key)
             } else {
                 rules[key] = category
             }
             UserDefaults.standard.set(rules, forKey: categoryRulesKey)
+
+            // A confirmed merchant choice resolves its other pending rows in
+            // one step. Existing manual choices remain protected, and the
+            // rule changes only category metadata, never amount, flow or kind.
+            if isExpenseCategory, !Self.pendingCategoryNames.contains(category) {
+                for peerIndex in movements.indices where peerIndex != index {
+                    let peer = movements[peerIndex]
+                    guard !peer.manuallyReviewed,
+                          reconciledMovements.contains(where: { $0.id == peer.id }),
+                          isClassifiableExpenseForCategory(peer),
+                          categoryRuleKey(for: peer) == key else { continue }
+                    apply(peerIndex, manuallyReviewed: false)
+                }
+            }
         }
         persist(markingChange: true)
         DiagnosticsRecorder.record(
@@ -4645,9 +4693,12 @@ final class FinanceStore {
 
     @discardableResult
     func applyAIClassifications(_ classifications: [AIClassification]) -> Int {
+        guard !classifications.isEmpty else { return 0 }
         var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
         var changed = 0
         for classification in classifications {
+            guard ExpenseAIClassifier.allowedCategories.contains(classification.category),
+                  !Self.pendingCategoryNames.contains(classification.category) else { continue }
             guard let index = movements.firstIndex(where: { $0.id == classification.movementID }) else { continue }
             guard !movements[index].manuallyReviewed else { continue }
             // Enrichment cannot promote or mutate a quarantined row. Only a
@@ -4658,14 +4709,9 @@ final class FinanceStore {
             // malformed response reclassify income, refunds, card payments or
             // own-account transfers as ordinary spend.
             guard movements[index].flow == .expense else { continue }
-            guard ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains(movements[index].category) else { continue }
+            guard Self.pendingCategoryNames.contains(movements[index].category) else { continue }
             guard !classification.requiresReview, classification.confidence >= 0.8 else { continue }
-            switch movements[index].kind {
-            case .cardPayment?, .bankTransfer?, .refund?, .credit?, .msi?:
-                continue
-            default:
-                break
-            }
+            guard isClassifiableExpenseForCategory(movements[index]) else { continue }
             let previous = movements[index]
             movements[index].category = classification.category
             movements[index].travelRelated = classification.travelRelated
@@ -4675,13 +4721,15 @@ final class FinanceStore {
                 || movements[index].classificationTags != previous.classificationTags {
                 changed += 1
             }
-            let key = Self.categoryRuleKey(movements[index].title)
+            let key = categoryRuleKey(for: movements[index])
             if !key.isEmpty {
                 rules[key] = classification.category
             }
         }
-        UserDefaults.standard.set(rules, forKey: categoryRulesKey)
-        persist(markingChange: true)
+        if changed > 0 {
+            UserDefaults.standard.set(rules, forKey: categoryRulesKey)
+            persist(markingChange: true)
+        }
         return changed
     }
 
@@ -16250,6 +16298,10 @@ final class FinanceStore {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    func categoryRuleKey(for movement: Movement) -> String {
+        Self.categoryRuleKey(movement.normalizedMerchant ?? movement.displayMerchant ?? movement.title)
+    }
+
     /// Uses the same token normalization for every issuer. OCR and PDF text
     /// frequently insert punctuation or split merchant names (for example
     /// 7-ELEVEN, APPLE.COM/BILL or TAQUERIA-ORINOCO); matching the raw string
@@ -16278,7 +16330,7 @@ final class FinanceStore {
     private static func categoryTags(for title: String, category: String) -> [String] {
         let text = categoryText(title)
         let projectMarkers = ["club amigos", "clubamigos", "proyecto", "proveedor club", "material club"]
-        let travelMarkers = ["airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico", "aerobus", "volaris", "vivaaerobus", "american airlines", "united airlines", "delta air", "iberia", "vuelo", "flight", "holafly", "esim", "roaming", "equipaje", "airport", "aeropuerto", "renta de auto", "car rental", "nueva york", "new york", "medellin", "atlanta"]
+        let travelMarkers = ["airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico", "aerobus", "volaris", "vivaaerobus", "avianca", "american airlines", "united airlines", "delta air", "iberia", "vuelo", "flight", "holafly", "esim", "roaming", "equipaje", "airport", "aeropuerto", "renta de auto", "car rental", "nueva york", "new york", "medellin", "atlanta"]
         let fixedMarkers = ["canva", "cursor", "google one", "google storage", "youtube premium", "apple music", "adobe", "microsoft 365", "microsoft office", "suscripcion", "saas", "software", "icloud", "dropbox", "apple com bill", "renta", "telcel", "at t", "movistar", "izzi", "totalplay", "cfe", "luz", "agua", "internet", "seguro", "membresia"]
         let project = category == "Club Amigos / Proyectos" || categoryContains(text, projectMarkers)
         let travel = category == "Viajes" || categoryContains(text, travelMarkers)
@@ -16305,11 +16357,11 @@ final class FinanceStore {
             // A destination alone is only a secondary travel tag. Otherwise
             // UBER MEDELLIN or a restaurant in New York would lose its useful
             // natural category and be flattened into Viajes.
-            ("Viajes", ["airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico", "aerobus", "volaris", "vivaaerobus", "american airlines", "united airlines", "delta air", "iberia", "vuelo", "flight", "holafly", "esim", "roaming", "airport", "aeropuerto", "renta de auto", "car rental"]),
-            ("Entretenimiento", ["cinemex", "cinemas wtc", "cinepolis", "cine", "teatro", "museo", "museum", "moma", "guggenheim", "summit one", "concierto", "festival", "boleto", "ticket", "show", "smoke jazz", "jazz", "nekoma", "club nocturno", "experiencia", "ocio"]),
-            ("Deporte", ["club deportivo", "club deportivo kanoa", "asdeporte", "pickleball", "padel", "pádel", "cancha", "renta de cancha", "gimnasio", "gym", "deporte", "competencia"]),
-            ("Salud", ["farmacia", "farmacias", "hospital", "clinica", "clínica", "doctor", "consultorio", "dentista", "dental", "odont", "laboratorio", "salud", "medic", "tratamiento"]),
-            ("Restaurantes y bares", ["restaurant", "rest ", "taquer", "taco", "sushi", "cafe", "café", "coffee", "starbucks", "burger", "pizza", "pub", "bar ", "comida", "food", "delivery", "didi food", "flauta", "ramen", "italian", "crepes", "cerv", "mariscos", "grill", "cocina", "parrilla", "chipotle", "doordash", "ubereats", "uber eats", "casa de tono", "espeto", "japiramen", "orinoco", "waffles"]),
+            ("Viajes", ["airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico", "aerobus", "volaris", "vivaaerobus", "avianca", "american airlines", "united airlines", "delta air", "iberia", "vuelo", "flight", "holafly", "esim", "roaming", "airport", "aeropuerto", "renta de auto", "car rental"]),
+            ("Entretenimiento", ["cinemex", "cinemas wtc", "cinepolis", "cinetec", "cineteca", "cine", "teatro", "museo", "museum", "moma", "guggenheim", "summit one", "concierto", "festival", "boleto", "ticket", "show", "smoke jazz", "jazz", "nekoma", "club nocturno", "experiencia", "ocio"]),
+            ("Deporte", ["club deportivo", "club deportivo kanoa", "asdeporte", "decathlon", "pickleball", "padel", "pádel", "cancha", "renta de cancha", "gimnasio", "gym", "deporte", "competencia"]),
+            ("Salud", ["farmacia", "farmacias", "farm san pablo", "farm guad", "hospital", "clinica", "clínica", "doctor", "consultorio", "dentista", "dental", "odont", "laboratorio", "salud", "medic", "tratamiento"]),
+            ("Restaurantes y bares", ["restaurant", "rest ", "taquer", "taco", "sushi", "cafe", "café", "cafesitio", "cafeteria", "cafetería", "coffee", "tierra garat", "starbucks", "burger", "shake shack", "pizza", "pub", "bar ", "comida", "food", "fastfood", "fastfoodrestaurant", "delivery", "rappi", "didi food", "flauta", "tortas", "pancita", "sazonjarocho", "sazon jarocho", "el globo", "panaderia", "panadería", "bakery", "pasteleria", "pastelería", "heladeria", "heladería", "neveria", "nevería", "antojitos", "fondita", "ramen", "italian", "crepes", "cerv", "mariscos", "grill", "cocina", "parrilla", "chipotle", "doordash", "ubereats", "uber eats", "casa de tono", "espeto", "japiramen", "orinoco", "waffles"]),
             ("Tiendita", ["oxxo", "7 eleven", "seven eleven", "7-eleven", "extra", "circle k", "minisuper", "mini super", "tienda de conveniencia", "convenience store", "snack"]),
             ("Despensa / supermercado", ["walmart", "superama", "soriana", "costco", "chedraui", "la comer", "city market", "sam's", "sams ", "supermercado", "grocery", "whole foods", "wholefds", "despensa", "mercado grande", "abarrotes"]),
             ("Transporte", ["uber", "didi", "cabify", "taxi", "metrobus", "metro ", "metrotap", "nyct", "nj transit", "njtransit", "nyc ferry", "subway", "mta ", "train ", "estacionamiento", "parking", "parco ", "gasolina", "pemex", "shell", "bp ", "gulf", "mobil", "caseta", "autopista", "toll", "ecobici", "transporte", "movilidad"]),

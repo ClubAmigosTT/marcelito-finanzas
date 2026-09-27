@@ -72,9 +72,12 @@ test("diagnóstico puede auditar todo el libro sin volver a subir PDFs", async (
 test("Zen solo recibe gastos canónicos y falla cerrado", async () => {
   const sections = await readFile(sectionsPath, "utf8");
   const ai = await readFile(aiPath, "utf8");
-  assert.match(sections, /store\.canonicalMovements\.filter/);
+  const models = await readFile(modelsPath, "utf8");
+  assert.match(sections, /store\.pendingClassifiableExpenseMovements/);
   assert.match(ai, /movements\.allSatisfy/);
-  assert.match(ai, /case \.cardPayment\?, \.bankTransfer\?, \.refund\?, \.credit\?/);
+  assert.match(models, /var pendingClassifiableExpenseMovements: \[Movement\][\s\S]*?canonicalMovements\.filter/);
+  assert.match(models, /reconciledMovements\.contains\(where: \{ \$0\.id == classification\.movementID \}\)/);
+  assert.match(ai, /case \.cardPayment\?, \.bankTransfer\?, \.income\?, \.refund\?, \.credit\?, \.msi\?/);
 });
 
 test("el importador nativo no tiene fallback genérico ni desbloqueo manual", async () => {
