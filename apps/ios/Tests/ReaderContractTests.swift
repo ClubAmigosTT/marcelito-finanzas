@@ -1351,6 +1351,55 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(rows.contains { abs(NSDecimalNumber(decimal: $0.amount).doubleValue) > 100_000 })
     }
 
+    func testBBVAOCRMergesStandaloneOperationDateWithTheCompleteVisualRow() {
+        // On the January-February BBVA export Vision returns FECHA OPER as a
+        // narrow box immediately beside a wider box that contains FECHA LIQ,
+        // description and the amounts. Treating the narrow box as its own row
+        // creates a false rejection and loses the operation date (16/ENE and
+        // 19/ENE become the liquidation dates 15/ENE and 18/ENE).
+        let fixtures = [
+            OCRObservationFixture(text: "Detalle de Movimientos Realizados", x: 0.02, y: 0.98, width: 0.52),
+            OCRObservationFixture(text: "FECHA", x: 0.04, y: 0.94, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.20, y: 0.94, width: 0.14),
+            OCRObservationFixture(text: "CARGOS", x: 0.60, y: 0.94, width: 0.08),
+            OCRObservationFixture(text: "ABONOS", x: 0.72, y: 0.94, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.84, y: 0.94, width: 0.08),
+
+            OCRObservationFixture(text: "15/ENE", x: 0.02, y: 0.82, width: 0.07),
+            OCRObservationFixture(text: "15/ENE FACEBK *9QF3WC5PY2", x: 0.09, y: 0.82, width: 0.40),
+            OCRObservationFixture(text: "376.02", x: 0.60, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "5,948.33", x: 0.82, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "5,915.92", x: 0.90, y: 0.82, width: 0.08),
+
+            OCRObservationFixture(text: "16/ENE", x: 0.02, y: 0.72, width: 0.07),
+            OCRObservationFixture(text: "15/ENE FACEBK *3BCXSB9PY2", x: 0.09, y: 0.72, width: 0.40),
+            OCRObservationFixture(text: "32.41", x: 0.60, y: 0.72, width: 0.08),
+            OCRObservationFixture(text: "5,915.92", x: 0.82, y: 0.72, width: 0.08),
+
+            OCRObservationFixture(text: "19/ENE", x: 0.02, y: 0.62, width: 0.07),
+            OCRObservationFixture(text: "18/ENE Google One", x: 0.09, y: 0.62, width: 0.30),
+            OCRObservationFixture(text: "59.00", x: 0.60, y: 0.62, width: 0.08),
+            OCRObservationFixture(text: "5,856.92", x: 0.82, y: 0.62, width: 0.08),
+        ]
+
+        let rows = FinanceStore.bbvaOCRRowsForTesting(
+            fixtures,
+            fileName: "BBVA febrero 2026.pdf"
+        )
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertEqual(rows.map(\.amount), [Decimal(string: "-376.02")!, Decimal(string: "-32.41")!, Decimal(string: "-59.00")!])
+        let calendar = Calendar.current
+        XCTAssertEqual(rows.map { calendar.component(.day, from: $0.date) }, [15, 16, 19])
+        XCTAssertEqual(rows.map { calendar.component(.month, from: $0.date) }, [1, 1, 1])
+
+        let diagnostics = FinanceStore.bbvaOCRDiagnosticsForTesting(
+            fixtures,
+            fileName: "BBVA febrero 2026.pdf"
+        )
+        XCTAssertEqual(diagnostics.count, 3)
+        XCTAssertTrue(diagnostics.allSatisfy(\.accepted))
+    }
+
     func testBBVAOCRRequiresCalibrationForARealMovementPage() {
         let fixtures = [
             OCRObservationFixture(text: "23/JUL", x: 0.02, y: 0.82, width: 0.10),
