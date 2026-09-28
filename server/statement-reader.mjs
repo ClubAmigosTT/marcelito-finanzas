@@ -16,7 +16,7 @@ const DEFAULT_MAX_CONCURRENT_REQUESTS = 2;
 const DEFAULT_PROVIDER_TIMEOUT_MS = 120_000;
 const DEFAULT_MAX_OUTPUT_TOKENS = 32_768;
 const TRANSACTION_CLASSIFIER_VERSION = "transaction-classifier-2026.09.08.1";
-const TRANSACTION_CLASSIFIER_PROMPT_VERSION = "expense-taxonomy-v2";
+const TRANSACTION_CLASSIFIER_PROMPT_VERSION = "expense-taxonomy-v3";
 const MIN_MULTIMODAL_AVERAGE_CONFIDENCE = 0.88;
 const MIN_MULTIMODAL_PAGE_CONFIDENCE = 0.78;
 const ZEN_HOSTS = new Set(["opencode.ai", "www.opencode.ai"]);
@@ -90,10 +90,11 @@ const CLASSIFIER_PROMPT = `Eres un clasificador de gastos personales. Recibirás
 
 Reglas obligatorias:
 - Clasifica únicamente el comercio/concepto y señales analíticas. No cambies ni repitas importes, fechas, dirección, flujo o tipo contable.
-- Usa una sola categoría principal de esta lista exacta: Restaurantes y bares, Tiendita, Despensa / supermercado, Entretenimiento, Viajes, Transporte, Deporte, Compras personales, Software y suscripciones, Salud, Club Amigos / Proyectos, Comisiones y finanzas u Otros / Por revisar.
+- Usa una sola categoría principal de esta lista exacta: Restaurantes y bares, Tiendita, Despensa / supermercado, Entretenimiento, Viajes, Transporte, Deporte, Compras personales, Software y suscripciones, Salud, ITAM, Entrenamiento, Binance (salarios), Club Amigos / Proyectos, Comisiones y finanzas u Otros / Por revisar.
 - Club Amigos / Proyectos tiene prioridad cuando el concepto o contraparte identifica claramente un proyecto, aunque el comercio normalmente corresponda a otra categoría.
 - Restaurantes y bares es comida o bebida preparada para consumo inmediato, restaurante, cafetería, bar o delivery. Tiendita es conveniencia/minisúper y compras pequeñas de paso; una compra grande de supermercado es Despensa / supermercado.
 - Viajes es vuelo, hospedaje, Airbnb, roaming/eSIM u otro servicio directamente asociado al viaje. Transporte es movilidad local, transporte público, Uber, taxi o estacionamiento. Un restaurante, Uber o entrada durante un viaje conserva su categoría natural y solo recibe la etiqueta viaje.
+- ITAM es para pagos identificables al Instituto Tecnológico Autónomo de México; Entrenamiento es para entrenamiento físico/deportivo explícito; Binance (salarios) requiere que el texto identifique tanto Binance como nómina/salario. No deduzcas estas categorías por el nombre de una persona o un descriptor ambiguo.
 - Entretenimiento es ocio, eventos, cine, clubes, museos y experiencias; Deporte es práctica, club o instalación deportiva; Software y suscripciones es SaaS, herramienta digital o membresía tecnológica; Comisiones y finanzas es únicamente costo financiero/bancario.
 - merchant debe ser un nombre corto y estable del comercio, sin referencias, RFC, autorizaciones, números de cuenta ni folios.
 - tags es un arreglo sin duplicados usando únicamente: viaje, ordinario, extraordinario, fijo, variable, personal, proyecto. Usa viaje también para una actividad o traslado que ocurrió dentro de un viaje.
@@ -683,7 +684,7 @@ const classifierExpenseKinds = new Set(["purchase", "interest", "fee", "other"])
 const classifierCategories = new Set([
   "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento", "Viajes",
   "Transporte", "Deporte", "Compras personales", "Software y suscripciones", "Salud",
-  "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar",
+  "ITAM", "Entrenamiento", "Binance (salarios)", "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar",
 ]);
 const classifierTags = new Set(["viaje", "ordinario", "extraordinario", "fijo", "variable", "personal", "proyecto"]);
 const classifierReviewCategories = new Set(["Sin categoría", "Por revisar", "Otros gastos", "Otros / Por revisar"]);

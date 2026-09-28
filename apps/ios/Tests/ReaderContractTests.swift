@@ -318,6 +318,83 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(store.movements.first?.classificationTags.contains("personal") == true)
     }
 
+    func testNewExpenseCategoriesClassifyOnlyExplicitMerchantEvidence() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let rows = [
+            Movement(date: .now, title: "INSTITUTO TECNOLOGICO AUTONOMO DE MEXICO", account: "BBVA", category: "Otros / Por revisar", amount: -2_000, flow: .expense, kind: .purchase),
+            Movement(date: .now, title: "ENTRENAMIENTO PERSONAL", account: "Amex", category: "Otros / Por revisar", amount: -800, flow: .expense, kind: .purchase),
+            Movement(date: .now, title: "BINANCE PAYROLL", account: "BBVA", category: "Otros / Por revisar", amount: -5_000, flow: .expense, kind: .purchase),
+            Movement(date: .now, title: "BINANCE", account: "BBVA", category: "Otros / Por revisar", amount: -500, flow: .expense, kind: .purchase),
+            Movement(date: .now, title: "SPEI TRANSFERENCIA A MARCELO DIAZ", account: "BBVA", category: "Transferencia", amount: -1_000, flow: .transfer, kind: .bankTransfer)
+        ]
+        store.movements = rows
+
+        XCTAssertEqual(store.applyDeterministicCategoryRules(), 4)
+        XCTAssertEqual(store.movements[0].category, "ITAM")
+        XCTAssertEqual(store.movements[1].category, "Entrenamiento")
+        XCTAssertEqual(store.movements[2].category, "Binance (salarios)")
+        XCTAssertEqual(store.movements[3].category, "Otros / Por revisar")
+        XCTAssertEqual(store.movements[4].category, "Transferencia")
+        XCTAssertEqual(store.movements[4].amount, rows[4].amount)
+        XCTAssertEqual(store.movements[4].flow, rows[4].flow)
+    }
+
+    func testTransferRecipientIsShownOnlyWhenNamedInTheDescriptor() {
+        let movement = Movement(
+            date: .now,
+            title: "PAGO TRANSF RAPIDA SPEI TRANSFERENCIA A ARACELI CASTILLO IVA REF 858573",
+            account: "Santander",
+            category: "Transferencia",
+            amount: -114,
+            flow: .transfer,
+            kind: .bankTransfer
+        )
+        XCTAssertEqual(movement.transferRecipient, "Araceli Castillo")
+        XCTAssertEqual(movement.summaryDisplayTitle, "SPEI a Araceli Castillo")
+
+        let intermediaryOnly = Movement(
+            date: .now,
+            title: "SPEI ENVIADO STP",
+            account: "BBVA",
+            category: "Transferencia",
+            amount: -500,
+            flow: .transfer,
+            kind: .bankTransfer
+        )
+        XCTAssertNil(intermediaryOnly.transferRecipient)
+        XCTAssertEqual(intermediaryOnly.summaryDisplayTitle, intermediaryOnly.title)
+    }
+
+    func testManuallyCategorizingATransferDoesNotCreateAnExpenseRule() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let transfer = Movement(
+            date: .now,
+            title: "COMERCIO TRANSFER TEST",
+            account: "BBVA",
+            category: "Transferencia",
+            amount: -100,
+            flow: .transfer,
+            kind: .bankTransfer
+        )
+        store.movements = [transfer]
+        XCTAssertTrue(store.updateCategory(for: transfer, to: "ITAM"))
+
+        let futureExpense = Movement(
+            date: .now,
+            title: transfer.title,
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -200,
+            flow: .expense,
+            kind: .purchase
+        )
+        store.movements = [futureExpense]
+        _ = store.applyDeterministicCategoryRules()
+        XCTAssertEqual(store.movements.first?.category, "Otros / Por revisar")
+    }
+
     func testManualMerchantCategoryUpdatesPeersWithoutChangingTheirFinancialFields() {
         let store = FinanceStore()
         defer { store.clearLocalData() }

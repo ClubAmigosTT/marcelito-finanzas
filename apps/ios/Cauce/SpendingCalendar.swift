@@ -821,7 +821,7 @@ struct SpendingCalendarView: View {
                     NavigationLink { MovementDetailView(movement: movement) } label: {
                         HStack {
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(movement.displayMerchant ?? movement.title).lineLimit(1)
+                                Text(movement.summaryDisplayTitle).lineLimit(1)
                                 Text("\(movement.category) · \(movement.account)").font(.caption).foregroundStyle(.secondary)
                             }
                             Spacer()
@@ -1619,7 +1619,7 @@ private struct SpendingPeriodDetailView: View {
                             } label: {
                                 VStack(alignment: .leading, spacing: 3) {
                                     HStack {
-                                        Text(movement.displayMerchant ?? movement.title).lineLimit(1)
+                                        Text(movement.summaryDisplayTitle).lineLimit(1)
                                         Spacer()
                                         Text(movement.expenseContribution, format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
                                     }
@@ -1708,7 +1708,7 @@ private struct SpendingDayDetailView: View {
                             } label: {
                                 VStack(alignment: .leading, spacing: 4) {
                                     HStack {
-                                        Text(movement.displayMerchant ?? movement.title).lineLimit(1)
+                                        Text(movement.summaryDisplayTitle).lineLimit(1)
                                         Spacer()
                                         Text(movement.expenseContribution, format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
                                     }
@@ -1724,7 +1724,7 @@ private struct SpendingDayDetailView: View {
                                     MovementDetailView(movement: movement)
                                 } label: {
                                     HStack {
-                                        Text(movement.displayMerchant ?? movement.title).lineLimit(1)
+                                        Text(movement.summaryDisplayTitle).lineLimit(1)
                                         Spacer()
                                         Text(movement.expenseContribution, format: .currency(code: "MXN").precision(.fractionLength(2))).monospacedDigit()
                                     }

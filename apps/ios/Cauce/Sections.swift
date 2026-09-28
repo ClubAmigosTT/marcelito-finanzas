@@ -8,7 +8,8 @@ import UniformTypeIdentifiers
 private let expenseCategoryOptions = [
     "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento",
     "Viajes", "Transporte", "Deporte", "Compras personales", "Software y suscripciones",
-    "Salud", "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar"
+    "Salud", "ITAM", "Entrenamiento", "Binance (salarios)",
+    "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar"
 ]
 
 private let movementCategoryOptions = ["Ingresos", "Transferencia"] + expenseCategoryOptions
@@ -120,7 +121,7 @@ struct MovementsView: View {
                                     .foregroundStyle(movement.flow.color)
                                     .font(.title3)
                                 VStack(alignment: .leading, spacing: 3) {
-                                    Text(movement.displayMerchant ?? movement.title)
+                                    Text(movement.summaryDisplayTitle)
                                         .lineLimit(1)
                                     Text(movement.category)
                                         .font(.caption.weight(.semibold))
@@ -418,6 +419,10 @@ struct MovementDetailView: View {
             } else {
                 LabeledContent("Estado", value: "Movimiento manual")
             }
+            if let recipient = currentMovement.transferRecipient {
+                LabeledContent(currentMovement.amount < 0 ? "Destinatario" : "Ordenante", value: recipient)
+                LabeledContent("Descripción bancaria", value: currentMovement.rawDescription ?? currentMovement.title)
+            }
             if let displayMerchant = currentMovement.displayMerchant, !displayMerchant.isEmpty {
                 LabeledContent("Comercio mostrado", value: displayMerchant)
             }
@@ -531,7 +536,7 @@ struct MovementDetailView: View {
                 }
             ))
         }
-        .navigationTitle(currentMovement.displayMerchant ?? currentMovement.title)
+        .navigationTitle(currentMovement.summaryDisplayTitle)
         .navigationBarTitleDisplayMode(.inline)
         .foregroundStyle(Color.marcelitoNavy)
         .scrollContentBackground(.hidden)
@@ -1172,7 +1177,7 @@ private struct ExpenseCategoryDetailView: View {
                                             .foregroundStyle(Color.marcelitoNavyMid)
                                             .frame(width: 20)
                                         VStack(alignment: .leading, spacing: 2) {
-                                            Text(movement.displayMerchant ?? movement.title)
+                                            Text(movement.summaryDisplayTitle)
                                                 .font(.subheadline.weight(.medium))
                                                 .lineLimit(2)
                                             Text(movement.date.formatted(.dateTime.day().month(.abbreviated)))

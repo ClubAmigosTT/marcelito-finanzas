@@ -33,6 +33,7 @@ import { createAuditRun } from "./audit";
 import { buildFinanceMetrics, defaultStatementKind, hasSufficientOcrQuality, isCategorizedSpendTransaction, isRealIncomeTransaction, isStatementEligibleForDashboard, isSpendTransaction, type AnalyticsPeriod, type CashFlowPoint, type ExecutiveAlert, type ProjectionMonth, type TravelTrip } from "./finance";
 import { inspectPdf, PDF_READER_VERSION } from "./pdfImport";
 import { categoryFromRules, deterministicExpenseClassification, expenseCategories, merchantKey, type CategoryRules } from "./categoryRules";
+import { transactionSummaryTitle } from "./transactionDescription";
 import { normalizeConcept, runTransactionPipeline, statementPeriodEndTimestamp, transactionPeriodKey } from "./reconciliation";
 import { prepareStoredLedger } from "./statementMigration";
 import { clearWebErrorDiagnostics, readWebErrorDiagnostics, type WebErrorDiagnostic } from "./WebErrorBoundary";
@@ -245,8 +246,8 @@ function compactMerchantName(description: string) {
     .slice(0, 46) || "Sin descripción";
 }
 
-function visibleMerchant(transaction: Pick<Transaction, "displayMerchant" | "description">) {
-  return transaction.displayMerchant?.trim() || transaction.description;
+function visibleMerchant(transaction: Transaction) {
+  return transactionSummaryTitle(transaction);
 }
 
 const pendingEnrichmentCategories = ["Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos"];

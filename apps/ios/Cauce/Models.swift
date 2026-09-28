@@ -293,6 +293,50 @@ struct Movement: Identifiable, Codable {
     /// Non-blocking merchant issue shown as “comercio por confirmar”.
     var merchantReviewReason: String?
 
+    /// Recipient or sender printed explicitly in a transfer/SPEI descriptor.
+    /// Returns nil when the row only identifies an intermediary such as STP.
+    var transferRecipient: String? {
+        let sourceTexts = [rawDescription, title, extractionEvidence?.sourceText].compactMap { $0 }
+        let genericCounterparties: Set<String> = [
+            "tercero", "terceros", "otro banco", "stp", "santander", "bbva", "banorte",
+            "banamex", "citibanamex", "mercado pago", "mercadopago", "bancoppel", "spei"
+        ]
+        let patterns = [
+            #"(?i)\btransferencia\s+a\s+(.+?)(?=\s+\b(?:iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b|\s+[-+]?\s*\$?\s*\d[\d, ]*(?:[.,]\d{2})|$)"#,
+            #"(?i)\b(?:a\s+favor\s+de|beneficiari[oa]|destinatari[oa])\s*[:#-]?\s*(.+?)(?=\s+\b(?:iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b|\s+[-+]?\s*\$?\s*\d[\d, ]*(?:[.,]\d{2})|$)"#,
+            #"(?i)\bspei\s+enviado\s+(?:a\s+)?(.+?)(?=\s+\b(?:iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b|\s+[-+]?\s*\$?\s*\d[\d, ]*(?:[.,]\d{2})|$)"#
+        ]
+        for source in sourceTexts {
+            for pattern in patterns {
+                guard let regex = try? NSRegularExpression(pattern: pattern),
+                      let match = regex.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)),
+                      match.numberOfRanges > 1,
+                      let range = Range(match.range(at: 1), in: source) else { continue }
+                var candidate = String(source[range])
+                    .replacingOccurrences(of: #"(?i)\b(?:iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b.*$"#, with: "", options: .regularExpression)
+                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+                if candidate.lowercased().hasPrefix("a ") { candidate = String(candidate.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines) }
+                guard !candidate.isEmpty, candidate.count <= 80,
+                      !genericCounterparties.contains(candidate.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()) else { continue }
+                return candidate.capitalized
+            }
+        }
+        return nil
+    }
+
+    /// Concise list label that surfaces the person/company on outbound and
+    /// inbound SPEI rows without replacing the original descriptor.
+    var summaryDisplayTitle: String {
+        guard let transferRecipient else { return displayMerchant ?? title }
+        let source = [title, rawDescription, extractionEvidence?.sourceText]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let rail = source.contains("spei") ? "SPEI" : "Transferencia"
+        return "\(rail) \(amount < 0 ? "a" : "de") \(transferRecipient)"
+    }
+
     /// Signed contribution to net spending. Refunds reduce spend on their
     /// posting date; neither their identity nor their original amount changes.
     var expenseContribution: Decimal { kind == .refund ? -amount : abs(amount) }
@@ -970,7 +1014,7 @@ final class FinanceStore {
     /// survive a PDF re-import, whose row UUID is intentionally new.
     private let manualCategoryOverridesKey = "marcelito.categoryOverrides.v1"
     private let categoryTaxonomyVersionKey = "marcelito.categoryTaxonomyVersion.v1"
-    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.5"
+    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.6"
     private static let pendingCategoryNames: Set<String> = [
         "Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos",
         "Alimentos", "Comidas", "Servicios", "Compras", "Finanzas",
@@ -4757,7 +4801,7 @@ final class FinanceStore {
         // Very short keys are shown as individual review rows in Gastos and
         // must not become broad merchant rules (for example, two unrelated
         // two-character OCR fragments).
-        if key.count >= 3 {
+        if key.count >= 3, isClassifiableExpenseForCategory(movements[index]) {
             var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
             var overrides = UserDefaults.standard.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
             // The review bucket must remain temporary. Persist final manual
@@ -16633,6 +16677,9 @@ final class FinanceStore {
 
         let rules: [(String, [String])] = [
             // Project identity is always evaluated first and is handled below.
+            ("ITAM", ["itam", "instituto tecnologico autonomo de mexico"]),
+            ("Entrenamiento", ["entrenamiento", "personal training", "entrenador", "trainer"]),
+            ("Binance (salarios)", ["binance salarios", "binance salario", "binance nomina", "binance nominas", "binance payroll"]),
             ("Comisiones y finanzas", ["comision", "interés", "iva com", "cajero", "anualidad", "cargo bancario", "seguro financiero", "financiera", "finanzas"]),
             ("Software y suscripciones", ["canva", "cursor", "google one", "google cloud", "google storage", "youtube premium", "apple music", "adobe", "microsoft 365", "microsoft office", "suscripcion", "suscripción", "saas", "software", "icloud", "dropbox", "apple.com/bill"]),
             // A destination alone is only a secondary travel tag. Otherwise

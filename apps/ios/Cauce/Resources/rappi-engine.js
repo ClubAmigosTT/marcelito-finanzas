@@ -187,6 +187,7 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
   const entertainmentMarkers = ["cinemex", "cinemas wtc", "cinepolis", "cinetec", "cineteca", "cine", "teatro", "museo", "museum", "moma", "guggenheim", "summit one", "concierto", "festival", "boleto", "ticket", "show", "smoke jazz", "jazz", "nekoma", "club nocturno", "experiencia", "ocio"];
   const sportMarkers = ["club deportivo", "club deportivo kanoa", "asdeporte", "decathlon", "pickleball", "padel", "pádel", "cancha", "renta de cancha", "gimnasio", "gym", "deporte", "competencia"];
   const healthMarkers = ["farmacia", "farmacias", "farm san pablo", "farm guad", "hospital", "clinica", "clínica", "doctor", "consultorio", "dentista", "dental", "odont", "laboratorio", "salud", "medic", "medico", "medical", "tratamiento"];
+  const trainingMarkers = ["entrenamiento", "personal training", "entrenador", "trainer"];
   const restaurantMarkers = ["restaurant", "rest ", "taquer", "taco", "sushi", "cafe", "cafesitio", "cafeteria", "coffee", "tierra garat", "starbucks", "burger", "shake shack", "pizza", "pub", "bar ", "comida", "food", "fastfood", "fastfoodrestaurant", "delivery", "rappi", "didi food", "flauta", "tortas", "pancita", "sazonjarocho", "sazon jarocho", "el globo", "panaderia", "bakery", "pasteleria", "heladeria", "neveria", "antojitos", "fondita", "ramen", "italian", "crepes", "cerv", "mariscos", "grill", "cocina", "parrilla", "chipotle", "doordash", "ubereats", "uber eats", "casa de tono", "espeto", "japiramen", "orinoco", "waffles"];
   const convenienceMarkers = ["oxxo", "7 eleven", "seven eleven", "7-eleven", "extra", "circle k", "minisuper", "mini super", "tienda de conveniencia", "convenience store", "snack", "abarrotes pequeno"];
   const groceryMarkers = ["walmart", "superama", "soriana", "costco", "chedraui", "la comer", "city market", "sam s", "sams ", "supermercado", "grocery", "whole foods", "wholefds", "despensa", "abarrotes", "mercado grande"];
@@ -205,6 +206,18 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
       category = "Club Amigos / Proyectos";
       reason = "El concepto identifica un gasto de proyecto.";
       confidence = 0.98;
+    } else if (containsAny(text, ["itam", "instituto tecnologico autonomo de mexico"])) {
+      category = "ITAM";
+      reason = "El concepto identifica un pago al ITAM.";
+      confidence = 0.98;
+    } else if (containsAny(text, trainingMarkers)) {
+      category = "Entrenamiento";
+      reason = "El concepto identifica un gasto de entrenamiento.";
+      confidence = 0.94;
+    } else if (containsAny(text, ["binance salarios", "binance salario", "binance nomina", "binance nominas", "binance payroll"])) {
+      category = "Binance (salarios)";
+      reason = "El descriptor identifica Binance y nómina/salarios.";
+      confidence = 0.97;
     } else if (containsAny(text, financeMarkers)) {
       category = "Comisiones y finanzas";
       reason = "El concepto describe un costo financiero o bancario.";

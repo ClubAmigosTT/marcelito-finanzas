@@ -21,6 +21,14 @@ test("proyecto tiene prioridad sobre el comercio", () => {
   assert.deepEqual(project?.tags.filter((tag) => tag === "proyecto"), ["proyecto"]);
 });
 
+test("agrega categorías ITAM y entrenamiento; Binance requiere señal salarial explícita", () => {
+  assert.equal(deterministicExpenseClassification("INSTITUTO TECNOLÓGICO AUTÓNOMO DE MÉXICO")?.category, "ITAM");
+  assert.equal(deterministicExpenseClassification("Entrenamiento personal")?.category, "Entrenamiento");
+  assert.equal(deterministicExpenseClassification("BINANCE PAYROLL")?.category, "Binance (salarios)");
+  assert.equal(deterministicExpenseClassification("BINANCE")?.category, "Otros / Por revisar");
+  assert.equal(deterministicExpenseClassification("BINANCE PAYROLL", "income", "income")?.category, undefined);
+});
+
 test("pagos, transferencias, ingresos, reembolsos y MSI quedan fuera de categorías de gasto", () => {
   for (const [flow, kind] of [
     ["debt", "cardPayment"],
