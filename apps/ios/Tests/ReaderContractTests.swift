@@ -622,7 +622,7 @@ final class ReaderContractTests: XCTestCase {
             The Platinum Credit Card
             Límite de Crédito Límite Disponible
             a Agosto 27,2026 10,000.00 MN 9,000.00 MN
-            23,150.88 - 32,744.61 + 950.00 = 950.00 300.00
+            23,150.88 - 100.00 + 950.00 = 24,000.88 300.00
             Nuevas transacciones: 900.00
             Total Nuevos Cargos: 950.00
             MARCELO ANDRES DIAZ SANCHEZ 27-Ago-2026 27-Sep-2026
@@ -668,6 +668,72 @@ final class ReaderContractTests: XCTestCase {
             summary: snapshot.summary,
             movements: snapshot.movements
         )
+        XCTAssertEqual(reconciliation.status, .valid, reconciliation.reason ?? "")
+    }
+
+    func testAmexSplitDatesAndFinancialAdjustmentsReconcile() throws {
+        let text = """
+        American Express
+        Período de Facturación Del 28 de Agosto al 27 de Septiembre de 2026
+        1,000.00 - 110.00 + 260.00 = 1,150.00 50.00
+        Nuevas transacciones: 250.00
+        Interés Financiero: 5.00
+        Comisiones: 5.00
+        Fecha y Detalle de las operaciones Importe en MN.
+        1 de
+        Septiembre
+        GRACIAS POR SU PAGO EN LINEA 100.00
+        CR
+        4 de Septiembre METROTAPAMEX 5.00 REST PUERTO GETARIA 45.00
+        2 de
+        Septiembre
+        MERCADO UNO 100.00
+        Total de las transacciones en $ de MARCELO ANDRES DIAZ SANCHEZ 150.00
+        Transacciones financieras aplicables a la Cuenta Básica
+        3 de
+        Septiembre
+        SALDO PENDIENTE POR CANCELACIÓN DE PLAN 100.00
+        3 de
+        Septiembre
+        INTERÉS FINANCIERO 5.00
+        3 de
+        Septiembre
+        IVA APLICABLE 5.00
+        3 de
+        Septiembre
+        BONO POR OFERTA DE ADQUISICIÓN 10.00
+        CR
+        Total de las transacciones y comisiones 10.00 CR
+        """
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "amex-septiembre.pdf",
+            sourceHint: "Amex"
+        )
+        let reconciliation = FinanceStore.reconcileStatementForTesting(
+            kind: .card,
+            summary: snapshot.summary,
+            movements: snapshot.movements
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 8)
+        XCTAssertEqual(snapshot.summary?.paymentsAndCredits, Decimal(string: "110.00"))
+        XCTAssertEqual(snapshot.summary?.newTransactions, Decimal(string: "250.00"))
+        XCTAssertEqual(snapshot.summary?.interest, Decimal(string: "5.00"))
+        XCTAssertNil(snapshot.summary?.payments)
+        XCTAssertNil(snapshot.summary?.credits)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .cardPayment }.count, 1)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .credit }.count, 1)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .msi }.count, 1)
+        let sharedDateRows = snapshot.movements.filter {
+            $0.title.contains("METROTAPAMEX") || $0.title.contains("REST PUERTO GETARIA")
+        }.sorted { $0.amount > $1.amount }
+        XCTAssertEqual(sharedDateRows.count, 2)
+        XCTAssertEqual(sharedDateRows.map(\.amount), [-5, -45])
+        XCTAssertEqual(sharedDateRows[0].date, sharedDateRows[1].date)
+        let planCancellation = try XCTUnwrap(snapshot.movements.first { $0.kind == .msi })
+        XCTAssertEqual(planCancellation.extractionEvidence?.selectedColumn, "FINANCIAL_ADJUSTMENT")
+        XCTAssertFalse(planCancellation.foreignCurrency)
         XCTAssertEqual(reconciliation.status, .valid, reconciliation.reason ?? "")
     }
 
@@ -1237,7 +1303,7 @@ final class ReaderContractTests: XCTestCase {
         The Platinum Credit Card
         Límite de Crédito Límite Disponible
         a Agosto 27,2026 10,000.00 MN 9,000.00 MN
-        23,150.88 - 32,744.61 + 950.00 = 950.00 300.00
+        23,150.88 - 100.00 + 950.00 = 24,000.88 300.00
         Nuevas transacciones: 900.00
         Total Nuevos Cargos: 950.00
         Fecha y Detalle de las operaciones Importe en MN.

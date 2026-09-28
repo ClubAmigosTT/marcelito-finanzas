@@ -953,7 +953,7 @@ final class FinanceStore {
     /// device. Keep this token separate from `readerVersion`: the public
     /// corpus certificate describes the reader contract, while this token is
     /// an operational cache/replay invalidation for a shipped build.
-    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.26.3"
+    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.28.1"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4110,12 +4110,22 @@ final class FinanceStore {
         let hasReadableConcept = movement.title.rangeOfCharacter(from: .letters) != nil
         let hasEvidenceBackedRappiReviewConcept = Self.isEvidenceBackedRappiReviewConcept(movement)
         let isKnownSantanderMerchant = Self.isEvidenceBackedSantanderMerchant(movement)
+        let normalizedTitle = movement.title.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: Locale(identifier: "es_MX")
+        )
+        let isAmexPlanCancellation = movement.account.localizedCaseInsensitiveCompare("Amex") == .orderedSame
+            && movement.kind == .msi
+            && normalizedTitle.contains("saldo pendiente por cancelacion de plan")
+            && movement.extractionEvidence?.method == "pdf-text"
+            && movement.extractionEvidence?.selectedColumn == "FINANCIAL_ADJUSTMENT"
         guard movement.amount != 0,
               movement.title.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3,
               (hasReadableConcept || hasEvidenceBackedRappiReviewConcept),
               (!Self.isAdministrativeTitle(movement.title)
                || Self.isSupportedScreenshotDescriptor(movement)
-               || isKnownSantanderMerchant) else { return false }
+               || isKnownSantanderMerchant
+               || isAmexPlanCancellation) else { return false }
         switch movement.flow {
         case .income:
             guard movement.amount > 0 else { return false }
@@ -5492,7 +5502,8 @@ final class FinanceStore {
         // sections. Keep those rows in `charges` so “Total Nuevos Cargos” can
         // still reconcile, but never let them distort the section subtotals.
         let sectionRows = validRows.filter { movement in
-            ![.msi, .interest, .fee, .cardPayment, .bankTransfer].contains(movementKind(movement))
+            movement.extractionEvidence?.selectedColumn != "FINANCIAL_ADJUSTMENT"
+                && ![.msi, .interest, .fee, .cardPayment, .bankTransfer].contains(movementKind(movement))
         }
         let domesticCharges = sectionRows.filter { isSpend($0) && !$0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let foreignCharges = sectionRows.filter { isSpend($0) && $0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
@@ -5639,12 +5650,17 @@ final class FinanceStore {
             // perfectly reconciled PDF whenever the MSI schedule is present.
             if let expectedNewTransactions = summary.newTransactions {
                 // `Nuevas transacciones` is the current-period purchase
-                // subtotal.  Keep MSI, interest, fees and payments out of this
-                // comparison so the statement's separate sections cannot
-                // inflate the subtotal (and avoid relying on a scope-local
-                // `regular` collection that is not available here).
+                // subtotal. Keep future MSI schedules, interest, fees and
+                // payments out, but include Amex plan-cancellation balances:
+                // those are explicitly included in the issuer's new-
+                // transactions figure while remaining outside the domestic
+                // purchase subtotal and real-spend aggregates.
                 let regularTransactions = validRows
-                    .filter { movementKind($0) == .purchase }
+                    .filter { movement in
+                        movementKind(movement) == .purchase
+                            || (movementKind(movement) == .msi
+                                && movement.extractionEvidence?.selectedColumn == "FINANCIAL_ADJUSTMENT")
+                    }
                     .reduce(Decimal(0)) { $0 + absolute($1.amount) }
                 if absolute(regularTransactions - absolute(expectedNewTransactions)) > tolerance {
                     mismatches.append("nuevas transacciones: extraído \(regularTransactions) vs declarado \(absolute(expectedNewTransactions))")
@@ -9639,6 +9655,20 @@ final class FinanceStore {
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "\u{00A0}", with: " ")
 
+        // Some Amex statement versions place the day and month in separate
+        // PDF text objects (`2 de` followed by `Septiembre`). Rejoin only
+        // this known date shape before identifying transaction boundaries;
+        // otherwise every following row can be absorbed into the preceding
+        // operation and the selectable-text reader falls back to partial OCR.
+        let splitSpanishDate = #"(?im)(?<![A-Za-z0-9])(\d{1,2}\s+de)[ \t]*\n[ \t]*(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\b"#
+        if let regex = try? NSRegularExpression(pattern: splitSpanishDate) {
+            value = regex.stringByReplacingMatches(
+                in: value,
+                range: NSRange(location: 0, length: (value as NSString).length),
+                withTemplate: "$1 $2"
+            )
+        }
+
         // Match complete markers/tokens and record their start positions. A
         // previous zero-width replacement implementation could make Swift's
         // regex engine revisit an already separated line and change valid
@@ -10257,8 +10287,58 @@ final class FinanceStore {
         func flush() {
             guard !pending.isEmpty else { return }
             let original = pending
+            let originalPage = rowPage
             pending = ""
-            let label = [1: "NACIONALES_PAGOS_CREDITOS", 2: "MONEDA_EXTRANJERA", 3: "MSI"][section] ?? "FUERA_DE_SECCION"
+
+            // Amex can vertically merge the date cell for adjacent operations.
+            // PDFKit then returns `merchant A amount merchant B amount` under
+            // one date. Split only when a complete amount is followed by a
+            // second merchant-like description and another amount; both rows
+            // inherit the date that the PDF visibly shares across that cell.
+            if let dateMatch = firstMatch(in: original, regex: dateRegex) {
+                let originalNSString = original as NSString
+                let bodyStart = dateMatch.range.upperBound
+                let bodyRange = NSRange(location: bodyStart, length: originalNSString.length - bodyStart)
+                let amounts = moneyRegex.matches(in: original, range: bodyRange)
+                if amounts.count > 1 {
+                    for index in 0..<(amounts.count - 1) {
+                        let amountEnd = amounts[index].range.upperBound
+                        let nextAmountStart = amounts[index + 1].range.location
+                        guard amountEnd < nextAmountStart else { continue }
+                        let gap = originalNSString.substring(
+                            with: NSRange(location: amountEnd, length: nextAmountStart - amountEnd)
+                        )
+                        let creditPrefix = try? NSRegularExpression(pattern: #"(?i)^\s*CR\b\s*"#)
+                        let creditRange = creditPrefix?.firstMatch(
+                            in: gap,
+                            range: NSRange(location: 0, length: (gap as NSString).length)
+                        )?.range
+                        let descriptionStart = amountEnd + (creditRange?.length ?? 0)
+                        guard descriptionStart < nextAmountStart else { continue }
+                        let descriptor = originalNSString.substring(
+                            with: NSRange(location: descriptionStart, length: nextAmountStart - descriptionStart)
+                        ).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let descriptorWords = descriptor.split(whereSeparator: \.isWhitespace)
+                            .filter { $0.contains(where: \.isLetter) }
+                        guard descriptorWords.count >= 2 else { continue }
+
+                        let datePrefix = originalNSString.substring(to: dateMatch.range.upperBound)
+                        let firstRow = originalNSString.substring(to: descriptionStart)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        let continuedRow = datePrefix + " " + originalNSString.substring(from: descriptionStart)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        pending = firstRow
+                        rowPage = originalPage
+                        flush()
+                        pending = continuedRow
+                        rowPage = originalPage
+                        flush()
+                        rowPage = originalPage
+                        return
+                    }
+                }
+            }
+            let label = [1: "NACIONALES_PAGOS_CREDITOS", 2: "MONEDA_EXTRANJERA", 3: "MSI", 4: "FINANCIAL_ADJUSTMENT"][section] ?? "FUERA_DE_SECCION"
             var reason = "amex.date-invalid"
             var selected: Decimal?
             var tokens: [String] = []
@@ -10307,16 +10387,29 @@ final class FinanceStore {
             let payment = lower.hasPrefix("gracias por su pago")
             reason = "amex.payment-without-credit-marker"
             guard !payment || credit else { return }
-            let kind: MovementKind = payment ? .cardPayment : credit ? .credit : section == 3 ? .msi : .purchase
+            let planCancellation = section == 4 && lower.contains("saldo pendiente por cancelacion de plan")
+            let financialFee = section == 4 && (lower.contains("iva aplicable") || lower.contains("servicios de facturacion"))
+            let kind: MovementKind = payment ? .cardPayment
+                : credit ? .credit
+                : lower.contains("interes financiero") ? .interest
+                : financialFee ? .fee
+                : section == 3 || planCancellation ? .msi
+                : .purchase
             let flow: FlowKind = payment ? .debt : credit ? .income : .expense
             let signed = credit && !payment ? amount : -amount
             reason = "amex.mxn-cell-verified; kind=\(kind.rawValue)"
             result.append(Movement(date: date, title: title, account: "Amex",
                 category: category(for: lower, flow: flow), amount: signed, flow: flow,
-                kind: kind, foreignCurrency: section == 2 || Self.hasForeignCurrency(in: original.lowercased()),
+                kind: kind,
+                foreignCurrency: section == 2 || (section != 4 && Self.hasForeignCurrency(in: original.lowercased())),
                 extractionEvidence: MovementExtractionEvidence(method: "pdf-text", page: rowPage,
                     confidence: 1, sourceText: String(original.prefix(500)), selectedColumn: label,
-                    selectedAmount: amount, selectionReason: reason)))
+                    selectedAmount: amount,
+                    selectionReason: planCancellation
+                        ? "ajuste financiero Amex: saldo de plan cancelado, separado de compras nacionales y de gasto real"
+                        : financialFee
+                            ? "ajuste financiero Amex: IVA/comisión identificado por descripción"
+                            : reason)))
             accepted = true
         }
         for raw in structured.components(separatedBy: .newlines) {
@@ -10328,8 +10421,15 @@ final class FinanceStore {
             if lower.contains("fecha y detalle de las operaciones") {
                 flush(); if section == 0 { section = 1 }; tableOpen = true; continue
             }
-            if lower.contains("total de las transacciones en") { flush(); section = 2; continue }
-            if lower.contains("total de transacciones en moneda extranjera") { flush(); section = 0; continue }
+            if lower.contains("transacciones financieras aplicables a la cuenta") {
+                flush(); section = 4; tableOpen = true; continue
+            }
+            if lower.contains("total de las transacciones en") { flush(); section = 2; tableOpen = true; continue }
+            if lower.contains("total de transacciones en moneda extranjera") { flush(); section = 0; tableOpen = false; continue }
+            if lower.contains("total de las transacciones y comisiones")
+                || lower.contains("total de iva sobre transacciones y comisiones") {
+                flush(); section = 0; tableOpen = false; continue
+            }
             if lower.contains("transacciones de meses sin intereses") { flush(); section = 3; tableOpen = true; continue }
             if lower.contains("total de meses sin intereses") || lower.contains("resumen de meses sin intereses")
                 || lower.contains("consolidado de compras") || lower.contains("total de plan de meses") {
@@ -15742,10 +15842,33 @@ final class FinanceStore {
                 return parseAmount(String(normalized[valueRange]))
             }
             summary.previousBalance = equationValue(1)
+            summary.paymentsAndCredits = equationValue(2)
             summary.newCharges = equationValue(3)
             summary.statementBalance = equationValue(4)
             summary.paymentForNoInterest = equationValue(4)
             summary.minimumPayment = equationValue(5)
+
+            // The equation is the issuer's combined payments-and-credits
+            // control. Generic nearby-label matching can mistake its opening
+            // balance for both payments and interest; keep only separately
+            // labelled amounts for those fields.
+            summary.payments = nil
+            summary.credits = nil
+            func amexLineAmount(_ label: String) -> Decimal? {
+                let labelPattern = label
+                    .split(separator: " ")
+                    .map { NSRegularExpression.escapedPattern(for: String($0)) }
+                    .joined(separator: #"\s+"#)
+                let amountPattern = #"(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}"#
+                guard let regex = try? NSRegularExpression(
+                    pattern: #"(?im)^\s*"# + labelPattern + #"\s*:\s*\$?\s*("# + amountPattern + #")(?!\d)"#
+                ), let match = regex.firstMatch(in: normalized, range: range),
+                   let amountRange = Range(match.range(at: 1), in: normalized) else { return nil }
+                return parseAmount(String(normalized[amountRange]))
+            }
+            summary.newTransactions = amexLineAmount("nuevas transacciones") ?? summary.newTransactions
+            summary.interest = amexLineAmount("interes financiero")
+            summary.fees = amexLineAmount("comisiones") ?? summary.fees
             hasValue = true
         }
         // Prefer the issuer's explicit total rows, which may appear after
