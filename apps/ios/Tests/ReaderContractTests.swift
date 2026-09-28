@@ -398,6 +398,41 @@ final class ReaderContractTests: XCTestCase {
         ))
     }
 
+    func testCompletedCanonicalRebuildKeepsNormalizedReaderMarkerAcrossLaunches() throws {
+        let suiteName = "marcelito.reader-rebuild-marker-test.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertTrue(FinanceStore.needsReaderNormalization(
+            loadedAtomicEnvelope: true,
+            storedReaderVersion: nil,
+            currentReaderVersion: FinanceStore.readerVersion
+        ))
+
+        FinanceStore.recordCanonicalRebuildCompletion(in: defaults)
+
+        XCTAssertEqual(
+            defaults.string(forKey: "marcelito.ledger.normalizedReaderVersion.v1"),
+            FinanceStore.readerVersion,
+            "A successful replay must persist the marker checked during the next launch"
+        )
+        XCTAssertNotNil(
+            defaults.string(forKey: "marcelito.extractionReplayVersion.v1"),
+            "The extraction replay generation must be committed with the rebuild"
+        )
+        XCTAssertFalse(FinanceStore.needsReaderNormalization(
+            loadedAtomicEnvelope: true,
+            storedReaderVersion: defaults.string(forKey: "marcelito.ledger.normalizedReaderVersion.v1"),
+            currentReaderVersion: FinanceStore.readerVersion
+        ))
+        XCTAssertFalse(FinanceStore.needsCanonicalRebuild(
+            completed: defaults.bool(forKey: "marcelito.canonicalRebuild.v1"),
+            completedReaderVersion: defaults.string(forKey: "marcelito.canonicalRebuild.readerVersion.v1"),
+            currentReaderVersion: FinanceStore.readerVersion,
+            hasSources: true
+        ))
+    }
+
     func testDuplicatePhysicalStatementDoesNotBlockCompletedRebuild() {
         XCTAssertEqual(
             FinanceStore.effectiveRebuildExpectedCountForTesting(raw: 25, statementCount: 24),

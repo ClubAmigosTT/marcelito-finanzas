@@ -69,7 +69,8 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
   assert.ok(migrationBlock, "la migración de lector debe dejar una señal explícita");
   assert.doesNotMatch(migrationBlock, /normalizeStoredLedger\(\)/);
   assert.doesNotMatch(migrationBlock, /\bpersist\(/);
-  assert.match(migrationBlock, /defaults\.set\(false, forKey: canonicalRebuildKey\)/);
+  assert.match(migrationBlock, /defaults\.set\(false, forKey: (?:Self\.)?canonicalRebuildKey\)/);
+  assert.match(models, /static func recordCanonicalRebuildCompletion\(in defaults: UserDefaults\)[\s\S]*normalizedLedgerReaderVersionKey/);
   assert.match(models, /guard !canonicalRebuildPending else \{ return false \}/);
   assert.match(app, /phase == \.active/);
   assert.doesNotMatch(app, /phase == \.active[\s\S]*?runAutomaticAuditIfNeeded/);

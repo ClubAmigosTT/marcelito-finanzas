@@ -977,11 +977,11 @@ final class FinanceStore {
         "Educación", "Hogar", "Mascotas"
     ]
     private let numericRepairKey = "marcelito.numericRepair.v1"
-    private let canonicalRebuildKey = "marcelito.canonicalRebuild.v1"
-    private let canonicalRebuildReaderVersionKey = "marcelito.canonicalRebuild.readerVersion.v1"
+    private static let canonicalRebuildKey = "marcelito.canonicalRebuild.v1"
+    private static let canonicalRebuildReaderVersionKey = "marcelito.canonicalRebuild.readerVersion.v1"
     private let canonicalRebuildExpectedCountKey = "marcelito.canonicalRebuild.expectedCount.v1"
-    private let extractionReplayVersionKey = "marcelito.extractionReplayVersion.v1"
-    private let normalizedLedgerReaderVersionKey = "marcelito.ledger.normalizedReaderVersion.v1"
+    private static let extractionReplayVersionKey = "marcelito.extractionReplayVersion.v1"
+    private static let normalizedLedgerReaderVersionKey = "marcelito.ledger.normalizedReaderVersion.v1"
     private let ledgerEnvelopeKey = "marcelito.ledger.active.v1"
     private let ledgerBackupKey = "marcelito.ledger.backup.v1"
     private let rebuildStateKey = "marcelito.ledger.rebuildState.v1"
@@ -1668,6 +1668,25 @@ final class FinanceStore {
         return !completed || completedReaderVersion != currentReaderVersion
     }
 
+    /// A rebuild is only durable once the normalized-reader marker is saved
+    /// alongside the canonical and extraction replay markers. The launch
+    /// migration check uses this marker to avoid invalidating a completed
+    /// rebuild after the next process restart.
+    static func recordCanonicalRebuildCompletion(in defaults: UserDefaults) {
+        defaults.set(true, forKey: canonicalRebuildKey)
+        defaults.set(readerVersion, forKey: canonicalRebuildReaderVersionKey)
+        defaults.set(extractionReplayVersion, forKey: extractionReplayVersionKey)
+        defaults.set(readerVersion, forKey: normalizedLedgerReaderVersionKey)
+    }
+
+    static func needsReaderNormalization(
+        loadedAtomicEnvelope: Bool,
+        storedReaderVersion: String?,
+        currentReaderVersion: String
+    ) -> Bool {
+        !loadedAtomicEnvelope || storedReaderVersion != currentReaderVersion
+    }
+
     /// Accounting acceptance is intentionally independent from expense
     /// categorisation. A row can be uncategorised and still be numerically
     /// trustworthy; conversely, a perfectly categorised OCR row is not safe
@@ -1976,7 +1995,7 @@ final class FinanceStore {
             raw: rawExpectedRebuildCount,
             statementCount: statementCount
         )
-        let missingRebuiltStatements = UserDefaults.standard.bool(forKey: canonicalRebuildKey)
+        let missingRebuiltStatements = UserDefaults.standard.bool(forKey: Self.canonicalRebuildKey)
             && expectedRebuildCount > 0
             && reconstructedStatementCount < expectedRebuildCount
         let canonicalGross = eligibleMovements.filter(isSpend).reduce(Decimal(0)) { $0 + absolute($1.amount) }
@@ -4654,17 +4673,21 @@ final class FinanceStore {
         // on every cold start made opening the app compete with SwiftUI for
         // the main thread. Keep a one-time migration marker for old builds,
         // then defer any expensive repair to the explicit refresh action.
-        let normalizedReaderVersion = defaults.string(forKey: normalizedLedgerReaderVersionKey)
+        let normalizedReaderVersion = defaults.string(forKey: Self.normalizedLedgerReaderVersionKey)
         let hasStoredSources = !statements.isEmpty || !storedPDFURLs.isEmpty
-        if !loadedAtomicEnvelope || normalizedReaderVersion != Self.readerVersion {
+        if Self.needsReaderNormalization(
+            loadedAtomicEnvelope: loadedAtomicEnvelope,
+            storedReaderVersion: normalizedReaderVersion,
+            currentReaderVersion: Self.readerVersion
+        ) {
             if hasStoredSources {
                 // Older builds may have persisted administrative PDF text as
                 // movements. Quarantine that snapshot immediately, but leave
                 // the expensive parse/dedupe/matching pass to the explicit
                 // rebuild so cold launch can render its first frame quickly.
-                defaults.set(false, forKey: canonicalRebuildKey)
-                defaults.removeObject(forKey: canonicalRebuildReaderVersionKey)
-                defaults.removeObject(forKey: normalizedLedgerReaderVersionKey)
+                defaults.set(false, forKey: Self.canonicalRebuildKey)
+                defaults.removeObject(forKey: Self.canonicalRebuildReaderVersionKey)
+                defaults.removeObject(forKey: Self.normalizedLedgerReaderVersionKey)
                 DiagnosticsRecorder.record(
                     stage: "store.migration.pending",
                     message: "Se detectó un libro de una versión anterior; la reconstrucción canónica quedó pendiente."
@@ -4672,7 +4695,7 @@ final class FinanceStore {
             } else {
                 // A fresh/empty install has nothing to migrate. Persist only
                 // this tiny marker; never serialize a large ledger here.
-                defaults.set(Self.readerVersion, forKey: normalizedLedgerReaderVersionKey)
+                defaults.set(Self.readerVersion, forKey: Self.normalizedLedgerReaderVersionKey)
             }
         }
         // A reader fix can be shipped with the same certified reader contract
@@ -4680,17 +4703,17 @@ final class FinanceStore {
         // on the device.  The old build had no replay marker, so this is the
         // migration that turns the stale cards into a real extraction pass;
         // no upload is required from the user.
-        let storedExtractionReplayVersion = defaults.string(forKey: extractionReplayVersionKey)
+        let storedExtractionReplayVersion = defaults.string(forKey: Self.extractionReplayVersionKey)
         if hasStoredSources && storedExtractionReplayVersion != Self.extractionReplayVersion {
-            defaults.set(false, forKey: canonicalRebuildKey)
-            defaults.removeObject(forKey: canonicalRebuildReaderVersionKey)
-            defaults.removeObject(forKey: normalizedLedgerReaderVersionKey)
+            defaults.set(false, forKey: Self.canonicalRebuildKey)
+            defaults.removeObject(forKey: Self.canonicalRebuildReaderVersionKey)
+            defaults.removeObject(forKey: Self.normalizedLedgerReaderVersionKey)
             DiagnosticsRecorder.record(
                 stage: "extraction.replay.pending",
                 message: "Se invalidó la extracción guardada para repetirla con la revisión \(Self.extractionReplayVersion)."
             )
         } else if !hasStoredSources {
-            defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
+            defaults.set(Self.extractionReplayVersion, forKey: Self.extractionReplayVersionKey)
         }
         refreshCanonicalRebuildStatus()
         DiagnosticsRecorder.record(
@@ -4998,11 +5021,11 @@ final class FinanceStore {
         defaults.removeObject(forKey: manualCategoryOverridesKey)
         defaults.removeObject(forKey: categoryTaxonomyVersionKey)
         defaults.removeObject(forKey: numericRepairKey)
-        defaults.removeObject(forKey: canonicalRebuildKey)
-        defaults.removeObject(forKey: canonicalRebuildReaderVersionKey)
+        defaults.removeObject(forKey: Self.canonicalRebuildKey)
+        defaults.removeObject(forKey: Self.canonicalRebuildReaderVersionKey)
         defaults.removeObject(forKey: canonicalRebuildExpectedCountKey)
-        defaults.removeObject(forKey: extractionReplayVersionKey)
-        defaults.removeObject(forKey: normalizedLedgerReaderVersionKey)
+        defaults.removeObject(forKey: Self.extractionReplayVersionKey)
+        defaults.removeObject(forKey: Self.normalizedLedgerReaderVersionKey)
         defaults.removeObject(forKey: ledgerEnvelopeKey)
         defaults.removeObject(forKey: ledgerBackupKey)
         defaults.removeObject(forKey: rebuildStateKey)
@@ -5050,7 +5073,7 @@ final class FinanceStore {
         let defaults = UserDefaults.standard
         let hasSources = !statements.isEmpty || !storedPDFURLs.isEmpty
         let extractionReplayPending = hasSources
-            && defaults.string(forKey: extractionReplayVersionKey) != Self.extractionReplayVersion
+            && defaults.string(forKey: Self.extractionReplayVersionKey) != Self.extractionReplayVersion
         // A statement imported after the last rebuild can still carry an
         // older reader revision. Treat that as a rebuild trigger even when
         // the previous rebuild was marked complete.
@@ -5062,8 +5085,8 @@ final class FinanceStore {
             pending = true
         } else {
             pending = Self.needsCanonicalRebuild(
-            completed: defaults.bool(forKey: canonicalRebuildKey),
-            completedReaderVersion: defaults.string(forKey: canonicalRebuildReaderVersionKey),
+            completed: defaults.bool(forKey: Self.canonicalRebuildKey),
+            completedReaderVersion: defaults.string(forKey: Self.canonicalRebuildReaderVersionKey),
             currentReaderVersion: Self.readerVersion,
             hasSources: hasSources
             )
@@ -5097,7 +5120,7 @@ final class FinanceStore {
         movements = backup.movements
         statements = backup.statements
         ledgerVersion = backup.version
-        defaults.set(false, forKey: canonicalRebuildKey)
+        defaults.set(false, forKey: Self.canonicalRebuildKey)
         defaults.removeObject(forKey: rebuildStateKey)
         defaults.removeObject(forKey: ledgerBackupKey)
         DiagnosticsRecorder.record(
@@ -5163,9 +5186,7 @@ final class FinanceStore {
         persist()
 
         guard !candidates.isEmpty else {
-            defaults.set(true, forKey: canonicalRebuildKey)
-            defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
-            defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
+            Self.recordCanonicalRebuildCompletion(in: defaults)
             defaults.set(true, forKey: numericRepairKey)
             defaults.set("complete", forKey: rebuildStateKey)
             defaults.removeObject(forKey: ledgerBackupKey)
@@ -5232,13 +5253,11 @@ final class FinanceStore {
         // logical statement count after normalization.
         normalizeStoredLedger()
         defaults.set(statements.count, forKey: canonicalRebuildExpectedCountKey)
-        defaults.set(true, forKey: canonicalRebuildKey)
-        defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
-        defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
+        persist()
+        Self.recordCanonicalRebuildCompletion(in: defaults)
         defaults.set(true, forKey: numericRepairKey)
         defaults.set("complete", forKey: rebuildStateKey)
         defaults.removeObject(forKey: ledgerBackupKey)
-        persist()
         refreshCanonicalRebuildStatus()
         DiagnosticsRecorder.record(
             stage: "rebuild.done",
@@ -5463,9 +5482,7 @@ final class FinanceStore {
         normalizeStoredLedger()
         defaults.set(statements.count, forKey: canonicalRebuildExpectedCountKey)
         persist()
-        defaults.set(true, forKey: canonicalRebuildKey)
-        defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
-        defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
+        Self.recordCanonicalRebuildCompletion(in: defaults)
         defaults.set(true, forKey: numericRepairKey)
         defaults.set("complete", forKey: rebuildStateKey)
         defaults.removeObject(forKey: ledgerBackupKey)
@@ -6969,11 +6986,8 @@ final class FinanceStore {
             // otherwise the first import on a clean install would immediately
             // ask the user to rebuild the same PDF a second time.
             if !canonicalRebuildPending && !statements.contains(where: { !isCurrentReader($0) }) {
-                defaults.set(true, forKey: canonicalRebuildKey)
-                defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
-                defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
+                Self.recordCanonicalRebuildCompletion(in: defaults)
                 defaults.set(true, forKey: numericRepairKey)
-                defaults.set(Self.readerVersion, forKey: normalizedLedgerReaderVersionKey)
             }
             refreshCanonicalRebuildStatus()
         }
