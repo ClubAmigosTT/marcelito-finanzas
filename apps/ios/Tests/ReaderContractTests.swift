@@ -987,6 +987,45 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("saldo") })
     }
 
+    func testBBVAKeepsSPEICounterpartyOnContinuationLines() throws {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE, GRUPO FINANCIERO BBVA MEXICO
+            Periodo DEL 15/02/2026 AL 14/03/2026
+            Saldo Anterior 3,807.70
+            Depósitos / Abonos (+) 1 990.00
+            Retiros / Cargos (-) 1 3,000.00
+            Saldo Final 1,797.70
+            Detalle de Movimientos Realizados
+            FECHA SALDO OPER LIQ DESCRIPCION REFERENCIA CARGOS ABONOS OPERACION LIQUIDACION
+            08/MAR 09/MAR SPEI ENVIADO SANTANDER 3,000.00 807.70 807.70
+            2901260Clinica
+            00001234567890123456
+            MBAN0100260309000000000000
+            clio Barcenas
+            10/MAR 10/MAR SPEI RECIBIDO SANTANDER 990.00 1,797.70 1,797.70
+            2684043TDMGCMARZ026
+            00001458060588056495
+            CLAVE0100320260310000000
+            GUILLERMO CONTRERAS DAVILA
+            TOTAL IMPORTE CARGOS 3,000.00 TOTAL MOVIMIENTOS CARGOS 1
+            TOTAL IMPORTE ABONOS 990.00 TOTAL MOVIMIENTOS ABONOS 1
+            """,
+            fileName: "BBVA-marzo-2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 2)
+        let sent = try XCTUnwrap(snapshot.movements.first { $0.amount < 0 })
+        XCTAssertEqual(sent.title, "SPEI ENVIADO SANTANDER")
+        XCTAssertEqual(sent.transferRecipient, "Clio Barcenas")
+        XCTAssertEqual(sent.summaryDisplayTitle, "SPEI a Clio Barcenas")
+        XCTAssertTrue(sent.extractionEvidence?.sourceText?.contains("clio Barcenas") == true)
+
+        let received = try XCTUnwrap(snapshot.movements.first { $0.amount > 0 })
+        XCTAssertEqual(received.transferRecipient, "Guillermo Contreras Davila")
+        XCTAssertEqual(received.summaryDisplayTitle, "SPEI de Guillermo Contreras Davila")
+    }
+
     func testBBVASplitSummaryLinesUseTheDecimalTotalAndCount() {
         // PDFKit frequently exposes the BBVA summary as three separate visual
         // lines. The count must not be promoted to the declared amount, and

@@ -299,7 +299,8 @@ struct Movement: Identifiable, Codable {
         let sourceTexts = [rawDescription, title, extractionEvidence?.sourceText].compactMap { $0 }
         let genericCounterparties: Set<String> = [
             "tercero", "terceros", "otro banco", "stp", "santander", "bbva", "banorte",
-            "banamex", "citibanamex", "mercado pago", "mercadopago", "bancoppel", "spei"
+            "banamex", "citibanamex", "mercado pago", "mercadopago", "bancoppel", "spei",
+            "banco santander", "banco stp", "banco bbva"
         ]
         let patterns = [
             #"(?i)\btransferencia\s+a\s+(.+?)(?=\s+\b(?:iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b|\s+[-+]?\s*\$?\s*\d[\d, ]*(?:[.,]\d{2})|$)"#,
@@ -321,6 +322,37 @@ struct Movement: Identifiable, Codable {
                       !genericCounterparties.contains(candidate.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()) else { continue }
                 return candidate.capitalized
             }
+            if let continuationCounterparty = bbvaCounterpartyFromContinuationLines(in: source) {
+                return continuationCounterparty
+            }
+        }
+        return nil
+    }
+
+    /// BBVA prints SPEI counterparties on continuation lines after the amount
+    /// and balances (for example, a line containing only the beneficiary's
+    /// name). These lines are not part of the title, so read only a trailing
+    /// name-shaped line from the retained row evidence.
+    private func bbvaCounterpartyFromContinuationLines(in source: String) -> String? {
+        let normalized = source.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        guard normalized.contains("spei enviado") || normalized.contains("spei recibido")
+                || normalized.contains("transferencia enviada") || normalized.contains("transferencia recibida") else {
+            return nil
+        }
+        let lines = source.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard lines.count > 1 else { return nil }
+        let namePattern = #"^[\p{L}]+(?:[ '\-][\p{L}]+){1,5}$"#
+        for line in lines.dropFirst().reversed() {
+            guard line.range(of: namePattern, options: .regularExpression) != nil else { continue }
+            let candidate = line
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let folded = candidate.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+            let generic: Set<String> = ["santander", "bbva", "banorte", "banamex", "stp", "spei", "mercado pago", "mercadopago"]
+            guard !generic.contains(folded) else { continue }
+            return candidate.capitalized
         }
         return nil
     }
@@ -10186,6 +10218,13 @@ final class FinanceStore {
         var currentPage: Int?
         var inMovementSection = false
 
+        func pendingHasTransferDescriptor() -> Bool {
+            let normalized = pending.joined(separator: " ")
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            return normalized.contains("spei enviado") || normalized.contains("spei recibido")
+                || normalized.contains("transferencia enviada") || normalized.contains("transferencia recibida")
+        }
+
         func flush() {
             guard !pending.isEmpty else { return }
             rows.append(RawBBVARow(lines: pending, page: pendingPage))
@@ -10283,7 +10322,13 @@ final class FinanceStore {
                 let foreignAuthorization = normalized.contains("usd")
                     && compact.contains("tc")
                     && compact.contains("aut")
-                if hasAmount || foreignAuthorization { pending.append(line) } else { flush() }
+                let transferDetailLine = pendingHasTransferDescriptor()
+                    && line.count <= 160
+                if hasAmount || foreignAuthorization || transferDetailLine {
+                    pending.append(line)
+                } else {
+                    flush()
+                }
             } else {
                 pending.append(line)
                 pendingHasAmount = hasAmount
@@ -10303,6 +10348,7 @@ final class FinanceStore {
         var calculatedBalance = openingBalance
         return rows.compactMap { rawRow -> Movement? in
             let original = rawRow.lines.joined(separator: " ")
+            let originalEvidence = rawRow.lines.joined(separator: "\n")
             guard let dateMatch = leadingDate(in: original),
                   let date = parseDate(dateMatch.text, defaultYear: defaultYear),
                   let dateRange = Range(dateMatch.range, in: original) else { return nil }
@@ -10429,7 +10475,7 @@ final class FinanceStore {
                     method: "pdf-text-bbva",
                     page: rawRow.page,
                     confidence: 0.97,
-                    sourceText: String(original.prefix(240)),
+                    sourceText: String(originalEvidence.prefix(640)),
                     selectedColumn: selectedColumn,
                     selectedAmount: abs(parsedAmount),
                     selectionReason: reason
