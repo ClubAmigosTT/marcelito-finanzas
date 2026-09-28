@@ -44,13 +44,20 @@ test("Gastos resume todo el libro real y conserva las categorías manuales entre
 
 test("el detalle de pendientes en Gastos muestra beneficiario y descripción bancaria", async () => {
   const source = await readFile(sectionsPath, "utf8");
+  const detailStart = source.indexOf("struct MovementDetailView");
   const reviewStart = source.indexOf("private struct ExpenseMerchantReviewView");
   const reviewEnd = source.indexOf("private struct ExpenseCategorySelection", reviewStart);
+  const detail = source.slice(detailStart, reviewStart);
   const review = source.slice(reviewStart, reviewEnd);
 
+  assert.ok(detailStart >= 0 && reviewStart > detailStart);
   assert.ok(reviewStart >= 0 && reviewEnd > reviewStart);
-  assert.match(review, /if movement\.transferRecipient != nil/);
-  assert.match(review, /Text\(movement\.summaryDisplayTitle\)/);
+  assert.match(detail, /currentMovement\.hasTransferOrSpeiDescriptor/);
+  assert.match(detail, /No indicado en el estado/);
+  assert.match(detail, /Text\(currentMovement\.originalBankDescription\)/);
+  assert.match(review, /if movement\.hasTransferOrSpeiDescriptor/);
+  assert.match(review, /Destinatario.*no indicado en el estado/);
+  assert.match(review, /movement\.summaryDisplayTitle/);
   assert.match(review, /Text\(movement\.originalBankDescription\)/);
 });
 

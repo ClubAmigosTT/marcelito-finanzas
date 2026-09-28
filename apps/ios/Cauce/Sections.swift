@@ -419,8 +419,11 @@ struct MovementDetailView: View {
             } else {
                 LabeledContent("Estado", value: "Movimiento manual")
             }
-            if let recipient = currentMovement.transferRecipient {
-                LabeledContent(currentMovement.amount < 0 ? "Destinatario" : "Ordenante", value: recipient)
+            if currentMovement.hasTransferOrSpeiDescriptor {
+                LabeledContent(
+                    currentMovement.amount < 0 ? "Destinatario" : "Ordenante",
+                    value: currentMovement.transferRecipient ?? "No indicado en el estado"
+                )
                 VStack(alignment: .leading, spacing: 5) {
                     Text("Descripción bancaria")
                         .font(.caption)
@@ -979,8 +982,10 @@ private struct ExpenseMerchantReviewView: View {
                                     Text("\(movement.account) · \(movement.category)")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
-                                    if movement.transferRecipient != nil {
-                                        Text(movement.summaryDisplayTitle)
+                                    if movement.hasTransferOrSpeiDescriptor {
+                                        Text(movement.transferRecipient != nil
+                                            ? movement.summaryDisplayTitle
+                                            : "\(movement.amount < 0 ? "Destinatario" : "Ordenante") no indicado en el estado")
                                             .font(.caption.weight(.semibold))
                                             .foregroundStyle(Color.marcelitoNavySoft)
                                             .lineLimit(1)

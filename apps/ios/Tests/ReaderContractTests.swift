@@ -382,6 +382,24 @@ final class ReaderContractTests: XCTestCase {
         )
         XCTAssertNil(intermediaryOnly.transferRecipient)
         XCTAssertEqual(intermediaryOnly.summaryDisplayTitle, intermediaryOnly.title)
+        XCTAssertTrue(intermediaryOnly.hasTransferOrSpeiDescriptor)
+        XCTAssertEqual(intermediaryOnly.originalBankDescription, "SPEI ENVIADO STP")
+
+        let genericBankDescriptor = Movement(
+            date: .now,
+            title: "SPEI ENVIADO SANTANDER",
+            account: "BBVA",
+            category: "Otros / Por revisar",
+            amount: -3000,
+            flow: .expense,
+            rawDescription: "08/MAR 09/MAR SPEI ENVIADO SANTANDER 3,000.00 807.70 807.70"
+        )
+        XCTAssertNil(genericBankDescriptor.transferRecipient)
+        XCTAssertTrue(genericBankDescriptor.hasTransferOrSpeiDescriptor)
+        XCTAssertEqual(
+            genericBankDescriptor.originalBankDescription,
+            "08/MAR 09/MAR SPEI ENVIADO SANTANDER 3,000.00 807.70 807.70"
+        )
     }
 
     func testManuallyCategorizingATransferDoesNotCreateAnExpenseRule() {

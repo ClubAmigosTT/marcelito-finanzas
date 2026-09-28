@@ -334,8 +334,20 @@ struct Movement: Identifiable, Codable {
         return candidates.first(where: { !$0.isEmpty }) ?? title
     }
 
+    /// True when the movement is a transfer/SPEI, even if the statement only
+    /// names an intermediary bank and does not print the beneficiary.
+    var hasTransferOrSpeiDescriptor: Bool {
+        if kind == .bankTransfer || flow == .transfer { return true }
+        let source = [title, rawDescription, extractionEvidence?.sourceText]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        return source.range(of: #"\b(?:spei|transfer(?:encia)?|transf)\b"#, options: .regularExpression) != nil
+    }
+
     /// Concise list label that surfaces the person/company on outbound and
-    /// inbound SPEI rows without replacing the original descriptor.
+    /// inbound SPEI rows without replacing the original descriptor. When the
+    /// bank omits the counterparty, callers can still show the original text.
     var summaryDisplayTitle: String {
         guard let transferRecipient else { return displayMerchant ?? title }
         let source = [title, rawDescription, extractionEvidence?.sourceText]
