@@ -4782,10 +4782,15 @@ final class FinanceStore {
             // one step. Existing manual choices remain protected, and the
             // rule changes only category metadata, never amount, flow or kind.
             if isExpenseCategory, !Self.pendingCategoryNames.contains(category) {
+                // Materialize this once. `reconciledMovements` validates every
+                // ledger row, so evaluating it from inside this loop made one
+                // tap repeat the full ledger/statement validation for every
+                // possible peer (quadratic work on a large pending queue).
+                let reconciledIDs = Set(reconciledMovements.map(\.id))
                 for peerIndex in movements.indices where peerIndex != index {
                     let peer = movements[peerIndex]
                     guard !peer.manuallyReviewed,
-                          reconciledMovements.contains(where: { $0.id == peer.id }),
+                          reconciledIDs.contains(peer.id),
                           isClassifiableExpenseForCategory(peer),
                           categoryRuleKey(for: peer) == key else { continue }
                     apply(peerIndex, manuallyReviewed: false)

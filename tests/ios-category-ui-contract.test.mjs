@@ -86,7 +86,9 @@ test("Resumen muestra ritmo de gasto con periodos equivalentes y barras semanale
   assert.match(pace, /vs mismo periodo del mes anterior/);
   assert.match(pace, /Promedio diario/);
   assert.match(pace, /Proyección del mes/);
-  assert.match(pace, /~\\\(money\(metrics\.projectedMonth/);
+  assert.match(pace, /if let dailyAverage = metrics\.dailyAverage,[\s\S]*let projectedMonth = metrics\.projectedMonth/);
+  assert.match(pace, /hasObservedRows \|\| isCovered/);
+  assert.match(pace, /Promedio y proyección disponibles cuando el periodo esté completo/);
   assert.match(pace, /store\.spendingCoveredDays\(\)/);
   assert.match(pace, /store\.netExpenseMovements/);
   assert.match(pace, /Aún no hay suficiente información para calcular tu ritmo de gasto/);

@@ -318,6 +318,61 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(store.movements.first?.classificationTags.contains("personal") == true)
     }
 
+    func testManualMerchantCategoryUpdatesPeersWithoutChangingTheirFinancialFields() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let date = Date(timeIntervalSince1970: 1_780_000_000)
+        var selected = Movement(
+            date: date,
+            title: "CAFE EJEMPLO REF 12345",
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -125,
+            flow: .expense,
+            kind: .purchase
+        )
+        selected.normalizedMerchant = "CAFE EJEMPLO"
+        var peer = selected
+        peer.id = UUID()
+        peer.date = date.addingTimeInterval(-86_400)
+        peer.amount = -240
+        peer.manuallyReviewed = false
+        var protectedPeer = peer
+        protectedPeer.id = UUID()
+        protectedPeer.amount = -60
+        protectedPeer.manuallyReviewed = true
+        var unrelated = peer
+        unrelated.id = UUID()
+        unrelated.normalizedMerchant = "OTRA TIENDA"
+        unrelated.title = "OTRA TIENDA"
+        // Match the size of the real pending queue so this exercises the
+        // category-change path with hundreds of ledger rows, not just a toy
+        // three-row example.
+        let otherPendingRows = (0..<513).map { index -> Movement in
+            Movement(
+                date: date.addingTimeInterval(-Double(index * 86_400)),
+                title: "COMERCIO PENDIENTE \(index)",
+                account: "Amex",
+                category: "Otros / Por revisar",
+                amount: -Decimal(index + 1),
+                flow: .expense,
+                kind: .purchase
+            )
+        }
+        store.movements = [selected, peer, protectedPeer, unrelated] + otherPendingRows
+
+        XCTAssertTrue(store.updateCategory(for: selected, to: "Restaurantes y bares"))
+
+        let updated = Dictionary(uniqueKeysWithValues: store.movements.map { ($0.id, $0) })
+        XCTAssertEqual(updated[selected.id]?.category, "Restaurantes y bares")
+        XCTAssertEqual(updated[peer.id]?.category, "Restaurantes y bares")
+        XCTAssertEqual(updated[peer.id]?.amount, peer.amount)
+        XCTAssertEqual(updated[peer.id]?.flow, peer.flow)
+        XCTAssertEqual(updated[peer.id]?.kind, peer.kind)
+        XCTAssertEqual(updated[protectedPeer.id]?.category, "Otros / Por revisar")
+        XCTAssertEqual(updated[unrelated.id]?.category, "Otros / Por revisar")
+    }
+
     func testManualTravelCategoryUpdatesItsSecondaryDimensions() {
         let store = FinanceStore()
         defer { store.clearLocalData() }

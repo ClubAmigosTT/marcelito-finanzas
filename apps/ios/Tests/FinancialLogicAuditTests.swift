@@ -78,9 +78,29 @@ final class FinancialLogicAuditTests: XCTestCase {
         XCTAssertEqual(incomplete?.accumulatedSpend, 100)
         XCTAssertNil(incomplete?.dailyAverage)
         XCTAssertNil(incomplete?.projectedMonth)
-        XCTAssertTrue(incomplete?.weeklySpend.isEmpty == true)
+        XCTAssertEqual(incomplete?.weeklySpend, [SpendingPaceWeek(number: 1, amount: 100)])
         XCTAssertNil(incomplete?.comparisonPercentChange)
         XCTAssertNil(SpendingPaceMetrics.calculate(movements: [], coveredDays: [], now: now, calendar: calendar))
+    }
+
+    func testSpendingPaceShowsObservedWeeksWithoutAssumingUncoveredWeeksAreZero() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = date(calendar, 2026, 9, 17)
+        let movements = [
+            row(-100, date: date(calendar, 2026, 9, 2)),
+            row(-250, date: date(calendar, 2026, 9, 16))
+        ]
+
+        let metrics = SpendingPaceMetrics.calculate(movements: movements, coveredDays: [], now: now, calendar: calendar)
+
+        XCTAssertEqual(metrics?.accumulatedSpend, 350)
+        XCTAssertEqual(metrics?.weeklySpend, [
+            SpendingPaceWeek(number: 1, amount: 100),
+            SpendingPaceWeek(number: 3, amount: 250)
+        ])
+        XCTAssertNil(metrics?.dailyAverage)
+        XCTAssertNil(metrics?.projectedMonth)
     }
 
     func testSpendingPaceHandlesZeroNetSpendAndExcludesOwnTransfersAndCardPayments() {

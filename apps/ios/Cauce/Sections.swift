@@ -616,7 +616,7 @@ struct ExpensesView: View {
     private var total: Decimal { store.consolidatedRealSpend }
 
     private var pendingReviewTotal: Decimal {
-        pendingReviewGroups.reduce(0) { $0 + $1.total }
+        store.pendingExpenseCategoryMovements.reduce(0) { $0 + $1.expenseContribution }
     }
 
     private func expenseShare(for amount: Decimal) -> String {
@@ -634,9 +634,9 @@ struct ExpensesView: View {
     }
 
     @ViewBuilder
-    private var identifiedExpensesSection: some View {
+    private func identifiedExpensesSection(groups categoryGroups: [(category: String, amount: Decimal)]) -> some View {
         Section("Gasto clasificado") {
-            ForEach(Array(groups.enumerated()), id: \.element.category) { index, item in
+            ForEach(Array(categoryGroups.enumerated()), id: \.element.category) { index, item in
                 ExpenseRow(name: item.category, amount: item.amount, share: expenseShare(for: item.amount), color: expenseColor(for: index)) {
                     selectedCategory = ExpenseCategorySelection(category: item.category)
                 }
@@ -645,14 +645,14 @@ struct ExpensesView: View {
     }
 
     @ViewBuilder
-    private var pendingExpensesSection: some View {
-        if !pendingReviewGroups.isEmpty {
+    private func pendingExpensesSection(groups pendingGroups: [ExpenseMerchantReviewGroup]) -> some View {
+        if !pendingGroups.isEmpty {
             Section {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("\(pendingReviewGroups.count) comercios · \(store.pendingExpenseCategoryMovements.count) movimientos")
+                    Text("\(pendingGroups.count) comercios · \(store.pendingExpenseCategoryMovements.count) movimientos")
                         .font(.subheadline.weight(.semibold))
                     Spacer(minLength: 8)
-                    Text(pendingReviewTotal, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                    Text(pendingGroups.reduce(Decimal.zero) { $0 + $1.total }, format: .currency(code: "MXN").precision(.fractionLength(0)))
                         .font(.subheadline.monospacedDigit())
                 }
                 .foregroundStyle(Color.marcelitoAmber)
@@ -674,7 +674,7 @@ struct ExpensesView: View {
                 }
                 .disabled(isAIProcessing || store.pendingExpenseCategoryMovements.isEmpty)
 
-                ForEach(pendingReviewGroups) { group in
+                ForEach(pendingGroups) { group in
                     let suggestion = aiSuggestionsByMerchant[group.key]
                     NavigationLink {
                         ExpenseMerchantReviewView(group: group, suggestion: suggestion) {
@@ -734,33 +734,40 @@ struct ExpensesView: View {
     }
 
     @ViewBuilder
-    private var expenseRows: some View {
+    private func expenseRows(
+        pendingGroups: [ExpenseMerchantReviewGroup],
+        categorizedGroups: [(category: String, amount: Decimal)]
+    ) -> some View {
         List {
             if store.operationalMetricsBlocked {
                 Section {
                     LedgerQualityBanner(store: store)
                     HistoricalDashboardBlockedCard(store: store)
                 }
-            } else if groups.isEmpty && pendingReviewGroups.isEmpty {
-                ContentUnavailableView("Sin gastos", systemImage: "chart.pie", description: Text("Importa un estado de cuenta para construir tus categorías reales."))
             } else {
-                if store.dashboardIsProvisional {
-                    Section {
-                        LedgerQualityBanner(store: store)
+                if categorizedGroups.isEmpty && pendingGroups.isEmpty {
+                    ContentUnavailableView("Sin gastos", systemImage: "chart.pie", description: Text("Importa un estado de cuenta para construir tus categorías reales."))
+                } else {
+                    if store.dashboardIsProvisional {
+                        Section {
+                            LedgerQualityBanner(store: store)
+                        }
                     }
+                    pendingExpensesSection(groups: pendingGroups)
+                    if !categorizedGroups.isEmpty {
+                        identifiedExpensesSection(groups: categorizedGroups)
+                    }
+                    readingSection
+                    reconciliationSection
                 }
-                pendingExpensesSection
-                if !groups.isEmpty {
-                    identifiedExpensesSection
-                }
-                readingSection
-                reconciliationSection
             }
         }
     }
     var body: some View {
+        let pendingGroups = pendingReviewGroups
+        let categorizedGroups = groups
         NavigationStack {
-            expenseRows
+            expenseRows(pendingGroups: pendingGroups, categorizedGroups: categorizedGroups)
                 .navigationTitle("Gastos")
                 .listStyle(.insetGrouped)
                 .listRowBackground(Color.marcelitoCreamSoft)
@@ -778,12 +785,12 @@ struct ExpensesView: View {
                     isPresented: $isAIConfirmationPresented,
                     titleVisibility: .visible
                 ) {
-                    Button("Enviar \(pendingReviewGroups.filter { !$0.classifiableMovements.isEmpty }.count) comercios") {
+                    Button("Enviar \(pendingGroups.filter { !$0.classifiableMovements.isEmpty }.count) comercios") {
                         classifyPendingMerchantGroups()
                     }
                     Button("Cancelar", role: .cancel) { }
                 } message: {
-                    let groupCount = pendingReviewGroups.filter { !$0.classifiableMovements.isEmpty }.count
+                    let groupCount = pendingGroups.filter { !$0.classifiableMovements.isEmpty }.count
                     Text("Se enviarán comercio, fecha, importe y un código aleatorio temporal por cada uno de \(groupCount) comercios pendientes. No se envían PDFs, nombres de cuenta ni saldos. Primero se actualizaron las reglas locales (\(localRuleChangeCount) movimientos).")
                 }
                 .alert("Configura clasificación IA", isPresented: $isAISetupPromptPresented) {

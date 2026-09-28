@@ -1390,14 +1390,28 @@ struct SpendingPaceMetrics {
 
         let dailyAverage: Decimal? = currentCoverage ? accumulated / Decimal(elapsed) : nil
         let projectedMonth = dailyAverage.map { $0 * Decimal(monthDays) }
+        // Show verified transaction activity even when the imported statements
+        // do not cover every day yet. A week with no rows is shown as zero only
+        // when the source statements prove that the full week is covered.
+        var observedWeeklySpend: [Int: Decimal] = [:]
+        var observedWeeklyRows: [Int: Int] = [:]
+        for movement in currentRows {
+            let movementDay = calendar.startOfDay(for: movement.date)
+            guard let dayOffset = calendar.dateComponents([.day], from: monthStart, to: movementDay).day,
+                  dayOffset >= 0,
+                  dayOffset < elapsed else { continue }
+            let weekNumber = dayOffset / 7 + 1
+            observedWeeklySpend[weekNumber, default: 0] += movement.expenseContribution
+            observedWeeklyRows[weekNumber, default: 0] += 1
+        }
         var weeks: [SpendingPaceWeek] = []
-        if currentCoverage {
-            for number in 1...((elapsed + 6) / 7) {
-                let offset = (number - 1) * 7
-                guard let start = calendar.date(byAdding: .day, value: offset, to: monthStart),
-                      let end = calendar.date(byAdding: .day, value: min(number * 7, elapsed), to: monthStart) else { continue }
-                weeks.append(SpendingPaceWeek(number: number, amount: spend(from: start, to: end)))
-            }
+        for number in 1...((elapsed + 6) / 7) {
+            let offset = (number - 1) * 7
+            let dayCount = min(7, elapsed - offset)
+            guard let start = calendar.date(byAdding: .day, value: offset, to: monthStart) else { continue }
+            let hasObservedRows = observedWeeklyRows[number, default: 0] > 0
+            guard hasObservedRows || isCovered(start: start, dayCount: dayCount) else { continue }
+            weeks.append(SpendingPaceWeek(number: number, amount: observedWeeklySpend[number, default: 0]))
         }
 
         var comparisonPercentChange: Decimal?
@@ -1456,7 +1470,7 @@ private struct SpendingPaceSection: View {
                 .font(.title3.weight(.bold))
                 .foregroundStyle(Color.marcelitoNavy)
 
-            if let metrics, metrics.hasCompleteCurrentCoverage {
+            if let metrics {
                 Text("\(money(metrics.accumulatedSpend)) gastados este mes")
                     .font(.headline.weight(.semibold))
                     .monospacedDigit()
@@ -1472,7 +1486,7 @@ private struct SpendingPaceSection: View {
                     Text("Sin gastos registrados en este periodo.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else {
+                } else if !metrics.weeklySpend.isEmpty {
                     Chart(metrics.weeklySpend) { week in
                         BarMark(
                             x: .value("Semana", week.number),
@@ -1499,10 +1513,17 @@ private struct SpendingPaceSection: View {
                     .frame(height: 142)
                 }
 
-                HStack(alignment: .top, spacing: 20) {
-                    paceMetric(title: "Promedio diario", value: money(metrics.dailyAverage ?? 0))
-                    Spacer(minLength: 0)
-                    paceMetric(title: "Proyección del mes", value: "~\(money(metrics.projectedMonth ?? 0))", alignment: .trailing)
+                if let dailyAverage = metrics.dailyAverage,
+                   let projectedMonth = metrics.projectedMonth {
+                    HStack(alignment: .top, spacing: 20) {
+                        paceMetric(title: "Promedio diario", value: money(dailyAverage))
+                        Spacer(minLength: 0)
+                        paceMetric(title: "Proyección del mes", value: "~\(money(projectedMonth))", alignment: .trailing)
+                    }
+                } else if !metrics.hasCompleteCurrentCoverage {
+                    Text("Promedio y proyección disponibles cuando el periodo esté completo.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
             } else {
                 insufficientDataMessage
