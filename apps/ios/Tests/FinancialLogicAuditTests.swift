@@ -34,6 +34,118 @@ final class FinancialLogicAuditTests: XCTestCase {
         Calendar(identifier: .gregorian).date(from: DateComponents(year: year, month: month, day: day))!
     }
 
+    private func date(_ calendar: Calendar, _ year: Int, _ month: Int, _ day: Int, hour: Int = 12) -> Date {
+        calendar.date(from: DateComponents(year: year, month: month, day: day, hour: hour))!
+    }
+
+    private func coveredDays(_ calendar: Calendar, year: Int, month: Int, through day: Int) -> Set<Date> {
+        Set((1...day).map { calendar.startOfDay(for: date(calendar, year, month, $0, hour: 0)) })
+    }
+
+    private func balance(_ calendar: Calendar, _ year: Int, _ month: Int, _ day: Int, cash: Decimal?, debt: Decimal?) -> FinanceStore.BalanceSnapshot {
+        FinanceStore.BalanceSnapshot(date: date(calendar, year, month, day), cash: cash, debt: debt)
+    }
+
+    func testSpendingPaceUsesEquivalentPartialPeriodsAndWeeklyRealSpend() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = date(calendar, 2026, 9, 17)
+        let movements = [
+            row(-4_200, date: date(calendar, 2026, 9, 2)),
+            row(-3_100, date: date(calendar, 2026, 9, 10)),
+            row(-6_797, date: date(calendar, 2026, 9, 17)),
+            row(-16_000, date: date(calendar, 2026, 8, 4))
+        ]
+        let coverage = coveredDays(calendar, year: 2026, month: 8, through: 17)
+            .union(coveredDays(calendar, year: 2026, month: 9, through: 17))
+
+        let metrics = SpendingPaceMetrics.calculate(movements: movements, coveredDays: coverage, now: now, calendar: calendar)
+
+        XCTAssertEqual(metrics?.accumulatedSpend, 14_097)
+        XCTAssertEqual(metrics?.dailyAverage, Decimal(14_097) / Decimal(17))
+        XCTAssertEqual(metrics?.projectedMonth, (Decimal(14_097) / Decimal(17)) * Decimal(30))
+        XCTAssertEqual(metrics?.weeklySpend.map(\.amount), [Decimal(4_200), Decimal(3_100), Decimal(6_797)])
+        XCTAssertEqual(metrics?.comparisonPercentChange, (Decimal(14_097) - Decimal(16_000)) / Decimal(16_000))
+    }
+
+    func testSpendingPaceDoesNotProjectWithIncompleteCoverageOrInventEmptyData() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = date(calendar, 2026, 9, 17)
+        let oneObservedPurchase = [row(-100, date: date(calendar, 2026, 9, 4))]
+
+        let incomplete = SpendingPaceMetrics.calculate(movements: oneObservedPurchase, coveredDays: [], now: now, calendar: calendar)
+        XCTAssertEqual(incomplete?.accumulatedSpend, 100)
+        XCTAssertNil(incomplete?.dailyAverage)
+        XCTAssertNil(incomplete?.projectedMonth)
+        XCTAssertTrue(incomplete?.weeklySpend.isEmpty == true)
+        XCTAssertNil(incomplete?.comparisonPercentChange)
+        XCTAssertNil(SpendingPaceMetrics.calculate(movements: [], coveredDays: [], now: now, calendar: calendar))
+    }
+
+    func testSpendingPaceHandlesZeroNetSpendAndExcludesOwnTransfersAndCardPayments() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = date(calendar, 2026, 9, 17)
+        let coverage = coveredDays(calendar, year: 2026, month: 9, through: 17)
+
+        let zeroSpend = SpendingPaceMetrics.calculate(movements: [], coveredDays: coverage, now: now, calendar: calendar)
+        XCTAssertEqual(zeroSpend?.accumulatedSpend, 0)
+        XCTAssertEqual(zeroSpend?.dailyAverage, 0)
+        XCTAssertEqual(zeroSpend?.projectedMonth, 0)
+        XCTAssertTrue(zeroSpend?.weeklySpend.allSatisfy { $0.amount == 0 } == true)
+
+        withStore { store in
+            store.movements = [
+                row(-120, kind: .purchase, date: now),
+                row(-500, kind: .cardPayment, date: now),
+                row(-200, kind: .bankTransfer, date: now),
+                row(50, kind: .refund, date: now)
+            ]
+            let metrics = SpendingPaceMetrics.calculate(
+                movements: store.netExpenseMovements,
+                coveredDays: coverage,
+                now: now,
+                calendar: calendar
+            )
+            XCTAssertEqual(metrics?.accumulatedSpend, 70)
+        }
+    }
+
+    func testPositionHistoryUsesCompleteCutsAndOnlyAdjacentMonthsForVariation() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let snapshots = [
+            balance(calendar, 2026, 5, 31, cash: 100, debt: 20),
+            balance(calendar, 2026, 6, 30, cash: 110, debt: 20),
+            balance(calendar, 2026, 7, 15, cash: 125, debt: 30),
+            balance(calendar, 2026, 7, 31, cash: nil, debt: 30),
+            balance(calendar, 2026, 8, 31, cash: 140, debt: 40)
+        ]
+
+        let points = PositionHistoryBuilder.monthlyPoints(from: snapshots, calendar: calendar)
+        XCTAssertEqual(points.map(\.value), [Decimal(80), Decimal(90), Decimal(95), Decimal(100)])
+        XCTAssertEqual(PositionHistoryBuilder.contiguousSuffix(points, limit: 3, calendar: calendar).map(\.value), [Decimal(90), Decimal(95), Decimal(100)])
+        let change = PositionHistoryBuilder.monthOverMonthChange(in: points, calendar: calendar)
+        XCTAssertEqual(change?.amount, 5)
+        XCTAssertEqual(change?.percent, Decimal(5) / Decimal(95))
+
+        let gap = [points[0], points[2]]
+        XCTAssertEqual(PositionHistoryBuilder.contiguousSuffix(gap, limit: 6, calendar: calendar).map(\.value), [Decimal(95)])
+        XCTAssertNil(PositionHistoryBuilder.monthOverMonthChange(in: gap, calendar: calendar))
+    }
+
+    func testPositionCoverageRatioAndSharedScaleHandleZeroDebtAndZeroBalances() {
+        XCTAssertEqual(PositionFinancialCalculations.debtCoverageRatio(cash: 55_520, debt: 52_960), Decimal(55_520) / Decimal(52_960))
+        XCTAssertNil(PositionFinancialCalculations.debtCoverageRatio(cash: 55_520, debt: 0))
+        XCTAssertNil(PositionFinancialCalculations.debtCoverageRatio(cash: -1, debt: 100))
+
+        let scale = PositionBalanceScale(cash: 55_520, debt: 52_960)
+        XCTAssertEqual(scale.fraction(for: 55_520), 1)
+        XCTAssertEqual(scale.fraction(for: 52_960), NSDecimalNumber(decimal: Decimal(52_960) / Decimal(55_520)).doubleValue)
+        XCTAssertEqual(PositionBalanceScale(cash: 0, debt: 0).fraction(for: 0), 0)
+    }
+
     func testAccountStatementStatusTracksMonthlyCutoffAndDueDate() {
         withStore { store in
             store.statements = [

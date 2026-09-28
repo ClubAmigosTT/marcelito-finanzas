@@ -2724,61 +2724,367 @@ struct StatementSummaryEditor: View {
     }
 }
 
+struct PositionHistoryPoint: Identifiable, Equatable {
+    let monthStart: Date
+    let value: Decimal
+    var id: Date { monthStart }
+    var chartValue: Double { NSDecimalNumber(decimal: value).doubleValue }
+}
+
+struct PositionMonthChange: Equatable {
+    let amount: Decimal
+    let percent: Decimal
+}
+
+enum PositionHistoryBuilder {
+    static func monthlyPoints(
+        from snapshots: [FinanceStore.BalanceSnapshot],
+        calendar: Calendar
+    ) -> [PositionHistoryPoint] {
+        let grouped = Dictionary(grouping: snapshots) { snapshot in
+            calendar.dateInterval(of: .month, for: snapshot.date)?.start ?? calendar.startOfDay(for: snapshot.date)
+        }
+        return grouped.keys.sorted().compactMap { monthStart in
+            guard let latest = grouped[monthStart]?.filter({ $0.patrimony != nil }).max(by: { $0.date < $1.date }),
+                  let position = latest.patrimony else { return nil }
+            return PositionHistoryPoint(monthStart: monthStart, value: position)
+        }
+    }
+
+    /// Keeps only the most recent uninterrupted run, so a line never bridges
+    /// a missing month and suggests a position for which no complete cut exists.
+    static func contiguousSuffix(
+        _ points: [PositionHistoryPoint],
+        limit: Int,
+        calendar: Calendar
+    ) -> [PositionHistoryPoint] {
+        let ordered = points.sorted { $0.monthStart < $1.monthStart }
+        guard let last = ordered.last else { return [] }
+        var suffix = [last]
+        guard limit > 1 else { return suffix }
+        for point in ordered.dropLast().reversed() {
+            guard let followingMonth = calendar.date(byAdding: .month, value: 1, to: point.monthStart),
+                  followingMonth == suffix.last?.monthStart else { break }
+            suffix.append(point)
+            if suffix.count >= max(1, limit) { break }
+        }
+        return Array(suffix.reversed())
+    }
+
+    static func monthOverMonthChange(
+        in points: [PositionHistoryPoint],
+        calendar: Calendar
+    ) -> PositionMonthChange? {
+        guard points.count >= 2,
+              let previous = points.suffix(2).first,
+              let current = points.last,
+              previous.value != 0,
+              calendar.date(byAdding: .month, value: 1, to: previous.monthStart) == current.monthStart else { return nil }
+        let amount = current.value - previous.value
+        return PositionMonthChange(amount: amount, percent: amount / abs(previous.value))
+    }
+}
+
+enum PositionFinancialCalculations {
+    static func debtCoverageRatio(cash: Decimal?, debt: Decimal?) -> Decimal? {
+        guard let cash, let debt, cash >= 0, debt > 0 else { return nil }
+        return cash / debt
+    }
+}
+
+struct PositionBalanceScale {
+    let maximum: Decimal
+
+    init(cash: Decimal, debt: Decimal) {
+        maximum = max(Decimal.zero, max(cash, debt))
+    }
+
+    func fraction(for balance: Decimal) -> Double {
+        guard maximum > 0 else { return 0 }
+        return NSDecimalNumber(decimal: max(Decimal.zero, balance) / maximum).doubleValue
+    }
+}
+
 struct NetWorthView: View {
     @Environment(FinanceStore.self) private var store
     @State private var selectedMetric: DashboardMetric?
+    @State private var historyRange = 6
 
-    private var patrimonyText: String {
+    private var history: [PositionHistoryPoint] {
+        PositionHistoryBuilder.contiguousSuffix(
+            PositionHistoryBuilder.monthlyPoints(from: store.balanceHistory, calendar: .current),
+            limit: historyRange,
+            calendar: .current
+        )
+    }
+
+    private var monthChange: PositionMonthChange? {
+        PositionHistoryBuilder.monthOverMonthChange(in: history, calendar: .current)
+    }
+
+    private func money(_ value: Decimal?) -> String {
         if store.dashboardIsBlocked { return "Bloqueado" }
-        return store.liquidPatrimony?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "—"
+        return value?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"
+    }
+
+    private var variationColor: Color {
+        guard let amount = monthChange?.amount else { return Color.marcelitoNavyMid }
+        if amount > 0 { return Color.marcelitoSuccess }
+        if amount < 0 { return Color.marcelitoDanger }
+        return Color.marcelitoNavyMid
+    }
+
+    private var variationLabel: String? {
+        guard let monthChange else { return nil }
+        let amount = abs(monthChange.amount).formatted(.currency(code: "MXN").precision(.fractionLength(0)))
+        let percentValue = Int((NSDecimalNumber(decimal: abs(monthChange.percent) * 100).doubleValue).rounded())
+        let arrow = monthChange.amount > 0 ? "↑" : (monthChange.amount < 0 ? "↓" : "→")
+        let percentSign = monthChange.percent < 0 ? "−" : "+"
+        return "\(arrow) \(amount) (\(percentSign)\(percentValue)%) vs mes anterior"
     }
 
     var body: some View {
         NavigationStack {
-            List {
-                if store.dashboardIsBlocked {
-                    Section {
-                        LedgerQualityBanner(store: store)
-                        HistoricalDashboardBlockedCard(store: store)
-                    }
-                } else if store.dashboardIsProvisional {
-                    Section {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    if store.dashboardIsBlocked || store.dashboardIsProvisional {
                         LedgerQualityBanner(store: store)
                     }
-                }
-                Section {
+
                     Button {
                         selectedMetric = .patrimony
                     } label: {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Patrimonio líquido").foregroundStyle(.secondary)
-                            Text(patrimonyText)
-                                .font(.largeTitle.bold())
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Posición neta")
+                                .font(.subheadline.weight(.medium))
+                                .foregroundStyle(Color.marcelitoCream.opacity(0.82))
+                            Text(money(store.liquidPatrimony))
+                                .font(.system(.largeTitle, design: .rounded).weight(.bold))
                                 .monospacedDigit()
-                            Text(store.liquidPatrimony == nil ? "Pendiente de saldos al corte" : "Efectivo disponible menos deuda")
-                                .foregroundStyle(Color.marcelitoNavyMid)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                            if !store.dashboardIsBlocked, let cash = store.cashAvailable, let debt = store.debtTotal {
+                                Text("\(money(cash)) disponible − \(money(debt)) deuda")
+                                    .font(.subheadline)
+                                    .foregroundStyle(Color.marcelitoCream.opacity(0.85))
+                                    .lineLimit(2)
+                                    .minimumScaleFactor(0.8)
+                            }
+                            if let variationLabel {
+                                Text(variationLabel)
+                                    .font(.subheadline.weight(.medium))
+                                    .foregroundStyle(store.dashboardIsBlocked ? Color.marcelitoCream.opacity(0.82) : variationColor)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .foregroundStyle(Color.marcelitoCream)
+                        .marcelitoCard(fill: Color.marcelitoNavy, radius: 18, padding: 16)
                     }
                     .buttonStyle(.plain)
-                    .accessibilityHint("Toca para ver el detalle y la tendencia del patrimonio")
-                    .padding(.vertical, 10)
+                    .accessibilityHint("Toca para ver el detalle de la posición neta")
+
+                    debtCoverageSection
+                    creditSection
+                    evolutionSection
                 }
-                Section("Saldos calculados") {
-                    LabeledContent("Efectivo disponible", value: store.dashboardIsBlocked ? "Bloqueado" : (store.cashAvailable?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"))
-                    LabeledContent("Deuda total", value: store.dashboardIsBlocked ? "Bloqueado" : (store.debtTotal?.formatted(.currency(code: "MXN").precision(.fractionLength(0))) ?? "Pendiente"))
-                    LabeledContent("Utilización de crédito", value: store.dashboardIsBlocked ? "Bloqueado" : (store.creditUtilizationRate.map { "\(Int((NSDecimalNumber(decimal: $0).doubleValue * 100).rounded()))%" } ?? "Pendiente"))
-                }
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 26)
             }
-            .navigationTitle("Patrimonio")
-            .listStyle(.insetGrouped)
-            .listRowBackground(Color.marcelitoCreamSoft)
+            .navigationTitle("Posición financiera")
+            .safeAreaPadding(.bottom, 76)
             .foregroundStyle(Color.marcelitoNavy)
-            .scrollContentBackground(.hidden)
             .background(MarcelitoAmbientBackground())
             .sheet(item: $selectedMetric) { metric in
                 MetricDetailSheet(metric: metric, store: store)
             }
         }
+    }
+
+    private var debtCoverageSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Cobertura de deuda")
+                .font(.headline)
+
+            if store.dashboardIsBlocked {
+                Text("Bloqueado")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else if let cash = store.cashAvailable, let debt = store.debtTotal {
+                if debt == 0 {
+                    Text("Sin deuda registrada")
+                        .font(.subheadline.weight(.medium))
+                } else if let ratio = PositionFinancialCalculations.debtCoverageRatio(cash: cash, debt: debt) {
+                    Text(ratio.formatted(.number.precision(.fractionLength(2))) + "x")
+                        .font(.title2.weight(.bold))
+                        .monospacedDigit()
+                    let percent = Int((NSDecimalNumber(decimal: ratio * 100).doubleValue).rounded())
+                    Text("Tu efectivo cubre el \(percent)% de tu deuda actual.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Text("Cobertura no disponible con estos saldos.")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+
+                let scale = PositionBalanceScale(cash: cash, debt: debt)
+                PositionBalanceBarRow(title: "Efectivo", fraction: scale.fraction(for: cash), formattedValue: money(cash))
+                PositionBalanceBarRow(title: "Deuda", fraction: scale.fraction(for: debt), formattedValue: money(debt))
+            } else {
+                Text("Cobertura pendiente con datos del último corte.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .marcelitoCard(fill: Color.marcelitoCreamSoft.opacity(0.75), radius: 16, padding: 14)
+    }
+
+    private var creditSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Crédito")
+                .font(.headline)
+                .padding(.bottom, 2)
+            PositionMetricRow(title: "Deuda actual", value: money(store.debtTotal))
+
+            if store.dashboardIsBlocked {
+                PositionMetricRow(title: "Utilización", value: "Bloqueado")
+            } else if let utilization = store.creditUtilizationRate {
+                PositionMetricRow(
+                    title: "Utilización",
+                    value: "\(Int((NSDecimalNumber(decimal: utilization * 100).doubleValue).rounded()))%"
+                )
+                PositionUtilizationBar(fraction: NSDecimalNumber(decimal: utilization).doubleValue)
+            } else {
+                PositionMetricRow(title: "Utilización", value: "Pendiente")
+            }
+
+            if let available = store.creditAvailable, let limit = store.creditLimit, !store.dashboardIsBlocked {
+                Divider().opacity(0.5)
+                PositionMetricRow(title: "Crédito disponible", value: money(available))
+                PositionMetricRow(title: "Límite total", value: money(limit))
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .marcelitoCard(fill: Color.marcelitoCreamSoft.opacity(0.75), radius: 16, padding: 14)
+    }
+
+    private var evolutionSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Evolución de tu posición")
+                    .font(.headline)
+                Spacer(minLength: 8)
+                Picker("Historial", selection: $historyRange) {
+                    Text("6 m").tag(6)
+                    Text("12 m").tag(12)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 110)
+                .controlSize(.small)
+            }
+
+            if store.dashboardIsBlocked {
+                Text("La conciliación está pendiente.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else if history.count < 2 {
+                Text("Necesitamos más meses para mostrar tu evolución.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                Chart(history) { point in
+                    LineMark(
+                        x: .value("Mes", point.monthStart),
+                        y: .value("Posición neta", point.chartValue)
+                    )
+                    .foregroundStyle(Color.marcelitoNavyMid)
+                    .lineStyle(StrokeStyle(lineWidth: 2.5))
+                    PointMark(
+                        x: .value("Mes", point.monthStart),
+                        y: .value("Posición neta", point.chartValue)
+                    )
+                    .foregroundStyle(Color.marcelitoNavyMid)
+                }
+                .chartXAxis {
+                    AxisMarks(values: .automatic(desiredCount: min(6, history.count))) { _ in
+                        AxisValueLabel(format: .dateTime.locale(Locale(identifier: "es_MX")).month(.abbreviated))
+                    }
+                }
+                .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) }
+                .frame(height: 155)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .marcelitoCard(fill: Color.marcelitoCreamSoft.opacity(0.75), radius: 16, padding: 14)
+    }
+}
+
+private struct PositionMetricRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack {
+            Text(title)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text(value)
+                .fontWeight(.semibold)
+                .monospacedDigit()
+        }
+        .font(.subheadline)
+        .foregroundStyle(Color.marcelitoNavy)
+    }
+}
+
+private struct PositionBalanceBarRow: View {
+    let title: String
+    let fraction: Double
+    let formattedValue: String
+
+    var body: some View {
+        VStack(spacing: 5) {
+            HStack {
+                Text(title)
+                Spacer()
+                Text(formattedValue)
+                    .monospacedDigit()
+            }
+            .font(.caption.weight(.medium))
+            GeometryReader { geometry in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.marcelitoNavy.opacity(0.08))
+                    Capsule()
+                        .fill(Color.marcelitoNavyMid)
+                        .frame(width: geometry.size.width * min(1, max(0, fraction)))
+                }
+            }
+            .frame(height: 7)
+            .accessibilityLabel("\(title), \(formattedValue), proporción \(Int(fraction * 100)) por ciento")
+        }
+        .foregroundStyle(Color.marcelitoNavy)
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct PositionUtilizationBar: View {
+    let fraction: Double
+
+    var body: some View {
+        GeometryReader { geometry in
+            ZStack(alignment: .leading) {
+                Capsule().fill(Color.marcelitoNavy.opacity(0.08))
+                Capsule()
+                    .fill(Color.marcelitoNavyMid)
+                    .frame(width: geometry.size.width * min(1, max(0, fraction)))
+            }
+        }
+        .frame(height: 7)
+        .accessibilityLabel("Utilización de crédito \(Int(fraction * 100)) por ciento")
     }
 }

@@ -68,22 +68,28 @@ test("calidad distingue conciliación de comercios por enriquecer en Cuentas", a
   assert.match(root, /Por enriquecer en el libro:/);
 });
 
-test("Resumen grafica únicamente el flujo neto y conserva su desglose", async () => {
+test("Resumen muestra ritmo de gasto con periodos equivalentes y barras semanales", async () => {
   const [root, models] = await Promise.all([
     readFile(rootTabPath, "utf8"),
     readFile(modelsPath, "utf8"),
   ]);
-  const chartStart = root.indexOf("private struct CashFlowChart");
+  const chartStart = root.indexOf("struct SpendingPaceMetrics");
   const chartEnd = root.indexOf("private struct DecisionCallout", chartStart);
-  const chart = root.slice(chartStart, chartEnd);
+  const pace = root.slice(chartStart, chartEnd);
 
   assert.ok(chartStart >= 0 && chartEnd > chartStart);
+  assert.match(root, /SpendingPaceSection\(store: store\)/);
   assert.match(models, /var net: Double \{ income - expense \}/);
-  assert.match(chart, /Text\("Flujo neto"\)/);
-  assert.match(chart, /linePath\(keyPath: \\CashFlowPoint\.net/);
-  assert.doesNotMatch(chart, /linePath\(keyPath: \\CashFlowPoint\.(income|expense|balance)/);
-  assert.match(chart, /CashFlowDetailValue\(title: "Ingresos"/);
-  assert.match(chart, /CashFlowDetailValue\(title: "Gastos"/);
+  assert.match(pace, /Text\("Ritmo de gasto"\)/);
+  assert.match(pace, /BarMark\(/);
+  assert.match(pace, /weeklySpend/);
+  assert.match(pace, /vs mismo periodo del mes anterior/);
+  assert.match(pace, /Promedio diario/);
+  assert.match(pace, /Proyección del mes/);
+  assert.match(pace, /~\\\(money\(metrics\.projectedMonth/);
+  assert.match(pace, /store\.spendingCoveredDays\(\)/);
+  assert.match(pace, /store\.netExpenseMovements/);
+  assert.match(pace, /Aún no hay suficiente información para calcular tu ritmo de gasto/);
 });
 
 test("las métricas y categorías exponen Top 10 editable por movimiento", async () => {
@@ -92,7 +98,7 @@ test("las métricas y categorías exponen Top 10 editable por movimiento", async
     readFile(rootTabPath, "utf8"),
   ]);
   const metricStart = root.indexOf("struct MetricDetailSheet");
-  const metricEnd = root.indexOf("private struct CashFlowChart", metricStart);
+  const metricEnd = root.indexOf("struct SpendingPaceWeek", metricStart);
   const metricDetail = root.slice(metricStart, metricEnd);
 
   assert.ok(metricStart >= 0 && metricEnd > metricStart);
