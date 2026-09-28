@@ -408,6 +408,10 @@ struct StatementRecord: Identifiable, Codable {
     /// Issuer plus masked last four digits when the administrative header
     /// exposes an account number. The full number is never persisted.
     var accountKey: String? = nil
+    /// Local-only SHA-256 identity for an Amex billing account prefix. It lets
+    /// adjacent statements remain one account when Amex reissues the card and
+    /// changes its last four digits; the full account number is never stored.
+    var accountFamilyFingerprint: String? = nil
     var period: String
     var fileName: String
     /// Nombre relativo del PDF que guardamos en Application Support para poder
@@ -873,6 +877,7 @@ private struct PDFImportExtraction: Codable, @unchecked Sendable {
     let sourceDetection: SourceDetectionEvidence
     let source: String
     let accountKey: String?
+    let accountFamilyFingerprint: String?
     let kind: StatementKind
     let candidates: [Movement]
     let period: String
@@ -945,15 +950,15 @@ final class FinanceStore {
     /// when saved PDF results need a deliberate replay. This release forces
     /// older persisted snapshots through the current reader; the refresh stays
     /// explicit so a full Vision pass never blocks app launch.
-    static let readerVersion = "ios-reader-recovery-2026.09.27.17"
+    static let readerVersion = "ios-reader-recovery-2026.09.28.18"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
-    private static let accountIdentityParserVersion = "masked-header-v3"
+    private static let accountIdentityParserVersion = "masked-header-v4"
     /// Extraction fixes must be replayed against PDFs that are already on the
     /// device. Keep this token separate from `readerVersion`: the public
     /// corpus certificate describes the reader contract, while this token is
     /// an operational cache/replay invalidation for a shipped build.
-    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.28.1"
+    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.28.3"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -1123,6 +1128,15 @@ final class FinanceStore {
         source: String
     ) -> String? {
         accountKey(preferredText: primaryText, administrativeText: administrativeText, source: source)
+    }
+
+    static func amexGroupedAccountKeysForTesting(_ records: [StatementRecord]) -> [UUID: String] {
+        let store = FinanceStore(reconciliationOnly: true)
+        store.statements = records
+        _ = store.repairStatementAccountIdentitiesAndDuplicatePeriods()
+        return Dictionary(uniqueKeysWithValues: store.statements.compactMap { statement in
+            statement.accountKey.map { (statement.id, $0) }
+        })
     }
 #endif
 
@@ -3474,6 +3488,25 @@ final class FinanceStore {
     private func statementRange(from value: String) -> ClosedRange<Date>? {
         let normalized = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        let spanishCyclePattern = #"(?i)\b(\d{1,2})\s+(?:de\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\s+al\s+(\d{1,2})\s+(?:de\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\s+(?:de\s+)?(20\d{2})\b"#
+        if let regex = try? NSRegularExpression(pattern: spanishCyclePattern),
+           let match = regex.firstMatch(in: normalized, range: range), match.numberOfRanges == 6,
+           let startDayRange = Range(match.range(at: 1), in: normalized),
+           let startMonthRange = Range(match.range(at: 2), in: normalized),
+           let endDayRange = Range(match.range(at: 3), in: normalized),
+           let endMonthRange = Range(match.range(at: 4), in: normalized),
+           let yearRange = Range(match.range(at: 5), in: normalized),
+           let startDay = Int(normalized[startDayRange]),
+           let endDay = Int(normalized[endDayRange]),
+           let endYear = Int(normalized[yearRange]),
+           let startMonth = Self.monthNumber(String(normalized[startMonthRange])),
+           let endMonth = Self.monthNumber(String(normalized[endMonthRange])) {
+            let startYear = startMonth > endMonth ? endYear - 1 : endYear
+            let calendar = Calendar(identifier: .gregorian)
+            guard let start = calendar.date(from: DateComponents(year: startYear, month: startMonth, day: startDay)),
+                  let end = calendar.date(from: DateComponents(year: endYear, month: endMonth, day: endDay)) else { return nil }
+            return start...end
+        }
         let patterns = [
             #"(?i)\b\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\b"#,
             #"(?i)\b\d{1,2}[\/.\-](?:\d{1,2}|ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)[\/.\-]\d{2,4}\b"#,
@@ -3981,6 +4014,65 @@ final class FinanceStore {
         // accounts from the same issuer can share a cutoff period; a verified
         // masked key from this PDF is required before replacement is safe.
         var changed = false
+
+        // Amex can replace the plastic while keeping the same billing
+        // account prefix. Join different masked endings only when their
+        // verified PDF family fingerprint matches and the statement ranges
+        // form a continuous, non-overlapping chain. Concurrent card accounts
+        // therefore remain separate.
+        let amexFamilyGroups = Dictionary(grouping: statements.indices.filter { index in
+            let statement = statements[index]
+            let issuer = statement.source.localizedCaseInsensitiveCompare("Amex") == .orderedSame
+                || statement.source.localizedCaseInsensitiveCompare("American Express") == .orderedSame
+            return issuer && statementKind(statement) == .card
+                && statement.accountKey != nil
+                && statement.accountFamilyFingerprint != nil
+        }, by: { statements[$0].accountFamilyFingerprint! })
+        let calendar = Calendar(identifier: .gregorian)
+        func adjacentStatementPeriods(_ left: StatementRecord, _ right: StatementRecord) -> Bool {
+            guard !statementsOverlap(left, right),
+                  let leftRange = statementRange(from: left.period),
+                  let rightRange = statementRange(from: right.period) else { return false }
+            if leftRange.upperBound < rightRange.lowerBound {
+                guard let nextDay = calendar.date(byAdding: .day, value: 1, to: leftRange.upperBound) else { return false }
+                return calendar.isDate(nextDay, inSameDayAs: rightRange.lowerBound)
+            }
+            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: rightRange.upperBound) else { return false }
+            return calendar.isDate(nextDay, inSameDayAs: leftRange.lowerBound)
+        }
+        for familyIndexes in amexFamilyGroups.values {
+            var visited = Set<Int>()
+            for seed in familyIndexes where !visited.contains(seed) {
+                var component = [seed]
+                visited.insert(seed)
+                var cursor = 0
+                while cursor < component.count {
+                    let currentIndex = component[cursor]
+                    cursor += 1
+                    for candidateIndex in familyIndexes where !visited.contains(candidateIndex) {
+                        let current = statements[currentIndex]
+                        let candidate = statements[candidateIndex]
+                        let sameKnownNumber = current.accountKey == candidate.accountKey
+                        guard sameKnownNumber || adjacentStatementPeriods(current, candidate) else { continue }
+                        visited.insert(candidateIndex)
+                        component.append(candidateIndex)
+                    }
+                }
+                let accountKeys = Set(component.compactMap { statements[$0].accountKey })
+                guard accountKeys.count > 1,
+                      let canonicalIndex = component.min(by: { leftIndex, rightIndex in
+                          let leftStart = statementRange(from: statements[leftIndex].period)?.lowerBound ?? .distantFuture
+                          let rightStart = statementRange(from: statements[rightIndex].period)?.lowerBound ?? .distantFuture
+                          return leftStart < rightStart
+                      }),
+                      let canonicalKey = statements[canonicalIndex].accountKey else { continue }
+                for index in component where statements[index].accountKey != canonicalKey {
+                    statements[index].accountKey = canonicalKey
+                    changed = true
+                }
+            }
+        }
+
         let identified = statements.filter { $0.accountKey != nil }
         let groups = Dictionary(grouping: identified) { statement in
             "\(sourceScope(statement))|\(statement.accountKey!)|\(statementPeriodIdentity(statement.period))"
@@ -6683,6 +6775,11 @@ final class FinanceStore {
             sourceDetection: sourceDetection,
             source: source,
             accountKey: accountKey,
+            accountFamilyFingerprint: Self.amexAccountFamilyFingerprint(
+                preferredText: text,
+                administrativeText: extractedText,
+                source: source
+            ),
             kind: kind,
             candidates: candidates,
             period: period,
@@ -6712,6 +6809,7 @@ final class FinanceStore {
         let sourceDetection = extraction.sourceDetection
         let source = extraction.source
         let accountKey = extraction.accountKey
+        let accountFamilyFingerprint = extraction.accountFamilyFingerprint
         let detectedKind = extraction.kind
         let candidates = extraction.candidates
         let period = extraction.period
@@ -6829,6 +6927,7 @@ final class FinanceStore {
             id: statementId,
             source: source,
             accountKey: accountKey,
+            accountFamilyFingerprint: accountFamilyFingerprint,
             period: period,
             fileName: url.lastPathComponent,
             localFileName: storedFileName,
@@ -11965,8 +12064,16 @@ final class FinanceStore {
     ) -> StatementReconciliationRecord {
         // Amex's independent text parser must not hide a rejected row just
         // because other mistakes happen to compensate in aggregate totals.
+        // A date/description fragment with no parsed monetary cells is not a
+        // financial candidate (Amex's text layer emits some of these from
+        // page furniture and foreign-currency annotations). Keep it in the
+        // diagnostic trace, but do not let it invalidate otherwise exact
+        // statement controls. Any rejected row with amount evidence remains
+        // a hard blocker.
         if source == "Amex", let rejected = diagnostics.first(where: {
-            !$0.accepted && $0.reason.hasPrefix("amex.")
+            !$0.accepted
+                && $0.reason.hasPrefix("amex.")
+                && ($0.cellTexts == nil || !($0.cellTexts?.isEmpty ?? true))
         }) {
             var result = reconciliation
             result.status = .invalid
@@ -16361,10 +16468,22 @@ final class FinanceStore {
     /// the last four digits; references or account-like numbers in rows never
     /// become an identity.
     private static func maskedAccountKey(from text: String, source: String) -> String? {
-        if source == "Rappi",
+        guard let digits = accountNumberDigits(from: text, source: source) else { return nil }
+        let issuer = source
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
+        guard !issuer.isEmpty else { return nil }
+        return "\(issuer):\(String(digits.suffix(4)))"
+    }
+
+    private static func accountNumberDigits(from text: String, source: String) -> String? {
+        let normalizedIssuer = source.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        if normalizedIssuer.localizedCaseInsensitiveCompare("Rappi") == .orderedSame,
            let raw = rappiCapture(#"numero\s*de\s*cuenta\s*:?\s*([0-9][0-9\s-]{18,30})"#, in: text) {
             let digits = raw.filter(\.isNumber)
-            if digits.count == 20 { return "rappi:\(digits.suffix(4))" }
+            if digits.count == 20 { return digits }
         }
         let normalized = text.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
@@ -16393,15 +16512,28 @@ final class FinanceStore {
                   let valueRange = Range(match.range(at: 1), in: header) else { continue }
             let digits = String(header[valueRange]).filter { $0.isNumber }
             guard (4...18).contains(digits.count) else { continue }
-            let issuer = source
-                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-                .lowercased()
-                .components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .joined()
-            guard !issuer.isEmpty else { continue }
-            return "\(issuer):\(String(digits.suffix(4)))"
+            return digits
         }
         return nil
+    }
+
+    /// Amex may reissue the plastic while the billing account stays the same.
+    /// Hash only the stable first 11 digits from the administrative account
+    /// number; never store or report the full number.
+    private static func amexAccountFamilyFingerprint(
+        preferredText: String,
+        administrativeText: String,
+        source: String
+    ) -> String? {
+        let normalizedIssuer = source.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        guard normalizedIssuer.localizedCaseInsensitiveCompare("Amex") == .orderedSame
+                || normalizedIssuer.localizedCaseInsensitiveCompare("American Express") == .orderedSame else { return nil }
+        let digits = accountNumberDigits(from: preferredText, source: source)
+            ?? accountNumberDigits(from: administrativeText, source: source)
+        guard let digits, digits.count == 15 else { return nil }
+        let familyPrefix = String(digits.prefix(11))
+        let digest = SHA256.hash(data: Data(("amex-account-family-v1|" + familyPrefix).utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Resolve the account identity from administrative evidence before

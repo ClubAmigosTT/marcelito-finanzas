@@ -76,10 +76,41 @@ final class AmexDiagnosticTests: XCTestCase {
     }
 
     func testRejectedAmexRowBlocksEvenCompensatingTotals() {
-        let rejected = OCRRowDiagnostic(page: 2, rawText: "synthetic", reason: "amex.mxn-cell-ambiguous", accepted: false)
+        let rejected = OCRRowDiagnostic(page: 2, rawText: "synthetic", reason: "amex.mxn-cell-ambiguous", accepted: false,
+                                        cellTexts: ["25.00", "250.00"])
         let result = FinanceStore.santanderRowGate(StatementReconciliationRecord(status: .valid, tolerance: 0),
             source: "Amex", diagnostics: [rejected])
         XCTAssertEqual(result.status, .invalid)
+    }
+
+    func testAmexTextFragmentWithoutMoneyDoesNotBlockReconciledTotals() {
+        let fragment = OCRRowDiagnostic(page: 3, rawText: "synthetic non-financial fragment",
+                                        reason: "amex.mxn-cell-ambiguous", accepted: false, cellTexts: [])
+        let result = FinanceStore.santanderRowGate(StatementReconciliationRecord(status: .valid, tolerance: 0),
+            source: "Amex", diagnostics: [fragment])
+        XCTAssertEqual(result.status, .valid)
+    }
+
+    func testAdjacentAmexCardReissueGroupsOnlyWhenPeriodsAreContinuous() {
+        func statement(_ accountKey: String, _ period: String, _ day: Double) -> StatementRecord {
+            StatementRecord(
+                id: UUID(), source: "Amex", accountKey: accountKey,
+                accountFamilyFingerprint: "same-family", period: period,
+                fileName: "statement-\(Int(day)).pdf", importedAt: Date(timeIntervalSince1970: day),
+                transactionCount: 1, requiresReview: false, kind: .card
+            )
+        }
+
+        let julyAugust = statement("amex:1003", "del 28 de julio al 27 de agosto de 2026", 1)
+        let augustSeptember = statement("amex:2001", "del 28 de agosto al 27 de septiembre de 2026", 2)
+        let grouped = FinanceStore.amexGroupedAccountKeysForTesting([julyAugust, augustSeptember])
+        XCTAssertEqual(grouped[julyAugust.id], "amex:1003")
+        XCTAssertEqual(grouped[augustSeptember.id], "amex:1003")
+
+        let overlappingReplacement = statement("amex:2001", "del 28 de julio al 27 de agosto de 2026", 3)
+        let separate = FinanceStore.amexGroupedAccountKeysForTesting([julyAugust, overlappingReplacement])
+        XCTAssertEqual(separate[julyAugust.id], "amex:1003")
+        XCTAssertEqual(separate[overlappingReplacement.id], "amex:2001")
     }
 
     /// Real PDFs stay private. Skipping this test is NOT certification.
