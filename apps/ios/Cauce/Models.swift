@@ -10302,6 +10302,13 @@ final class FinanceStore {
                 let amounts = moneyRegex.matches(in: original, range: bodyRange)
                 if amounts.count > 1 {
                     for index in 0..<(amounts.count - 1) {
+                        // Amex merchant descriptions can contain an advertised
+                        // price (for example `$1.50 FRESH PIZZA NEW YORK`) before
+                        // the actual MXN cell. Keep that in the description;
+                        // only split on a plain amount that can close the first
+                        // transaction in the statement's native text layout.
+                        let firstAmount = originalNSString.substring(with: amounts[index].range)
+                        guard !firstAmount.hasPrefix("$") else { continue }
                         let amountEnd = amounts[index].range.upperBound
                         let nextAmountStart = amounts[index + 1].range.location
                         guard amountEnd < nextAmountStart else { continue }
