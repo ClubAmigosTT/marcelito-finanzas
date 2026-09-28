@@ -421,7 +421,16 @@ struct MovementDetailView: View {
             }
             if let recipient = currentMovement.transferRecipient {
                 LabeledContent(currentMovement.amount < 0 ? "Destinatario" : "Ordenante", value: recipient)
-                LabeledContent("Descripción bancaria", value: currentMovement.rawDescription ?? currentMovement.title)
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("Descripción bancaria")
+                        .font(.caption)
+                        .foregroundStyle(Color.marcelitoNavySoft)
+                    Text(currentMovement.originalBankDescription)
+                        .font(.subheadline)
+                        .foregroundStyle(Color.marcelitoNavy)
+                        .textSelection(.enabled)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
             if let displayMerchant = currentMovement.displayMerchant, !displayMerchant.isEmpty {
                 LabeledContent("Comercio mostrado", value: displayMerchant)
@@ -970,6 +979,17 @@ private struct ExpenseMerchantReviewView: View {
                                     Text("\(movement.account) · \(movement.category)")
                                         .font(.caption)
                                         .foregroundStyle(.secondary)
+                                    if movement.transferRecipient != nil {
+                                        Text(movement.summaryDisplayTitle)
+                                            .font(.caption.weight(.semibold))
+                                            .foregroundStyle(Color.marcelitoNavySoft)
+                                            .lineLimit(1)
+                                        Text(movement.originalBankDescription)
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                            .fixedSize(horizontal: false, vertical: true)
+                                    }
                                 }
                                 Spacer(minLength: 8)
                                 Text(movement.expenseContribution, format: .currency(code: "MXN"))

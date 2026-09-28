@@ -42,6 +42,18 @@ test("Gastos resume todo el libro real y conserva las categorías manuales entre
   assert.match(expenses, /expenseContribution/);
 });
 
+test("el detalle de pendientes en Gastos muestra beneficiario y descripción bancaria", async () => {
+  const source = await readFile(sectionsPath, "utf8");
+  const reviewStart = source.indexOf("private struct ExpenseMerchantReviewView");
+  const reviewEnd = source.indexOf("private struct ExpenseCategorySelection", reviewStart);
+  const review = source.slice(reviewStart, reviewEnd);
+
+  assert.ok(reviewStart >= 0 && reviewEnd > reviewStart);
+  assert.match(review, /if movement\.transferRecipient != nil/);
+  assert.match(review, /Text\(movement\.summaryDisplayTitle\)/);
+  assert.match(review, /Text\(movement\.originalBankDescription\)/);
+});
+
 test("Cuentas conserva un acceso superior para asignar y editar movimientos", async () => {
   const source = await readFile(sectionsPath, "utf8");
   const accountsStart = source.indexOf("struct AccountsView");

@@ -353,6 +353,24 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(movement.transferRecipient, "Araceli Castillo")
         XCTAssertEqual(movement.summaryDisplayTitle, "SPEI a Araceli Castillo")
 
+        let ocrOnlyRecipient = Movement(
+            date: .now,
+            title: "SPEI ENVIADO",
+            account: "Santander",
+            category: "Otros / Por revisar",
+            amount: -250,
+            flow: .expense,
+            extractionEvidence: MovementExtractionEvidence(
+                method: "vision-ocr",
+                page: 2,
+                confidence: 0.9,
+                sourceText: "SPEI ENVIADO A MARIA LOPEZ CONCEPTO RENTA",
+                selectedAmount: -250
+            )
+        )
+        XCTAssertEqual(ocrOnlyRecipient.transferRecipient, "Maria Lopez")
+        XCTAssertEqual(ocrOnlyRecipient.originalBankDescription, "SPEI ENVIADO A MARIA LOPEZ CONCEPTO RENTA")
+
         let intermediaryOnly = Movement(
             date: .now,
             title: "SPEI ENVIADO STP",

@@ -325,6 +325,15 @@ struct Movement: Identifiable, Codable {
         return nil
     }
 
+    /// Original bank descriptor, preferring the retained raw row and falling
+    /// back to the OCR evidence fragment when that is the only source.
+    var originalBankDescription: String {
+        let candidates = [rawDescription, extractionEvidence?.sourceText, title]
+            .compactMap { $0 }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return candidates.first(where: { !$0.isEmpty }) ?? title
+    }
+
     /// Concise list label that surfaces the person/company on outbound and
     /// inbound SPEI rows without replacing the original descriptor.
     var summaryDisplayTitle: String {
