@@ -379,10 +379,19 @@ struct MovementDetailView: View {
     @State private var selectedKind: MovementKind
     @State private var isTravel: Bool
     @State private var categorySaveMessage: String?
+    @State private var merchantRuleAppliedForCurrentChoice = false
     private let categories = movementCategoryOptions
 
     private var currentMovement: Movement {
         store.movements.first(where: { $0.id == movement.id }) ?? movement
+    }
+
+    private var canApplyMerchantRule: Bool {
+        store.canApplyCategoryRule(for: currentMovement, to: selectedCategory)
+    }
+
+    private var merchantRulePeerCount: Int {
+        store.categoryRulePeerCount(for: currentMovement)
     }
 
     init(movement: Movement) {
@@ -511,8 +520,9 @@ struct MovementDetailView: View {
                 get: { selectedCategory },
                 set: {
                     selectedCategory = $0
-                    categorySaveMessage = store.updateCategory(for: movement, to: $0)
-                        ? "Guardado como \($0)"
+                    merchantRuleAppliedForCurrentChoice = false
+                    categorySaveMessage = store.updateCategory(for: movement, to: $0, applyToMerchant: false)
+                        ? "Guardado como \($0) para este movimiento"
                         : "No se pudo guardar; el movimiento ya no está disponible."
                 }
             )) {
@@ -520,9 +530,32 @@ struct MovementDetailView: View {
                     Text(option).tag(option)
                 }
             }
-            Text("La categoría se guarda al seleccionarla y se recuerda para movimientos futuros y otros pendientes del mismo comercio.")
+            Text("La categoría se guarda al seleccionarla. Puedes extenderla a este comercio con la opción de abajo.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            if canApplyMerchantRule {
+                Button {
+                    guard store.updateCategory(for: currentMovement, to: selectedCategory, applyToMerchant: true) else {
+                        categorySaveMessage = "No se pudo guardar la regla para este comercio."
+                        return
+                    }
+                    merchantRuleAppliedForCurrentChoice = true
+                    categorySaveMessage = "Regla guardada para este comercio."
+                } label: {
+                    Label(
+                        merchantRuleAppliedForCurrentChoice
+                            ? "Regla guardada para este comercio"
+                            : merchantRulePeerCount > 0
+                                ? "Aplicar también a \(merchantRulePeerCount) otros gastos"
+                                : "Guardar regla para futuros gastos",
+                        systemImage: merchantRuleAppliedForCurrentChoice ? "checkmark.circle.fill" : "arrow.clockwise.circle"
+                    )
+                }
+                .disabled(merchantRuleAppliedForCurrentChoice)
+                Text("Los gastos que ya clasificaste manualmente se conservan.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             if let categorySaveMessage {
                 Label(categorySaveMessage, systemImage: "checkmark.circle.fill")
                     .font(.caption.weight(.semibold))
@@ -580,6 +613,12 @@ private struct ExpenseMerchantReviewGroup: Identifiable {
     }
 }
 
+private struct ExpensePendingReviewSnapshot {
+    let groups: [ExpenseMerchantReviewGroup]
+    let movementCount: Int
+    let total: Decimal
+}
+
 private struct ExpenseCategoryAISuggestion {
     let category: String
     let confidence: Double
@@ -598,13 +637,14 @@ struct ExpensesView: View {
     @State private var localRuleChangeCount = 0
     @State private var aiSuggestionsByMerchant: [String: ExpenseCategoryAISuggestion] = [:]
 
-    private var pendingReviewGroups: [ExpenseMerchantReviewGroup] {
+    private var pendingReviewSnapshot: ExpensePendingReviewSnapshot {
+        let pendingMovements = store.pendingExpenseCategoryMovements
         let eligibleIDs = Set(store.pendingClassifiableExpenseMovements.map(\.id))
-        let grouped = Dictionary(grouping: store.pendingExpenseCategoryMovements) { movement in
+        let grouped = Dictionary(grouping: pendingMovements) { movement in
             let key = store.categoryRuleKey(for: movement)
             return key.count >= 3 ? key : "row:\(movement.id.uuidString)"
         }
-        return grouped.map { pair in
+        let groups = grouped.map { pair in
             let (key, movements) = pair
             return ExpenseMerchantReviewGroup(
                 key: key,
@@ -617,7 +657,14 @@ struct ExpensesView: View {
             let order = $0.displayName.localizedCaseInsensitiveCompare($1.displayName)
             return order == .orderedSame ? $0.key < $1.key : order == .orderedAscending
         }
+        return ExpensePendingReviewSnapshot(
+            groups: groups,
+            movementCount: pendingMovements.count,
+            total: pendingMovements.reduce(0) { $0 + $1.expenseContribution }
+        )
     }
+
+    private var pendingReviewGroups: [ExpenseMerchantReviewGroup] { pendingReviewSnapshot.groups }
 
     private var groups: [(category: String, amount: Decimal)] {
         // Movements already contains the user's saved/manual category. The
@@ -631,10 +678,6 @@ struct ExpensesView: View {
     }
 
     private var total: Decimal { store.consolidatedRealSpend }
-
-    private var pendingReviewTotal: Decimal {
-        store.pendingExpenseCategoryMovements.reduce(0) { $0 + $1.expenseContribution }
-    }
 
     private func expenseShare(for amount: Decimal) -> String {
         guard total > 0, amount >= 0, amount <= total else { return "—" }
@@ -662,14 +705,15 @@ struct ExpensesView: View {
     }
 
     @ViewBuilder
-    private func pendingExpensesSection(groups pendingGroups: [ExpenseMerchantReviewGroup]) -> some View {
+    private func pendingExpensesSection(snapshot: ExpensePendingReviewSnapshot) -> some View {
+        let pendingGroups = snapshot.groups
         if !pendingGroups.isEmpty {
             Section {
                 HStack(alignment: .firstTextBaseline) {
-                    Text("\(pendingGroups.count) comercios · \(store.pendingExpenseCategoryMovements.count) movimientos")
+                    Text("\(pendingGroups.count) comercios · \(snapshot.movementCount) movimientos")
                         .font(.subheadline.weight(.semibold))
                     Spacer(minLength: 8)
-                    Text(pendingGroups.reduce(Decimal.zero) { $0 + $1.total }, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                    Text(snapshot.total, format: .currency(code: "MXN").precision(.fractionLength(0)))
                         .font(.subheadline.monospacedDigit())
                 }
                 .foregroundStyle(Color.marcelitoAmber)
@@ -691,7 +735,7 @@ struct ExpensesView: View {
                 }
                 .disabled(isAIProcessing || store.pendingExpenseCategoryMovements.isEmpty)
 
-                ForEach(pendingGroups) { group in
+                ForEach(snapshot.groups) { group in
                     let suggestion = aiSuggestionsByMerchant[group.key]
                     NavigationLink {
                         ExpenseMerchantReviewView(group: group, suggestion: suggestion) {
@@ -719,6 +763,15 @@ struct ExpensesView: View {
                         }
                     }
                 }
+                Divider()
+                HStack {
+                    Text("Total pendiente")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer(minLength: 8)
+                    Text(snapshot.total, format: .currency(code: "MXN").precision(.fractionLength(0)))
+                        .font(.subheadline.weight(.semibold).monospacedDigit())
+                }
+                .foregroundStyle(Color.marcelitoNavy)
             } header: {
                 Text("Pendiente de clasificar")
             } footer: {
@@ -727,14 +780,14 @@ struct ExpensesView: View {
         }
     }
 
-    private var readingSection: some View {
+    private func readingSection(pendingTotal: Decimal) -> some View {
         Section("Resumen") {
             VStack(alignment: .leading, spacing: 6) {
                 Text("Gasto consolidado")
                 Text(total, format: .currency(code: "MXN").precision(.fractionLength(0)))
                     .font(.headline)
                 LabeledContent("Clasificado", value: groups.reduce(Decimal(0)) { $0 + $1.amount }.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
-                LabeledContent("Pendiente", value: pendingReviewTotal.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
+                LabeledContent("Pendiente", value: pendingTotal.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
                 Text("Gasto neto conciliado. Lo que sigue pendiente de clasificar aparece separado arriba; las capturas provisionales no se incluyen.")
                     .foregroundStyle(.secondary)
             }
@@ -752,7 +805,7 @@ struct ExpensesView: View {
 
     @ViewBuilder
     private func expenseRows(
-        pendingGroups: [ExpenseMerchantReviewGroup],
+        pendingSnapshot: ExpensePendingReviewSnapshot,
         categorizedGroups: [(category: String, amount: Decimal)]
     ) -> some View {
         List {
@@ -762,7 +815,7 @@ struct ExpensesView: View {
                     HistoricalDashboardBlockedCard(store: store)
                 }
             } else {
-                if categorizedGroups.isEmpty && pendingGroups.isEmpty {
+                if categorizedGroups.isEmpty && pendingSnapshot.groups.isEmpty {
                     ContentUnavailableView("Sin gastos", systemImage: "chart.pie", description: Text("Importa un estado de cuenta para construir tus categorías reales."))
                 } else {
                     if store.dashboardIsProvisional {
@@ -770,21 +823,22 @@ struct ExpensesView: View {
                             LedgerQualityBanner(store: store)
                         }
                     }
-                    pendingExpensesSection(groups: pendingGroups)
+                    pendingExpensesSection(snapshot: pendingSnapshot)
                     if !categorizedGroups.isEmpty {
                         identifiedExpensesSection(groups: categorizedGroups)
                     }
-                    readingSection
+                    readingSection(pendingTotal: pendingSnapshot.total)
                     reconciliationSection
                 }
             }
         }
     }
     var body: some View {
-        let pendingGroups = pendingReviewGroups
+        let pendingSnapshot = pendingReviewSnapshot
+        let pendingGroups = pendingSnapshot.groups
         let categorizedGroups = groups
         NavigationStack {
-            expenseRows(pendingGroups: pendingGroups, categorizedGroups: categorizedGroups)
+            expenseRows(pendingSnapshot: pendingSnapshot, categorizedGroups: categorizedGroups)
                 .navigationTitle("Gastos")
                 .listStyle(.insetGrouped)
                 .listRowBackground(Color.marcelitoCreamSoft)
@@ -935,73 +989,102 @@ private struct ExpenseMerchantReviewView: View {
     let suggestion: ExpenseCategoryAISuggestion?
     let onAccepted: () -> Void
 
+    private var currentGroup: ExpenseMerchantReviewGroup? {
+        let pendingMovements = store.pendingExpenseCategoryMovements
+        let members: [Movement]
+        if group.key.hasPrefix("row:") {
+            members = pendingMovements.filter { "row:\($0.id.uuidString)" == group.key }
+        } else {
+            members = pendingMovements.filter { store.categoryRuleKey(for: $0) == group.key }
+        }
+        guard !members.isEmpty else { return nil }
+        let eligibleIDs = Set(store.pendingClassifiableExpenseMovements.map(\.id))
+        return ExpenseMerchantReviewGroup(
+            key: group.key,
+            movements: members,
+            classifiableMovements: members.filter { eligibleIDs.contains($0.id) }
+        )
+    }
+
     var body: some View {
         NavigationStack {
             List {
-                Section("Comercio") {
-                    LabeledContent("Nombre", value: group.displayName)
-                    LabeledContent("Movimientos", value: "\(group.count)")
-                    LabeledContent("Total", value: group.total.formatted(.currency(code: "MXN")))
-                }
-                if let suggestion {
-                    Section("Sugerencia para revisar") {
-                        LabeledContent("Categoría", value: suggestion.category)
-                        LabeledContent("Confianza", value: "\(Int((suggestion.confidence * 100).rounded()))%")
-                        if let reason = suggestion.reason, !reason.isEmpty {
-                            Text(reason).font(.caption).foregroundStyle(.secondary)
+                if let currentGroup {
+                    Section("Comercio") {
+                        LabeledContent("Nombre", value: currentGroup.displayName)
+                        LabeledContent("Movimientos", value: "\(currentGroup.count)")
+                        LabeledContent("Total", value: currentGroup.total.formatted(.currency(code: "MXN")))
+                    }
+                    if let suggestion, !currentGroup.classifiableMovements.isEmpty {
+                        Section("Sugerencia para revisar") {
+                            LabeledContent("Categoría", value: suggestion.category)
+                            LabeledContent("Confianza", value: "\(Int((suggestion.confidence * 100).rounded()))%")
+                            if let reason = suggestion.reason, !reason.isEmpty {
+                                Text(reason).font(.caption).foregroundStyle(.secondary)
+                            }
+                            Button("Confirmar para este comercio") {
+                                guard store.updateCategory(
+                                    for: currentGroup.representative,
+                                    to: suggestion.category,
+                                    applyToMerchant: true
+                                ) else { return }
+                                onAccepted()
+                                dismiss()
+                            }
+                            .fontWeight(.semibold)
                         }
-                        Button("Confirmar para este comercio") {
-                            guard store.updateCategory(for: group.representative, to: suggestion.category) else { return }
-                            onAccepted()
-                            dismiss()
+                    } else if currentGroup.classifiableMovements.isEmpty {
+                        Section("Revisión manual") {
+                            Text("Este grupo no se envía a IA porque incluye movimientos que requieren una decisión contable. Abre un movimiento para revisar su tipo y categoría.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
                         }
-                        .fontWeight(.semibold)
+                    } else {
+                        Section("Sin sugerencia automática") {
+                            Text("No hubo evidencia suficiente para proponer una categoría. Abre un movimiento para elegirla; desde ahí puedes extenderla al comercio.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
                     }
-                } else if group.classifiableMovements.isEmpty {
-                    Section("Revisión manual") {
-                        Text("Este grupo no se envía a IA porque incluye movimientos que requieren una decisión contable. Abre un movimiento para revisar su tipo y categoría.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Section("Sin sugerencia automática") {
-                        Text("No hubo evidencia suficiente para proponer una categoría. Abre un movimiento para elegirla; esa decisión se guardará como regla para este comercio y sus otros pendientes.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                Section("Movimientos") {
-                    ForEach(group.movements) { movement in
-                        NavigationLink {
-                            MovementDetailView(movement: movement)
-                        } label: {
-                            HStack(spacing: 10) {
-                                VStack(alignment: .leading, spacing: 3) {
-                                    Text(movement.date, format: .dateTime.day().month(.abbreviated).year())
-                                        .font(.subheadline.weight(.semibold))
-                                    Text("\(movement.account) · \(movement.category)")
-                                        .font(.caption)
-                                        .foregroundStyle(.secondary)
-                                    if movement.hasTransferOrSpeiDescriptor {
-                                        Text(movement.transferRecipient != nil
-                                            ? movement.summaryDisplayTitle
-                                            : "\(movement.amount < 0 ? "Destinatario" : "Ordenante") no indicado en el estado")
-                                            .font(.caption.weight(.semibold))
-                                            .foregroundStyle(Color.marcelitoNavySoft)
-                                            .lineLimit(1)
-                                        Text(movement.originalBankDescription)
-                                            .font(.caption2)
+                    Section("Movimientos") {
+                        ForEach(currentGroup.movements) { movement in
+                            NavigationLink {
+                                MovementDetailView(movement: movement)
+                            } label: {
+                                HStack(spacing: 10) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(movement.date, format: .dateTime.day().month(.abbreviated).year())
+                                            .font(.subheadline.weight(.semibold))
+                                        Text("\(movement.account) · \(movement.category)")
+                                            .font(.caption)
                                             .foregroundStyle(.secondary)
-                                            .lineLimit(2)
-                                            .fixedSize(horizontal: false, vertical: true)
+                                        if movement.hasTransferOrSpeiDescriptor {
+                                            Text(movement.transferRecipient != nil
+                                                ? movement.summaryDisplayTitle
+                                                : "\(movement.amount < 0 ? "Destinatario" : "Ordenante") no indicado en el estado")
+                                                .font(.caption.weight(.semibold))
+                                                .foregroundStyle(Color.marcelitoNavySoft)
+                                                .lineLimit(1)
+                                            Text(movement.originalBankDescription)
+                                                .font(.caption2)
+                                                .foregroundStyle(.secondary)
+                                                .lineLimit(2)
+                                                .fixedSize(horizontal: false, vertical: true)
+                                        }
                                     }
+                                    Spacer(minLength: 8)
+                                    Text(movement.expenseContribution, format: .currency(code: "MXN"))
+                                        .font(.subheadline.monospacedDigit())
                                 }
-                                Spacer(minLength: 8)
-                                Text(movement.expenseContribution, format: .currency(code: "MXN"))
-                                    .font(.subheadline.monospacedDigit())
                             }
                         }
                     }
+                } else {
+                    ContentUnavailableView(
+                        "Comercio actualizado",
+                        systemImage: "checkmark.circle",
+                        description: Text("La categoría ya se guardó y no quedan movimientos pendientes de este comercio.")
+                    )
                 }
             }
             .navigationTitle("Revisar comercio")

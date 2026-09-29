@@ -4245,6 +4245,12 @@ final class FinanceStore {
         for index in nextMovements.indices {
             let movement = nextMovements[index]
             guard movement.flow == .expense else { continue }
+            // A confirmed manual category is the user's decision. Preserve it
+            // during taxonomy refreshes, even when it was saved for only one
+            // movement and has no merchant-wide rule.
+            if movement.manuallyReviewed, !Self.pendingCategoryNames.contains(movement.category) {
+                continue
+            }
             if [.cardPayment, .bankTransfer, .income, .credit, .refund, .msi].contains(movementKind(movement)) {
                 continue
             }
@@ -4834,7 +4840,7 @@ final class FinanceStore {
     }
 
     @discardableResult
-    func updateCategory(for movement: Movement, to category: String) -> Bool {
+    func updateCategory(for movement: Movement, to category: String, applyToMerchant: Bool) -> Bool {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return false }
         let key = categoryRuleKey(for: movements[index])
         func apply(_ targetIndex: Int, manuallyReviewed: Bool) {
@@ -4854,7 +4860,7 @@ final class FinanceStore {
         // Very short keys are shown as individual review rows in Gastos and
         // must not become broad merchant rules (for example, two unrelated
         // two-character OCR fragments).
-        if key.count >= 3, isClassifiableExpenseForCategory(movements[index]) {
+        if applyToMerchant, key.count >= 3, isClassifiableExpenseForCategory(movements[index]) {
             var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
             var overrides = UserDefaults.standard.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
             // The review bucket must remain temporary. Persist final manual
@@ -16692,6 +16698,28 @@ final class FinanceStore {
 
     func categoryRuleKey(for movement: Movement) -> String {
         Self.categoryRuleKey(movement.normalizedMerchant ?? movement.displayMerchant ?? movement.title)
+    }
+
+    /// Number of canonical, unreviewed same-merchant expenses that can be
+    /// included in an explicitly requested merchant-wide category rule.
+    func categoryRulePeerCount(for movement: Movement) -> Int {
+        let key = categoryRuleKey(for: movement)
+        guard key.count >= 3 else { return 0 }
+        let canonicalIDs = Set(reconciledMovements.map(\.id))
+        return movements.filter { peer in
+            peer.id != movement.id
+                && !peer.manuallyReviewed
+                && canonicalIDs.contains(peer.id)
+                && isClassifiableExpenseForCategory(peer)
+                && categoryRuleKey(for: peer) == key
+        }.count
+    }
+
+    func canApplyCategoryRule(for movement: Movement, to category: String) -> Bool {
+        isClassifiableExpenseForCategory(movement)
+            && categoryRuleKey(for: movement).count >= 3
+            && ExpenseAIClassifier.allowedCategories.contains(category)
+            && !Self.pendingCategoryNames.contains(category)
     }
 
     /// Uses the same token normalization for every issuer. OCR and PDF text

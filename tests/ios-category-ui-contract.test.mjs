@@ -12,10 +12,27 @@ test("los selectores iOS vinculan cada categoría con el valor que se guarda", a
   const explicitStringTags = source.match(/Text\(option\)\.tag\(option\)/g) ?? [];
 
   assert.ok(explicitStringTags.length >= 2, "los selectores de alta y edición deben declarar tags String");
-  assert.match(source, /store\.updateCategory\(for: movement, to: \$0\)/);
+  assert.match(source, /store\.updateCategory\(for: movement, to: \$0, applyToMerchant: false\)/);
   assert.match(source, /La categoría se guarda al seleccionarla/);
+  assert.ok(source.includes("Aplicar también a \\(merchantRulePeerCount) otros gastos"));
+  assert.ok(source.includes("Guardar regla para futuros gastos"));
   assert.match(source, /Text\(movement\.category\)/);
   assert.match(source, /Guardado como/);
+});
+
+test("la lista pendiente deriva grupos, cantidad y total de la misma instantánea", async () => {
+  const source = await readFile(sectionsPath, "utf8");
+  const expensesStart = source.indexOf("struct ExpensesView");
+  const reviewStart = source.indexOf("private struct ExpenseMerchantReviewView", expensesStart);
+  const expenses = source.slice(expensesStart, reviewStart);
+  const review = source.slice(reviewStart);
+
+  assert.match(expenses, /let pendingMovements = store\.pendingExpenseCategoryMovements/);
+  assert.match(expenses, /movementCount: pendingMovements\.count/);
+  assert.match(expenses, /total: pendingMovements\.reduce/);
+  assert.match(expenses, /Text\("Total pendiente"\)/);
+  assert.match(review, /private var currentGroup: ExpenseMerchantReviewGroup\?/);
+  assert.match(review, /"Comercio actualizado"/);
 });
 
 test("la pantalla ofrece reglas locales y reporta solo cambios realmente aplicados por IA", async () => {

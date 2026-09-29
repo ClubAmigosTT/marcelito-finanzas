@@ -300,7 +300,7 @@ final class ReaderContractTests: XCTestCase {
         )
         store.movements = [movement]
 
-        XCTAssertTrue(store.updateCategory(for: movement, to: "Restaurantes y bares"))
+        XCTAssertTrue(store.updateCategory(for: movement, to: "Restaurantes y bares", applyToMerchant: true))
         XCTAssertEqual(store.movements.first?.category, "Restaurantes y bares")
         let futureMovement = Movement(
             date: .now,
@@ -316,6 +316,145 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(store.applyDeterministicCategoryRules(), 1)
         XCTAssertEqual(store.movements.first?.category, "Restaurantes y bares")
         XCTAssertTrue(store.movements.first?.classificationTags.contains("personal") == true)
+    }
+
+    func testSingleMovementCategorySaveIsIdempotentAndKeepsPendingTotalsConsistent() {
+        let store = FinanceStore()
+        store.clearLocalData()
+        defer { store.clearLocalData() }
+
+        let merchant = "COMERCIO PRUEBA"
+        let selected = Movement(
+            date: .now,
+            title: merchant,
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -125,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant,
+            displayMerchant: merchant
+        )
+        let peer = Movement(
+            date: .now.addingTimeInterval(-86_400),
+            title: merchant,
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -240,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant,
+            displayMerchant: merchant
+        )
+        var previouslyReviewed = Movement(
+            date: .now.addingTimeInterval(-172_800),
+            title: merchant,
+            account: "Amex",
+            category: "Viajes",
+            amount: -360,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant,
+            displayMerchant: merchant
+        )
+        previouslyReviewed.manuallyReviewed = true
+        store.movements = [selected, peer, previouslyReviewed]
+
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.count, 2)
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.reduce(Decimal.zero) { $0 + $1.expenseContribution }, 365)
+        XCTAssertEqual(store.categoryRulePeerCount(for: selected), 1)
+        XCTAssertTrue(store.canApplyCategoryRule(for: selected, to: "Salud"))
+
+        XCTAssertTrue(store.updateCategory(for: selected, to: "Salud", applyToMerchant: false))
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.category, "Salud")
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.manuallyReviewed, true)
+        XCTAssertEqual(store.movements.first(where: { $0.id == peer.id })?.category, "Otros / Por revisar")
+        XCTAssertEqual(store.movements.first(where: { $0.id == previouslyReviewed.id })?.category, "Viajes")
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.count, 1)
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.reduce(Decimal.zero) { $0 + $1.expenseContribution }, 240)
+
+        store.normalizeFinanceForTesting()
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.category, "Salud")
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.manuallyReviewed, true)
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.count, 1)
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.reduce(Decimal.zero) { $0 + $1.expenseContribution }, 240)
+
+        let savedMovement = try! XCTUnwrap(store.movements.first(where: { $0.id == selected.id }))
+        XCTAssertTrue(store.updateCategory(for: savedMovement, to: "Salud", applyToMerchant: false))
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.count, 1, "Saving the same choice must not resurrect the row")
+        XCTAssertEqual(
+            store.pendingExpenseCategoryMovements.reduce(Decimal.zero) { $0 + $1.expenseContribution },
+            240,
+            "The pending total and count must use the same rows"
+        )
+
+        _ = store.applyDeterministicCategoryRules()
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.category, "Salud")
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.amount, -125)
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.flow, .expense)
+    }
+
+    func testMerchantRuleRequiresExplicitActionAndPreservesReviewedPeers() {
+        let store = FinanceStore()
+        store.clearLocalData()
+        defer { store.clearLocalData() }
+
+        let merchant = "COMERCIO REGLA"
+        let selected = Movement(
+            date: .now,
+            title: merchant,
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -125,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant
+        )
+        let peer = Movement(
+            date: .now.addingTimeInterval(-86_400),
+            title: merchant,
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -240,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant
+        )
+        var protectedPeer = Movement(
+            date: .now.addingTimeInterval(-172_800),
+            title: merchant,
+            account: "Amex",
+            category: "Viajes",
+            amount: -360,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant
+        )
+        protectedPeer.manuallyReviewed = true
+        store.movements = [selected, peer, protectedPeer]
+
+        XCTAssertTrue(store.updateCategory(for: selected, to: "Salud", applyToMerchant: false))
+        let individuallySaved = try! XCTUnwrap(store.movements.first(where: { $0.id == selected.id }))
+        XCTAssertEqual(store.categoryRulePeerCount(for: individuallySaved), 1)
+        XCTAssertTrue(store.updateCategory(for: individuallySaved, to: "Salud", applyToMerchant: true))
+        XCTAssertEqual(store.movements.first(where: { $0.id == peer.id })?.category, "Salud")
+        XCTAssertEqual(store.movements.first(where: { $0.id == protectedPeer.id })?.category, "Viajes")
+        XCTAssertEqual(store.movements.first(where: { $0.id == peer.id })?.amount, -240)
+
+        let future = Movement(
+            date: .now,
+            title: merchant,
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -80,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant
+        )
+        store.movements.append(future)
+        _ = store.applyDeterministicCategoryRules()
+        XCTAssertEqual(store.movements.first(where: { $0.id == future.id })?.category, "Salud")
+        XCTAssertEqual(store.movements.first(where: { $0.id == protectedPeer.id })?.category, "Viajes")
     }
 
     func testNewExpenseCategoriesClassifyOnlyExplicitMerchantEvidence() {
@@ -415,7 +554,7 @@ final class ReaderContractTests: XCTestCase {
             kind: .bankTransfer
         )
         store.movements = [transfer]
-        XCTAssertTrue(store.updateCategory(for: transfer, to: "ITAM"))
+        XCTAssertTrue(store.updateCategory(for: transfer, to: "ITAM", applyToMerchant: false))
 
         let futureExpense = Movement(
             date: .now,
@@ -474,7 +613,7 @@ final class ReaderContractTests: XCTestCase {
         }
         store.movements = [selected, peer, protectedPeer, unrelated] + otherPendingRows
 
-        XCTAssertTrue(store.updateCategory(for: selected, to: "Restaurantes y bares"))
+        XCTAssertTrue(store.updateCategory(for: selected, to: "Restaurantes y bares", applyToMerchant: true))
 
         let updated = Dictionary(uniqueKeysWithValues: store.movements.map { ($0.id, $0) })
         XCTAssertEqual(updated[selected.id]?.category, "Restaurantes y bares")
@@ -500,7 +639,7 @@ final class ReaderContractTests: XCTestCase {
         )
         store.movements = [movement]
 
-        XCTAssertTrue(store.updateCategory(for: movement, to: "Viajes"))
+        XCTAssertTrue(store.updateCategory(for: movement, to: "Viajes", applyToMerchant: true))
         XCTAssertEqual(store.movements.first?.category, "Viajes")
         XCTAssertTrue(store.movements.first?.travelRelated == true)
         XCTAssertTrue(store.movements.first?.classificationTags.contains("viaje") == true)
@@ -520,7 +659,7 @@ final class ReaderContractTests: XCTestCase {
         )
         store.movements = [movement]
 
-        XCTAssertTrue(store.updateCategory(for: movement, to: "Otros / Por revisar"))
+        XCTAssertTrue(store.updateCategory(for: movement, to: "Otros / Por revisar", applyToMerchant: false))
         XCTAssertEqual(store.applyDeterministicCategoryRules(), 1)
         XCTAssertEqual(store.movements.first?.category, "Tiendita")
     }

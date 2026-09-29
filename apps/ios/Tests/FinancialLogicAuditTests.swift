@@ -472,7 +472,7 @@ final class FinancialLogicAuditTests: XCTestCase {
             store.statements = [original]
             store.movements = [movement]
             store.updateClassification(for: movement, kind: .purchase, travelRelated: true)
-            store.updateCategory(for: movement, to: "Salud")
+            store.updateCategory(for: movement, to: "Salud", applyToMerchant: false)
 
             let replacement = statement("Rappi", key: "rappi:1234", kind: .card)
             var reread = row(-100, date: date, title: "COMERCIO EJEMPLO")
