@@ -540,4 +540,105 @@ final class FinancialLogicAuditTests: XCTestCase {
             XCTAssertEqual(store.totalTransfers, 100)
         }
     }
+    private func seedTransfer(_ store: FinanceStore, sharedReference: Bool = true) {
+        let bank = statement("BBVA", key: "bbva:1111", kind: .bank)
+        let destination = statement("Santander", key: "santander:2222", kind: .bank)
+        store.statements = [bank, destination]
+        var outgoing = row(-3000, date: calendarDate(2026, 8, 31), title: sharedReference ? "SPEI ENVIADO REF ABC123" : "SPEI ENVIADO")
+        outgoing.statementId = bank.id
+        var incoming = row(3000, kind: .income, date: calendarDate(2026, 9, 1), title: sharedReference ? "SPEI RECIBIDO REF ABC123" : "SPEI RECIBIDO")
+        incoming.account = "Santander"
+        incoming.statementId = destination.id
+        store.movements = [outgoing, incoming]
+    }
+
+    private func assertTransferPair(_ store: FinanceStore, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(store.movements.count, 2, file: file, line: line)
+        guard store.movements.count == 2 else { return }
+        XCTAssertEqual(store.movements[0].matchedMovementId, store.movements[1].id, file: file, line: line)
+        XCTAssertEqual(store.movements[1].matchedMovementId, store.movements[0].id, file: file, line: line)
+        XCTAssertTrue(store.movements.allSatisfy { $0.kind == .bankTransfer && $0.flow == .transfer }, file: file, line: line)
+        XCTAssertEqual(store.consolidatedRealSpend, 0, file: file, line: line)
+        XCTAssertEqual(store.realIncome, 0, file: file, line: line)
+    }
+
+    func testCategoryBeforePairingDoesNotLockAccounting() {
+        withStore { store in
+            seedTransfer(store)
+            _ = store.updateCategory(for: store.movements[0], to: "Itam", applyToMerchant: false)
+            XCTAssertEqual(store.movements[0].manuallyAccountingReviewed, false)
+            store.normalizeFinanceForTesting()
+            assertTransferPair(store)
+            XCTAssertEqual(store.movements[0].category, "Itam")
+        }
+    }
+
+    func testCategoryAfterPairingPreservesReciprocityAcrossNormalizationAndReload() {
+        withStore { store in
+            seedTransfer(store)
+            store.normalizeFinanceForTesting()
+            _ = store.updateCategory(for: store.movements[0], to: "Entrenamiento", applyToMerchant: false)
+            store.normalizeFinanceForTesting()
+            assertTransferPair(store)
+            let reopened = FinanceStore()
+            assertTransferPair(reopened)
+            XCTAssertEqual(reopened.movements[0].category, "Entrenamiento")
+        }
+    }
+
+    func testManualTransferMatchesBothSidesWithIndependentEvidence() {
+        withStore { store in
+            seedTransfer(store)
+            store.updateClassification(for: store.movements[0], kind: .bankTransfer, travelRelated: false)
+            assertTransferPair(store)
+        }
+    }
+
+    func testConfirmedPairSurvivesNewRowIDsAndPreservesCategories() {
+        withStore { store in
+            seedTransfer(store, sharedReference: false)
+            _ = store.updateCategory(for: store.movements[0], to: "Itam", applyToMerchant: false)
+            XCTAssertTrue(store.confirmOwnTransfer(store.movements[0], counterpart: store.movements[1]))
+            var reread = store.movements
+            for index in reread.indices {
+                reread[index].id = UUID()
+                reread[index].matchedMovementId = nil
+                reread[index].manuallyReviewed = false
+                reread[index].manuallyAccountingReviewed = nil
+                reread[index].confirmedCounterpartKey = nil
+                reread[index].kind = reread[index].amount < 0 ? .purchase : .income
+                reread[index].flow = reread[index].amount < 0 ? .expense : .income
+            }
+            store.movements = reread
+            store.normalizeFinanceForTesting()
+            assertTransferPair(store)
+            XCTAssertEqual(store.movements[0].category, "Itam")
+        }
+    }
+
+    func testLegacyManualAccountingDecisionAndCodableStayProtected() throws {
+        try withStore { store in
+            seedTransfer(store)
+            store.movements[0].manuallyReviewed = true
+            store.movements[0].category = "Salud"
+            let data = try JSONEncoder().encode(store.movements[0])
+            let decoded = try JSONDecoder().decode(Movement.self, from: data)
+            XCTAssertNil(decoded.manuallyAccountingReviewed)
+            XCTAssertTrue(decoded.accountingReviewLocked)
+            store.normalizeFinanceForTesting()
+            XCTAssertEqual(store.movements[0].category, "Salud")
+            XCTAssertEqual(store.movements[0].kind, .purchase)
+            XCTAssertNil(store.movements[0].matchedMovementId)
+        }
+    }
+
+    func testOneCentDifferenceCannotBeAutomaticallyReconciled() {
+        withStore { store in
+            seedTransfer(store)
+            store.movements[1].amount = Decimal(string: "3000.01")!
+            store.normalizeFinanceForTesting()
+            XCTAssertTrue(store.movements.allSatisfy { $0.matchedMovementId == nil })
+        }
+    }
+
 }

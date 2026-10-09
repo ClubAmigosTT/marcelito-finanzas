@@ -380,6 +380,7 @@ struct MovementDetailView: View {
     @State private var isTravel: Bool
     @State private var categorySaveMessage: String?
     @State private var merchantRuleAppliedForCurrentChoice = false
+    @State private var counterpartToConfirm: Movement?
     private let categories = movementCategoryOptions
 
     private var currentMovement: Movement {
@@ -512,7 +513,27 @@ struct MovementDetailView: View {
                             )
                         }
                     } else {
-                        LabeledContent("Contraparte", value: "Estado no importado")
+                        LabeledContent("Contraparte", value: "Pendiente de conciliar")
+                    }
+                }
+            }
+            if currentMovement.kind == .bankTransfer, currentMovement.matchedMovementId == nil {
+                Section("Enlazar transferencia propia") {
+                    let candidates = store.transferCounterparts(for: currentMovement)
+                    if candidates.isEmpty {
+                        Text("Contraparte pendiente: no hay un movimiento compatible en las cuentas cargadas.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    ForEach(candidates) { peer in
+                        Button {
+                            counterpartToConfirm = peer
+                        } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(peer.account) · \(peer.amount.formatted(.currency(code: "MXN")))")
+                                Text("\(peer.date.formatted(date: .abbreviated, time: .omitted)) · \(peer.summaryDisplayTitle)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
                     }
                 }
             }
@@ -580,6 +601,24 @@ struct MovementDetailView: View {
                     store.updateClassification(for: movement, kind: selectedKind, travelRelated: $0)
                 }
             ))
+        }
+        .alert("¿Son la misma transferencia entre tus cuentas?", isPresented: Binding(
+            get: { counterpartToConfirm != nil },
+            set: { if !$0 { counterpartToConfirm = nil } }
+        )) {
+            Button("Confirmar ambos movimientos") {
+                if let peer = counterpartToConfirm {
+                    let success = store.confirmOwnTransfer(currentMovement, counterpart: peer)
+                    if success { selectedKind = .bankTransfer }
+                    categorySaveMessage = success ? "Transferencia enlazada; no cuenta como ingreso ni gasto." : "La pareja cambió. Revisa nuevamente."
+                }
+                counterpartToConfirm = nil
+            }
+            Button("Cancelar", role: .cancel) { counterpartToConfirm = nil }
+        } message: {
+            if let peer = counterpartToConfirm {
+                Text("\(peer.account) · \(peer.amount.formatted(.currency(code: "MXN"))) · \(peer.date.formatted(date: .abbreviated, time: .omitted))")
+            }
         }
         .navigationTitle(currentMovement.summaryDisplayTitle)
         .navigationBarTitleDisplayMode(.inline)

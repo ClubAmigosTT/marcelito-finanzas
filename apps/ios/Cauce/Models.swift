@@ -282,6 +282,10 @@ struct Movement: Identifiable, Codable {
     var reconciliationConfidence: Int?
     var reconciliationReason: String?
     var manuallyReviewed: Bool = false
+    /// Nil preserves the accounting decision of legacy manual reviews.
+    var manuallyAccountingReviewed: Bool? = nil
+    var confirmedCounterpartKey: String? = nil
+    var accountingReviewLocked: Bool { manuallyAccountingReviewed ?? manuallyReviewed }
     /// Original merchant text retained as evidence; never replaced by cleanup.
     var rawDescription: String?
     /// Stable merchant key for rules and deduplication.
@@ -442,7 +446,7 @@ struct Movement: Identifiable, Codable {
 
     private enum CodingKeys: String, CodingKey {
         case id, date, title, account, category, amount, flow, statementId, kind, travelRelated, foreignCurrency, classificationTags, extractionEvidence
-        case matchedMovementId, reconciliationConfidence, reconciliationReason, manuallyReviewed
+        case matchedMovementId, reconciliationConfidence, reconciliationReason, manuallyReviewed, manuallyAccountingReviewed, confirmedCounterpartKey
         case rawDescription, normalizedMerchant, displayMerchant, merchantConfidence, merchantReviewReason
     }
 
@@ -465,6 +469,8 @@ struct Movement: Identifiable, Codable {
         reconciliationConfidence = try container.decodeIfPresent(Int.self, forKey: .reconciliationConfidence)
         reconciliationReason = try container.decodeIfPresent(String.self, forKey: .reconciliationReason)
         manuallyReviewed = try container.decodeIfPresent(Bool.self, forKey: .manuallyReviewed) ?? false
+        manuallyAccountingReviewed = try container.decodeIfPresent(Bool.self, forKey: .manuallyAccountingReviewed)
+        confirmedCounterpartKey = try container.decodeIfPresent(String.self, forKey: .confirmedCounterpartKey)
         rawDescription = try container.decodeIfPresent(String.self, forKey: .rawDescription)
         normalizedMerchant = try container.decodeIfPresent(String.self, forKey: .normalizedMerchant)
         displayMerchant = try container.decodeIfPresent(String.self, forKey: .displayMerchant)
@@ -491,6 +497,8 @@ struct Movement: Identifiable, Codable {
         try container.encodeIfPresent(reconciliationConfidence, forKey: .reconciliationConfidence)
         try container.encodeIfPresent(reconciliationReason, forKey: .reconciliationReason)
         try container.encode(manuallyReviewed, forKey: .manuallyReviewed)
+        try container.encodeIfPresent(manuallyAccountingReviewed, forKey: .manuallyAccountingReviewed)
+        try container.encodeIfPresent(confirmedCounterpartKey, forKey: .confirmedCounterpartKey)
         try container.encodeIfPresent(rawDescription, forKey: .rawDescription)
         try container.encodeIfPresent(normalizedMerchant, forKey: .normalizedMerchant)
         try container.encodeIfPresent(displayMerchant, forKey: .displayMerchant)
@@ -1086,11 +1094,13 @@ final class FinanceStore {
     private let manualDashboardUnlockKey = "marcelito.dashboard.manualUnlock.v1"
     private let transferOwnerAliasesKey = "marcelito.transfer.ownerAliases.v1"
     private let transferMatcherVersionKey = "marcelito.transfer.matcherVersion.v1"
-    private static let transferMatcherVersion = "scored-owner-pairing-v1"
+    private static let transferMatcherVersion = "reciprocal-accounting-pairing-v2"
     private static let defaultTransferOwnerAliases = [
         "Marcelo Díaz",
         "Marcelo A. Díaz",
-        "Díaz Marcelo"
+        "Díaz Marcelo",
+        "Marcelo Andrés Díaz Sanc",
+        "Marcelo Andrés Díaz Sánchez"
     ]
     private let ledgerSchemaVersion = 1
     private let statementFilesDirectoryName = "ImportedStatements"
@@ -3768,8 +3778,20 @@ final class FinanceStore {
     }
 #endif
 
+    private func transferDescriptor(_ movement: Movement) -> String {
+        [movement.title, movement.rawDescription, movement.extractionEvidence?.sourceText].compactMap { $0 }.joined(separator: " ")
+    }
+
+    private func exactTransferAmountsMatch(_ left: Decimal, _ right: Decimal) -> Bool {
+        absolute(left) == absolute(right)
+    }
+
+    private func canAutomaticallyMatch(_ movement: Movement, kind: MovementKind) -> Bool {
+        !movement.accountingReviewLocked || movement.kind == kind
+    }
+
     private func hasTransferHint(_ movement: Movement) -> Bool {
-        let value = normalizedConcept(movement.title)
+        let value = normalizedConcept(transferDescriptor(movement))
         return ["transfer", "traspaso", "spei", "entre cuentas", "cuenta propia", "clabe"].contains { value.contains($0) }
     }
 
@@ -3849,7 +3871,7 @@ final class FinanceStore {
     }
 
     private func transferPairEvidence(_ outflow: Movement, _ inflow: Movement) -> (score: Int, reason: String) {
-        let combined = normalizedConcept("\(outflow.title) \(inflow.title)")
+        let combined = normalizedConcept("\(transferDescriptor(outflow)) \(transferDescriptor(inflow))")
         var score = 50 // importe exacto, direcciones opuestas y cuentas distintas
         var reasons = ["importe exacto", "egreso ↔ ingreso"]
 
@@ -3866,7 +3888,7 @@ final class FinanceStore {
             score += 25
             reasons.append("texto de cuenta propia")
         }
-        if ownerAliasMentioned(in: "\(outflow.title) \(inflow.title)") {
+        if ownerAliasMentioned(in: "\(transferDescriptor(outflow)) \(transferDescriptor(inflow))") {
             score += 20
             reasons.append("titular propio")
         }
@@ -3884,8 +3906,8 @@ final class FinanceStore {
             .filter { statementKind($0) == .bank }
             .map { normalizedConcept($0.source) }
             .filter { $0.count >= 3 })
-        let outText = normalizedConcept(outflow.title)
-        let inText = normalizedConcept(inflow.title)
+        let outText = normalizedConcept(transferDescriptor(outflow))
+        let inText = normalizedConcept(transferDescriptor(inflow))
         let namedCounterpart = (knownBankLabels.contains(outAccount) && inAccount.count >= 3 && outText.contains(inAccount))
             || (knownBankLabels.contains(inAccount) && outAccount.count >= 3 && inText.contains(outAccount))
         if namedCounterpart {
@@ -3898,8 +3920,8 @@ final class FinanceStore {
             reasons.append("cuentas propias distintas")
         }
 
-        let sharedReferences = transferReferenceTokens(outflow.title)
-            .intersection(transferReferenceTokens(inflow.title))
+        let sharedReferences = transferReferenceTokens(transferDescriptor(outflow))
+            .intersection(transferReferenceTokens(transferDescriptor(inflow)))
         if !sharedReferences.isEmpty {
             score += 25
             reasons.append("referencia coincidente")
@@ -4006,7 +4028,7 @@ final class FinanceStore {
     }
 
     private func hasCardPaymentHint(_ movement: Movement) -> Bool {
-        let value = normalizedConcept(movement.title)
+        let value = normalizedConcept(transferDescriptor(movement))
         return value.contains("pago de tarjeta")
             || value.contains("pago amex")
             || value.contains("gracias por su pago")
@@ -4410,15 +4432,56 @@ final class FinanceStore {
     }
 
     private func reconcileStoredMovements() {
-        for index in movements.indices where !movements[index].manuallyReviewed && movements[index].reconciliationReason != nil {
+        var consumed = Set<UUID>()
+        // Rebind human-confirmed pairs after a replay assigns new row UUIDs.
+        let rowsByReviewKey = Dictionary(grouping: movements.indices) { manualReviewKey(movements[$0]) }
+        for index in movements.indices {
+            guard let key = movements[index].confirmedCounterpartKey,
+                  rowsByReviewKey[manualReviewKey(movements[index])]?.count == 1,
+                  let candidates = rowsByReviewKey[key], candidates.count == 1,
+                  let peer = candidates.first, peer != index,
+                  movements[peer].confirmedCounterpartKey == manualReviewKey(movements[index]),
+                  movements[index].kind == .bankTransfer, movements[peer].kind == .bankTransfer,
+                  distinctImportedBankAccounts(movements[index], movements[peer]),
+                  movements[index].amount * movements[peer].amount < 0,
+                  exactTransferAmountsMatch(movements[index].amount, movements[peer].amount),
+                  abs(movements[index].date.timeIntervalSince(movements[peer].date)) <= 3 * 86400 else { continue }
+            movements[index].matchedMovementId = movements[peer].id
+            movements[peer].matchedMovementId = movements[index].id
+            for target in [index, peer] {
+                movements[target].flow = .transfer
+                movements[target].reconciliationConfidence = 100
+                movements[target].reconciliationReason = "Traspaso propio · pareja confirmada manualmente"
+            }
+        }
+        // Preserve verified reciprocal pairs before clearing automatic guesses.
+        // A category edit must not orphan the other account's movement.
+        for index in movements.indices {
+            let row = movements[index]
+            guard let peerID = row.matchedMovementId,
+                  let peer = movements.first(where: { $0.id == peerID }),
+                  peer.id != row.id, peer.matchedMovementId == row.id,
+                  row.kind == peer.kind, row.flow == .transfer, peer.flow == .transfer,
+                  exactTransferAmountsMatch(row.amount, peer.amount) else { continue }
+            let validBankPair = row.kind == .bankTransfer && distinctImportedBankAccounts(row, peer)
+                && row.amount * peer.amount < 0 && abs(row.date.timeIntervalSince(peer.date)) <= 3 * 86400
+            let validCardPair = row.kind == .cardPayment && ((isBankMovement(row) && isCardMovement(peer)) || (isCardMovement(row) && isBankMovement(peer)))
+                && (isBankMovement(row) ? row.amount < 0 : peer.amount < 0)
+                && abs(row.date.timeIntervalSince(peer.date)) <= 5 * 86400
+            if validBankPair || validCardPair { consumed.insert(row.id); consumed.insert(peer.id) }
+        }
+        for index in movements.indices where !consumed.contains(movements[index].id) && (movements[index].reconciliationReason != nil || movements[index].matchedMovementId != nil) {
             movements[index].matchedMovementId = nil
             movements[index].reconciliationConfidence = nil
             movements[index].reconciliationReason = nil
-            movements[index].flow = movements[index].amount > 0 ? .income : .expense
-            movements[index].kind = nil
-            movements[index].category = Self.category(for: movements[index].title, flow: movements[index].flow)
+            if !movements[index].accountingReviewLocked {
+                movements[index].flow = movements[index].amount > 0 ? .income : .expense
+                movements[index].kind = nil
+            }
+            if !movements[index].manuallyReviewed {
+                movements[index].category = Self.category(for: movements[index].title, flow: movements[index].flow)
+            }
         }
-        var consumed = Set<UUID>()
         let threeDays: TimeInterval = 3 * 24 * 60 * 60
         // A bank direct debit can be posted a few days before the card issuer
         // reflects the payment (the real Santander/Amex corpus has a
@@ -4429,11 +4492,11 @@ final class FinanceStore {
 
         for index in movements.indices {
             let bank = movements[index]
-            guard !bank.manuallyReviewed, !consumed.contains(bank.id), isBankMovement(bank), isOutflow(bank) else { continue }
+            guard canAutomaticallyMatch(bank, kind: .cardPayment), !consumed.contains(bank.id), isBankMovement(bank), isOutflow(bank) else { continue }
 
             let cardCandidates = movements.indices.filter { candidateIndex in
                 let card = movements[candidateIndex]
-                guard !card.manuallyReviewed, !consumed.contains(card.id), candidateIndex != index, isCardMovement(card), amountsMatch(bank.amount, card.amount), abs(bank.date.timeIntervalSince(card.date)) <= cardPaymentWindow else { return false }
+                guard canAutomaticallyMatch(card, kind: .cardPayment), !consumed.contains(card.id), candidateIndex != index, isCardMovement(card), exactTransferAmountsMatch(bank.amount, card.amount), abs(bank.date.timeIntervalSince(card.date)) <= cardPaymentWindow else { return false }
                 let cardText = normalizedConcept(card.title)
                 let cardSignal = movementKind(card) == .cardPayment
                     || hasCardPaymentHint(card)
@@ -4445,15 +4508,23 @@ final class FinanceStore {
                 return hasCardPaymentHint(bank) && cardSignal
             }
             if cardCandidates.count == 1, let cardIndex = cardCandidates.first {
+                let card = movements[cardIndex]
+                let fundingCandidates = movements.filter { other in
+                    canAutomaticallyMatch(other, kind: .cardPayment) && isBankMovement(other) && other.amount < 0
+                        && !consumed.contains(other.id) && hasCardPaymentHint(other)
+                        && exactTransferAmountsMatch(other.amount, card.amount)
+                        && abs(other.date.timeIntervalSince(card.date)) <= cardPaymentWindow
+                }
+                guard fundingCandidates.count == 1 else { continue }
                 movements[index].flow = .transfer
                 movements[index].kind = .cardPayment
-                movements[index].category = "Transferencia"
+                if !movements[index].manuallyReviewed { movements[index].category = "Transferencia" }
                 movements[index].matchedMovementId = movements[cardIndex].id
                 movements[index].reconciliationConfidence = 100
                 movements[index].reconciliationReason = "Pago de tarjeta · importe exacto · fechas compatibles"
                 movements[cardIndex].flow = .transfer
                 movements[cardIndex].kind = .cardPayment
-                movements[cardIndex].category = "Transferencia"
+                if !movements[cardIndex].manuallyReviewed { movements[cardIndex].category = "Transferencia" }
                 movements[cardIndex].matchedMovementId = bank.id
                 movements[cardIndex].reconciliationConfidence = 100
                 movements[cardIndex].reconciliationReason = "Pago de tarjeta · importe exacto · fechas compatibles"
@@ -4467,20 +4538,20 @@ final class FinanceStore {
         var ambiguousRows = Set<UUID>()
         for outflowIndex in movements.indices {
             let outflow = movements[outflowIndex]
-            guard !outflow.manuallyReviewed, !consumed.contains(outflow.id), isBankMovement(outflow), isOutflow(outflow) else { continue }
+            guard canAutomaticallyMatch(outflow, kind: .bankTransfer), !consumed.contains(outflow.id), isBankMovement(outflow), isOutflow(outflow) else { continue }
             for inflowIndex in movements.indices {
                 let inflow = movements[inflowIndex]
-                guard !inflow.manuallyReviewed, inflowIndex != outflowIndex,
+                guard canAutomaticallyMatch(inflow, kind: .bankTransfer), inflowIndex != outflowIndex,
                       !consumed.contains(inflow.id),
                       isBankMovement(inflow),
                       isInflow(inflow),
                       distinctImportedBankAccounts(outflow, inflow),
-                      amountsMatch(outflow.amount, inflow.amount) else { continue }
+                      exactTransferAmountsMatch(outflow.amount, inflow.amount) else { continue }
                 let dateDistance = abs(outflow.date.timeIntervalSince(inflow.date))
                 guard dateDistance <= threeDays else { continue }
                 let evidence = transferPairEvidence(outflow, inflow)
-                let sharedReference = !transferReferenceTokens(outflow.title).intersection(transferReferenceTokens(inflow.title)).isEmpty
-                let ownEvidence = ownerAliasMentioned(in: "\(outflow.title) \(inflow.title)") || sharedReference
+                let sharedReference = !transferReferenceTokens(transferDescriptor(outflow)).intersection(transferReferenceTokens(transferDescriptor(inflow))).isEmpty
+                let ownEvidence = ownerAliasMentioned(in: "\(transferDescriptor(outflow)) \(transferDescriptor(inflow))") || sharedReference
                 if ownEvidence && evidence.score >= 90 {
                     let cents = NSDecimalNumber(decimal: absolute(outflow.amount) * 100).int64Value
                     scoredCandidates.append(ScoredTransferCandidate(
@@ -4516,13 +4587,13 @@ final class FinanceStore {
             guard !consumed.contains(outflow.id), !consumed.contains(inflow.id) else { continue }
             movements[candidate.outflowIndex].flow = .transfer
             movements[candidate.outflowIndex].kind = .bankTransfer
-            movements[candidate.outflowIndex].category = "Transferencia"
+            if !movements[candidate.outflowIndex].manuallyReviewed { movements[candidate.outflowIndex].category = "Transferencia" }
             movements[candidate.outflowIndex].matchedMovementId = inflow.id
             movements[candidate.outflowIndex].reconciliationConfidence = min(candidate.score, 100)
             movements[candidate.outflowIndex].reconciliationReason = candidate.reason
             movements[candidate.inflowIndex].flow = .transfer
             movements[candidate.inflowIndex].kind = .bankTransfer
-            movements[candidate.inflowIndex].category = "Transferencia"
+            if !movements[candidate.inflowIndex].manuallyReviewed { movements[candidate.inflowIndex].category = "Transferencia" }
             movements[candidate.inflowIndex].matchedMovementId = outflow.id
             movements[candidate.inflowIndex].reconciliationConfidence = min(candidate.score, 100)
             movements[candidate.inflowIndex].reconciliationReason = candidate.reason
@@ -4538,10 +4609,10 @@ final class FinanceStore {
         // deliberately left as ordinary income/spend.
         for index in movements.indices {
             let movement = movements[index]
-            guard !movement.manuallyReviewed, !consumed.contains(movement.id),
+            guard !movement.accountingReviewLocked, !consumed.contains(movement.id),
                   isBankMovement(movement),
                   hasTransferHint(movement),
-                  ownerAliasMentioned(in: movement.title) else { continue }
+                  ownerAliasMentioned(in: transferDescriptor(movement)) else { continue }
             movements[index].reconciliationConfidence = 60
             movements[index].reconciliationReason = "Posible transferencia propia: falta contraparte. Confirma el tipo manualmente; permanece en métricas."
             ambiguousRows.insert(movement.id)
@@ -4701,6 +4772,14 @@ final class FinanceStore {
             ?? []
         lastAuditRun = defaults.data(forKey: auditRunKey).flatMap { try? JSONDecoder().decode(LedgerAuditRun.self, from: $0) }
         lastImportedFile = defaults.string(forKey: importKey)
+        // Keep a recoverable snapshot before any new matcher/normalization runs.
+        let transferBackupKey = "marcelito.ledger.beforeTransferV2.v1"
+        if !movements.isEmpty, defaults.data(forKey: transferBackupKey) == nil,
+           let backup = try? JSONEncoder().encode(currentEnvelope()) {
+            defaults.set(backup, forKey: transferBackupKey)
+            defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeTransferV2.v1")
+        }
+
         // A prior reader could miss the masked account number when BBVA put
         // its administrative header on page two. Repair that split eagerly so
         // the Accounts carousel and every aggregate see one canonical account
@@ -4846,7 +4925,12 @@ final class FinanceStore {
         func apply(_ targetIndex: Int, manuallyReviewed: Bool) {
             let title = movements[targetIndex].normalizedMerchant ?? movements[targetIndex].displayMerchant ?? movements[targetIndex].title
             movements[targetIndex].category = category
-            if manuallyReviewed { movements[targetIndex].manuallyReviewed = true }
+            if manuallyReviewed {
+                if !movements[targetIndex].manuallyReviewed {
+                    movements[targetIndex].manuallyAccountingReviewed = false
+                }
+                movements[targetIndex].manuallyReviewed = true
+            }
             var tags = Self.categoryTags(for: title, category: category)
             if movements[targetIndex].travelRelated, !tags.contains("viaje") {
                 tags.append("viaje")
@@ -4966,10 +5050,51 @@ final class FinanceStore {
         return changed
     }
 
+    /// Candidates are suggestions only: equal amounts never authorize exclusion.
+    func transferCounterparts(for movement: Movement) -> [Movement] {
+        guard isBankMovement(movement) else { return [] }
+        return movements.filter { peer in
+            peer.id != movement.id && distinctImportedBankAccounts(movement, peer)
+                && movement.amount * peer.amount < 0
+                && exactTransferAmountsMatch(movement.amount, peer.amount)
+                && abs(movement.date.timeIntervalSince(peer.date)) <= 3 * 86400
+                && (peer.matchedMovementId == nil || peer.matchedMovementId == movement.id)
+        }.sorted { $0.date < $1.date }
+    }
+
+    @discardableResult
+    func confirmOwnTransfer(_ movement: Movement, counterpart: Movement) -> Bool {
+        guard let index = movements.firstIndex(where: { $0.id == movement.id }),
+              let peerIndex = movements.firstIndex(where: { $0.id == counterpart.id }),
+              movements[index].matchedMovementId == nil || movements[index].matchedMovementId == counterpart.id,
+              transferCounterparts(for: movements[index]).contains(where: { $0.id == counterpart.id }) else { return false }
+        for (target, peer) in [(index, peerIndex), (peerIndex, index)] {
+            movements[target].kind = .bankTransfer
+            movements[target].flow = .transfer
+            movements[target].matchedMovementId = movements[peer].id
+            movements[target].confirmedCounterpartKey = manualReviewKey(movements[peer])
+            movements[target].reconciliationConfidence = 100
+            movements[target].reconciliationReason = "Traspaso propio · pareja confirmada manualmente"
+            movements[target].manuallyAccountingReviewed = true
+            if !movements[target].manuallyReviewed { movements[target].category = "Transferencia" }
+            movements[target].manuallyReviewed = true
+        }
+        persist(markingChange: true)
+        return true
+    }
+
     func updateClassification(for movement: Movement, kind: MovementKind, travelRelated: Bool) {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return }
+        if kind != .bankTransfer {
+            if let peerID = movements[index].matchedMovementId,
+               let peerIndex = movements.firstIndex(where: { $0.id == peerID }) {
+                movements[peerIndex].confirmedCounterpartKey = nil
+            }
+            movements[index].confirmedCounterpartKey = nil
+        }
         movements[index].kind = kind
         movements[index].manuallyReviewed = true
+        movements[index].manuallyAccountingReviewed = true
         movements[index].travelRelated = travelRelated
         movements[index].classificationTags.removeAll { $0 == "viaje" }
         if travelRelated { movements[index].classificationTags.append("viaje") }
@@ -4980,6 +5105,10 @@ final class FinanceStore {
             movements[index].flow = .income
         default:
             movements[index].flow = .expense
+        }
+        reconcileStoredMovements()
+        if kind == .bankTransfer, movements[index].matchedMovementId == nil {
+            movements[index].reconciliationReason = "Traspaso propio confirmado · contraparte pendiente"
         }
         persist(markingChange: true)
     }
@@ -4998,8 +5127,12 @@ final class FinanceStore {
             guard counts[manualReviewKey(movements[index])] == 1 else { continue }
             guard let prior = saved[manualReviewKey(movements[index])] else { continue }
             movements[index].category = prior.category
-            movements[index].kind = prior.kind
-            movements[index].flow = prior.flow
+            movements[index].confirmedCounterpartKey = prior.confirmedCounterpartKey
+            movements[index].manuallyAccountingReviewed = prior.manuallyAccountingReviewed
+            if prior.accountingReviewLocked {
+                movements[index].kind = prior.kind
+                movements[index].flow = prior.flow
+            }
             movements[index].travelRelated = prior.travelRelated
             movements[index].classificationTags = prior.classificationTags
             movements[index].manuallyReviewed = true
@@ -5126,6 +5259,8 @@ final class FinanceStore {
         defaults.removeObject(forKey: categoryRulesKey)
         defaults.removeObject(forKey: transferOwnerAliasesKey)
         defaults.removeObject(forKey: transferMatcherVersionKey)
+        defaults.removeObject(forKey: "marcelito.ledger.beforeTransferV2.v1")
+        defaults.removeObject(forKey: "marcelito.manualReviews.beforeTransferV2.v1")
         defaults.removeObject(forKey: manualCategoryOverridesKey)
         defaults.removeObject(forKey: categoryTaxonomyVersionKey)
         defaults.removeObject(forKey: numericRepairKey)
