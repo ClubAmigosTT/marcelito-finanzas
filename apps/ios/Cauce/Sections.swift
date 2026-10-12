@@ -80,6 +80,9 @@ struct MovementsView: View {
     @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
+    @State private var selectedBank: String?
+    @State private var selectedMonth: Date?
+    @State private var selectedStatementID: UUID?
     @State private var isAddPresented = false
     @State private var isAISettingsPresented = false
     @State private var isAIConfirmationPresented = false
@@ -94,23 +97,94 @@ struct MovementsView: View {
         store.pendingClassifiableExpenseMovements
     }
 
+    private var filterCalendar: Calendar { Calendar(identifier: .gregorian) }
+
+    private var banks: [String] {
+        Array(Set(store.statements.map(\.source) + store.movements.compactMap { movement in
+            movement.statementId == nil ? movement.account : nil
+        })).sorted()
+    }
+
+    private var bankMovements: [Movement] {
+        store.movements.filter { movement in
+            let statement = movement.statementId.flatMap { id in store.statements.first { $0.id == id } }
+            return selectedBank == nil || (statement?.source ?? movement.account) == selectedBank
+        }
+    }
+
+    private var months: [Date] {
+        Array(Set(bankMovements.compactMap { filterCalendar.dateInterval(of: .month, for: $0.date)?.start }))
+            .sorted(by: >)
+    }
+
+    private var filterStatements: [StatementRecord] {
+        store.statements.filter { selectedBank == nil || $0.source == selectedBank }
+            .sorted { $0.importedAt > $1.importedAt }
+    }
+
+    private func monthLabel(_ month: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "es_MX")
+        formatter.calendar = filterCalendar
+        formatter.dateFormat = "MMMM yyyy"
+        return formatter.string(from: month).capitalized
+    }
+
     private var filtered: [Movement] {
-        guard !query.isEmpty else { return store.movements }
-        return store.movements.filter {
-            let statement = $0.statementId.flatMap { id in store.statements.first(where: { $0.id == id }) }
-            return $0.title.localizedCaseInsensitiveContains(query)
-                || $0.category.localizedCaseInsensitiveContains(query)
-                || $0.account.localizedCaseInsensitiveContains(query)
-                || statement?.source.localizedCaseInsensitiveContains(query) == true
-                || statement?.period.localizedCaseInsensitiveContains(query) == true
+        let selection = MovementListFilter(bank: selectedBank, month: selectedMonth,
+            statementID: selectedStatementID, query: query)
+        let statements = Dictionary(store.statements.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        return store.movements.filter { movement in
+            selection.includes(movement, statement: movement.statementId.flatMap { statements[$0] }, calendar: filterCalendar)
+        }.sorted { $0.date > $1.date }
+    }
+
+    private var filtersSection: some View {
+        Section("Filtros") {
+            Picker("Banco", selection: $selectedBank) {
+                Text("Todos los bancos").tag(nil as String?)
+                ForEach(banks, id: \.self) { Text($0).tag(Optional($0)) }
+            }
+            .accessibilityIdentifier("movements.filter.bank")
+            Picker("Mes", selection: $selectedMonth) {
+                Text("Todos los meses").tag(nil as Date?)
+                ForEach(months, id: \.self) { Text(monthLabel($0)).tag(Optional($0)) }
+            }
+            .accessibilityIdentifier("movements.filter.month")
+            Picker("Estado de cuenta", selection: $selectedStatementID) {
+                Text("Todos los estados").tag(nil as UUID?)
+                ForEach(filterStatements) { statement in
+                    Text("\(statement.source) · \(statement.period)").tag(Optional(statement.id))
+                }
+            }
+            .accessibilityIdentifier("movements.filter.statement")
+            HStack {
+                Text("\(filtered.count) movimientos")
+                    .font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if selectedBank != nil || selectedMonth != nil || selectedStatementID != nil || !query.isEmpty {
+                    Button("Limpiar filtros") {
+                        selectedBank = nil
+                        selectedMonth = nil
+                        selectedStatementID = nil
+                        query = ""
+                    }
+                    .font(.caption)
+                }
+            }
+        }
+        .onChange(of: selectedBank) { _, _ in
+            selectedStatementID = nil
+            if let selectedMonth, !months.contains(selectedMonth) { self.selectedMonth = nil }
         }
     }
 
     var body: some View {
         NavigationStack {
             List {
+                filtersSection
                 if filtered.isEmpty {
-                    ContentUnavailableView("Sin movimientos", systemImage: "doc.text.magnifyingglass", description: Text("Importa un estado de cuenta o agrega un movimiento manual."))
+                    ContentUnavailableView("Sin movimientos", systemImage: "doc.text.magnifyingglass", description: Text(store.movements.isEmpty ? "Importa un estado de cuenta o agrega un movimiento manual." : "No hay movimientos con estos filtros. Prueba otro banco, mes o estado de cuenta."))
                 } else {
                     ForEach(filtered) { movement in
                         NavigationLink {
