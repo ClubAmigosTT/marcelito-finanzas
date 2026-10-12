@@ -121,7 +121,8 @@ struct MonthlyFinancialReviewView: View {
     private var audit: MonthlyFinancialAudit { store.monthlyFinancialAudit(for: month) }
     private var months: [Date] {
         let calendar = Calendar(identifier: .gregorian)
-        return Array(Set(store.movements.compactMap { calendar.dateInterval(of: .month, for: $0.date)?.start } + [month])).sorted(by: >)
+        let current = calendar.dateInterval(of: .month, for: .now)!.start
+        return Array(Set(store.movements.compactMap { calendar.dateInterval(of: .month, for: $0.date)?.start } + [month, current])).sorted(by: >)
     }
     private func monthLabel(_ value: Date) -> String {
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "es_MX")
