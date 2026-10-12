@@ -2,7 +2,7 @@ from pathlib import Path
 src=(Path(__file__).resolve().parents[1]/'apps/ios/Cauce/Models.swift').read_text()
 import tempfile,subprocess
 out=Path(tempfile.mkdtemp(prefix='marcelito-transfer-test-'))
-names=['transferDescriptor','exactTransferAmountsMatch','canAutomaticallyMatch','transferCounterparts','confirmOwnTransfer','amountsMatch','hasTransferHint','containsWholePhrase','ownerAliasMentioned','transferReferenceTokens','transferPairEvidence','hasIndependentTransferLink','globallyBestTransferCandidates','hasCardPaymentHint','isOutflow','isInflow','reconcileStoredMovements','movementKind','isSpend','isRealIncome','updateClassification']
+names=['transferDescriptor','exactTransferAmountsMatch','canAutomaticallyMatch','transferCounterparts','transferPairReviewKey','confirmOwnTransfer','amountsMatch','hasTransferHint','containsWholePhrase','ownerAliasMentioned','transferReferenceTokens','transferPairEvidence','hasIndependentTransferLink','globallyBestTransferCandidates','hasCardPaymentHint','isOutflow','isInflow','reconcileStoredMovements','movementKind','isSpend','isRealIncome','updateClassification']
 def extract(name):
  start=src.index('    private func '+name+'(') if '    private func '+name+'(' in src else src.index('    func '+name+'(')
  i=src.index('{',start);level=1;j=i+1
@@ -24,6 +24,8 @@ class Probe {
  var statements = [Statement(source:"BBVA",kind:.bank),Statement(source:"Santander",kind:.bank),Statement(source:"Amex",kind:.card)]
  var transferOwnerAliases = ["Marcelo Díaz", "Marcelo A. Díaz", "Díaz Marcelo"]
  var screenshotCaptures:[Capture] = []
+ var rejectedTransferPairKeys = Set<String>()
+ func isEligibleMovement(_ m:Movement)->Bool {true}
  func absolute(_ x:Decimal)->Decimal {abs(x)}
  func normalizedConcept(_ s:String)->String {s.folding(options:[.diacriticInsensitive,.caseInsensitive],locale:.current).lowercased()}
  func statementKind(_ s:Statement)->AccountKind {s.kind}

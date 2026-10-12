@@ -4568,11 +4568,12 @@ final class FinanceStore {
                       distinctImportedBankAccounts(outflow, inflow),
                       exactTransferAmountsMatch(outflow.amount, inflow.amount) else { continue }
                 let dateDistance = abs(outflow.date.timeIntervalSince(inflow.date))
-                guard dateDistance <= threeDays else { continue }
+                guard dateDistance <= threeDays,
+                      !rejectedTransferPairKeys.contains(transferPairReviewKey(outflow, inflow)) else { continue }
                 let evidence = transferPairEvidence(outflow, inflow)
                 let sharedReference = !transferReferenceTokens(transferDescriptor(outflow)).intersection(transferReferenceTokens(transferDescriptor(inflow))).isEmpty
                 let ownEvidence = ownerAliasMentioned(in: "\(transferDescriptor(outflow)) \(transferDescriptor(inflow))") || sharedReference
-                if ownEvidence && hasIndependentTransferLink(outflow, inflow) && evidence.score >= 90 {
+                if ownEvidence && evidence.score >= 90 && hasIndependentTransferLink(outflow, inflow) {
                     let cents = NSDecimalNumber(decimal: absolute(outflow.amount) * 100).int64Value
                     scoredCandidates.append(ScoredTransferCandidate(
                         outflowIndex: outflowIndex,
@@ -5077,11 +5078,142 @@ final class FinanceStore {
         return changed
     }
 
+    private var rejectedTransferPairKeys: Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: "marcelito.transfer.rejectedPairs.v1") ?? [])
+    }
+
+    private func transferPairReviewKey(_ left: Movement, _ right: Movement) -> String {
+        [manualReviewKey(left), manualReviewKey(right)].sorted().joined(separator: "||")
+    }
+
+    func rejectTransferPair(_ pair: TransferReviewPair) {
+        guard movements.contains(where: { $0.id == pair.outgoing.id }),
+              movements.contains(where: { $0.id == pair.incoming.id }) else { return }
+        var rejected = rejectedTransferPairKeys
+        rejected.insert(transferPairReviewKey(pair.outgoing, pair.incoming))
+        UserDefaults.standard.set(Array(rejected), forKey: "marcelito.transfer.rejectedPairs.v1")
+        persist(markingChange: true)
+    }
+
+    func resetRejectedTransferPairs() {
+        UserDefaults.standard.removeObject(forKey: "marcelito.transfer.rejectedPairs.v1")
+        persist(markingChange: true)
+    }
+
+    var pendingTransferReviewPairs: [TransferReviewPair] {
+        let rows = eligibleMovements.filter { isBankMovement($0) && $0.matchedMovementId == nil }
+        let incoming = Dictionary(grouping: rows.filter { $0.amount > 0 && !($0.manuallyAccountingReviewed == true && $0.kind == .income) }) {
+            NSDecimalNumber(decimal: abs($0.amount)).stringValue
+        }
+        let rejected = rejectedTransferPairKeys
+        return rows.filter { $0.amount < 0 && movementKind($0) != .cardPayment }.flatMap { outgoing in
+            incoming[NSDecimalNumber(decimal: abs(outgoing.amount)).stringValue, default: []].filter { peer in
+                distinctImportedBankAccounts(outgoing, peer)
+                    && abs(outgoing.date.timeIntervalSince(peer.date)) <= 3 * 86400
+                    && !rejected.contains(transferPairReviewKey(outgoing, peer))
+            }.map { TransferReviewPair(outgoing: outgoing, incoming: $0) }
+        }.sorted { $0.outgoing.date > $1.outgoing.date }
+    }
+
+    /// Full account coverage uses printed date ranges, not a month label.
+    private func monthlyAuditCoveredDays(calendar: Calendar) -> Set<Date> {
+        let groups = Dictionary(grouping: statements) { "\($0.source)|\($0.accountKey ?? "unknown")" }
+        guard !groups.isEmpty else { return [] }
+        var common: Set<Date>?
+        let printedDate = #"\d{4}-\d{1,2}-\d{1,2}|\b\d{1,2}(?:[/-](?:\d{1,2}|[a-záéíóú]{3,})[/-]\d{4}|\s+(?:de\s+)?[a-záéíóú]{3,})"#
+        for records in groups.values {
+            var days = Set<Date>()
+            for record in records where isEligibleStatement(record) {
+                let count = (try? NSRegularExpression(pattern: printedDate, options: .caseInsensitive))?
+                    .numberOfMatches(in: record.period, range: NSRange(record.period.startIndex..., in: record.period)) ?? 0
+                guard count >= 2, let range = statementRange(from: record.period) else { continue }
+                var day = calendar.startOfDay(for: range.lowerBound)
+                let end = calendar.startOfDay(for: range.upperBound)
+                while day <= end {
+                    days.insert(day)
+                    guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+                    day = next
+                }
+            }
+            common = common.map { $0.intersection(days) } ?? days
+        }
+        return common ?? []
+    }
+
+    func monthlyFinancialAudit(for date: Date, now: Date = .now) -> MonthlyFinancialAudit {
+        let calendar = Calendar(identifier: .gregorian)
+        let interval = calendar.dateInterval(of: .month, for: date)!
+        let rows = eligibleMovements.filter { $0.date >= interval.start && $0.date < interval.end }
+        let grouped: [MonthlyAuditBucket: [Movement]] = [
+            .income: rows.filter(isRealIncome),
+            .spending: rows.filter(isSpend),
+            .refunds: rows.filter { movementKind($0) == .refund && $0.amount > 0 },
+            .transferOut: rows.filter { movementKind($0) == .bankTransfer && $0.amount < 0 },
+            .transferIn: rows.filter { movementKind($0) == .bankTransfer && $0.amount > 0 },
+            .cardPayment: rows.filter { movementKind($0) == .cardPayment && isBankMovement($0) && $0.amount < 0 }
+        ]
+        let pending = pendingTransferReviewPairs.filter {
+            ($0.outgoing.date >= interval.start && $0.outgoing.date < interval.end)
+                || ($0.incoming.date >= interval.start && $0.incoming.date < interval.end)
+        }.count
+        let excluded = statements.filter { record in
+            guard !isEligibleStatement(record), let range = statementRange(from: record.period) else { return false }
+            return range.lowerBound < interval.end && range.upperBound >= interval.start
+        }.count
+        let covered = monthlyAuditCoveredDays(calendar: calendar)
+        let observedEnd = min(interval.end, calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now))!)
+        var cursor = interval.start
+        var complete = observedEnd > interval.start && !statements.isEmpty && statements.allSatisfy { $0.accountKey != nil }
+        while cursor < observedEnd {
+            if !covered.contains(cursor) { complete = false; break }
+            cursor = calendar.date(byAdding: .day, value: 1, to: cursor)!
+        }
+        let income = grouped[.income, default: []].reduce(Decimal(0)) { $0 + abs($1.amount) }
+        let spend = grouped[.spending, default: []].reduce(Decimal(0)) { $0 + abs($1.amount) }
+            - grouped[.refunds, default: []].reduce(Decimal(0)) { $0 + abs($1.amount) }
+        let bridge = complete && pending == 0 && excluded == 0 && interval.end <= now
+            ? monthlyFundingBridge(interval: interval, incomeLessSpending: income - spend, calendar: calendar) : nil
+        return MonthlyFinancialAudit(month: interval.start, rows: grouped, hasCompleteCoverage: complete,
+            unresolvedPairCount: pending, excludedStatementCount: excluded, bridge: bridge)
+    }
+
+    private func monthlyFundingBridge(interval: DateInterval, incomeLessSpending: Decimal, calendar: Calendar) -> MonthlyFundingBridge? {
+        // Never carry different account cutoffs forward to fabricate a month-end balance.
+        guard statements.allSatisfy({ $0.accountKey != nil }) else { return nil }
+        let groups = Dictionary(grouping: statements) { "\($0.source)|\($0.accountKey!)" }
+        guard !groups.isEmpty,
+              let startDay = calendar.date(byAdding: .day, value: -1, to: interval.start),
+              let endDay = calendar.date(byAdding: .day, value: -1, to: interval.end) else { return nil }
+        func totals(at day: Date) -> (cash: Decimal, debt: Decimal)? {
+            var cash: Decimal = 0, debt: Decimal = 0
+            for records in groups.values {
+                let exact = records.filter { record in
+                    guard isEligibleStatement(record), let range = statementRange(from: record.period) else { return false }
+                    return calendar.isDate(range.upperBound, inSameDayAs: day)
+                }
+                guard exact.count == 1, let record = exact.first else { return nil }
+                if statementKind(record) == .bank {
+                    guard let balance = record.summary?.cashBalance else { return nil }
+                    cash += balance
+                } else {
+                    guard let balance = record.summary?.debtBalance ?? record.summary?.statementBalance else { return nil }
+                    debt += balance
+                }
+            }
+            return (cash, debt)
+        }
+        guard let before = totals(at: startDay), let after = totals(at: endDay) else { return nil }
+        return MonthlyFundingBridge(cashChange: after.cash - before.cash, debtChange: after.debt - before.debt,
+            incomeLessSpending: incomeLessSpending)
+    }
+
     /// Candidates are suggestions only: equal amounts never authorize exclusion.
     func transferCounterparts(for movement: Movement) -> [Movement] {
-        guard isBankMovement(movement) else { return [] }
+        guard isBankMovement(movement), isEligibleMovement(movement) else { return [] }
         return movements.filter { peer in
-            peer.id != movement.id && distinctImportedBankAccounts(movement, peer)
+            peer.id != movement.id && isEligibleMovement(peer)
+                && !rejectedTransferPairKeys.contains(transferPairReviewKey(movement, peer))
+                && distinctImportedBankAccounts(movement, peer)
                 && movement.amount * peer.amount < 0
                 && exactTransferAmountsMatch(movement.amount, peer.amount)
                 && abs(movement.date.timeIntervalSince(peer.date)) <= 3 * 86400
@@ -5286,6 +5418,7 @@ final class FinanceStore {
         defaults.removeObject(forKey: categoryRulesKey)
         defaults.removeObject(forKey: transferOwnerAliasesKey)
         defaults.removeObject(forKey: transferMatcherVersionKey)
+        defaults.removeObject(forKey: "marcelito.transfer.rejectedPairs.v1")
         defaults.removeObject(forKey: "marcelito.ledger.beforeTransferV2.v1")
         defaults.removeObject(forKey: "marcelito.manualReviews.beforeTransferV2.v1")
         defaults.removeObject(forKey: "marcelito.ledger.beforeTransferV3.v1")

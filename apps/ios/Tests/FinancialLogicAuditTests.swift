@@ -729,4 +729,89 @@ final class FinancialLogicAuditTests: XCTestCase {
         }
     }
 
+    private func seedMonthlyAudit(_ store: FinanceStore, cashEnd: Decimal = 800) {
+        let bankBefore = statement("BBVA", key: "bbva:4922", kind: .bank,
+            period: "01/05/2026 - 31/05/2026", summary: .init(cashBalance: 1000))
+        let bankAfter = statement("BBVA", key: "bbva:4922", kind: .bank,
+            period: "01/06/2026 - 30/06/2026", summary: .init(cashBalance: cashEnd))
+        let cardBefore = statement("Amex", key: "amex:1003", kind: .card,
+            period: "01/05/2026 - 31/05/2026", summary: .init(debtBalance: 500))
+        let cardAfter = statement("Amex", key: "amex:1003", kind: .card,
+            period: "01/06/2026 - 30/06/2026", summary: .init(debtBalance: 650))
+        store.statements = [bankBefore, bankAfter, cardBefore, cardAfter]
+        var income = row(100, kind: .income, date: calendarDate(2026, 6, 15))
+        income.statementId = bankAfter.id
+        var purchase = row(-500, date: calendarDate(2026, 6, 15))
+        purchase.account = "Amex"; purchase.statementId = cardAfter.id
+        var refund = row(50, kind: .refund, date: calendarDate(2026, 6, 16))
+        refund.account = "Amex"; refund.statementId = cardAfter.id
+        var payment = row(-300, kind: .cardPayment, date: calendarDate(2026, 6, 17))
+        payment.flow = .transfer; payment.statementId = bankAfter.id
+        var receipt = row(300, kind: .cardPayment, date: calendarDate(2026, 6, 17))
+        receipt.account = "Amex"; receipt.flow = .transfer; receipt.statementId = cardAfter.id
+        store.movements = [income, purchase, refund, payment, receipt]
+    }
+
+    func testMonthlyAuditSeparatesExternalIncomeSpendRefundsAndFundingPayments() {
+        withStore { store in
+            seedMonthlyAudit(store)
+            let report = store.monthlyFinancialAudit(for: calendarDate(2026, 6, 1))
+            XCTAssertEqual(report.total(.income), 100)
+            XCTAssertEqual(report.total(.spending), 500)
+            XCTAssertEqual(report.total(.refunds), 50)
+            XCTAssertEqual(report.netSpending, 450)
+            XCTAssertEqual(report.total(.cardPayment), 300)
+            XCTAssertEqual(report.rows[.cardPayment]?.count, 1)
+            XCTAssertTrue(report.hasCompleteCoverage)
+            XCTAssertTrue(report.bridge?.reconciles == true)
+            XCTAssertEqual(report.bridge?.difference, 0)
+        }
+    }
+
+    func testMonthlyFundingDifferenceIsVisibleRatherThanForcedToZero() {
+        withStore { store in
+            seedMonthlyAudit(store, cashEnd: 900)
+            let report = store.monthlyFinancialAudit(for: calendarDate(2026, 6, 1))
+            XCTAssertEqual(report.bridge?.difference, 100)
+            XCTAssertFalse(report.bridge?.reconciles ?? true)
+        }
+    }
+
+    func testPartialCoverageAndDifferentCutoffsDoNotInventMonthlyBalances() {
+        withStore { store in
+            seedMonthlyAudit(store)
+            store.statements[1].period = "15/06/2026 - 14/07/2026"
+            let report = store.monthlyFinancialAudit(for: calendarDate(2026, 6, 1))
+            XCTAssertFalse(report.hasCompleteCoverage)
+            XCTAssertNil(report.bridge)
+            XCTAssertFalse(report.canUseForBudget)
+        }
+    }
+
+    func testRejectedPairPersistsWithoutChangingTypesOrCategoriesAndCanBeReset() {
+        withStore { store in
+            seedTransfer(store, sharedReference: false)
+            let pair = store.pendingTransferReviewPairs[0]
+            let priorCategory = store.movements[0].category
+            store.rejectTransferPair(pair)
+            XCTAssertEqual(store.pendingTransferReviewPairs.count, 0)
+            XCTAssertEqual(store.movements[0].kind, .purchase)
+            XCTAssertEqual(store.movements[0].category, priorCategory)
+            FinanceStore.recordCanonicalRebuildCompletion(in: .standard)
+            let reopened = FinanceStore()
+            XCTAssertEqual(reopened.pendingTransferReviewPairs.count, 0)
+            reopened.resetRejectedTransferPairs()
+            XCTAssertEqual(reopened.pendingTransferReviewPairs.count, 1)
+        }
+    }
+
+    func testConfirmedIncomeIsNotSuggestedAsOwnTransferAgain() {
+        withStore { store in
+            seedTransfer(store, sharedReference: false)
+            store.updateClassification(for: store.movements[1], kind: .income, travelRelated: false)
+            XCTAssertEqual(store.pendingTransferReviewPairs.count, 0)
+            XCTAssertEqual(store.realIncome, 3000)
+        }
+    }
+
 }

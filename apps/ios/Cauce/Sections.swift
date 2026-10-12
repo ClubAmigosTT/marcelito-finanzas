@@ -80,6 +80,8 @@ struct MovementsView: View {
     @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var query = ""
+    @State private var isMonthlyReviewPresented = false
+    @State private var isTransferReviewPresented = false
     @State private var selectedBank: String?
     @State private var selectedMonth: Date?
     @State private var selectedStatementID: UUID?
@@ -183,6 +185,10 @@ struct MovementsView: View {
         NavigationStack {
             List {
                 filtersSection
+                Section("Revisión financiera") {
+                    Button("Resumen mensual") { isMonthlyReviewPresented = true }
+                    Button("Revisar transferencias (\(store.pendingTransferReviewPairs.count) parejas)") { isTransferReviewPresented = true }
+                }
                 if filtered.isEmpty {
                     ContentUnavailableView("Sin movimientos", systemImage: "doc.text.magnifyingglass", description: Text(store.movements.isEmpty ? "Importa un estado de cuenta o agrega un movimiento manual." : "No hay movimientos con estos filtros. Prueba otro banco, mes o estado de cuenta."))
                 } else {
@@ -279,6 +285,8 @@ struct MovementsView: View {
             .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)
             .background(MarcelitoAmbientBackground())
+            .sheet(isPresented: $isMonthlyReviewPresented) { MonthlyFinancialReviewView() }
+            .sheet(isPresented: $isTransferReviewPresented) { TransferReviewView() }
             .sheet(isPresented: $isAddPresented) {
                 AddMovementView()
             }
