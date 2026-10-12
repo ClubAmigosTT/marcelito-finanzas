@@ -4572,7 +4572,7 @@ final class FinanceStore {
                 let evidence = transferPairEvidence(outflow, inflow)
                 let sharedReference = !transferReferenceTokens(transferDescriptor(outflow)).intersection(transferReferenceTokens(transferDescriptor(inflow))).isEmpty
                 let ownEvidence = ownerAliasMentioned(in: "\(transferDescriptor(outflow)) \(transferDescriptor(inflow))") || sharedReference
-                if ownEvidence && hasIndependentTransferLink(outflow, inflow) && evidence.score >= 90 {
+                if ownEvidence && evidence.score >= 90 && hasIndependentTransferLink(outflow, inflow) {
                     let cents = NSDecimalNumber(decimal: absolute(outflow.amount) * 100).int64Value
                     scoredCandidates.append(ScoredTransferCandidate(
                         outflowIndex: outflowIndex,
