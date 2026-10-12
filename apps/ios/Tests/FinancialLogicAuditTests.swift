@@ -641,4 +641,92 @@ final class FinancialLogicAuditTests: XCTestCase {
         }
     }
 
+    private func seedNvioSalaryAndUnrelatedWithdrawal(_ store: FinanceStore, stalePair: Bool = false) {
+        let bbva = statement("BBVA", key: "bbva:4922", kind: .bank)
+        let santander = statement("Santander", key: "santander:1111", kind: .bank)
+        store.statements = [bbva, santander]
+        var salary = row(15000, kind: .income, date: calendarDate(2026, 6, 27), title: "SPEI RECIBIDONVIO")
+        salary.statementId = bbva.id
+        var withdrawal = row(-15000, date: calendarDate(2026, 6, 30), title: "TRANSFERENCIA A MARCELO ANDRES DIAZ SANC")
+        withdrawal.account = "Santander"
+        withdrawal.statementId = santander.id
+        if stalePair {
+            salary.kind = .bankTransfer; salary.flow = .transfer
+            withdrawal.kind = .bankTransfer; withdrawal.flow = .transfer
+            salary.matchedMovementId = withdrawal.id; withdrawal.matchedMovementId = salary.id
+            salary.reconciliationReason = "importe exacto · dirección explícita"
+            withdrawal.reconciliationReason = salary.reconciliationReason
+            salary.reconciliationConfidence = 100; withdrawal.reconciliationConfidence = 100
+            salary.category = "Binance (salarios)"
+            salary.manuallyReviewed = true; salary.manuallyAccountingReviewed = false
+        }
+        store.movements = [salary, withdrawal]
+    }
+
+    func testNvioIncomeCannotMatchSantanderByOwnerAmountAndThreeDays() {
+        withStore { store in
+            seedNvioSalaryAndUnrelatedWithdrawal(store)
+            store.normalizeFinanceForTesting()
+            XCTAssertTrue(store.movements.allSatisfy { $0.matchedMovementId == nil })
+            XCTAssertEqual(store.realIncome, 15000)
+            XCTAssertEqual(store.consolidatedRealSpend, 15000)
+        }
+    }
+
+    func testStaleAutomaticNvioPairIsRevalidatedWithoutLosingCategory() {
+        withStore { store in
+            seedNvioSalaryAndUnrelatedWithdrawal(store, stalePair: true)
+            store.normalizeFinanceForTesting()
+            XCTAssertTrue(store.movements.allSatisfy { $0.matchedMovementId == nil })
+            XCTAssertEqual(store.realIncome, 15000)
+            XCTAssertEqual(store.movements[0].category, "Binance (salarios)")
+            XCTAssertTrue(store.movements[0].manuallyReviewed)
+            _ = store.updateCategory(for: store.movements[0], to: "Binance (salarios)", applyToMerchant: false)
+            FinanceStore.recordCanonicalRebuildCompletion(in: .standard)
+            let reopened = FinanceStore()
+            XCTAssertEqual(reopened.realIncome, 15000)
+            XCTAssertEqual(reopened.movements[0].category, "Binance (salarios)")
+        }
+    }
+
+    func testActualSantanderOwnTransferKeepsIndependentBankLink() {
+        withStore { store in
+            seedTransfer(store, sharedReference: false)
+            store.movements[0].title = "SPEI ENVIADO SANTANDER MARCELO ANDRES DIAZ SANC"
+            store.movements[1].title = "SPEI RECIBIDOBBVA"
+            store.normalizeFinanceForTesting()
+            assertTransferPair(store)
+            store.normalizeFinanceForTesting()
+            assertTransferPair(store)
+        }
+    }
+
+    func testHumanConfirmedPairWithoutPrintedReferenceRemainsProtected() {
+        withStore { store in
+            seedTransfer(store, sharedReference: false)
+            XCTAssertTrue(store.confirmOwnTransfer(store.movements[0], counterpart: store.movements[1]))
+            store.normalizeFinanceForTesting()
+            assertTransferPair(store)
+        }
+    }
+
+    func testUserConfirmedRappiPaymentExcludesSpendAndKeepsCategoryAfterReload() {
+        withStore { store in
+            let bbva = statement("BBVA", key: "bbva:4922", kind: .bank)
+            store.statements = [bbva]
+            var payment = row(-10000, date: calendarDate(2026, 6, 30), title: "SPEI ENVIADO STP")
+            payment.statementId = bbva.id
+            store.movements = [payment]
+            _ = store.updateCategory(for: payment, to: "Transporte", applyToMerchant: false)
+            store.updateClassification(for: store.movements[0], kind: .cardPayment, travelRelated: false)
+            XCTAssertEqual(store.consolidatedRealSpend, 0)
+            XCTAssertEqual(store.movements[0].category, "Transporte")
+            FinanceStore.recordCanonicalRebuildCompletion(in: .standard)
+            let reopened = FinanceStore()
+            XCTAssertEqual(reopened.consolidatedRealSpend, 0)
+            XCTAssertEqual(reopened.movements[0].kind, .cardPayment)
+            XCTAssertEqual(reopened.movements[0].category, "Transporte")
+        }
+    }
+
 }

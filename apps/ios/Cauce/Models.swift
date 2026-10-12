@@ -1094,7 +1094,7 @@ final class FinanceStore {
     private let manualDashboardUnlockKey = "marcelito.dashboard.manualUnlock.v1"
     private let transferOwnerAliasesKey = "marcelito.transfer.ownerAliases.v1"
     private let transferMatcherVersionKey = "marcelito.transfer.matcherVersion.v1"
-    private static let transferMatcherVersion = "reciprocal-accounting-pairing-v2"
+    private static let transferMatcherVersion = "independent-bank-link-v3"
     private static let defaultTransferOwnerAliases = [
         "Marcelo Díaz",
         "Marcelo A. Díaz",
@@ -3870,6 +3870,30 @@ final class FinanceStore {
         return outKey != inKey
     }
 
+    /// Generic SPEI wording, matching amounts and one owner's name cannot
+    /// establish that a deposit was funded by this particular withdrawal.
+    private func hasIndependentTransferLink(_ outflow: Movement, _ inflow: Movement) -> Bool {
+        let outText = normalizedConcept(transferDescriptor(outflow))
+        let inText = normalizedConcept(transferDescriptor(inflow))
+        let shared = !transferReferenceTokens(transferDescriptor(outflow))
+            .intersection(transferReferenceTokens(transferDescriptor(inflow))).isEmpty
+        if shared { return true }
+        let outBank = normalizedConcept(statementForMovement(outflow)?.source ?? outflow.account)
+        let inBank = normalizedConcept(statementForMovement(inflow)?.source ?? inflow.account)
+        let bankNames = Set(statements.filter { statementKind($0) == .bank }.map { normalizedConcept($0.source) })
+            .union(["nvio", "stp", "bbva", "santander", "banorte", "banamex", "citibanamex", "hsbc", "scotiabank", "inbursa", "azteca"])
+        // Some BBVA titles concatenate RECIBIDO and the sender bank (NVIO).
+        // An explicit third-bank sender contradicts a Santander/BBVA pair.
+        for bank in bankNames where bank != outBank && !bank.isEmpty {
+            let pattern = #"spei\s*recibid[oa]\s*"# + NSRegularExpression.escapedPattern(for: bank) + #"(?:\b|(?=\d))"#
+            if inText.range(of: pattern, options: .regularExpression) != nil { return false }
+        }
+        let namedBank = (inBank.count >= 3 && outText.contains(inBank))
+            || (outBank.count >= 3 && inText.contains(outBank))
+        let ownIdentity = ownerAliasMentioned(in: "\(transferDescriptor(outflow)) \(transferDescriptor(inflow))")
+        return namedBank && ownIdentity
+    }
+
     private func transferPairEvidence(_ outflow: Movement, _ inflow: Movement) -> (score: Int, reason: String) {
         let combined = normalizedConcept("\(transferDescriptor(outflow)) \(transferDescriptor(inflow))")
         var score = 50 // importe exacto, direcciones opuestas y cuentas distintas
@@ -3927,13 +3951,8 @@ final class FinanceStore {
             reasons.append("referencia coincidente")
         }
 
-        // BBVA/Santander often omit the counterpart bank from the first line
-        // of the row (it appears in a continuation line that PDFKit does not
-        // keep in the short title). When both imported statements are known
-        // bank accounts and the rows explicitly say SENT/RECEIVED, the exact
-        // amount and ±2-day match is sufficient evidence of an own-account
-        // transfer. Salary/merchant deposits do not contain the opposite
-        // directional pair and therefore remain income or spend.
+        // Direction wording is supporting evidence only; acceptance separately
+        // requires a bank route plus owner identity, or a shared reference.
         let outgoingSignal = outText.contains("enviado")
             || outText.contains("transferencia")
             || outText.contains("traspaso")
@@ -3944,10 +3963,6 @@ final class FinanceStore {
             || inText.contains("deposito")
             || inText.contains("entrada")
         if outgoingSignal && incomingSignal {
-            // With exact opposite amounts across two distinct imported bank
-            // accounts, explicit SENT/RECEIVED semantics must reach the
-            // acceptance threshold even when neither bank names the other in
-            // the shortened PDF row title. Keep ±3-day pairs below the gate.
             score += 18
             reasons.append("dirección explícita")
         }
@@ -4468,7 +4483,12 @@ final class FinanceStore {
             let validCardPair = row.kind == .cardPayment && ((isBankMovement(row) && isCardMovement(peer)) || (isCardMovement(row) && isBankMovement(peer)))
                 && (isBankMovement(row) ? row.amount < 0 : peer.amount < 0)
                 && abs(row.date.timeIntervalSince(peer.date)) <= 5 * 86400
-            if validBankPair || validCardPair { consumed.insert(row.id); consumed.insert(peer.id) }
+            let humanConfirmed = row.confirmedCounterpartKey != nil && peer.confirmedCounterpartKey != nil
+            let independentBankLink = isOutflow(row)
+                ? hasIndependentTransferLink(row, peer) : hasIndependentTransferLink(peer, row)
+            if (validBankPair && (humanConfirmed || independentBankLink)) || validCardPair {
+                consumed.insert(row.id); consumed.insert(peer.id)
+            }
         }
         for index in movements.indices where !consumed.contains(movements[index].id) && (movements[index].reconciliationReason != nil || movements[index].matchedMovementId != nil) {
             movements[index].matchedMovementId = nil
@@ -4552,7 +4572,7 @@ final class FinanceStore {
                 let evidence = transferPairEvidence(outflow, inflow)
                 let sharedReference = !transferReferenceTokens(transferDescriptor(outflow)).intersection(transferReferenceTokens(transferDescriptor(inflow))).isEmpty
                 let ownEvidence = ownerAliasMentioned(in: "\(transferDescriptor(outflow)) \(transferDescriptor(inflow))") || sharedReference
-                if ownEvidence && evidence.score >= 90 {
+                if ownEvidence && hasIndependentTransferLink(outflow, inflow) && evidence.score >= 90 {
                     let cents = NSDecimalNumber(decimal: absolute(outflow.amount) * 100).int64Value
                     scoredCandidates.append(ScoredTransferCandidate(
                         outflowIndex: outflowIndex,
@@ -4778,6 +4798,13 @@ final class FinanceStore {
            let backup = try? JSONEncoder().encode(currentEnvelope()) {
             defaults.set(backup, forKey: transferBackupKey)
             defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeTransferV2.v1")
+        }
+
+        let independentLinkBackupKey = "marcelito.ledger.beforeTransferV3.v1"
+        if !movements.isEmpty, defaults.data(forKey: independentLinkBackupKey) == nil,
+           let backup = try? JSONEncoder().encode(currentEnvelope()) {
+            defaults.set(backup, forKey: independentLinkBackupKey)
+            defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeTransferV3.v1")
         }
 
         // A prior reader could miss the masked account number when BBVA put
@@ -5261,6 +5288,8 @@ final class FinanceStore {
         defaults.removeObject(forKey: transferMatcherVersionKey)
         defaults.removeObject(forKey: "marcelito.ledger.beforeTransferV2.v1")
         defaults.removeObject(forKey: "marcelito.manualReviews.beforeTransferV2.v1")
+        defaults.removeObject(forKey: "marcelito.ledger.beforeTransferV3.v1")
+        defaults.removeObject(forKey: "marcelito.manualReviews.beforeTransferV3.v1")
         defaults.removeObject(forKey: manualCategoryOverridesKey)
         defaults.removeObject(forKey: categoryTaxonomyVersionKey)
         defaults.removeObject(forKey: numericRepairKey)

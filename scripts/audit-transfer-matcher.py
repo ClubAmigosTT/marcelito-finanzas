@@ -2,7 +2,7 @@ from pathlib import Path
 src=(Path(__file__).resolve().parents[1]/'apps/ios/Cauce/Models.swift').read_text()
 import tempfile,subprocess
 out=Path(tempfile.mkdtemp(prefix='marcelito-transfer-test-'))
-names=['transferDescriptor','exactTransferAmountsMatch','canAutomaticallyMatch','transferCounterparts','confirmOwnTransfer','amountsMatch','hasTransferHint','containsWholePhrase','ownerAliasMentioned','transferReferenceTokens','transferPairEvidence','globallyBestTransferCandidates','hasCardPaymentHint','isOutflow','isInflow','reconcileStoredMovements','movementKind','isSpend','isRealIncome','updateClassification']
+names=['transferDescriptor','exactTransferAmountsMatch','canAutomaticallyMatch','transferCounterparts','confirmOwnTransfer','amountsMatch','hasTransferHint','containsWholePhrase','ownerAliasMentioned','transferReferenceTokens','transferPairEvidence','hasIndependentTransferLink','globallyBestTransferCandidates','hasCardPaymentHint','isOutflow','isInflow','reconcileStoredMovements','movementKind','isSpend','isRealIncome','updateClassification']
 def extract(name):
  start=src.index('    private func '+name+'(') if '    private func '+name+'(' in src else src.index('    func '+name+'(')
  i=src.index('{',start);level=1;j=i+1
@@ -27,6 +27,7 @@ class Probe {
  func absolute(_ x:Decimal)->Decimal {abs(x)}
  func normalizedConcept(_ s:String)->String {s.folding(options:[.diacriticInsensitive,.caseInsensitive],locale:.current).lowercased()}
  func statementKind(_ s:Statement)->AccountKind {s.kind}
+ func statementForMovement(_ m:Movement)->Statement? {statements.first{$0.source == m.account}}
  func isBankMovement(_ m:Movement)->Bool {m.account != "Amex"}
  func isCardMovement(_ m:Movement)->Bool {m.account == "Amex"}
  func distinctImportedBankAccounts(_ a:Movement,_ b:Movement)->Bool {isBankMovement(a) && isBankMovement(b) && a.account != b.account}
@@ -73,7 +74,7 @@ if r.returncode: print(r.stderr);raise SystemExit(r.returncode)
 rows={}
 for line in r.stdout.splitlines():
  bits=line.split('|');rows[bits[0]]=dict(b.split('=') for b in bits[1:])
-expected={'verified_pair':('0','0','2'),'verified_pair_second_pass':('0','0','2'),'category_review_after_pairing':('0','0','2'),'manual_transfer_after_audit':('0','0','2'),'category_review_before_pairing':('3000','3000','0'),'one_cent_difference':('3000','3000.01','0'),'full_owner_name_default_alias':('0','0','2'),'two_banks_one_card_payment':('6000','0','0'),'new_category_before_pair':('0','0','2'),'new_category_after_pair':('0','0','2'),'confirmed_ambiguous_pair':('0','0','2'),'confirmed_pair_recreated_ids':('0','0','2'),'full_descriptor_reference':('0','0','2')}
+expected={'verified_pair':('0','0','2'),'verified_pair_second_pass':('0','0','2'),'category_review_after_pairing':('0','0','2'),'manual_transfer_after_audit':('0','0','2'),'category_review_before_pairing':('3000','3000','0'),'one_cent_difference':('3000','3000.01','0'),'full_owner_name_default_alias':('3000','3000','0'),'two_banks_one_card_payment':('6000','0','0'),'new_category_before_pair':('0','0','2'),'new_category_after_pair':('0','0','2'),'confirmed_ambiguous_pair':('0','0','2'),'confirmed_pair_recreated_ids':('0','0','2'),'full_descriptor_reference':('0','0','2')}
 for name,value in expected.items():
  actual=rows[name];assert (actual['spend'],actual['income'],actual['linked'])==value,(name,actual,value)
 print(r.stdout);print(f'{len(expected)} regression assertions passed; production Swift method bodies, isolated account/persistence helpers.')
