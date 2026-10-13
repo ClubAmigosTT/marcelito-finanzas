@@ -2,7 +2,7 @@ from pathlib import Path
 src=(Path(__file__).resolve().parents[1]/'apps/ios/Cauce/Models.swift').read_text()
 import tempfile,subprocess
 out=Path(tempfile.mkdtemp(prefix='marcelito-transfer-test-'))
-names=['transferDescriptor','exactTransferAmountsMatch','canAutomaticallyMatch','transferCounterparts','transferPairReviewKey','confirmOwnTransfer','amountsMatch','hasTransferHint','containsWholePhrase','ownerAliasMentioned','transferReferenceTokens','transferPairEvidence','hasIndependentTransferLink','globallyBestTransferCandidates','hasCardPaymentHint','isOutflow','isInflow','reconcileStoredMovements','movementKind','isSpend','isRealIncome','updateClassification']
+names=['transferDescriptor','exactTransferAmountsMatch','canAutomaticallyMatch','transferCounterparts','transferPairReviewKey','confirmOwnTransfer','amountsMatch','hasTransferHint','containsWholePhrase','ownerAliasMentioned','transferReferenceTokens','transferPairEvidence','hasIndependentTransferLink','globallyBestTransferCandidates','hasOwnCardPaymentRecipient','namedCardPaymentIssuer','paymentDestinationAccounts','paymentDestinationIssuers','cardPaymentIssuer','compatibleCardPayment','hasCardPaymentHint','isOutflow','isInflow','reconcileStoredMovements','movementKind','isSpend','isRealIncome','updateClassification']
 def extract(name):
  start=src.index('    private func '+name+'(') if '    private func '+name+'(' in src else src.index('    func '+name+'(')
  i=src.index('{',start);level=1;j=i+1
@@ -15,13 +15,15 @@ enum MovementKind { case purchase, cardPayment, bankTransfer, income, credit, re
 enum AccountKind { case bank, card }
 struct Statement { var id = UUID(); var source: String; var kind: AccountKind }
 struct Evidence {var sourceText:String?}
-struct Movement { var id = UUID(); var date: Date; var title: String; var account: String; var category = "Otros"; var amount: Decimal; var flow: FlowKind; var statementId: UUID?; var kind: MovementKind?; var manuallyReviewed = false; var manuallyAccountingReviewed:Bool?; var accountingReviewLocked:Bool {manuallyAccountingReviewed ?? manuallyReviewed};var confirmedCounterpartKey:String?;var rawDescription:String?;var extractionEvidence:Evidence?; var matchedMovementId: UUID?; var reconciliationConfidence: Int?; var reconciliationReason: String?; var travelRelated = false; var classificationTags: [String] = [] }
+// Recipient parsing is covered by native BankDescriptorContinuationTests;
+// the Foundation probe below tests bank/Amex matching, not Rappi identity.
+struct Movement { var transferRecipient:String? {nil}; var id = UUID(); var date: Date; var title: String; var account: String; var category = "Otros"; var amount: Decimal; var flow: FlowKind; var statementId: UUID?; var kind: MovementKind?; var manuallyReviewed = false; var manuallyAccountingReviewed:Bool?; var accountingReviewLocked:Bool {manuallyAccountingReviewed ?? manuallyReviewed};var confirmedCounterpartKey:String?;var rawDescription:String?;var extractionEvidence:Evidence?; var matchedMovementId: UUID?; var reconciliationConfidence: Int?; var reconciliationReason: String?; var travelRelated = false; var classificationTags: [String] = [] }
 struct CaptureSource {var kind: AccountKind}
 struct Capture {var movements:[Movement];var source:CaptureSource}
 struct DiagnosticsRecorder {static func record(level:String, stage:String,message:String) {}}
 class Probe {
  var movements:[Movement] = []
- var statements = [Statement(source:"BBVA",kind:.bank),Statement(source:"Santander",kind:.bank),Statement(source:"Amex",kind:.card)]
+ var statements = [Statement(source:"BBVA",kind:.bank),Statement(source:"Santander",kind:.bank),Statement(source:"Amex",kind:.card),Statement(source:"Rappi",kind:.card)]
  var transferOwnerAliases = ["Marcelo Díaz", "Marcelo A. Díaz", "Díaz Marcelo"]
  var screenshotCaptures:[Capture] = []
  var rejectedTransferPairKeys = Set<String>()
@@ -30,8 +32,8 @@ class Probe {
  func normalizedConcept(_ s:String)->String {s.folding(options:[.diacriticInsensitive,.caseInsensitive],locale:.current).lowercased()}
  func statementKind(_ s:Statement)->AccountKind {s.kind}
  func statementForMovement(_ m:Movement)->Statement? {statements.first{$0.source == m.account}}
- func isBankMovement(_ m:Movement)->Bool {m.account != "Amex"}
- func isCardMovement(_ m:Movement)->Bool {m.account == "Amex"}
+ func isBankMovement(_ m:Movement)->Bool {!["Amex","Rappi"].contains(m.account)}
+ func isCardMovement(_ m:Movement)->Bool {["Amex","Rappi"].contains(m.account)}
  func distinctImportedBankAccounts(_ a:Movement,_ b:Movement)->Bool {isBankMovement(a) && isBankMovement(b) && a.account != b.account}
  func isProvisionalScreenshotMovement(_ m:Movement)->Bool {false}
  func persist(markingChange:Bool) {}

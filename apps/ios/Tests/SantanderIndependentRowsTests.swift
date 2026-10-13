@@ -322,4 +322,39 @@ final class SantanderIndependentRowsTests: XCTestCase {
             XCTAssertTrue(result.diagnostics[0].cellRetryTexts?[1].contains("2x:") == true)
         }
     }
+    func testConceptMergedWithNextDateStaysOnItsOriginalRow() {
+        let merged = OCRObservationFixture(text: "CONCEPTO MADS RAPPI 17-JUL-2026 PAGO SEGUNDO",
+            x: 0.05, y: 0.72, width: 0.50, height: 0.028,
+            dateEvidenceText: "17-JUL-2026",
+            dateEvidenceBounds: CGRect(x: 0.05, y: 0.72, width: 0.08, height: 0.02),
+            wordEvidenceBoxes: [
+                OCRTextBoxFixture(text: "CONCEPTO MADS RAPPI", boundingBox: CGRect(x: 0.20, y: 0.735, width: 0.25, height: 0.008), descriptorDateY: 0.73, precedesDate: true),
+                OCRTextBoxFixture(text: "17-JUL-2026", boundingBox: CGRect(x: 0.05, y: 0.725, width: 0.08, height: 0.008), descriptorDateY: 0.73),
+                OCRTextBoxFixture(text: "PAGO SEGUNDO", boundingBox: CGRect(x: 0.20, y: 0.725, width: 0.25, height: 0.008), descriptorDateY: 0.73)
+            ])
+        let fixtures = row(1, amount: "30.00", balance: "970.00") + [merged,
+            OCRObservationFixture(text: "40.00", x: 0.74, y: 0.72, width: 0.08),
+            OCRObservationFixture(text: "930.00", x: 0.86, y: 0.72, width: 0.08)]
+        let result = read(fixtures)
+        XCTAssertEqual(result.movements.count, 2)
+        guard result.movements.count == 2 else { return }
+        XCTAssertEqual(result.movements.map(\.amount), [-30, -40])
+        XCTAssertTrue(result.movements[0].rawDescription?.contains("MADS RAPPI") == true)
+        XCTAssertFalse(result.movements[1].rawDescription?.contains("MADS RAPPI") == true)
+    }
+
+    func testStandaloneTransferConceptNearFollowingDateKeepsPreviousOwner() {
+        let concept = OCRObservationFixture(text: "CONCEPTO TRANSFERENCIA A MADS RAPPI",
+            x: 0.20, y: 0.735, width: 0.30, height: 0.008,
+            dateEvidenceText: "O TRANSFERENCIA",
+            dateEvidenceBounds: CGRect(x: 0.20, y: 0.735, width: 0.12, height: 0.008))
+        let result = read(row(1, amount: "30.00", balance: "970.00") + [concept]
+            + row(2, amount: "40.00", balance: "930.00"))
+        XCTAssertEqual(result.movements.count, 2)
+        guard result.movements.count == 2 else { return }
+        XCTAssertTrue(result.movements[0].rawDescription?.contains("MADS RAPPI") == true)
+        XCTAssertFalse(result.movements[1].rawDescription?.contains("MADS RAPPI") == true)
+        XCTAssertEqual(result.movements.map(\.amount), [-30, -40])
+    }
+
 }

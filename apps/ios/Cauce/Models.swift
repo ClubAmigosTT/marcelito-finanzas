@@ -307,6 +307,7 @@ struct Movement: Identifiable, Codable {
             "banco santander", "banco stp", "banco bbva"
         ]
         let patterns = [
+            #"(?i)\bal\s+cliente\s+(.+?)(?=\s*\(\s*1\s*\)|\s+\b(?:dato|iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b|\n|$)"#,
             #"(?i)\btransferencia\s+a\s+(.+?)(?=\s+\b(?:iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b|\s+[-+]?\s*\$?\s*\d[\d, ]*(?:[.,]\d{2})|$)"#,
             #"(?i)\b(?:a\s+favor\s+de|beneficiari[oa]|destinatari[oa])\s*[:#-]?\s*(.+?)(?=\s+\b(?:iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b|\s+[-+]?\s*\$?\s*\d[\d, ]*(?:[.,]\d{2})|$)"#,
             #"(?i)\bspei\s+enviado\s+(?:a\s+)?(.+?)(?=\s+\b(?:iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b|\s+[-+]?\s*\$?\s*\d[\d, ]*(?:[.,]\d{2})|$)"#
@@ -674,6 +675,8 @@ struct ReaderPDFDiagnosticSnapshot {
 struct OCRTextBoxFixture {
     let text: String
     let boundingBox: CGRect
+    var descriptorDateY: CGFloat? = nil
+    var precedesDate = false
 }
 
 struct OCRObservationFixture {
@@ -687,6 +690,7 @@ struct OCRObservationFixture {
     let dateEvidenceText: String?
     let dateEvidenceBounds: CGRect?
     let amountEvidenceBoxes: [OCRTextBoxFixture]
+    let wordEvidenceBoxes: [OCRTextBoxFixture]
 
     init(
         page: Int = 0,
@@ -698,7 +702,8 @@ struct OCRObservationFixture {
         confidence: Double = 0.99,
         dateEvidenceText: String? = nil,
         dateEvidenceBounds: CGRect? = nil,
-        amountEvidenceBoxes: [OCRTextBoxFixture] = []
+        amountEvidenceBoxes: [OCRTextBoxFixture] = [],
+        wordEvidenceBoxes: [OCRTextBoxFixture] = []
     ) {
         self.page = page
         self.text = text
@@ -710,6 +715,7 @@ struct OCRObservationFixture {
         self.dateEvidenceText = dateEvidenceText
         self.dateEvidenceBounds = dateEvidenceBounds
         self.amountEvidenceBoxes = amountEvidenceBoxes
+        self.wordEvidenceBoxes = wordEvidenceBoxes
     }
 }
 
@@ -1094,7 +1100,7 @@ final class FinanceStore {
     private let manualDashboardUnlockKey = "marcelito.dashboard.manualUnlock.v1"
     private let transferOwnerAliasesKey = "marcelito.transfer.ownerAliases.v1"
     private let transferMatcherVersionKey = "marcelito.transfer.matcherVersion.v1"
-    private static let transferMatcherVersion = "independent-bank-link-v3"
+    private static let transferMatcherVersion = "issuer-card-payments-v4"
     private static let defaultTransferOwnerAliases = [
         "Marcelo Díaz",
         "Marcelo A. Díaz",
@@ -1480,6 +1486,10 @@ final class FinanceStore {
                 } ?? [],
                 amountBoxes: fixture.amountEvidenceBoxes.map {
                     OCRTextBox(text: $0.text, boundingBox: $0.boundingBox)
+                },
+                wordBoxes: fixture.wordEvidenceBoxes.map {
+                    OCRTextBox(text: $0.text, boundingBox: $0.boundingBox,
+                        descriptorDateY: $0.descriptorDateY, precedesDate: $0.precedesDate)
                 }
             )
         }
@@ -3779,7 +3789,8 @@ final class FinanceStore {
 #endif
 
     private func transferDescriptor(_ movement: Movement) -> String {
-        [movement.title, movement.rawDescription, movement.extractionEvidence?.sourceText].compactMap { $0 }.joined(separator: " ")
+        if let raw = movement.rawDescription, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return raw }
+        return [movement.title, movement.extractionEvidence?.sourceText].compactMap { $0 }.joined(separator: " ")
     }
 
     private func exactTransferAmountsMatch(_ left: Decimal, _ right: Decimal) -> Bool {
@@ -4042,18 +4053,84 @@ final class FinanceStore {
         }
     }
 
-    private func hasCardPaymentHint(_ movement: Movement) -> Bool {
+    private func namedCardPaymentIssuer(_ movement: Movement) -> String? {
+        let text = normalizedConcept(transferDescriptor(movement))
+        if text.contains("pago") && (text.contains("american express") || text.contains("americanexpress")
+            || containsWholePhrase("amex", in: text)) { return "Amex" }
+        // A named destination is a payment hint, not permission to exclude.
+        // Automatic matching still requires owner identity, a card receipt,
+        // exact cents, bounded dates and uniqueness in BOTH directions.
+        if text.contains("transferencia a mads rappi")
+            || (text.contains("pago") && text.contains("rappicard")) { return "Rappi" }
+        return nil
+    }
+
+    private func paymentDestinationAccounts(_ movement: Movement) -> Set<String> {
+        let text = transferDescriptor(movement)
+        let pattern = #"(?im)(?:a la cuenta|cuenta destino|clabe)\s*[: ]*([0-9]{17,18})(?![0-9])|^\s*(?:00)?([0-9]{18})\s*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        return Set(regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match in
+            for i in 1..<match.numberOfRanges {
+                if let range = Range(match.range(at: i), in: text) {
+                    let value = String(text[range])
+                    return value.count == 17 ? "0" + value : value
+                }
+            }
+            return nil
+        })
+    }
+
+    private func hasOwnCardPaymentRecipient(_ movement: Movement) -> Bool {
+        guard let recipient = movement.transferRecipient else { return false }
+        let name = normalizedConcept(recipient)
+        return transferOwnerAliases.map(normalizedConcept).contains(name)
+    }
+
+    private func paymentDestinationIssuers() -> [String: Set<String>] {
+        var result: [String: Set<String>] = [:]
+        for other in movements where other.amount < 0 && isBankMovement(other) {
+            guard let issuer = namedCardPaymentIssuer(other), hasOwnCardPaymentRecipient(other),
+                  isEligibleMovement(other) else { continue }
+            for account in paymentDestinationAccounts(other) { result[account, default: []].insert(issuer) }
+        }
+        return result
+    }
+
+    private func cardPaymentIssuer(_ bank: Movement, destinations: [String: Set<String>]) -> String? {
+        if let named = namedCardPaymentIssuer(bank) { return named }
+        let accounts = paymentDestinationAccounts(bank)
+        guard !accounts.isEmpty, hasTransferHint(bank), ownerAliasMentioned(in: transferDescriptor(bank)) else { return nil }
+        let issuers = accounts.reduce(into: Set<String>()) { $0.formUnion(destinations[$1, default: []]) }
+        return issuers.count == 1 ? issuers.first : nil
+    }
+
+    private func hasCardPaymentHint(_ movement: Movement, destinations: [String: Set<String>]) -> Bool {
         let value = normalizedConcept(transferDescriptor(movement))
-        return value.contains("pago de tarjeta")
-            || value.contains("pago amex")
-            || value.contains("gracias por su pago")
-            || value.contains("pago credito")
-            // Santander's direct-debit row names the issuer legally rather
-            // than using the short `Amex` label (for example
-            // `DOMICILIACION PAGO SERVICIO ... AMERICAN EXPRESS CO`). This is
-            // still an unambiguous card-payment signal, not a generic
-            // merchant mention, because it is paired with `pago` below.
-            || (value.contains("pago") && (value.contains("american express") || value.contains("americanexpress")))
+        return cardPaymentIssuer(movement, destinations: destinations) != nil || value.contains("pago de tarjeta")
+            || value.contains("pago amex") || value.contains("gracias por su pago") || value.contains("pago credito")
+    }
+
+    private func compatibleCardPayment(_ bank: Movement, _ card: Movement, destinations: [String: Set<String>], requireOwnRecipient: Bool = true) -> Bool {
+        // Discard impossible pairs before the expensive statement/OCR proof.
+        // Eligibility is still mandatory for every actual candidate.
+        guard bank.amount < 0, card.amount != 0,
+              exactTransferAmountsMatch(bank.amount, card.amount),
+              abs(bank.date.timeIntervalSince(card.date)) <= 5 * 86400,
+              isBankMovement(bank), isCardMovement(card) else { return false }
+        guard isEligibleMovement(bank), isEligibleMovement(card),
+              !rejectedTransferPairKeys.contains(transferPairReviewKey(bank, card)) else { return false }
+        let cardText = normalizedConcept(transferDescriptor(card))
+        let receipt = movementKind(card) == .cardPayment
+            || (cardText.contains("pago") && (cardText.contains("spei") || cardText.contains("gracias") || cardText.contains("recib")))
+        guard receipt, hasCardPaymentHint(bank, destinations: destinations) else { return false }
+        if let issuer = cardPaymentIssuer(bank, destinations: destinations) {
+            guard statementForMovement(card)?.source == issuer || card.account == issuer else { return false }
+            if issuer == "Rappi" { return !requireOwnRecipient || hasOwnCardPaymentRecipient(bank) }
+            return true
+        }
+        // A generic payment label alone never proves which owned card
+        // received it. It remains an explicit review proposal.
+        return !requireOwnRecipient
     }
 
     private func isOutflow(_ movement: Movement) -> Bool {
@@ -4448,6 +4525,7 @@ final class FinanceStore {
 
     private func reconcileStoredMovements() {
         var consumed = Set<UUID>()
+        let destinations = paymentDestinationIssuers()
         // Rebind human-confirmed pairs after a replay assigns new row UUIDs.
         let rowsByReviewKey = Dictionary(grouping: movements.indices) { manualReviewKey(movements[$0]) }
         for index in movements.indices {
@@ -4456,17 +4534,24 @@ final class FinanceStore {
                   let candidates = rowsByReviewKey[key], candidates.count == 1,
                   let peer = candidates.first, peer != index,
                   movements[peer].confirmedCounterpartKey == manualReviewKey(movements[index]),
-                  movements[index].kind == .bankTransfer, movements[peer].kind == .bankTransfer,
-                  distinctImportedBankAccounts(movements[index], movements[peer]),
-                  movements[index].amount * movements[peer].amount < 0,
-                  exactTransferAmountsMatch(movements[index].amount, movements[peer].amount),
-                  abs(movements[index].date.timeIntervalSince(movements[peer].date)) <= 3 * 86400 else { continue }
+                  movements[index].kind == movements[peer].kind,
+                  exactTransferAmountsMatch(movements[index].amount, movements[peer].amount) else { continue }
+            let bankPair = movements[index].kind == .bankTransfer
+                && movements[index].amount * movements[peer].amount < 0
+                && distinctImportedBankAccounts(movements[index], movements[peer])
+                && abs(movements[index].date.timeIntervalSince(movements[peer].date)) <= 3 * 86400
+            let cardPair = movements[index].kind == .cardPayment
+                && ((isBankMovement(movements[index]) && isCardMovement(movements[peer]))
+                    || (isCardMovement(movements[index]) && isBankMovement(movements[peer])))
+                && (isBankMovement(movements[index]) ? movements[index].amount < 0 : movements[peer].amount < 0)
+                && abs(movements[index].date.timeIntervalSince(movements[peer].date)) <= 5 * 86400
+            guard bankPair || cardPair else { continue }
             movements[index].matchedMovementId = movements[peer].id
             movements[peer].matchedMovementId = movements[index].id
             for target in [index, peer] {
                 movements[target].flow = .transfer
                 movements[target].reconciliationConfidence = 100
-                movements[target].reconciliationReason = "Traspaso propio · pareja confirmada manualmente"
+                movements[target].reconciliationReason = cardPair ? "Pago de tarjeta · pareja confirmada manualmente" : "Traspaso propio · pareja confirmada manualmente"
             }
         }
         // Preserve verified reciprocal pairs before clearing automatic guesses.
@@ -4486,7 +4571,13 @@ final class FinanceStore {
             let humanConfirmed = row.confirmedCounterpartKey != nil && peer.confirmedCounterpartKey != nil
             let independentBankLink = isOutflow(row)
                 ? hasIndependentTransferLink(row, peer) : hasIndependentTransferLink(peer, row)
-            if (validBankPair && (humanConfirmed || independentBankLink)) || validCardPair {
+            let independentCardLink = isBankMovement(row) ? compatibleCardPayment(row, peer, destinations: destinations) : compatibleCardPayment(peer, row, destinations: destinations)
+            let bank = isBankMovement(row) ? row : peer
+            let card = isCardMovement(row) ? row : peer
+            let uniqueCardPair = validCardPair && independentCardLink
+                && movements.filter { compatibleCardPayment(bank, $0, destinations: destinations) }.count == 1
+                && movements.filter { compatibleCardPayment($0, card, destinations: destinations) }.count == 1
+            if (validBankPair && (humanConfirmed || independentBankLink)) || (validCardPair && (humanConfirmed || uniqueCardPair)) {
                 consumed.insert(row.id); consumed.insert(peer.id)
             }
         }
@@ -4495,8 +4586,18 @@ final class FinanceStore {
             movements[index].reconciliationConfidence = nil
             movements[index].reconciliationReason = nil
             if !movements[index].accountingReviewLocked {
-                movements[index].flow = movements[index].amount > 0 ? .income : .expense
-                movements[index].kind = nil
+                let cardText = normalizedConcept(transferDescriptor(movements[index]))
+                let independentlyPrintedReceipt = isCardMovement(movements[index])
+                    && (cardText.contains("gracias por su pago") || cardText.contains("pago por spei") || cardText.contains("pago recibido"))
+                if independentlyPrintedReceipt {
+                    // Amex credits are negative, Rappi credits positive. An
+                    // uncertain funding pair cannot turn either into a purchase.
+                    movements[index].flow = .transfer
+                    movements[index].kind = .cardPayment
+                } else {
+                    movements[index].flow = movements[index].amount > 0 ? .income : .expense
+                    movements[index].kind = nil
+                }
             }
             if !movements[index].manuallyReviewed {
                 movements[index].category = Self.category(for: movements[index].title, flow: movements[index].flow)
@@ -4508,7 +4609,6 @@ final class FinanceStore {
         // three-day posting gap). Keep a strict ±3-day rule for own-bank
         // transfers, but allow a bounded five-day window when both sides have
         // an explicit card-payment signal and the amount is exact to cents.
-        let cardPaymentWindow: TimeInterval = 5 * 24 * 60 * 60
 
         for index in movements.indices {
             let bank = movements[index]
@@ -4516,24 +4616,13 @@ final class FinanceStore {
 
             let cardCandidates = movements.indices.filter { candidateIndex in
                 let card = movements[candidateIndex]
-                guard canAutomaticallyMatch(card, kind: .cardPayment), !consumed.contains(card.id), candidateIndex != index, isCardMovement(card), exactTransferAmountsMatch(bank.amount, card.amount), abs(bank.date.timeIntervalSince(card.date)) <= cardPaymentWindow else { return false }
-                let cardText = normalizedConcept(card.title)
-                let cardSignal = movementKind(card) == .cardPayment
-                    || hasCardPaymentHint(card)
-                    || (card.flow == .debt && (cardText.contains("pago") || cardText.contains("abono") || cardText.contains("recib")))
-                // Require both the funding bank and the card statement to
-                // describe a payment. Matching an arbitrary purchase merely
-                // because a bank row happened to contain `pago` could hide a
-                // real expense from the consolidated ledger.
-                return hasCardPaymentHint(bank) && cardSignal
+                return !consumed.contains(card.id) && compatibleCardPayment(bank, card, destinations: destinations)
             }
-            if cardCandidates.count == 1, let cardIndex = cardCandidates.first {
+            if cardCandidates.count == 1, let cardIndex = cardCandidates.first,
+               canAutomaticallyMatch(movements[cardIndex], kind: .cardPayment) {
                 let card = movements[cardIndex]
                 let fundingCandidates = movements.filter { other in
-                    canAutomaticallyMatch(other, kind: .cardPayment) && isBankMovement(other) && other.amount < 0
-                        && !consumed.contains(other.id) && hasCardPaymentHint(other)
-                        && exactTransferAmountsMatch(other.amount, card.amount)
-                        && abs(other.date.timeIntervalSince(card.date)) <= cardPaymentWindow
+                    !consumed.contains(other.id) && compatibleCardPayment(other, card, destinations: destinations)
                 }
                 guard fundingCandidates.count == 1 else { continue }
                 movements[index].flow = .transfer
@@ -4806,6 +4895,13 @@ final class FinanceStore {
            let backup = try? JSONEncoder().encode(currentEnvelope()) {
             defaults.set(backup, forKey: independentLinkBackupKey)
             defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeTransferV3.v1")
+        }
+
+        let paymentBackupKey = "marcelito.ledger.beforeCardPaymentsV4.v1"
+        if !movements.isEmpty, defaults.data(forKey: paymentBackupKey) == nil,
+           let backup = try? JSONEncoder().encode(currentEnvelope()) {
+            defaults.set(backup, forKey: paymentBackupKey)
+            defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeCardPaymentsV4.v1")
         }
 
         // A prior reader could miss the masked account number when BBVA put
@@ -5100,19 +5196,118 @@ final class FinanceStore {
         persist(markingChange: true)
     }
 
+    var isRepairingPaymentDescriptions = false
+    var paymentDescriptionRepairProgress: String?
+
+    /// Recover descriptors only. UUIDs, dates, amounts, source evidence keys,
+    /// categories and explicit accounting decisions are never replaced.
+    @MainActor
+    func recoverPaymentDescriptions() async -> (updated: Int, skipped: Int) {
+        guard !isRepairingPaymentDescriptions else { return (0, 0) }
+        isRepairingPaymentDescriptions = true
+        defer { isRepairingPaymentDescriptions = false; paymentDescriptionRepairProgress = nil }
+        let defaults = UserDefaults.standard
+        if defaults.data(forKey: "marcelito.ledger.beforeDescriptorRepair.v1") == nil,
+           let backup = try? JSONEncoder().encode(currentEnvelope()) {
+            defaults.set(backup, forKey: "marcelito.ledger.beforeDescriptorRepair.v1")
+            defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeDescriptorRepair.v1")
+        }
+        let sources = statements.filter { isEligibleStatement($0) && ["BBVA", "Santander"].contains($0.source) }
+        var descriptors: [UUID: (text: String, date: Date, amount: Decimal, page: Int?, statementID: UUID?, fingerprint: String?)] = [:]
+        var skipped = 0
+        for (position, statement) in sources.enumerated() {
+            paymentDescriptionRepairProgress = "\(position + 1) de \(sources.count) · \(statement.source)"
+            guard !Task.isCancelled, let url = statementFileURL(for: statement) else { skipped += 1; continue }
+            do {
+                let extraction = try await PDFExtractionCoordinator.shared.perform {
+                    let data = try Self.readPDFData(from: url)
+                    return try autoreleasepool {
+                        try Self.extractPDFUsingCache(data: data, fileName: statement.fileName, allowOCR: true,
+                            sourceOverride: nil, kindOverride: nil, learnedRules: [:])
+                    }
+                }
+                guard !Task.isCancelled, extraction.source == statement.source,
+                      extraction.sourceFingerprint == statement.sourceFingerprint,
+                      reconcileStatement(kind: extraction.kind, summary: extraction.summary,
+                        movements: extraction.candidates).status == .valid else { skipped += 1; continue }
+                let original = movements.filter { $0.statementId == statement.id }
+                func key(_ row: Movement) -> String {
+                    "\(normalizedDate(row.date))|\(row.amount)|\(row.extractionEvidence?.page ?? 0)"
+                }
+                let oldGroups = Dictionary(grouping: original, by: key)
+                let newGroups = Dictionary(grouping: extraction.candidates, by: key)
+                guard oldGroups.mapValues(\.count) == newGroups.mapValues(\.count) else { skipped += 1; continue }
+                for (identity, group) in oldGroups where group.count == 1 {
+                    guard let current = group.first, let replacement = newGroups[identity]?.first,
+                          let raw = replacement.rawDescription, !raw.isEmpty else { continue }
+                    descriptors[current.id] = (raw, current.date, current.amount, current.extractionEvidence?.page,
+                        current.statementId, statement.sourceFingerprint)
+                }
+            } catch { skipped += 1 }
+        }
+        guard !Task.isCancelled else { return (0, skipped) }
+        var updated = 0
+        for index in movements.indices {
+            if let descriptor = descriptors[movements[index].id],
+               movements[index].date == descriptor.date, movements[index].amount == descriptor.amount,
+               movements[index].extractionEvidence?.page == descriptor.page,
+               movements[index].statementId == descriptor.statementID,
+               statementForMovement(movements[index])?.sourceFingerprint == descriptor.fingerprint,
+               movements[index].rawDescription != descriptor.text {
+                movements[index].rawDescription = descriptor.text; updated += 1
+            }
+        }
+        if updated > 0 {
+            // Classification review remains protected by accountingReviewLocked.
+            reconcileStoredMovements()
+            persist(markingChange: true)
+        }
+        DiagnosticsRecorder.record(stage: "payments.descriptors.repair",
+            message: "Descripciones recuperadas: \(updated); estados omitidos: \(skipped). Categorías conservadas.")
+        return (updated, skipped)
+    }
+
     var pendingTransferReviewPairs: [TransferReviewPair] {
-        let rows = eligibleMovements.filter { isBankMovement($0) && $0.matchedMovementId == nil }
-        let incoming = Dictionary(grouping: rows.filter { $0.amount > 0 && !($0.manuallyAccountingReviewed == true && $0.kind == .income) }) {
+        let rows = eligibleMovements.filter { $0.matchedMovementId == nil }
+        let incoming = Dictionary(grouping: rows.filter {
+            ($0.amount > 0 || (isCardMovement($0) && movementKind($0) == .cardPayment))
+                && !($0.manuallyAccountingReviewed == true && $0.kind == .income)
+        }) {
             NSDecimalNumber(decimal: abs($0.amount)).stringValue
         }
         let rejected = rejectedTransferPairKeys
-        return rows.filter { $0.amount < 0 && movementKind($0) != .cardPayment }.flatMap { outgoing in
+        let destinations = paymentDestinationIssuers()
+        return rows.filter { isBankMovement($0) && $0.amount < 0 }.flatMap { outgoing in
             incoming[NSDecimalNumber(decimal: abs(outgoing.amount)).stringValue, default: []].filter { peer in
-                distinctImportedBankAccounts(outgoing, peer)
+                let bankPair = distinctImportedBankAccounts(outgoing, peer)
+                    && movementKind(outgoing) != .cardPayment
                     && abs(outgoing.date.timeIntervalSince(peer.date)) <= 3 * 86400
+                return (bankPair || compatibleCardPayment(outgoing, peer, destinations: destinations, requireOwnRecipient: false))
                     && !rejected.contains(transferPairReviewKey(outgoing, peer))
-            }.map { TransferReviewPair(outgoing: outgoing, incoming: $0) }
+            }.map { TransferReviewPair(outgoing: outgoing, incoming: $0,
+                isCardPayment: isCardMovement($0)) }
         }.sorted { $0.outgoing.date > $1.outgoing.date }
+    }
+
+    @discardableResult
+    func confirmPaymentPair(_ pair: TransferReviewPair) -> Bool {
+        guard pair.isCardPayment,
+              let bankIndex = movements.firstIndex(where: { $0.id == pair.outgoing.id }),
+              let cardIndex = movements.firstIndex(where: { $0.id == pair.incoming.id }),
+              movements[bankIndex].matchedMovementId == nil, movements[cardIndex].matchedMovementId == nil,
+              pendingTransferReviewPairs.contains(where: { $0.id == pair.id }) else { return false }
+        for (target, peer) in [(bankIndex, cardIndex), (cardIndex, bankIndex)] {
+            movements[target].kind = .cardPayment
+            movements[target].flow = .transfer
+            movements[target].matchedMovementId = movements[peer].id
+            movements[target].confirmedCounterpartKey = manualReviewKey(movements[peer])
+            movements[target].reconciliationConfidence = 100
+            movements[target].reconciliationReason = "Pago de tarjeta · pareja confirmada manualmente"
+            movements[target].manuallyAccountingReviewed = true
+            movements[target].manuallyReviewed = true
+        }
+        persist(markingChange: true)
+        return true
     }
 
     /// Full account coverage uses printed date ranges, not a month label.
@@ -5196,7 +5391,7 @@ final class FinanceStore {
                     guard let balance = record.summary?.cashBalance else { return nil }
                     cash += balance
                 } else {
-                    guard let balance = record.summary?.debtBalance ?? record.summary?.statementBalance else { return nil }
+                    guard let balance = calculateMetric(for: record).debtBalance else { return nil }
                     debt += balance
                 }
             }
@@ -5244,7 +5439,7 @@ final class FinanceStore {
 
     func updateClassification(for movement: Movement, kind: MovementKind, travelRelated: Bool) {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return }
-        if kind != .bankTransfer {
+        if kind != movements[index].kind {
             if let peerID = movements[index].matchedMovementId,
                let peerIndex = movements.firstIndex(where: { $0.id == peerID }) {
                 movements[peerIndex].confirmedCounterpartKey = nil
@@ -5282,11 +5477,37 @@ final class FinanceStore {
               let data = UserDefaults.standard.data(forKey: "marcelito.manualReviews.v1"),
               let saved = try? JSONDecoder().decode([String: Movement].self, from: data) else { return }
         let counts = Dictionary(grouping: movements, by: manualReviewKey).mapValues(\.count)
+        func financialKey(_ movement: Movement) -> String {
+            let identity = financialAccountKey(movement) ?? movement.statementId?.uuidString ?? movement.id.uuidString
+            return "\(identity)|\(normalizedDate(movement.date))|\(movement.amount)|\(movement.extractionEvidence?.page ?? 0)"
+        }
+        let financialCounts = Dictionary(grouping: movements, by: financialKey).mapValues(\.count)
+        let savedFinancial = Dictionary(grouping: Array(saved), by: { entry in
+            // Saved keys retain the bank/account identity even if replay has
+            // replaced the old statement UUID before this restoration runs.
+            entry.key.components(separatedBy: "|").prefix(5).joined(separator: "|")
+        })
+        var restorations: [(index: Int, prior: Movement)] = []
+        var keyTranslations: [String: String] = [:]
         for index in movements.indices {
-            guard counts[manualReviewKey(movements[index])] == 1 else { continue }
-            guard let prior = saved[manualReviewKey(movements[index])] else { continue }
+            let key = manualReviewKey(movements[index])
+            guard counts[key] == 1 else { continue }
+            let priorEntry: (key: String, value: Movement)?
+            if let prior = saved[key] { priorEntry = (key, prior) }
+            else {
+                // Descriptor recovery changes source text. Rebind only when
+                // account/day/signed cents/page are unique on BOTH sides.
+                let financial = financialKey(movements[index])
+                let alternatives = savedFinancial[financial, default: []]
+                priorEntry = financialCounts[financial] == 1 && alternatives.count == 1 ? alternatives.first : nil
+            }
+            guard let priorEntry else { continue }
+            keyTranslations[priorEntry.key] = key
+            restorations.append((index, priorEntry.value))
+        }
+        for (index, prior) in restorations {
             movements[index].category = prior.category
-            movements[index].confirmedCounterpartKey = prior.confirmedCounterpartKey
+            movements[index].confirmedCounterpartKey = prior.confirmedCounterpartKey.map { keyTranslations[$0] ?? $0 }
             movements[index].manuallyAccountingReviewed = prior.manuallyAccountingReviewed
             if prior.accountingReviewLocked {
                 movements[index].kind = prior.kind
@@ -5421,6 +5642,10 @@ final class FinanceStore {
         defaults.removeObject(forKey: "marcelito.transfer.rejectedPairs.v1")
         defaults.removeObject(forKey: "marcelito.ledger.beforeTransferV2.v1")
         defaults.removeObject(forKey: "marcelito.manualReviews.beforeTransferV2.v1")
+        defaults.removeObject(forKey: "marcelito.ledger.beforeDescriptorRepair.v1")
+        defaults.removeObject(forKey: "marcelito.manualReviews.beforeDescriptorRepair.v1")
+        defaults.removeObject(forKey: "marcelito.ledger.beforeCardPaymentsV4.v1")
+        defaults.removeObject(forKey: "marcelito.manualReviews.beforeCardPaymentsV4.v1")
         defaults.removeObject(forKey: "marcelito.ledger.beforeTransferV3.v1")
         defaults.removeObject(forKey: "marcelito.manualReviews.beforeTransferV3.v1")
         defaults.removeObject(forKey: manualCategoryOverridesKey)
@@ -6339,7 +6564,10 @@ final class FinanceStore {
         var rappiSupplementalLayoutText = ""
         var rappiPageWiseSelectableText = ""
         var recoveryAttempts = ["pdf-text"]
-        if !textLayerReconciles {
+        if !textLayerReconciles || Self.sourceDetection(from: extractedText, fileName: fileName).source == "BBVA" {
+            // BBVA content-stream order can reconcile amounts while placing
+            // beneficiary lines before the dated row. Prefer visual ordering
+            // only when the same issuer controls also certify that stream.
             let isRappi = Self.sourceDetection(from: extractedText, fileName: fileName).source == "Rappi"
             if isRappi {
                 // Preserve page boundaries before any OCR is attempted. This
@@ -7440,6 +7668,7 @@ final class FinanceStore {
         let fingerprint = pdfFingerprint(data)
         let keyData = try JSONSerialization.data(withJSONObject: [
             "reader": readerVersion, "replay": extractionReplayVersion,
+            "descriptors": "date-owned-continuations-v4",
             "fingerprint": fingerprint, "fileName": fileName,
             "accountIdentity": accountIdentityParserVersion,
             "allowOCR": allowOCR, "source": sourceOverride ?? "",
@@ -7798,11 +8027,16 @@ final class FinanceStore {
         /// financial fields without treating merchant quality as accounting
         /// uncertainty.
         let confidence: Double?
+        let descriptorDateY: CGFloat?
+        let precedesDate: Bool
 
-        init(text: String, boundingBox: CGRect, confidence: Double? = nil) {
+        init(text: String, boundingBox: CGRect, confidence: Double? = nil,
+             descriptorDateY: CGFloat? = nil, precedesDate: Bool = false) {
             self.text = text
             self.boundingBox = boundingBox
             self.confidence = confidence
+            self.descriptorDateY = descriptorDateY
+            self.precedesDate = precedesDate
         }
 
         var centerX: CGFloat { boundingBox.midX }
@@ -7825,6 +8059,8 @@ final class FinanceStore {
         /// recognizes the full printed row as one observation.
         let dateBoxes: [OCRTextBox]
         let amountBoxes: [OCRTextBox]
+        /// Bounded substring fragments split at printed Santander dates.
+        let wordBoxes: [OCRTextBox]
         let isolatedRappiRow: Bool
 
         init(
@@ -7834,6 +8070,7 @@ final class FinanceStore {
             confidence: Double,
             dateBoxes: [OCRTextBox] = [],
             amountBoxes: [OCRTextBox] = [],
+            wordBoxes: [OCRTextBox] = [],
             isolatedRappiRow: Bool = false,
             financialConfidence: Double? = nil
         ) {
@@ -7844,6 +8081,7 @@ final class FinanceStore {
             self.financialConfidence = financialConfidence
             self.dateBoxes = dateBoxes
             self.amountBoxes = amountBoxes
+            self.wordBoxes = wordBoxes
             self.isolatedRappiRow = isolatedRappiRow
         }
 
@@ -9024,6 +9262,28 @@ final class FinanceStore {
                     }
                 }
 
+                func descriptorFragments(in candidate: VNRecognizedText, text: String) -> [OCRTextBox] {
+                    guard issuerHint == "Santander", let dates = substringPatterns.date else { return [] }
+                    let fullRange = NSRange(text.startIndex..., in: text)
+                    let physicalDates = dates.matches(in: text, range: fullRange).compactMap { match -> (range: NSRange, box: CGRect)? in
+                        guard let range = Range(match.range, in: text),
+                              let rectangle = try? candidate.boundingBox(for: range) else { return nil }
+                        return rectangle.boundingBox.midX <= 0.14 ? (match.range, rectangle.boundingBox) : nil
+                    }
+                    guard physicalDates.count > 1 || (physicalDates.first?.range.location ?? 0) > 0 else { return [] }
+                    let cuts = Array(Set([0, fullRange.length] + physicalDates.map { $0.range.location })).sorted()
+                    return zip(cuts, cuts.dropFirst()).compactMap { start, end in
+                        let nsRange = NSRange(location: start, length: end - start)
+                        guard let range = Range(nsRange, in: text),
+                              !text[range].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                              let rectangle = try? candidate.boundingBox(for: range) else { return nil }
+                        let following = physicalDates.first(where: { $0.range.location >= start }) ?? physicalDates.last!
+                        return OCRTextBox(text: String(text[range]), boundingBox: rectangle.boundingBox,
+                            confidence: Double(candidate.confidence), descriptorDateY: following.box.midY,
+                            precedesDate: start < following.range.location)
+                    }
+                }
+
                 return (request.results ?? []).compactMap { result -> OCRObservation? in
                     guard let candidate = result.topCandidates(1).first,
                           !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -9042,6 +9302,7 @@ final class FinanceStore {
                         confidence: Double(candidate.confidence),
                         dateBoxes: dateBoxes,
                         amountBoxes: amountBoxes,
+                        wordBoxes: result.boundingBox.height > 0.014 ? descriptorFragments(in: candidate, text: text) : [],
                         financialConfidence: financialConfidence
                     )
                 }
@@ -10566,13 +10827,13 @@ final class FinanceStore {
             if let pageMarkerRegex,
                let marker = firstMatch(in: normalized, regex: pageMarkerRegex),
                let page = Int(marker.text.filter(\.isNumber)) {
-                flush()
+                if !pendingHasTransferDescriptor() || (pendingPage.map { page > $0 + 1 } ?? false) { flush() }
                 currentPage = page
                 continue
             }
 
             if normalized.contains("detalle de movimientos realizados") {
-                flush()
+                if !pendingHasTransferDescriptor() { flush() }
                 inMovementSection = true
                 continue
             }
@@ -10582,6 +10843,11 @@ final class FinanceStore {
                 continue
             }
             guard inMovementSection else { continue }
+            // Repeated header/footer text is not a transfer continuation. Keep
+            // the pending transfer alive for the top of the following page.
+            let furniture = ["estado de cuenta", "libreton", "pagina ", "no. de cuenta", "no. de cliente",
+                "bbva mexico", "av. paseo", "la gat real", "fecha saldo", "oper liq"]
+            if furniture.contains(where: { normalized.hasPrefix($0) }) { continue }
 
             let boundary = normalized.contains("total importe cargos")
                 || normalized.contains("total importe abonos")
@@ -10650,8 +10916,21 @@ final class FinanceStore {
 
         var calculatedBalance = openingBalance
         return rows.compactMap { rawRow -> Movement? in
-            let original = rawRow.lines.joined(separator: " ")
             let originalEvidence = rawRow.lines.joined(separator: "\n")
+            // A continuation may contain references resembling money. Numeric
+            // parsing stays on the dated financial baseline; descriptor text
+            // is retained independently and never provides a balance/amount.
+            var financialLines = rawRow.lines
+            let transferRow = rawRow.lines.joined(separator: " ").lowercased().contains("spei")
+            if transferRow, let moneyLine = rawRow.lines.firstIndex(where: { !allMatches(in: $0, regex: amountRegex).isEmpty }) {
+                financialLines = Array(rawRow.lines.prefix(moneyLine + 1))
+                for line in rawRow.lines.dropFirst(moneyLine + 1) {
+                    guard line.rangeOfCharacter(from: .letters) == nil,
+                          !allMatches(in: line, regex: amountRegex).isEmpty else { break }
+                    financialLines.append(line)
+                }
+            }
+            let original = financialLines.joined(separator: " ")
             guard let dateMatch = leadingDate(in: original),
                   let date = parseDate(dateMatch.text, defaultYear: defaultYear),
                   let dateRange = Range(dateMatch.range, in: original) else { return nil }
@@ -10782,7 +11061,8 @@ final class FinanceStore {
                     selectedColumn: selectedColumn,
                     selectedAmount: abs(parsedAmount),
                     selectionReason: reason
-                )
+                ),
+                rawDescription: originalEvidence
             )
             if let printedRunningBalance, directionFromBalance != nil {
                 calculatedBalance = printedRunningBalance
@@ -12883,6 +13163,7 @@ final class FinanceStore {
         }
         struct PhysicalRow {
             let observations: [OCRObservation]
+            let descriptorObservations: [OCRObservation]
             let band: CGRect
             var cells: [[OCRObservation]]
             var movement: Movement?
@@ -12992,6 +13273,24 @@ final class FinanceStore {
                 failureReason: { parseFailureReason = $0 })?.movement
             if physical.movement == nil {
                 physical.problem = parseFailureReason ?? "santander.date-description-or-amount-invalid"
+            } else {
+                let descriptorMetadata = physical.descriptorObservations.map { observation in
+                    OCRObservation(page: observation.page,
+                        text: amountRegex.stringByReplacingMatches(in: observation.text,
+                            range: NSRange(observation.text.startIndex..., in: observation.text), withTemplate: " "),
+                        boundingBox: observation.boundingBox, confidence: observation.confidence,
+                        dateBoxes: observation.dateBoxes)
+                }
+                let recovered = parseSantanderRow(descriptorMetadata + normalizedCells.flatMap { $0 },
+                    dateRegex: dateRegex, amountRegex: amountRegex, defaultYear: defaultYear,
+                    previousRunningBalance: nil, columns: columns, dateMaxX: dateMaxX,
+                    titleBounds: titleBounds, requireFixedMovementColumn: true)?.movement
+                if let recovered, var movement = physical.movement,
+                   recovered.date == movement.date, recovered.amount == movement.amount {
+                    movement.title = recovered.title
+                    movement.rawDescription = physical.descriptorObservations.map(\.text).joined(separator: " ")
+                    physical.movement = movement
+                }
             }
         }
 
@@ -13244,18 +13543,64 @@ final class FinanceStore {
                     anchors.sort { $0.box.midY > $1.box.midY }
                 }
             }
+            // The bank's money cells sit on the transaction baseline. A
+            // merged/tall date glyph can extend into a preceding concept line;
+            // use the independently located balance cell to own that text.
+            var numericBaselines: [CGFloat] = []
+            for (candidateIndex, candidate) in anchors.enumerated() {
+                let top = min(candidate.box.maxY + 0.004, 1)
+                let next = candidateIndex + 1 < anchors.count ? anchors[candidateIndex + 1].box.maxY + 0.004 : 0
+                let bottom = max(next, candidate.box.minY - 0.006)
+                let numericBand = CGRect(x: tableLeft, y: bottom, width: tableSpan, height: top - bottom)
+                let found = extractCells(pageObservations, band: numericBand, anchorIndex: candidateIndex, anchors: anchors)
+                numericBaselines.append(found[2].first?.centerY ?? candidate.box.midY)
+            }
             for (index, dateAnchor) in anchors.enumerated() {
                 let anchor = dateAnchor.box
                 let upper = min(anchor.maxY + 0.004, 1)
                 let lower = index + 1 < anchors.count ? anchors[index + 1].box.maxY + 0.004 : 0
+                var descriptorRow: [OCRObservation] = []
+                for observation in pageObservations {
+                    if observation.wordBoxes.isEmpty {
+                        let description = observation.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                        let isTransferConcept = description.hasPrefix("concepto") && description.contains("transfer")
+                            && !observation.dateBoxes.contains(where: { $0.centerX <= dateMaxX })
+                        if isTransferConcept {
+                            // CONCEPTO is a continuation printed below its
+                            // transfer. A tall next-date glyph must not steal
+                            // this line merely because their boxes overlap.
+                            let owner = anchors.indices.last(where: { numericBaselines[$0] >= observation.centerY })
+                            if owner == index {
+                                descriptorRow.append(observation)
+                            }
+                        } else if observation.centerY <= upper && observation.centerY > lower {
+                            descriptorRow.append(observation)
+                        }
+                        continue
+                    }
+                    for fragment in observation.wordBoxes {
+                        var belongsHere = fragment.centerY <= upper && fragment.centerY > lower
+                        if let relatedDate = fragment.descriptorDateY {
+                            var nearestIndex: Int?
+                            var nearestDistance = CGFloat.greatestFiniteMagnitude
+                            for candidateIndex in anchors.indices {
+                                let distance = abs(anchors[candidateIndex].box.midY - relatedDate)
+                                if distance < nearestDistance { nearestIndex = candidateIndex; nearestDistance = distance }
+                            }
+                            if let nearestIndex, nearestDistance <= 0.006 {
+                                belongsHere = index == (fragment.precedesDate ? nearestIndex - 1 : nearestIndex)
+                            }
+                        }
+                        if belongsHere {
+                            descriptorRow.append(OCRObservation(page: page, text: fragment.text,
+                                boundingBox: fragment.boundingBox, confidence: observation.confidence))
+                        }
+                    }
+                }
+                descriptorRow.sort { $0.centerY == $1.centerY ? $0.centerX < $1.centerX : $0.centerY > $1.centerY }
                 let row = pageObservations.filter { $0.centerY <= upper && $0.centerY > lower }
                     .sorted { $0.centerY == $1.centerY ? $0.centerX < $1.centerX : $0.centerY > $1.centerY }
                 var rowWithDate = row
-                // A Vision observation may contain several baselines: its
-                // substring date box can delimit this row while the parent's
-                // center falls just outside the selected band. Carry the
-                // exact date-bearing observation into the row so its own
-                // description text stays linked to that date.
                 if !rowWithDate.contains(where: {
                     $0.page == dateAnchor.sourceObservation.page
                         && $0.boundingBox == dateAnchor.sourceObservation.boundingBox
@@ -13272,7 +13617,8 @@ final class FinanceStore {
                 // one parent observation.
                 let numericBottom = max(lower, anchor.minY - 0.006)
                 let band = CGRect(x: tableLeft, y: numericBottom, width: tableSpan, height: upper - numericBottom)
-                var physical = PhysicalRow(observations: rowWithDate, band: band,
+                var physical = PhysicalRow(observations: rowWithDate,
+                    descriptorObservations: [dateEvidence] + descriptorRow, band: band,
                     cells: extractCells(pageObservations, band: band, anchorIndex: index, anchors: anchors))
                 decode(&physical)
                 if physical.problem != nil { retryCells(&physical) }
@@ -14193,7 +14539,8 @@ final class FinanceStore {
                 selectedColumn: selectedColumn,
                 selectedAmount: selectedValue,
                 selectionReason: selectionReason
-            )
+            ),
+            rawDescription: fullText
         )
         return SantanderRowResult(movement: movement, runningBalance: runningBalance)
     }

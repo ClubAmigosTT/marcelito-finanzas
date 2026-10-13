@@ -814,4 +814,17 @@ final class FinancialLogicAuditTests: XCTestCase {
         }
     }
 
+    func testMonthlyBridgeUsesFullCreditUsageIncludingDeferredDebt() {
+        withStore { store in
+            seedMonthlyAudit(store)
+            store.statements[2].summary?.creditLimit = 1000
+            store.statements[2].summary?.creditAvailable = 500
+            store.statements[3].summary?.creditLimit = 1000
+            store.statements[3].summary?.creditAvailable = 100
+            let report = store.monthlyFinancialAudit(for: calendarDate(2026, 6, 1))
+            XCTAssertEqual(report.bridge?.debtChange, 400)
+            XCTAssertEqual(report.bridge?.difference, -250)
+        }
+    }
+
 }

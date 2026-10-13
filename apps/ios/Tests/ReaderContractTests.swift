@@ -2777,8 +2777,9 @@ final class ReaderContractTests: XCTestCase {
                 fileName: "santander-julio.pdf",
                 importedAt: .now,
                 transactionCount: 1,
-                requiresReview: true,
+                requiresReview: false,
                 kind: .bank,
+                reconciliation: StatementReconciliationRecord(status: .valid, tolerance: 0),
                 sourceDetection: bankEvidence,
                 readerVersion: FinanceStore.readerVersion
             ),
@@ -2790,8 +2791,9 @@ final class ReaderContractTests: XCTestCase {
                 fileName: "amex-julio.pdf",
                 importedAt: .now,
                 transactionCount: 1,
-                requiresReview: true,
+                requiresReview: false,
                 kind: .card,
+                reconciliation: StatementReconciliationRecord(status: .valid, tolerance: 0),
                 sourceDetection: cardEvidence,
                 readerVersion: FinanceStore.readerVersion
             )

@@ -38,6 +38,7 @@ struct MonthlyFundingBridge {
 struct TransferReviewPair: Identifiable {
     let outgoing: Movement
     let incoming: Movement
+    var isCardPayment: Bool = false
     var id: String { "\(outgoing.id)|\(incoming.id)" }
 }
 
@@ -64,6 +65,7 @@ struct TransferReviewView: View {
     @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var confirmation: TransferReviewPair?
+    @State private var repairMessage: String?
     var body: some View {
         NavigationStack {
             List {
@@ -71,16 +73,31 @@ struct TransferReviewView: View {
                     Text("Confirmar excluye ambos lados de ingresos y gastos. Descartar sólo rechaza esta pareja; no cambia sus tipos ni categorías.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
+                Section {
+                    Button {
+                        Task {
+                            let result = await store.recoverPaymentDescriptions()
+                            repairMessage = "\(result.updated) descripciones recuperadas."
+                                + (result.skipped > 0 ? " \(result.skipped) estados no pudieron comprobarse; se conservaron sus datos." : "")
+                        }
+                    } label: {
+                        if store.isRepairingPaymentDescriptions {
+                            HStack { ProgressView(); Text(store.paymentDescriptionRepairProgress ?? "Recuperando descripciones…") }
+                        } else { Label("Recuperar descripciones de los PDF", systemImage: "doc.text.magnifyingglass") }
+                    }
+                    .disabled(store.isRepairingPaymentDescriptions)
+                    if let repairMessage { Text(repairMessage).font(.caption).foregroundStyle(.secondary) }
+                }
                 if store.pendingTransferReviewPairs.isEmpty {
                     ContentUnavailableView("Sin parejas pendientes", systemImage: "checkmark.circle",
                         description: Text("No hay coincidencias por revisar en las cuentas cargadas. Esto no garantiza que estén cargadas todas tus transferencias."))
                 }
                 ForEach(store.pendingTransferReviewPairs) { pair in
-                    Section {
+                    Section(pair.isCardPayment ? "Pago a tarjeta" : "Traspaso entre cuentas") {
                         FinancialReviewRow(movement: pair.outgoing)
                         FinancialReviewRow(movement: pair.incoming)
                         HStack {
-                            Button("Confirmar traspaso propio") { confirmation = pair }
+                            Button(pair.isCardPayment ? "Confirmar pago a tarjeta" : "Confirmar traspaso propio") { confirmation = pair }
                                 .buttonStyle(.bordered)
                             Button("Descartar pareja") { store.rejectTransferPair(pair) }
                                 .buttonStyle(.borderless)
@@ -94,11 +111,14 @@ struct TransferReviewView: View {
             }
             .navigationTitle("Revisar transferencias")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cerrar") { dismiss() } } }
-            .alert("¿Son el mismo traspaso entre tus cuentas?", isPresented: Binding(
+            .alert(confirmation?.isCardPayment == true ? "¿Es el mismo pago a tu tarjeta?" : "¿Son el mismo traspaso entre tus cuentas?", isPresented: Binding(
                 get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }
             )) {
                 Button("Confirmar ambos movimientos") {
-                    if let pair = confirmation { _ = store.confirmOwnTransfer(pair.outgoing, counterpart: pair.incoming) }
+                    if let pair = confirmation {
+                        if pair.isCardPayment { _ = store.confirmPaymentPair(pair) }
+                        else { _ = store.confirmOwnTransfer(pair.outgoing, counterpart: pair.incoming) }
+                    }
                     confirmation = nil
                 }
                 Button("Cancelar", role: .cancel) { confirmation = nil }
