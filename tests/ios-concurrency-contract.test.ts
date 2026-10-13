@@ -119,7 +119,7 @@ test("la auditoría iOS separa revisión canónica de cuarentena", async () => {
   assert.match(diagnostics, /Movimientos por enriquecer/);
   assert.match(diagnostics, /Movimientos bloqueados/);
   assert.match(diagnostics, /audit\.quarantinedRows/);
-  assert.match(rootTab, /Por enriquecer en el libro/);
+  assert.match(rootTab, /movimientos por revisar/);
 });
 
 test("Vision tiene fallback de idiomas cuando el dispositivo no expone etiquetas regionales", async () => {

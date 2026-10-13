@@ -470,7 +470,7 @@ final class ReaderContractTests: XCTestCase {
         store.movements = rows
 
         XCTAssertEqual(store.applyDeterministicCategoryRules(), 4)
-        XCTAssertEqual(store.movements[0].category, "ITAM")
+        XCTAssertEqual(store.movements[0].category, "Educación")
         XCTAssertEqual(store.movements[1].category, "Entrenamiento")
         XCTAssertEqual(store.movements[2].category, "Binance (salarios)")
         XCTAssertEqual(store.movements[3].category, "Otros / Por revisar")

@@ -13,7 +13,7 @@ export const expenseCategories = [
   "Compras personales",
   "Software y suscripciones",
   "Salud",
-  "ITAM",
+  "Educación",
   "Entrenamiento",
   "Binance (salarios)",
   "Club Amigos / Proyectos",
@@ -128,7 +128,7 @@ export function deterministicExpenseClassification(
     reason = "El concepto identifica un gasto de proyecto.";
     confidence = 0.98;
   } else if (containsAny(text, ["itam", "instituto tecnologico autonomo de mexico"])) {
-    category = "ITAM";
+    category = "Educación";
     reason = "El concepto identifica un pago al ITAM.";
     confidence = 0.98;
   } else if (containsAny(text, trainingMarkers)) {

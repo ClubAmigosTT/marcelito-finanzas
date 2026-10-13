@@ -58,6 +58,9 @@ enum StatementKind: String, Codable, Hashable, CaseIterable, Sendable {
 }
 
 struct StatementSummaryRecord: Codable {
+    var paymentDueDate: Date? = nil
+    /// Nominal annual ordinary interest rate as a fraction, never the CAT.
+    var annualInterestRate: Decimal? = nil
     var previousBalance: Decimal? = nil
     var statementBalance: Decimal? = nil
     var debtBalance: Decimal? = nil
@@ -1085,7 +1088,7 @@ final class FinanceStore {
     private static let pendingCategoryNames: Set<String> = [
         "Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos",
         "Alimentos", "Comidas", "Servicios", "Compras", "Finanzas",
-        "Educación", "Hogar", "Mascotas"
+        "Hogar", "Mascotas"
     ]
     private let numericRepairKey = "marcelito.numericRepair.v1"
     private static let canonicalRebuildKey = "marcelito.canonicalRebuild.v1"
@@ -2964,6 +2967,11 @@ final class FinanceStore {
 
     /// Returns the newest statement for an account, independent of the order
     /// in which PDFs were imported.
+    func statementCutoffDate(for id: UUID) -> Date? {
+        guard let statement = statements.first(where: { $0.id == id }) else { return nil }
+        return statementRange(from: statement.period)?.upperBound ?? statementEndDate(for: id)
+    }
+
     func latestStatement(for source: String, kind: StatementKind? = nil, accountKey: String? = nil) -> StatementRecord? {
         statements
             .filter { statement in
@@ -4807,7 +4815,7 @@ final class FinanceStore {
             debt = creditLimit - creditAvailable
         } else {
             debt = statement.summary?.debtBalance
-                ?? (kind == .card ? statement.summary?.statementBalance : nil)
+                ?? (kind == .card ? statement.summary?.statementBalance.map { $0 + (statement.summary?.msiPending.map(abs) ?? 0) } : nil)
         }
         let msiPending = statement.summary?.msiPending.map(absolute)
         let revolvingBalance = statement.summary?.revolvingBalance.map(absolute)
@@ -4924,7 +4932,7 @@ final class FinanceStore {
         // Upgrade the former broad taxonomy in memory without changing any
         // amount, date, account or movement identity. The next canonical
         // persist writes the new primary category names.
-        let legacyExpenseCategories = Set(["Alimentos", "Comidas", "Servicios", "Compras", "Finanzas", "Educación", "Hogar", "Mascotas", "Otros gastos"])
+        let legacyExpenseCategories = Set(["Alimentos", "Comidas", "Servicios", "Compras", "Finanzas", "Hogar", "Mascotas", "Otros gastos"])
         movements = movements.map { movement in
             guard movement.flow == .expense, legacyExpenseCategories.contains(movement.category) else { return movement }
             var migrated = movement
@@ -16484,7 +16492,12 @@ final class FinanceStore {
     }
 
     private static func summary(from text: String, source: String) -> StatementSummaryRecord? {
-        if source == "Rappi" { return rappiSummary(text) }
+        if source == "Rappi" {
+            var result = rappiSummary(text)
+            let metadata = CardDocumentMetadata.parse(text)
+            result?.paymentDueDate = metadata.dueDate; result?.annualInterestRate = metadata.annualRate
+            return result
+        }
         let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
         func normalizeBareBankAmount(_ raw: String, _ parsed: Decimal) -> Decimal {
@@ -16691,6 +16704,8 @@ final class FinanceStore {
         }
 
         var summary = StatementSummaryRecord()
+        let metadata = CardDocumentMetadata.parse(text)
+        summary.paymentDueDate = metadata.dueDate; summary.annualInterestRate = metadata.annualRate
         var hasValue = false
         func assign(_ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>, _ value: Decimal?) {
             guard let value else { return }
@@ -17416,7 +17431,7 @@ final class FinanceStore {
 
         let rules: [(String, [String])] = [
             // Project identity is always evaluated first and is handled below.
-            ("ITAM", ["itam", "instituto tecnologico autonomo de mexico"]),
+            ("Educación", ["itam", "instituto tecnologico autonomo de mexico"]),
             ("Entrenamiento", ["entrenamiento", "personal training", "entrenador", "trainer"]),
             ("Binance (salarios)", ["binance salarios", "binance salario", "binance nomina", "binance nominas", "binance payroll"]),
             ("Comisiones y finanzas", ["comision", "interés", "iva com", "cajero", "anualidad", "cargo bancario", "seguro financiero", "financiera", "finanzas"]),

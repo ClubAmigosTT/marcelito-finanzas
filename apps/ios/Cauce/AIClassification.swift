@@ -107,7 +107,7 @@ enum ExpenseAIClassifier {
     static let allowedCategories = [
         "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento",
         "Viajes", "Transporte", "Deporte", "Compras personales", "Software y suscripciones",
-        "Salud", "ITAM", "Entrenamiento", "Binance (salarios)",
+        "Salud", "Educación", "Entrenamiento", "Binance (salarios)",
         "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar"
     ]
     static let allowedTags = ["viaje", "ordinario", "extraordinario", "fijo", "variable", "personal", "proyecto"]

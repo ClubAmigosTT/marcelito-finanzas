@@ -3,6 +3,7 @@ import SwiftUI
 @main
 struct MarcelitoApp: App {
     @State private var financeStore: FinanceStore
+    @State private var planningStore = FinancialPlanningStore()
     @State private var authModel: AuthenticationModel
     @Environment(\.scenePhase) private var scenePhase
 
@@ -19,6 +20,7 @@ struct MarcelitoApp: App {
                     RootTabView()
                         .environment(financeStore)
                         .environment(authModel)
+                        .environment(planningStore)
                 } else {
                     SignInView()
                         .environment(authModel)
@@ -27,6 +29,7 @@ struct MarcelitoApp: App {
             .background(MarcelitoAmbientBackground())
             .tint(Color.marcelitoNavy)
             .preferredColorScheme(.light)
+            .environment(\.locale, Locale(identifier: "es_MX"))
             .onChange(of: scenePhase) { _, phase in
                 if phase == .background {
                     DiagnosticsRecorder.markBackground()

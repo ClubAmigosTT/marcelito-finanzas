@@ -42,9 +42,9 @@ test("el dashboard separa estados conciliados, filas bloqueadas y enriquecimient
     readFile(new URL("../apps/ios/Cauce/Diagnostics.swift", import.meta.url), "utf8"),
     readFile(modelsPath, "utf8"),
   ]);
-  assert.match(rootTab, /Conciliación financiera:/);
-  assert.match(rootTab, /Movimientos bloqueados por fila:/);
-  assert.match(rootTab, /por enriquecer:/);
+  assert.match(rootTab, /movimientos por revisar/);
+  assert.match(rootTab, /Button\("Revisar"\)/);
+  assert.match(diagnostics, /Por enriquecer/);
   assert.match(diagnostics, /audit\.blockedRows/);
   assert.match(diagnostics, /Por enriquecer/);
   assert.match(models, /let blockedRows: Int/);

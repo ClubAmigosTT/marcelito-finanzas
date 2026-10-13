@@ -22,7 +22,7 @@ test("los selectores iOS vinculan cada categoría con el valor que se guarda", a
 
 test("la lista pendiente deriva grupos, cantidad y total de la misma instantánea", async () => {
   const source = await readFile(sectionsPath, "utf8");
-  const expensesStart = source.indexOf("struct ExpensesView");
+  const expensesStart = source.indexOf("struct PendingClassificationView");
   const reviewStart = source.indexOf("private struct ExpenseMerchantReviewView", expensesStart);
   const expenses = source.slice(expensesStart, reviewStart);
   const review = source.slice(reviewStart);
@@ -46,17 +46,14 @@ test("la pantalla ofrece reglas locales y reporta solo cambios realmente aplicad
   assert.equal(source.includes("Se actualizaron \\(classifications.count)"), false);
 });
 
-test("Gastos resume todo el libro real y conserva las categorías manuales entre cortes", async () => {
-  const source = await readFile(sectionsPath, "utf8");
-  const expensesStart = source.indexOf("struct ExpensesView");
-  const expensesEnd = source.indexOf("private struct ExpenseTrendPoint", expensesStart);
-  const expenses = source.slice(expensesStart, expensesEnd);
-
-  assert.ok(expensesStart >= 0 && expensesEnd > expensesStart);
-  assert.equal((source.match(/store\.netExpenseMovements/g) ?? []).length, 2);
-  assert.doesNotMatch(expenses, /currentPeriodExpenseMovements/);
-  assert.match(expenses, /Gasto neto conciliado\. Lo que sigue pendiente de clasificar aparece separado arriba/);
-  assert.match(expenses, /expenseContribution/);
+test("Gastos usa un periodo visible por fecha del cargo y conserva el libro", async () => {
+  const source = await readFile(new URL("../apps/ios/Cauce/PlanningViews.swift", import.meta.url), "utf8");
+  const engine = await readFile(new URL("../apps/ios/Cauce/FinancialPlanning.swift", import.meta.url), "utf8");
+  assert.match(source, /safeAreaInset\(edge: \.top\)/);
+  assert.match(source, /por fecha del cargo/);
+  assert.match(source, /planning\.expenseRows\(store, period: period\)/);
+  assert.match(engine, /period\.contains\(\$0\.date\)/);
+  assert.doesNotMatch(engine, /movements\[[^\]]+\]\.amount\s*=/);
 });
 
 test("el detalle de pendientes en Gastos muestra beneficiario y descripción bancaria", async () => {
@@ -99,9 +96,10 @@ test("calidad distingue conciliación de comercios por enriquecer en Cuentas", a
 
   assert.match(sections, /store\.ledgerQuality\.reviewMovementCount > 0/);
   assert.match(sections, /LedgerQualityBanner\(store: store\)/);
-  assert.match(root, /store\.ledgerQuality\.reviewMovementCount > 0/);
-  assert.match(root, /Movimientos bloqueados por fila:/);
-  assert.match(root, /Por enriquecer en el libro:/);
+  assert.match(root, /let count = store\.ledgerQuality\.reviewMovementCount/);
+  assert.match(root, /movimientos por revisar/);
+  assert.match(root, /Button\("Revisar"\)/);
+  assert.doesNotMatch(root.slice(root.indexOf("struct LedgerQualityBanner"), root.indexOf("struct HistoricalDashboardBlockedCard")), /quarantinedCandidateCount/);
 });
 
 test("Resumen muestra ritmo de gasto con periodos equivalentes y barras semanales", async () => {
@@ -116,7 +114,7 @@ test("Resumen muestra ritmo de gasto con periodos equivalentes y barras semanale
   assert.ok(chartStart >= 0 && chartEnd > chartStart);
   assert.match(root, /SpendingPaceSection\(store: store\)/);
   assert.match(models, /var net: Double \{ income - expense \}/);
-  assert.match(pace, /Text\("Ritmo de gasto"\)/);
+  assert.match(pace, /Ritmo de gasto ·/);
   assert.match(pace, /BarMark\(/);
   assert.match(pace, /weeklySpend/);
   assert.match(pace, /vs mismo periodo del mes anterior/);
@@ -124,10 +122,10 @@ test("Resumen muestra ritmo de gasto con periodos equivalentes y barras semanale
   assert.match(pace, /Proyección del mes/);
   assert.match(pace, /if let dailyAverage = metrics\.dailyAverage,[\s\S]*let projectedMonth = metrics\.projectedMonth/);
   assert.match(pace, /hasObservedRows \|\| isCovered/);
-  assert.match(pace, /Promedio y proyección disponibles cuando el periodo esté completo/);
+  assert.match(pace, /Faltan estados o capturas de algunos días/);
   assert.match(pace, /store\.spendingCoveredDays\(\)/);
-  assert.match(pace, /store\.netExpenseMovements/);
-  assert.match(pace, /Aún no hay suficiente información para calcular tu ritmo de gasto/);
+  assert.match(pace, /planning\.personalRows/);
+  assert.match(pace, /Faltan movimientos del mes actual/);
 });
 
 test("las métricas y categorías exponen Top 10 editable por movimiento", async () => {

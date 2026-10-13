@@ -9,7 +9,7 @@ export const categories = [
   "Compras personales",
   "Software y suscripciones",
   "Salud",
-  "ITAM",
+  "Educación",
   "Entrenamiento",
   "Binance (salarios)",
   "Club Amigos / Proyectos",

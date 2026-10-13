@@ -7,13 +7,15 @@ struct RootTabView: View {
     private enum Tab: Hashable {
         case summary
         case expenses
-        case calendar
+        case budget
         case accounts
         case patrimony
     }
 
     @State private var selectedTab: Tab = .summary
     @Environment(FinanceStore.self) private var store
+    @Environment(FinancialPlanningStore.self) private var planning
+    @State private var showIncomeOnboarding = false
     @State private var automaticReplayStarted = false
 
     var body: some View {
@@ -21,7 +23,7 @@ struct RootTabView: View {
             DeferredTab {
                 HomeView()
             }
-                .tabItem { Label("Resumen", systemImage: "house.fill") }
+                .tabItem { Label("Inicio", systemImage: "house.fill") }
                 .tag(Tab.summary)
             DeferredTab {
                 ExpensesView()
@@ -29,10 +31,10 @@ struct RootTabView: View {
                 .tabItem { Label("Gastos", systemImage: "chart.pie.fill") }
                 .tag(Tab.expenses)
             DeferredTab {
-                SpendingCalendarView()
+                BudgetView()
             }
-                .tabItem { Label("Calendario", systemImage: "calendar") }
-                .tag(Tab.calendar)
+                .tabItem { Label("Presupuesto", systemImage: "chart.bar.fill") }
+                .tag(Tab.budget)
             DeferredTab {
                 AccountsView()
             }
@@ -41,7 +43,7 @@ struct RootTabView: View {
             DeferredTab {
                 NetWorthView()
             }
-                .tabItem { Label("Posición", systemImage: "chart.line.uptrend.xyaxis") }
+                .tabItem { Label("Patrimonio", systemImage: "chart.line.uptrend.xyaxis") }
                 .tag(Tab.patrimony)
         }
         .tint(Color.marcelitoNavy)
@@ -51,16 +53,26 @@ struct RootTabView: View {
         // A reader update must actually touch the PDFs already on the device.
         // Start the pending replay once after authentication; the existing
         // single-flight rebuild keeps a simultaneous manual tap harmless.
+        .sheet(isPresented: $showIncomeOnboarding) { PlanningIncomeView() }
         .task {
+            showIncomeOnboarding = !planning.state.incomeOnboardingCompleted
+            await PlanningNotifications.refresh(store: store, planning: planning)
             guard !automaticReplayStarted else { return }
             automaticReplayStarted = true
             guard store.hasCanonicalRebuildPending else { return }
             _ = await store.rebuildCanonicalLedgerIfNeededAsync()
         }
+        .task(id: store.ledgerVersion) { await PlanningNotifications.refresh(store: store, planning: planning) }
+        .task(id: planning.revision) {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            await PlanningNotifications.refresh(store: store, planning: planning)
+        }
     }
 }
 
 struct HomeView: View {
+    @Environment(FinancialPlanningStore.self) private var planning
     @Environment(FinanceStore.self) private var store
     @Environment(AuthenticationModel.self) private var auth
     @State private var isImporterPresented = false
@@ -77,6 +89,7 @@ struct HomeView: View {
     @ViewBuilder
     private var homeContent: some View {
         LazyVStack(alignment: .leading, spacing: 18) {
+            if let error = planning.loadError { Text(error).font(.caption).foregroundStyle(Color.marcelitoAmber) }
             if store.hasCanonicalRebuildPending {
                 PendingLedgerRefreshCard {
                     Task { @MainActor in
@@ -85,9 +98,9 @@ struct HomeView: View {
                 }
             }
             if hasData {
-                NetWorthSummary(store: store)
+                HomeMonthlyPlanCard { isImporterPresented = true }
                 LedgerQualityBanner(store: store)
-                MetricsStrip()
+                HomePersonalMetrics()
                 if store.dashboardIsBlocked || store.operationalMetricsBlocked {
                     HistoricalDashboardBlockedCard(store: store)
                 } else {
@@ -146,8 +159,8 @@ struct HomeView: View {
             .scrollIndicators(.hidden)
             .safeAreaPadding(.bottom, 76)
             .background(MarcelitoAmbientBackground())
-            .navigationTitle("Resumen")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationTitle("Inicio")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .disabled(isImporting)
@@ -191,6 +204,8 @@ struct HomeView: View {
             ) {
                 Button("Borrar datos", role: .destructive) {
                     store.clearLocalData()
+                    planning.clearLocalData()
+                    Task { await PlanningNotifications.refresh(store: store, planning: planning) }
                     auth.deleteAccount()
                 }
                 Button("Cancelar", role: .cancel) { }
@@ -680,77 +695,21 @@ struct PendingLedgerRefreshCard: View {
 
 struct LedgerQualityBanner: View {
     let store: FinanceStore
-
-    private var isWarning: Bool {
-        store.dashboardIsBlocked
-            || store.dashboardIsProvisional
-            || store.operationalMetricsBlocked
-            || store.ledgerQuality.reviewMovementCount > 0
-    }
-
-    private var percentText: String {
-        "\(Int(store.ledgerQuality.reconciledPercent.rounded()))% conciliado · \(Int(store.ledgerQuality.evidencePercent.rounded()))% con evidencia"
-    }
-
+    @State private var showReview = false
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: isWarning ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                .foregroundStyle(isWarning ? Color.marcelitoAmber : Color.marcelitoSuccess)
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Calidad de datos / conciliación")
-                    .font(.caption.weight(.semibold))
-                Text(percentText)
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                if store.ledgerQuality.reconciledStatementCount > 0,
-                   store.ledgerQuality.reconciledStatementCount == store.ledgerQuality.statementCount,
-                   store.ledgerQuality.validatedStatementCount < store.ledgerQuality.statementCount {
-                    Text("Conciliado, pero \(store.ledgerQuality.statementCount - store.ledgerQuality.validatedStatementCount) estado(s) requieren revisión OCR antes de entrar a los KPI")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.marcelitoAmber)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if isWarning || store.ledgerQuality.reviewMovementCount > 0 {
-                    LedgerBlockerDetailsButton().environment(store)
-                }
-                Text("Conciliación financiera: \(store.ledgerQuality.reconciledStatementCount)/\(store.ledgerQuality.statementCount) · elegibles KPI: \(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Text("Movimientos bloqueados por fila: \(store.ledgerQuality.blockedMovementCount) · por enriquecer: \(store.ledgerQuality.enrichmentMovementCount)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(store.ledgerQuality.blockedMovementCount > 0 || store.ledgerQuality.enrichmentMovementCount > 0 ? Color.marcelitoAmber : .secondary)
-                Text("Por enriquecer en el libro: \(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) movimientos · \(money(store.ledgerQuality.reviewAmount))")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(store.ledgerQuality.reviewMovementCount > 0 ? Color.marcelitoAmber : .secondary)
-                Text("Fuera del libro: \(store.ledgerQuality.quarantinedMovementCount) · candidatos fuera de KPI (no persistidos): \(store.ledgerQuality.quarantinedCandidateCount) · \(store.ledgerQuality.quarantinedStatementCount) estado(s) fuera de KPI")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(store.ledgerQuality.quarantinedCandidateCount > 0 ? Color.marcelitoAmber : .secondary)
-                if store.dashboardIsProvisional {
-                    Text("\(store.provisionalMovementCount) movimientos provisionales · gasto neto \(store.provisionalSpend.formatted(.currency(code: "MXN")))")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.marcelitoAmber)
-                }
-                if let message = store.ledgerQuality.message {
-                    Text(message)
-                        .font(.caption2)
-                        .foregroundStyle(isWarning ? Color.marcelitoAmber : .secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+        let count = store.ledgerQuality.reviewMovementCount
+        if count > 0 || store.dashboardIsBlocked || store.operationalMetricsBlocked {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.circle").foregroundStyle(Color.marcelitoAmber)
+                Text(count > 0 ? "\(count) movimientos por revisar · \(store.ledgerQuality.reviewAmount.formatted(.currency(code: "MXN").precision(.fractionLength(0))))" : "Hay estados por revisar")
+                    .font(.caption)
+                Spacer(minLength: 4)
+                Button("Revisar") { showReview = true }.font(.caption.weight(.semibold))
             }
-            Spacer(minLength: 0)
+            .padding(10)
+            .foregroundStyle(Color.marcelitoNavy)
+            .sheet(isPresented: $showReview) { LedgerBlockerDetailsView() }
         }
-        .foregroundStyle(Color.marcelitoNavy)
-        .padding(12)
-        .background(
-            (isWarning ? Color.marcelitoAmber : Color.marcelitoSuccess).opacity(0.10),
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Calidad de estados PDF \(percentText)\(store.dashboardIsProvisional ? ". Incluye capturas provisionales" : "")")
-    }
-
-    private func money(_ value: Decimal) -> String {
-        value.formatted(.currency(code: "MXN").precision(.fractionLength(2)))
     }
 }
 
@@ -896,9 +855,10 @@ private struct NetWorthSummary: View {
 
     private var trendText: String {
         if store.dashboardIsBlocked { return "Conciliación requerida antes de mostrar el patrimonio" }
-        guard let trend = store.liquidPatrimonyChangePercent else { return "Compara con tu siguiente corte" }
-        let percent = Int((NSDecimalNumber(decimal: trend).doubleValue * 100).rounded())
-        return "\(percent >= 0 ? "+" : "−")\(abs(percent))% vs mes anterior"
+        let points = PositionHistoryBuilder.monthlyPoints(from: store.balanceHistory, calendar: .current)
+        guard points.count >= 2 else { return "Compara con tu siguiente corte" }
+        let delta = points[points.count - 1].value - points[points.count - 2].value
+        return "\(delta >= 0 ? "+" : "−")\(abs(delta).formatted(.currency(code: "MXN").precision(.fractionLength(0)))) vs mes anterior"
     }
 
     var body: some View {
@@ -1443,10 +1403,13 @@ struct SpendingPaceMetrics {
 
 private struct SpendingPaceSection: View {
     let store: FinanceStore
+    @Environment(FinancialPlanningStore.self) private var planning
 
     private var metrics: SpendingPaceMetrics? {
         SpendingPaceMetrics.calculate(
-            movements: store.netExpenseMovements,
+            movements: planning.personalRows(store, period: FinancePeriod(start: Calendar.current.date(byAdding: .month, value: -1, to: FinancePeriod.month(.now).start)!, end: FinancePeriod.month(.now).end)).map { row in
+                var adjusted = row; adjusted.amount = -planning.personalContribution(row); return adjusted
+            },
             coveredDays: store.spendingCoveredDays(),
             now: .now,
             calendar: .current
@@ -1466,7 +1429,7 @@ private struct SpendingPaceSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("Ritmo de gasto")
+            Text("Ritmo de gasto · \(FinancePeriod.month(.now).label)")
                 .font(.title3.weight(.bold))
                 .foregroundStyle(Color.marcelitoNavy)
 
@@ -1521,7 +1484,7 @@ private struct SpendingPaceSection: View {
                         paceMetric(title: "Proyección del mes", value: "~\(money(projectedMonth))", alignment: .trailing)
                     }
                 } else if !metrics.hasCompleteCurrentCoverage {
-                    Text("Promedio y proyección disponibles cuando el periodo esté completo.")
+                    Text("Faltan estados o capturas de algunos días del mes para calcular promedio y proyección.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -1534,7 +1497,7 @@ private struct SpendingPaceSection: View {
     }
 
     private var insufficientDataMessage: some View {
-        Text("Aún no hay suficiente información para calcular tu ritmo de gasto.")
+        Text("Faltan movimientos del mes actual. Sube un estado o capturas de este mes para calcular tu ritmo de gasto.")
             .font(.subheadline)
             .foregroundStyle(.secondary)
     }

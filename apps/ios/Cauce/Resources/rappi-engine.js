@@ -207,7 +207,7 @@ ${fileName}`.matchAll(/\b(20\d{2})\b/g)).map((match) => Number(match[1]));
       reason = "El concepto identifica un gasto de proyecto.";
       confidence = 0.98;
     } else if (containsAny(text, ["itam", "instituto tecnologico autonomo de mexico"])) {
-      category = "ITAM";
+      category = "Educación";
       reason = "El concepto identifica un pago al ITAM.";
       confidence = 0.98;
     } else if (containsAny(text, trainingMarkers)) {

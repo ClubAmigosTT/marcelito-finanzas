@@ -8,11 +8,11 @@ import UniformTypeIdentifiers
 private let expenseCategoryOptions = [
     "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento",
     "Viajes", "Transporte", "Deporte", "Compras personales", "Software y suscripciones",
-    "Salud", "ITAM", "Entrenamiento", "Binance (salarios)",
+    "Salud", "Educación", "Entrenamiento", "Binance (salarios)",
     "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar"
 ]
 
-private let movementCategoryOptions = ["Ingresos", "Transferencia"] + expenseCategoryOptions
+private let movementCategoryOptions = expenseCategoryOptions
 
 func conciseStatementPeriod(_ statement: StatementRecord) -> String {
     if statement.source == "BBVA" {
@@ -479,7 +479,7 @@ struct MovementDetailView: View {
 
     init(movement: Movement) {
         self.movement = movement
-        _selectedCategory = State(initialValue: movementCategoryOptions.contains(movement.category) ? movement.category : "Otros / Por revisar")
+        _selectedCategory = State(initialValue: movement.category == "ITAM" ? "Educación" : movementCategoryOptions.contains(movement.category) ? movement.category : "Otros / Por revisar")
         _selectedKind = State(initialValue: movement.kind ?? .purchase)
         _isTravel = State(initialValue: movement.travelRelated)
         _categorySaveMessage = State(initialValue: nil)
@@ -676,6 +676,7 @@ struct MovementDetailView: View {
             )) {
                 ForEach(MovementKind.allCases) { Text($0.rawValue).tag($0) }
             }
+            if store.netExpenseMovements.contains(where: { $0.id == currentMovement.id }) || currentMovement.kind == .msi { MovementPlanningLabels(movement: currentMovement) }
             Toggle("Relacionado con viaje", isOn: Binding(
                 get: { isTravel },
                 set: {
@@ -746,7 +747,10 @@ private struct ExpenseCategoryAISuggestion {
     let reason: String?
 }
 
-struct ExpensesView: View {
+struct PendingClassificationView: View {
+    @Environment(\.dismiss) private var dismiss
+    var period: FinancePeriod? = nil
+    var accountFilter: String = "Todas"
     @Environment(FinanceStore.self) private var store
     @State private var selectedCategory: ExpenseCategorySelection?
     @State private var isAISettingsPresented = false
@@ -759,7 +763,7 @@ struct ExpensesView: View {
     @State private var aiSuggestionsByMerchant: [String: ExpenseCategoryAISuggestion] = [:]
 
     private var pendingReviewSnapshot: ExpensePendingReviewSnapshot {
-        let pendingMovements = store.pendingExpenseCategoryMovements
+        let pendingMovements = store.pendingExpenseCategoryMovements.filter { (period?.contains($0.date) ?? true) && (accountFilter == "Todas" || $0.account == accountFilter) }
         let eligibleIDs = Set(store.pendingClassifiableExpenseMovements.map(\.id))
         let grouped = Dictionary(grouping: pendingMovements) { movement in
             let key = store.categoryRuleKey(for: movement)
@@ -849,7 +853,7 @@ struct ExpensesView: View {
                         Text(isAIProcessing ? "Clasificando…" : "Clasificar pendientes")
                             .fontWeight(.semibold)
                         Spacer()
-                        Text("\(store.pendingClassifiableExpenseMovements.count)")
+                        Text("\(snapshot.groups.reduce(0) { $0 + $1.classifiableMovements.count })")
                             .monospacedDigit()
                     }
                     .foregroundStyle(Color.marcelitoNavy)
@@ -896,7 +900,7 @@ struct ExpensesView: View {
             } header: {
                 Text("Pendiente de clasificar")
             } footer: {
-                Text("Las reglas locales corren primero. Si las activas, la IA recibe comercio, fecha, importe y un código aleatorio temporal por grupo, solo de gastos conciliados. No se envían cuentas, saldos ni PDFs; las sugerencias dudosas quedan aquí para confirmar.")
+                Text(period?.label ?? "Todos los periodos")
             }
         }
     }
@@ -916,7 +920,7 @@ struct ExpensesView: View {
     }
 
     private var reconciliationSection: some View {
-        Section("Conciliación") {
+        Section("Desglose") {
             LabeledContent("Gasto de viaje", value: store.travelSpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
             LabeledContent("Gasto ordinario", value: store.ordinarySpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
             LabeledContent("Gasto consolidado", value: store.consolidatedRealSpend.formatted(.currency(code: "MXN").precision(.fractionLength(0))))
@@ -945,11 +949,7 @@ struct ExpensesView: View {
                         }
                     }
                     pendingExpensesSection(snapshot: pendingSnapshot)
-                    if !categorizedGroups.isEmpty {
-                        identifiedExpensesSection(groups: categorizedGroups)
-                    }
-                    readingSection(pendingTotal: pendingSnapshot.total)
-                    reconciliationSection
+
                 }
             }
         }
@@ -957,10 +957,11 @@ struct ExpensesView: View {
     var body: some View {
         let pendingSnapshot = pendingReviewSnapshot
         let pendingGroups = pendingSnapshot.groups
-        let categorizedGroups = groups
+        let categorizedGroups: [(category: String, amount: Decimal)] = []
         NavigationStack {
             expenseRows(pendingSnapshot: pendingSnapshot, categorizedGroups: categorizedGroups)
-                .navigationTitle("Gastos")
+                .navigationTitle("Clasificar pendientes")
+                .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Cerrar") { dismiss() } } }
                 .listStyle(.insetGrouped)
                 .listRowBackground(Color.marcelitoCreamSoft)
                 .foregroundStyle(Color.marcelitoNavy)
@@ -1111,7 +1112,8 @@ private struct ExpenseMerchantReviewView: View {
     let onAccepted: () -> Void
 
     private var currentGroup: ExpenseMerchantReviewGroup? {
-        let pendingMovements = store.pendingExpenseCategoryMovements
+        let scope = Set(group.movements.map(\.id))
+        let pendingMovements = store.pendingExpenseCategoryMovements.filter { scope.contains($0.id) }
         let members: [Movement]
         if group.key.hasPrefix("row:") {
             members = pendingMovements.filter { "row:\($0.id.uuidString)" == group.key }
@@ -1610,7 +1612,7 @@ private struct AccountCardArtwork: View {
                 }
             }
         }
-        .aspectRatio(account.artworkAspectRatio, contentMode: .fit)
+        .frame(height: 78)
         .clipped()
         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
         .overlay(alignment: .topTrailing) {
@@ -2062,7 +2064,7 @@ struct AccountsView: View {
                         .tag(account.id)
                 }
             }
-            .frame(height: 220)
+            .frame(height: 78)
             .tabViewStyle(.page(indexDisplayMode: .never))
 
             HStack(spacing: 7) {
@@ -2154,6 +2156,7 @@ struct AccountsView: View {
     @ViewBuilder
     private func selectedAccountContent(_ account: AccountDisplayItem) -> some View {
         selectedAccountHeading(account)
+        AccountPlanningStatus(source: account.source, kind: account.kind, accountKey: account.accountKey)
         statementImportButton
         screenshotImportButton
 
@@ -2189,9 +2192,7 @@ struct AccountsView: View {
                 .font(.headline)
             statementTiles
 
-            Text("Cifras detectadas y relectura")
-                .font(.headline)
-            statementEditors
+
         }
 
         screenshotCaptureSection
@@ -2674,6 +2675,7 @@ struct StatementDocumentView: View {
         }
         .navigationTitle("\(statement.source) · \(conciseStatementPeriod(statement))")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar { ToolbarItem(placement: .topBarTrailing) { NavigationLink { StatementSummaryEditor(statement: statement) } label: { Image(systemName: "slider.horizontal.3") }.accessibilityLabel("Cifras detectadas y relectura") } }
         .background(MarcelitoAmbientBackground())
         .foregroundStyle(Color.marcelitoNavy)
     }
@@ -3050,6 +3052,7 @@ struct NetWorthView: View {
     @Environment(FinanceStore.self) private var store
     @State private var selectedMetric: DashboardMetric?
     @State private var historyRange = 6
+    @Environment(FinancialPlanningStore.self) private var planning
 
     private var history: [PositionHistoryPoint] {
         PositionHistoryBuilder.contiguousSuffix(
@@ -3078,10 +3081,9 @@ struct NetWorthView: View {
     private var variationLabel: String? {
         guard let monthChange else { return nil }
         let amount = abs(monthChange.amount).formatted(.currency(code: "MXN").precision(.fractionLength(0)))
-        let percentValue = Int((NSDecimalNumber(decimal: abs(monthChange.percent) * 100).doubleValue).rounded())
-        let arrow = monthChange.amount > 0 ? "↑" : (monthChange.amount < 0 ? "↓" : "→")
-        let percentSign = monthChange.percent < 0 ? "−" : "+"
-        return "\(arrow) \(amount) (\(percentSign)\(percentValue)%) vs mes anterior"
+        let arrow = monthChange.amount > 0 ? "+" : (monthChange.amount < 0 ? "−" : "")
+        let previous = history.dropLast().last.map { monthName($0.monthStart) } ?? "mes anterior"
+        return "\(arrow)\(amount) vs \(previous)"
     }
 
     var body: some View {
@@ -3111,10 +3113,11 @@ struct NetWorthView: View {
                                     .lineLimit(2)
                                     .minimumScaleFactor(0.8)
                             }
+                            Text(balancePeriodLabel(store, kind: .bank) + " · " + balancePeriodLabel(store, kind: .card)).font(.caption2).foregroundStyle(Color.marcelitoCream)
                             if let variationLabel {
                                 Text(variationLabel)
                                     .font(.subheadline.weight(.medium))
-                                    .foregroundStyle(store.dashboardIsBlocked ? Color.marcelitoCream.opacity(0.82) : variationColor)
+                                    .foregroundStyle(Color.marcelitoCream)
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -3132,7 +3135,7 @@ struct NetWorthView: View {
                 .padding(.top, 12)
                 .padding(.bottom, 26)
             }
-            .navigationTitle("Posición financiera")
+            .navigationTitle("Patrimonio")
             .safeAreaPadding(.bottom, 76)
             .foregroundStyle(Color.marcelitoNavy)
             .background(MarcelitoAmbientBackground())
@@ -3144,43 +3147,12 @@ struct NetWorthView: View {
 
     private var debtCoverageSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Cobertura de deuda")
-                .font(.headline)
-
-            if store.dashboardIsBlocked {
-                Text("Bloqueado")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            } else if let cash = store.cashAvailable, let debt = store.debtTotal {
-                if debt == 0 {
-                    Text("Sin deuda registrada")
-                        .font(.subheadline.weight(.medium))
-                } else if let ratio = PositionFinancialCalculations.debtCoverageRatio(cash: cash, debt: debt) {
-                    Text(ratio.formatted(.number.precision(.fractionLength(2))) + "x")
-                        .font(.title2.weight(.bold))
-                        .monospacedDigit()
-                    let percent = Int((NSDecimalNumber(decimal: ratio * 100).doubleValue).rounded())
-                    Text("Tu efectivo cubre el \(percent)% de tu deuda actual.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Cobertura no disponible con estos saldos.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                }
-
-                let scale = PositionBalanceScale(cash: cash, debt: debt)
-                PositionBalanceBarRow(title: "Efectivo", fraction: scale.fraction(for: cash), formattedValue: money(cash))
-                PositionBalanceBarRow(title: "Deuda", fraction: scale.fraction(for: debt), formattedValue: money(debt))
-            } else {
-                Text("Cobertura pendiente con datos del último corte.")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .marcelitoCard(fill: Color.marcelitoCreamSoft.opacity(0.75), radius: 16, padding: 14)
+            HStack { Text("Meses de colchón").font(.headline); CalculationHelp(explanation: "Efectivo al último corte / promedio de gasto personal ordinario de los últimos tres meses completos disponibles. Excluye viajes, extraordinarios y la parte compartida. No confunde un mes sin datos con gasto cero.") }
+            if let cash = store.cashAvailable, let average = planning.ordinaryMonthlyAverage(store, before: .now), average > 0, !store.dashboardIsBlocked {
+                Text((cash / average).formatted(.number.precision(.fractionLength(1))) + " meses").font(.title2.bold()).monospacedDigit()
+                Text("Con un gasto ordinario de \(planningMoney(average)) al mes · efectivo al último corte").font(.caption).foregroundStyle(.secondary)
+            } else { Text("Faltan meses completos de gasto ordinario para calcular tu colchón.").font(.caption).foregroundStyle(.secondary) }
+        }.marcelitoCard(fill: Color.marcelitoCreamSoft.opacity(0.75), radius: 16, padding: 14)
     }
 
     private var creditSection: some View {
@@ -3198,6 +3170,8 @@ struct NetWorthView: View {
                     value: "\(Int((NSDecimalNumber(decimal: utilization * 100).doubleValue).rounded()))%"
                 )
                 PositionUtilizationBar(fraction: NSDecimalNumber(decimal: utilization).doubleValue)
+                Text(utilization < Decimal(string: "0.3")! ? "Saludable, menos de 30%" : "Por encima del 30% de tu línea").font(.caption).foregroundStyle(.secondary)
+                CalculationHelp(explanation: "Crédito utilizado / límite total declarado por el banco. Menos del 30% es la referencia elegida para este indicador, no una garantía de capacidad de pago.")
             } else {
                 PositionMetricRow(title: "Utilización", value: "Pendiente")
             }
