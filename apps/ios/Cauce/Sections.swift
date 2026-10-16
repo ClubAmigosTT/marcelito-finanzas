@@ -3014,6 +3014,12 @@ enum PositionHistoryBuilder {
         return Array(suffix.reversed())
     }
 
+    static func monthAmountChange(in points: [PositionHistoryPoint], calendar: Calendar) -> Decimal? {
+        guard points.count >= 2, let previous = points.suffix(2).first, let current = points.last,
+              calendar.date(byAdding: .month, value: 1, to: previous.monthStart) == current.monthStart else { return nil }
+        return current.value - previous.value
+    }
+
     static func monthOverMonthChange(
         in points: [PositionHistoryPoint],
         calendar: Calendar
@@ -3062,8 +3068,8 @@ struct NetWorthView: View {
         )
     }
 
-    private var monthChange: PositionMonthChange? {
-        PositionHistoryBuilder.monthOverMonthChange(in: history, calendar: .current)
+    private var monthChange: Decimal? {
+        PositionHistoryBuilder.monthAmountChange(in: history, calendar: .current)
     }
 
     private func money(_ value: Decimal?) -> String {
@@ -3072,7 +3078,7 @@ struct NetWorthView: View {
     }
 
     private var variationColor: Color {
-        guard let amount = monthChange?.amount else { return Color.marcelitoNavyMid }
+        guard let amount = monthChange else { return Color.marcelitoNavyMid }
         if amount > 0 { return Color.marcelitoSuccess }
         if amount < 0 { return Color.marcelitoDanger }
         return Color.marcelitoNavyMid
@@ -3080,8 +3086,8 @@ struct NetWorthView: View {
 
     private var variationLabel: String? {
         guard let monthChange else { return nil }
-        let amount = abs(monthChange.amount).formatted(.currency(code: "MXN").precision(.fractionLength(0)))
-        let arrow = monthChange.amount > 0 ? "+" : (monthChange.amount < 0 ? "−" : "")
+        let amount = abs(monthChange).formatted(.currency(code: "MXN").precision(.fractionLength(0)))
+        let arrow = monthChange > 0 ? "+" : (monthChange < 0 ? "−" : "")
         let previous = history.dropLast().last.map { monthName($0.monthStart) } ?? "mes anterior"
         return "\(arrow)\(amount) vs \(previous)"
     }

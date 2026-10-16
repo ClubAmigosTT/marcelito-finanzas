@@ -28,6 +28,12 @@ import XCTest
         XCTAssertNil(parsePlanningAmount("-100"))
         XCTAssertEqual(parsePlanningAmount("48.5821", precision: 4), Decimal(string: "48.5821"))
     }
+    func testPesoPositionChangeWorksFromZeroWithoutInventingPercent() {
+        let points = [PositionHistoryPoint(monthStart: FinancePeriod.month(date(8, 1)).start, value: 0), PositionHistoryPoint(monthStart: FinancePeriod.month(date(9, 1)).start, value: 31080)]
+        XCTAssertEqual(PositionHistoryBuilder.monthAmountChange(in: points, calendar: .current), 31080)
+        XCTAssertNil(PositionHistoryBuilder.monthOverMonthChange(in: points, calendar: .current))
+        XCTAssertNil(PositionHistoryBuilder.monthAmountChange(in: Array(points.suffix(1)), calendar: .current))
+    }
     func testNaturalMonthAndEndExclusiveAcrossYearBoundary() {
         let month = FinancePeriod.month(date(12, 20))
         XCTAssertTrue(month.contains(date(12, 31)))
