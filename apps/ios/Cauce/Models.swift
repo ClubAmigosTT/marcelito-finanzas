@@ -1143,6 +1143,22 @@ final class FinanceStore {
     @ObservationIgnored private var eligibleMovementsCache: DerivedProjectionCache<[Movement]>?
     @ObservationIgnored private var periodMetricsCache: DerivedProjectionCache<[StatementMetric]>?
     @ObservationIgnored private var ledgerQualityCache: DerivedProjectionCache<LedgerQuality>?
+    @ObservationIgnored private var netExpenseCache: DerivedProjectionCache<[Movement]>?
+    @ObservationIgnored private var incomeProjectionCache: DerivedProjectionCache<[Movement]>?
+    @ObservationIgnored private var balanceHistoryCache: DerivedProjectionCache<[BalanceSnapshot]>?
+    private struct CoverageCacheKey: Hashable { let account: String?; let day: Date }
+    @ObservationIgnored private var spendingCoverageCache: [CoverageCacheKey: DerivedProjectionCache<Set<Date>>] = [:]
+    /// Changes for in-memory edits as well as durable ledger commits.
+    private(set) var analyticsGeneration = UUID()
+
+    private func cachedProjection<Value>(_ cache: DerivedProjectionCache<Value>?) -> Value? {
+        _ = analyticsGeneration // keep cache hits observable after in-memory edits
+        guard let cache, cache.matches(ledgerVersion: ledgerVersion, manualDashboardUnlockEnabled: manualDashboardUnlockEnabled, canonicalRebuildPending: canonicalRebuildPending) else { return nil }
+        return cache.value
+    }
+    private func projectionEntry<Value>(_ value: Value) -> DerivedProjectionCache<Value> {
+        DerivedProjectionCache(ledgerVersion: ledgerVersion, manualDashboardUnlockEnabled: manualDashboardUnlockEnabled, canonicalRebuildPending: canonicalRebuildPending, value: value)
+    }
 
     var transferOwnerAliases: [String] {
         let stored = UserDefaults.standard.stringArray(forKey: transferOwnerAliasesKey) ?? []
@@ -3127,14 +3143,26 @@ final class FinanceStore {
     var realExpenseMovements: [Movement] { eligibleMovements.filter(isSpend) }
     /// Shared net-spend population for every analytical screen and drilldown.
     var netExpenseMovements: [Movement] {
+        if let value = cachedProjection(netExpenseCache) { return value }
+        let value: [Movement] = {
         eligibleMovements.filter { isSpend($0) || (movementKind($0) == .refund && $0.amount > 0) }
             .map { row in
                 var result = row
                 result.kind = movementKind(row)
                 return result
             }
+
+        }()
+        netExpenseCache = projectionEntry(value)
+        return value
     }
-    var realIncomeMovements: [Movement] { eligibleMovements.filter(isRealIncome) }
+    var realIncomeMovements: [Movement] {
+        if let value = cachedProjection(incomeProjectionCache) { return value }
+        let value: [Movement] = { eligibleMovements.filter(isRealIncome)
+        }()
+        incomeProjectionCache = projectionEntry(value)
+        return value
+    }
 
     /// Expenses shown in the dashboard are scoped to the newest available
     /// statement period. Keeping the complete ledger above is useful for
@@ -3184,6 +3212,8 @@ final class FinanceStore {
     /// Common account universe, last official balance carried forward at each
     /// cutoff. Never group bank/card balances by their human-readable labels.
     var balanceHistory: [BalanceSnapshot] {
+        if let value = cachedProjection(balanceHistoryCache) { return value }
+        let value: [BalanceSnapshot] = {
         let metrics = periodMetrics
         let keys = Set(statements.map { $0.accountKey ?? "\($0.source)|\(statementKind($0))" })
         let dated = metrics.compactMap { metric -> (StatementMetric, Date)? in
@@ -3199,6 +3229,10 @@ final class FinanceStore {
                 cash: completeSum(latest.filter { $0.kind == .bank }.map(\.cashBalance)),
                 debt: completeSum(latest.filter { $0.kind == .card }.map(\.debtBalance)))
         }
+
+        }()
+        balanceHistoryCache = projectionEntry(value)
+        return value
     }
 
     var balanceEvidenceDescription: String {
@@ -3848,6 +3882,9 @@ final class FinanceStore {
     /// Only days explicitly covered by every selected account may contribute
     /// zero to an average. Missing statements never fabricate zero-spend days.
     func spendingCoveredDays(account: String? = nil) -> Set<Date> {
+        let key = CoverageCacheKey(account: account, day: Calendar.current.startOfDay(for: .now))
+        if let value = cachedProjection(spendingCoverageCache[key]) { return value }
+        let value: Set<Date> = {
         let calendar = Calendar.current
         let selected = statements.filter { account == nil || $0.source == account }
         let groups = Dictionary(grouping: selected) { $0.accountKey ?? $0.source }
@@ -3870,6 +3907,11 @@ final class FinanceStore {
             common = common.map { $0.intersection(days) } ?? days
         }
         return common ?? []
+
+        }()
+        if spendingCoverageCache.count > 32 { spendingCoverageCache.removeAll() }
+        spendingCoverageCache[key] = projectionEntry(value)
+        return value
     }
 
     private func financialAccountKey(_ movement: Movement) -> String? {
@@ -7965,6 +8007,9 @@ final class FinanceStore {
         eligibleMovementsCache = nil
         periodMetricsCache = nil
         ledgerQualityCache = nil
+        netExpenseCache = nil; incomeProjectionCache = nil; balanceHistoryCache = nil
+        spendingCoverageCache.removeAll()
+        analyticsGeneration = UUID()
     }
 
     private func persist(markingChange: Bool = false) {

@@ -506,25 +506,31 @@ struct ExpensesView: View {
         }
     }
     private func chartPoints() -> [PlanningChartPoint] {
+        let c = Calendar.current
+        let selectedRows = rows // evaluate the period/account projection once
         if mode == .year {
+            let byMonth = Dictionary(grouping: selectedRows) { FinancePeriod.month($0.date).start }
             return period.months().compactMap { month in
-                let monthlyRows = rows.filter { FinancePeriod.month(month).contains($0.date) }
-                guard !monthlyRows.isEmpty else { return nil }
+                guard let monthlyRows = byMonth[month], !monthlyRows.isEmpty else { return nil }
                 return PlanningChartPoint(date: month, spend: NSDecimalNumber(decimal: monthlyRows.reduce(0) { $0 + planning.personalContribution($1) }).doubleValue, budget: nil)
             }
         }
-        let c = Calendar.current; let limit = min(period.end, c.date(byAdding: .day, value: 1, to: c.startOfDay(for: .now))!)
+        let limit = min(period.end, c.date(byAdding: .day, value: 1, to: c.startOfDay(for: .now))!)
         guard period.start < limit else { return [] }
+        let daily = selectedRows.reduce(into: [Date: Decimal]()) { values, row in values[c.startOfDay(for: row.date), default: 0] += planning.personalContribution(row) }
+        let observedPeriod = FinancePeriod(start: period.start, end: limit)
+        let monthlyBudgets: [Date: Decimal] = account == "Todas" ? Dictionary(uniqueKeysWithValues: observedPeriod.months().map { ($0, planning.consumptionBudget(store, month: $0)) }) : [:]
         var day = period.start; var accumulated: Decimal = 0; var budget: Decimal = 0; var result: [PlanningChartPoint] = []
         while day < limit {
-            accumulated += rows.filter { c.isDate($0.date, inSameDayAs: day) }.reduce(0) { $0 + planning.personalContribution($1) }
-            let totalBudget = planning.consumptionBudget(store, month: day)
+            accumulated += daily[c.startOfDay(for: day), default: 0]
+            let totalBudget = monthlyBudgets[FinancePeriod.month(day).start, default: 0]
             budget += totalBudget / Decimal(c.range(of: .day, in: .month, for: day)!.count)
             result.append(PlanningChartPoint(date: day, spend: NSDecimalNumber(decimal: accumulated).doubleValue, budget: account == "Todas" && totalBudget > 0 ? NSDecimalNumber(decimal: budget).doubleValue : nil))
             day = c.date(byAdding: .day, value: 1, to: day)!
         }
         return result
     }
+
 }
 struct PlanningChartPoint: Identifiable { let date: Date; let spend: Double; let budget: Double?; var id: Date { date } }
 struct PersonalMovementList: View {
@@ -634,7 +640,8 @@ struct BudgetView: View {
                 .sheet(isPresented: $showIncome) { PlanningIncomeView() }
                 .sheet(isPresented: $showDecision) { AffordabilityView(month: month) }
                 .onAppear { loadTarget() }
-                .onChange(of: month) { _, _ in loadTarget() }
+                .onDisappear { planning.savePendingPlanChanges() }
+                .onChange(of: month) { _, _ in planning.savePendingPlanChanges(); loadTarget() }
                 .alert("Cierre mensual", isPresented: Binding(get: { closeMessage != nil }, set: { if !$0 { closeMessage = nil } })) { Button("Aceptar") { closeMessage = nil } } message: { Text(closeMessage ?? "") }
         }
     }
@@ -703,8 +710,8 @@ struct BudgetView: View {
         return VStack(alignment: .leading, spacing: 6) {
             HStack { Text(category).font(.subheadline.weight(.semibold)); Spacer(); Text(planningMoney(limit)).monospacedDigit() }
             Slider(value: Binding(get: { NSDecimalNumber(decimal: fixed ? self.fixed[category] ?? 0 : limits[category] ?? 0).doubleValue }, set: { value in
-                var plan = planning.plan(for: month); if fixed { plan.fixedLimits[category] = Decimal(Int(value)) } else { plan.limits[category] = Decimal(Int(value)) }; planning.setPlan(plan, for: month)
-            }), in: 0...max(5000, NSDecimalNumber(decimal: max(limit, planning.monthlyIncome ?? 0)).doubleValue), step: 50).tint(Color.marcelitoNavy)
+                var plan = planning.plan(for: month); if fixed { plan.fixedLimits[category] = Decimal(Int(value)) } else { plan.limits[category] = Decimal(Int(value)) }; planning.setPlan(plan, for: month, persist: false)
+            }), in: 0...max(5000, NSDecimalNumber(decimal: max(limit, planning.monthlyIncome ?? 0)).doubleValue), step: 50, onEditingChanged: { editing in if !editing { planning.savePendingPlanChanges() } }).tint(Color.marcelitoNavy)
             ProgressView(value: min(1, max(0, ratio))).tint(color)
             Text("\(snapshot.hasData && actual[category] != nil ? planningMoney(spent) + " usados" : "Sin cargos registrados") · \(snapshot.period.label) · \(fixed ? "fijo" : "variable")").font(.caption2).foregroundStyle(.secondary)
             if ratio >= 0.8, elapsed < 20, c.isDate(month, equalTo: .now, toGranularity: .month), limit > 0 { Text("Ya usaste al menos 80% antes del día 20").font(.caption).foregroundStyle(Color.marcelitoAmber) }

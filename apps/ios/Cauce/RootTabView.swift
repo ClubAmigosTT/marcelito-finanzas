@@ -12,6 +12,7 @@ struct RootTabView: View {
         case patrimony
     }
 
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab: Tab = .summary
     @Environment(FinanceStore.self) private var store
     @Environment(FinancialPlanningStore.self) private var planning
@@ -20,27 +21,27 @@ struct RootTabView: View {
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            DeferredTab {
+            DeferredTab(isActive: selectedTab == .summary) {
                 HomeView()
             }
                 .tabItem { Label("Inicio", systemImage: "house.fill") }
                 .tag(Tab.summary)
-            DeferredTab {
+            DeferredTab(isActive: selectedTab == .expenses) {
                 ExpensesView()
             }
                 .tabItem { Label("Gastos", systemImage: "chart.pie.fill") }
                 .tag(Tab.expenses)
-            DeferredTab {
+            DeferredTab(isActive: selectedTab == .budget) {
                 BudgetView()
             }
                 .tabItem { Label("Presupuesto", systemImage: "chart.bar.fill") }
                 .tag(Tab.budget)
-            DeferredTab {
+            DeferredTab(isActive: selectedTab == .accounts) {
                 AccountsView()
             }
                 .tabItem { Label("Cuentas", systemImage: "creditcard.fill") }
                 .tag(Tab.accounts)
-            DeferredTab {
+            DeferredTab(isActive: selectedTab == .patrimony) {
                 NetWorthView()
             }
                 .tabItem { Label("Patrimonio", systemImage: "chart.line.uptrend.xyaxis") }
@@ -62,6 +63,7 @@ struct RootTabView: View {
             guard store.hasCanonicalRebuildPending else { return }
             _ = await store.rebuildCanonicalLedgerIfNeededAsync()
         }
+        .onChange(of: scenePhase) { _, phase in if phase != .active { planning.savePendingPlanChanges() } }
         .task(id: store.ledgerVersion) { await PlanningNotifications.refresh(store: store, planning: planning) }
         .task(id: planning.revision) {
             try? await Task.sleep(for: .milliseconds(400))
@@ -332,27 +334,25 @@ struct HomeView: View {
 /// before the user has asked to see them.
 private struct DeferredTab<Content: View>: View {
     @State private var isLoaded = false
+    private let isActive: Bool
     private let content: () -> Content
 
-    init(@ViewBuilder content: @escaping () -> Content) {
+    init(isActive: Bool, @ViewBuilder content: @escaping () -> Content) {
+        self.isActive = isActive
         self.content = content
     }
-
     var body: some View {
         Group {
-            if isLoaded {
-                content()
-            } else {
-                Color.clear
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .task {
-                        // Yield once so the selected tab's shell can render
-                        // before its financial projections are evaluated.
-                        await Task.yield()
-                        isLoaded = true
-                    }
-                    .accessibilityHidden(true)
-            }
+            if isLoaded { content() }
+            else { Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity).accessibilityHidden(true) }
+        }
+        .task(id: isActive) {
+            // An offscreen placeholder may mount. Only the selected tab may
+            // construct its first projection; visited tabs keep their state.
+            guard isActive, !isLoaded else { return }
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            isLoaded = true
         }
     }
 }

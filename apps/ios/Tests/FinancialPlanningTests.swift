@@ -20,6 +20,101 @@ import XCTest
         }
         body(store, FinancialPlanningStore(defaults: defaults), defaults)
     }
+    func testLargeBookProjectionIsReusedAcrossTabsAndPeriodChanges() {
+        withStores { store, p, _ in
+            store.movements = (0..<1377).map { index in row(6 + index % 3, 1 + index % 27, -100) }
+            let period = FinancePeriod(start: FinancePeriod.month(date(1, 1)).start, end: FinancePeriod.month(date(12, 1)).end)
+            for _ in 0..<20 {
+                XCTAssertEqual(p.expenseRows(store, period: period).count, 1377)
+                XCTAssertEqual(p.total(store, period: period), 137700)
+                XCTAssertEqual(p.personalTotal(store, period: period), 137700)
+                _ = p.budgetCategoryTotals(store, period: .month(date(6, 1)), fixed: false)
+            }
+            XCTAssertEqual(p.spendingProjectionBuildCount, 1)
+            let snapshot = store.movements
+            XCTAssertEqual(snapshot.count, 1377)
+            XCTAssertTrue(snapshot.allSatisfy { $0.amount == -100 })
+        }
+    }
+    func testCachedProjectionsRefreshAfterInMemoryAccountingAndCategoryEdits() {
+        withStores { store, p, _ in
+            store.movements = [row(6, 1, -100)]
+            let version = store.ledgerVersion
+            XCTAssertEqual(p.total(store, period: .month(date(6, 1))), 100)
+            _ = p.budgetCategoryTotals(store, period: .month(date(6, 1)))
+            store.movements[0].category = "Salud"
+            XCTAssertEqual(p.budgetCategoryTotals(store, period: .month(date(6, 1)))["Salud"], 100)
+            XCTAssertNil(p.budgetCategoryTotals(store, period: .month(date(6, 1)))["Tiendita"])
+            store.movements[0].kind = .bankTransfer
+            XCTAssertEqual(p.total(store, period: .month(date(6, 1))), 0)
+            XCTAssertTrue(store.netExpenseMovements.isEmpty)
+            XCTAssertEqual(store.ledgerVersion, version)
+            XCTAssertEqual(p.spendingProjectionBuildCount, 3)
+        }
+    }
+    func testCachedPersonalTotalsRefreshAfterLabelsAndMerchantRules() {
+        withStores { store, p, _ in
+            let movement = row(6, 1, -1000); store.movements = [movement]
+            let period = FinancePeriod.month(date(6, 1))
+            XCTAssertEqual(p.personalTotal(store, period: period), 1000)
+            var label = PersonalExpenseLabel(); label.sharedAmount = 300; label.sharedPerson = "Amiga"
+            p.setLabel(label, for: movement)
+            XCTAssertEqual(p.personalTotal(store, period: period), 700)
+            label.extraordinary = true; p.setLabel(label, for: movement)
+            XCTAssertEqual(p.personalTotal(store, period: period), 0)
+            label.extraordinary = false; p.setLabel(label, for: movement)
+            p.state.fixedMerchantRules[p.merchantKey(movement)] = true
+            XCTAssertEqual(p.budgetCategoryTotals(store, period: period, fixed: true)["Tiendita"], 700)
+            XCTAssertTrue(p.budgetCategoryTotals(store, period: period, fixed: false).isEmpty)
+            XCTAssertEqual(store.movements[0].amount, -1000)
+        }
+    }
+    func testCachedMSIMatchesUniqueRebuiltIdentityButPreservesAmbiguousRows() {
+        withStores { store, p, _ in
+            let movement = row(6, 1, -100); store.movements = [movement]
+            let plan = InstallmentCommitment(merchant: "MSI", account: "BBVA", purchaseDate: date(5, 1), total: 300, monthly: 100, count: 3, firstDueMonth: date(6, 1), linkedMovementIDs: [UUID()], linkedIdentities: [p.identity(movement)], category: "Compras personales")
+            p.state.installments = [plan]
+            XCTAssertEqual(p.total(store, period: .month(date(6, 1))), 0)
+            XCTAssertEqual(p.total(store, period: .month(date(5, 1))), 300)
+            var duplicate = movement; duplicate.id = UUID(); store.movements.append(duplicate)
+            XCTAssertEqual(p.total(store, period: .month(date(6, 1))), 200)
+            XCTAssertEqual(p.total(store, period: .month(date(5, 1))), 0)
+            p.state.installments[0].linkedMovementIDs = [movement.id]
+            XCTAssertEqual(p.total(store, period: .month(date(6, 1))), 100)
+            XCTAssertEqual(p.total(store, period: .month(date(5, 1))), 300)
+        }
+    }
+    func testSliderPlanChangesStayLiveAndFlushWithoutRebuildingSpending() {
+        withStores { store, p, defaults in
+            store.movements = [row(6, 1, -100)]
+            p.state.incomeAmount = 3000; p.save()
+            let before = defaults.data(forKey: "marcelito.planning.v1")
+            let revision = p.revision
+            XCTAssertEqual(p.snapshot(store, month: date(6, 1), now: date(6, 15)).remaining, 2900)
+            for value in 1...20 {
+                var plan = p.plan(for: date(6, 1)); plan.savingsTarget = Decimal(value * 10)
+                p.setPlan(plan, for: date(6, 1), persist: false)
+            }
+            XCTAssertEqual(p.snapshot(store, month: date(6, 1), now: date(6, 15)).remaining, 2700)
+            XCTAssertEqual(p.spendingProjectionBuildCount, 1)
+            XCTAssertEqual(p.revision, revision)
+            XCTAssertEqual(defaults.data(forKey: "marcelito.planning.v1"), before)
+            XCTAssertTrue(p.hasUnsavedPlanChanges)
+            p.savePendingPlanChanges()
+            XCTAssertFalse(p.hasUnsavedPlanChanges)
+            XCTAssertEqual(FinancialPlanningStore(defaults: defaults).plan(for: date(6, 1)).savingsTarget, 200)
+            XCTAssertEqual(defaults.data(forKey: "marcelito.planning.v1.backup"), before)
+        }
+    }
+    func testCachedIncomeProjectionRefreshesWhenAnEntryChangesKind() {
+        withStores { store, p, _ in
+            store.movements = [row(6, 1, 15000, kind: .income)]
+            XCTAssertEqual(p.observedIncome(store, period: .month(date(6, 1))), 15000)
+            store.movements[0].kind = .bankTransfer
+            XCTAssertEqual(p.observedIncome(store, period: .month(date(6, 1))), 0)
+            XCTAssertTrue(store.realIncomeMovements.isEmpty)
+        }
+    }
     func testPlanningAmountsRequireTheWholeValueAndKeepCents() {
         XCTAssertEqual(parsePlanningAmount("$16,500.25"), Decimal(string: "16500.25"))
         XCTAssertNil(parsePlanningAmount("12oops"))
