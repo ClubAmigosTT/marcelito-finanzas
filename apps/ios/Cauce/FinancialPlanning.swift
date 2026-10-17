@@ -4,7 +4,7 @@ import Observation
 /// Local planning data is versioned separately from the audited ledger. It never
 /// replaces an amount, beneficiary, category, or accounting decision in a PDF.
 enum FinancePeriodMode: String, CaseIterable, Identifiable, Codable {
-    case day = "Día", week = "Semana", month = "Mes", range = "Rango"
+    case day = "Día", week = "Semana", month = "Mes", year = "Año", range = "Rango"
     var id: String { rawValue }
 }
 struct FinancePeriod: Equatable {
@@ -15,6 +15,9 @@ struct FinancePeriod: Equatable {
         let f = DateFormatter(); f.locale = Locale(identifier: "es_MX")
         let c = Calendar.current
         let last = c.date(byAdding: .day, value: -1, to: end) ?? start
+        if let year = c.dateInterval(of: .year, for: start), year.start == start, year.end == end {
+            f.dateFormat = "yyyy"; return f.string(from: start)
+        }
         if c.isDate(start, equalTo: last, toGranularity: .month) {
             f.dateFormat = c.component(.day, from: start) == 1 && c.component(.day, from: last) == c.range(of: .day, in: .month, for: last)?.count ? "MMMM yyyy" : "d MMM"
             if f.dateFormat == "MMMM yyyy" { return f.string(from: start).capitalized }
@@ -37,13 +40,32 @@ struct FinancePeriod: Equatable {
             let first = calendar.startOfDay(for: min(from, through)); let last = calendar.startOfDay(for: max(from, through))
             return Self(start: first, end: calendar.date(byAdding: .day, value: 1, to: last)!)
         }
-        let component: Calendar.Component = mode == .day ? .day : mode == .week ? .weekOfYear : .month
+        let component: Calendar.Component = mode == .day ? .day : mode == .week ? .weekOfYear : mode == .year ? .year : .month
         var displayCalendar = calendar
         if mode == .week { displayCalendar.firstWeekday = 2; displayCalendar.minimumDaysInFirstWeek = 4 }
         let interval = displayCalendar.dateInterval(of: component, for: date)!
         return Self(start: interval.start, end: interval.end)
     }
 }
+extension FinancePeriod {
+    /// Shift calendar periods from their first day. This prevents Jan 31 ->
+    /// Mar 3 and Feb 29 -> March errors, and keeps DST days as calendar days.
+    func shifted(by offset: Int, mode: FinancePeriodMode, calendar: Calendar = .current) -> FinancePeriod {
+        if mode == .range {
+            let count = max(1, calendar.dateComponents([.day], from: start, to: end).day ?? 1)
+            return FinancePeriod(start: calendar.date(byAdding: .day, value: count * offset, to: start)!, end: calendar.date(byAdding: .day, value: count * offset, to: end)!)
+        }
+        let component: Calendar.Component = mode == .day ? .day : mode == .week ? .weekOfYear : mode == .year ? .year : .month
+        let anchor = calendar.date(byAdding: component, value: offset, to: start)!
+        return .selected(mode, date: anchor, from: anchor, through: anchor, calendar: calendar)
+    }
+    func months(calendar: Calendar = .current) -> [Date] {
+        var result: [Date] = []; var cursor = FinancePeriod.month(start, calendar: calendar).start
+        while cursor < end { result.append(cursor); cursor = calendar.date(byAdding: .month, value: 1, to: cursor)! }
+        return result
+    }
+}
+
 struct PersonalExpenseLabel: Codable, Equatable {
     var extraordinary: Bool? = nil
     var sharedPerson = ""

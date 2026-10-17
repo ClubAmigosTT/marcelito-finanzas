@@ -55,6 +55,59 @@ import XCTest
         let range = FinancePeriod.selected(.range, date: date(9, 1), from: date(1, 1), through: date(9, 30))
         XCTAssertTrue(range.label.hasPrefix("Ene–")); XCTAssertTrue(range.label.hasSuffix("2026"))
     }
+    func testPeriodNavigationDoesNotSkipShortMonthsOrYearBoundaries() {
+        let january = FinancePeriod.month(date(1, 31))
+        let february = january.shifted(by: 1, mode: .month)
+        XCTAssertEqual(Calendar.current.component(.month, from: february.start), 2)
+        XCTAssertEqual(Calendar.current.component(.day, from: february.start), 1)
+        XCTAssertEqual(february.shifted(by: 1, mode: .month).start, FinancePeriod.month(date(3, 1)).start)
+        XCTAssertEqual(february.shifted(by: -1, mode: .month), january)
+        let december = FinancePeriod.month(date(12, 31))
+        XCTAssertEqual(Calendar.current.component(.year, from: december.shifted(by: 1, mode: .month).start), 2027)
+        let year = FinancePeriod.selected(.year, date: date(2, 29, year: 2024), from: date(1, 1), through: date(1, 1))
+        XCTAssertEqual(year.label, "2024")
+        XCTAssertEqual(year.months().count, 12)
+        XCTAssertEqual(Calendar.current.dateComponents([.day], from: year.start, to: year.end).day, 366)
+        let next = year.shifted(by: 1, mode: .year)
+        XCTAssertEqual(next.label, "2025")
+        XCTAssertEqual(Calendar.current.component(.month, from: next.start), 1)
+        XCTAssertEqual(next.shifted(by: -1, mode: .year), year)
+    }
+    func testDayWeekAndCustomRangeNavigationPreserveCalendarLength() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "America/New_York")!
+        let anchor = calendar.date(from: DateComponents(year: 2026, month: 3, day: 8, hour: 12))!
+        let day = FinancePeriod.selected(.day, date: anchor, from: anchor, through: anchor, calendar: calendar)
+        let tomorrow = day.shifted(by: 1, mode: .day, calendar: calendar)
+        XCTAssertEqual(calendar.component(.day, from: tomorrow.start), 9)
+        XCTAssertEqual(tomorrow.shifted(by: -1, mode: .day, calendar: calendar), day)
+        let week = FinancePeriod.selected(.week, date: date(12, 31), from: date(12, 31), through: date(12, 31))
+        let nextWeek = week.shifted(by: 1, mode: .week)
+        XCTAssertEqual(Calendar.current.dateComponents([.day], from: week.start, to: nextWeek.start).day, 7)
+        XCTAssertEqual(Calendar.current.component(.weekday, from: nextWeek.start), 2)
+        let range = FinancePeriod.selected(.range, date: date(1, 1), from: date(1, 28), through: date(2, 3))
+        let nextRange = range.shifted(by: 1, mode: .range)
+        XCTAssertEqual(nextRange.start, range.end)
+        XCTAssertEqual(Calendar.current.dateComponents([.day], from: nextRange.start, to: nextRange.end).day, 7)
+        XCTAssertEqual(nextRange.shifted(by: -1, mode: .range), range)
+    }
+    func testHorizontalPeriodSwipeDoesNotCaptureVerticalScrollingOrSmallDrags() {
+        XCTAssertEqual(periodSwipeDirection(horizontal: -100, vertical: 10), 1)
+        XCTAssertEqual(periodSwipeDirection(horizontal: 100, vertical: -10), -1)
+        XCTAssertNil(periodSwipeDirection(horizontal: 10, vertical: -150))
+        XCTAssertNil(periodSwipeDirection(horizontal: 80, vertical: 60))
+        XCTAssertNil(periodSwipeDirection(horizontal: 30, vertical: 0))
+    }
+    func testAnnualSpendingUsesChargeDatesAndExistingAccountingExclusions() {
+        withStores { store, planning, _ in
+            let year = FinancePeriod.selected(.year, date: date(6, 1), from: date(6, 1), through: date(6, 1))
+            store.movements = [row(1, 2, -100), row(12, 31, -200), row(6, 10, -1000, kind: .cardPayment), row(6, 11, -2000, kind: .bankTransfer), row(6, 12, 15000, kind: .income), row(1, 1, -300)]
+            store.movements[5].date = date(1, 1, year: 2027)
+            XCTAssertEqual(planning.personalTotal(store, period: year), 300)
+            XCTAssertEqual(planning.observedIncome(store, period: year), 15000)
+            XCTAssertEqual(planning.expenseRows(store, period: year).count, 2)
+        }
+    }
     func testQuincenalIncomeAndNoIncomeAreDifferent() {
         withStores { _, p, defaults in
             XCTAssertNil(p.monthlyIncome)

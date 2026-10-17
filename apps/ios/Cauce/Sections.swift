@@ -3058,18 +3058,38 @@ struct NetWorthView: View {
     @Environment(FinanceStore.self) private var store
     @State private var selectedMetric: DashboardMetric?
     @State private var historyRange = 6
+    @State private var historyAnchor = Date.now
+    @State private var initializedHistory = false
+    @State private var showHistoryPicker = false
     @Environment(FinancialPlanningStore.self) private var planning
 
-    private var history: [PositionHistoryPoint] {
-        PositionHistoryBuilder.contiguousSuffix(
-            PositionHistoryBuilder.monthlyPoints(from: store.balanceHistory, calendar: .current),
-            limit: historyRange,
-            calendar: .current
-        )
+    private var allHistory: [PositionHistoryPoint] {
+        PositionHistoryBuilder.monthlyPoints(from: store.balanceHistory, calendar: .current)
     }
-
+    private var historyPeriod: FinancePeriod {
+        if historyRange == 0 { return .selected(.year, date: historyAnchor, from: historyAnchor, through: historyAnchor) }
+        let end = FinancePeriod.month(historyAnchor).end
+        return FinancePeriod(start: Calendar.current.date(byAdding: .month, value: -historyRange, to: end)!, end: end)
+    }
+    private var history: [PositionHistoryPoint] { allHistory.filter { historyPeriod.contains($0.monthStart) } }
+    private var currentHistory: [PositionHistoryPoint] { PositionHistoryBuilder.contiguousSuffix(allHistory, limit: 2, calendar: .current) }
     private var monthChange: Decimal? {
-        PositionHistoryBuilder.monthAmountChange(in: history, calendar: .current)
+        PositionHistoryBuilder.monthAmountChange(in: currentHistory, calendar: .current)
+    }
+    private func moveHistory(_ direction: Int) {
+        let mode: FinancePeriodMode = historyRange == 0 ? .year : .month
+        let current = FinancePeriod.selected(mode, date: historyAnchor, from: historyAnchor, through: historyAnchor)
+        historyAnchor = current.shifted(by: direction, mode: mode).start
+    }
+    private func historySegment(_ point: PositionHistoryPoint) -> Date {
+        var segment = history.first?.monthStart ?? point.monthStart
+        var previous: PositionHistoryPoint?
+        for item in history {
+            if let previous, Calendar.current.date(byAdding: .month, value: 1, to: previous.monthStart) != item.monthStart { segment = item.monthStart }
+            if item.id == point.id { return segment }
+            previous = item
+        }
+        return segment
     }
 
     private func money(_ value: Decimal?) -> String {
@@ -3088,7 +3108,7 @@ struct NetWorthView: View {
         guard let monthChange else { return nil }
         let amount = abs(monthChange).formatted(.currency(code: "MXN").precision(.fractionLength(0)))
         let arrow = monthChange > 0 ? "+" : (monthChange < 0 ? "−" : "")
-        let previous = history.dropLast().last.map { monthName($0.monthStart) } ?? "mes anterior"
+        let previous = currentHistory.dropLast().last.map { monthName($0.monthStart) } ?? "mes anterior"
         return "\(arrow)\(amount) vs \(previous)"
     }
 
@@ -3202,25 +3222,29 @@ struct NetWorthView: View {
                 Picker("Historial", selection: $historyRange) {
                     Text("6 m").tag(6)
                     Text("12 m").tag(12)
+                    Text("Año").tag(0)
                 }
                 .pickerStyle(.segmented)
-                .frame(width: 110)
+                .frame(width: 155)
                 .controlSize(.small)
             }
 
+            PeriodNavigationBar(label: historyPeriod.label, move: moveHistory) { showHistoryPicker = true }
+            Text("Saldos por corte · los meses sin datos no se reconstruyen").font(.caption2).foregroundStyle(.secondary)
             if store.dashboardIsBlocked {
                 Text("La conciliación está pendiente.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-            } else if history.count < 2 {
-                Text("Necesitamos más meses para mostrar tu evolución.")
+            } else if history.isEmpty {
+                Text("No hay cortes históricos completos en este periodo.")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } else {
                 Chart(history) { point in
                     LineMark(
                         x: .value("Mes", point.monthStart),
-                        y: .value("Posición neta", point.chartValue)
+                        y: .value("Posición neta", point.chartValue),
+                        series: .value("Tramo con datos", historySegment(point))
                     )
                     .foregroundStyle(Color.marcelitoNavyMid)
                     .lineStyle(StrokeStyle(lineWidth: 2.5))
@@ -3236,12 +3260,21 @@ struct NetWorthView: View {
                     }
                 }
                 .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) }
+                .chartXScale(domain: historyPeriod.start...historyPeriod.end)
                 .frame(height: 155)
+                if history.count == 1 { Text("Un corte disponible; necesitamos más meses para mostrar la tendencia.").font(.caption).foregroundStyle(.secondary) }
             }
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .marcelitoCard(fill: Color.marcelitoCreamSoft.opacity(0.75), radius: 16, padding: 14)
+        .onAppear {
+            guard !initializedHistory else { return }
+            historyAnchor = allHistory.last?.monthStart ?? .now; initializedHistory = true
+        }
+        .sheet(isPresented: $showHistoryPicker) {
+            PeriodSelectionSheet(mode: historyRange == 0 ? .year : .month, date: historyAnchor) { historyAnchor = $0 }
+        }
     }
 }
 

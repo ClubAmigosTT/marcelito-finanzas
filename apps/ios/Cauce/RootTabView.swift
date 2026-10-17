@@ -85,6 +85,7 @@ struct HomeView: View {
     @State private var isSettingsPresented = false
     @State private var showLatestExpenses = false
     @State private var latestExpenseDate = Date.now
+    @State private var latestExpenseMode: FinancePeriodMode = .month
 
     private var hasData: Bool { !store.movements.isEmpty || !store.statements.isEmpty }
 
@@ -101,18 +102,19 @@ struct HomeView: View {
             }
             if hasData {
                 HomeMonthlyPlanCard(upload: { isImporterPresented = true }, showLatest: { date in
-                    latestExpenseDate = date; showLatestExpenses = true
+                    latestExpenseDate = date; latestExpenseMode = .month; showLatestExpenses = true
                 })
                 PlanningDataFreshness { isImporterPresented = true }
                 LedgerQualityBanner(store: store)
-                HomePersonalMetrics()
+                HomePersonalMetrics(showActivity: false)
                 if store.dashboardIsBlocked || store.operationalMetricsBlocked {
                     HistoricalDashboardBlockedCard(store: store)
                 } else if planning.hasData(store, period: .month(.now)) {
                     SpendingPaceSection(store: store)
-                } else if let latest = planning.latestMovementDate(store) {
-                    LastRecordedMonthSummary(date: latest) {
-                        latestExpenseDate = latest; showLatestExpenses = true
+                }
+                if !store.operationalMetricsBlocked, let latest = planning.latestMovementDate(store) {
+                    LastRecordedMonthSummary(date: latest) { date, mode in
+                        latestExpenseDate = date; latestExpenseMode = mode; showLatestExpenses = true
                     }
                 }
             } else {
@@ -207,7 +209,7 @@ struct HomeView: View {
                 SettingsView()
             }
             .sheet(isPresented: $showLatestExpenses) {
-                ExpensesView(initialDate: latestExpenseDate, isPresentedAsSheet: true)
+                ExpensesView(initialDate: latestExpenseDate, initialMode: latestExpenseMode, isPresentedAsSheet: true)
             }
             .confirmationDialog(
                 "Borrar datos del dispositivo",
