@@ -26,7 +26,7 @@ import XCTest
             sourceDetection: .init(source: "BBVA", confidence: 1, status: .verified, evidence: ["fixture"], ignoredBodyMentions: []), readerVersion: FinanceStore.readerVersion)
         store.statements = [record]
         store.movements = [row(10000), row(-2000)].map { item in
-            var item = item; item.statementId = record.id; item.extractionEvidence = .init(method: "fixture", page: 1, confidence: 1); return item
+            var item = item; item.statementId = record.id; item.extractionEvidence = .init(method: "fixture", page: 1, confidence: 1, sourceText: "15/09/2026 \(item.title) \(item.amount)"); return item
         }
     }
     func testRemainingIncludesExtraordinaryAndUncollectedSharedWithoutCreatingIncome() {
@@ -69,6 +69,12 @@ import XCTest
             coverSeptember(store); p.state.incomeAmount = 10000
             let goal = SavingsGoal(name:"Fondo",target:20000,saved:1000,monthlyContribution:1000)
             XCTAssertTrue(p.saveGoal(goal))
+            XCTAssertFalse(store.operationalMetricsBlocked, store.ledgerQuality.message ?? "Libro bloqueado")
+            let audit = store.monthlyFinancialAudit(for: date(9))
+            XCTAssertTrue(audit.hasCompleteCoverage, "Cobertura mensual incompleta")
+            XCTAssertEqual(audit.unresolvedPairCount, 0)
+            XCTAssertEqual(audit.excludedStatementCount, 0)
+            XCTAssertEqual(p.coveredDays(store).filter { FinancePeriod.month(date(9)).contains($0) }.count, 30)
             XCTAssertTrue(p.closeMonth(date(9),store:store,goalID:goal.id,now:date(10,17)))
             let remaining = p.snapshot(store,month:date(9)).remaining
             XCTAssertEqual(p.state.goals[0].saved,9000)
