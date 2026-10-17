@@ -48,17 +48,17 @@ import XCTest
         item.cadence = .weekly; XCTAssertEqual(item.monthlyAmount, Decimal(string: "433.33"))
         item.cadence = .annual; XCTAssertEqual(item.monthlyAmount, Decimal(string: "8.33"))
     }
-    func testDetectionNeedsConfirmationAndSeparatesRegularFromFrequent() {
+    func testDetectionNeedsConfirmationAndDoesNotRecommendIrregularFrequentShops() {
         withStores { store, p, _ in
             let monthly = [row(6, 10), row(7, 10), row(8, 10)]
             let frequent = [row(6, 2, name: "Café", amount: -100), row(6, 8, name: "Café", amount: -40), row(7, 20, name: "Café", amount: -90), row(7, 26, name: "Café", amount: -50)]
             store.movements = monthly + frequent
             let found = p.recurringExpenseSuggestions(store, now: date(10))
-            XCTAssertEqual(found.count, 2)
+            XCTAssertEqual(found.count, 1)
             XCTAssertEqual(found.first(where: { $0.name == "Internet" })?.regular, true)
             XCTAssertEqual(found.first(where: { $0.name == "Internet" })?.cadence, .monthly)
-            XCTAssertEqual(found.first(where: { $0.name == "Café" })?.regular, false)
-            XCTAssertEqual(found.first(where: { $0.name == "Café" })?.amount, 140)
+            XCTAssertNil(found.first(where: { $0.name == "Café" }))
+            XCTAssertEqual(found.first?.movements.count, 3)
             XCTAssertTrue(p.fixedExpenses.isEmpty); XCTAssertFalse(p.isFixed(monthly[0]))
             XCTAssertTrue(p.fixedLimits(store, month: date(10)).isEmpty)
         }
@@ -207,6 +207,66 @@ import XCTest
             second.title = "PAGO TRANSFERENCIA A OTRA PERSONA IVA REF 456"
             XCTAssertNotEqual(p.fixedExpenseKey(second), previous)
             XCTAssertFalse(p.canLinkFixedExpense(row(10, 10, name: "SPEI ENVIADO STP")))
+        }
+    }
+
+    func testPayrollUsesOriginalBankDescriptionAndKeepsActualDepositSelectionAvailable() {
+        withStores { store, p, _ in
+            var deposits: [Movement] = []
+            for (month, day, amount) in [(7, 15, 16500), (7, 31, 16600), (8, 14, 16400), (8, 31, 16500), (8, 31, 40000)] {
+                var item = row(month, day, name: "ABONO \(month)\(day)", amount: Decimal(amount), account: "Santander", kind: .income)
+                item.normalizedMerchant = "Abono"
+                item.rawDescription = "ABONO PAGO DE NOMINA EMPRESA REF \(month)\(day)"
+                deposits.append(item)
+            }
+            let ownTransfer = row(8, 20, name: "Propia", amount: 15000, kind: .bankTransfer)
+            let refund = row(8, 21, name: "Devolución", amount: 15000, kind: .refund)
+            store.movements = deposits + [ownTransfer, refund]
+            let found = p.incomeSuggestions(store, now: date(10))
+            XCTAssertEqual(found.count, 1); XCTAssertEqual(found.first?.amount, 16500)
+            XCTAssertEqual(found.first?.cadence, "Quincenal"); XCTAssertEqual(found.first?.movements.count, 4)
+            let options = p.receivedIncomeOptions(store, now: date(10))
+            XCTAssertEqual(options.count, 5); XCTAssertFalse(options.contains(where: { $0.id == ownTransfer.id || $0.id == refund.id }))
+            let draft = p.incomeDraft(from: deposits[0], store: store)
+            XCTAssertEqual(draft.account, "Santander"); XCTAssertEqual(draft.cadence, "Quincenal")
+            XCTAssertTrue(p.incomeSources.isEmpty)
+            XCTAssertTrue(p.setIncomeSources([draft]))
+            XCTAssertTrue(p.incomeSuggestions(store, now: date(10)).isEmpty)
+            XCTAssertEqual(store.movements[0].amount, deposits[0].amount)
+        }
+    }
+    func testManualIncomeSupportsWeeklyAndAnnualWithoutCreatingDeposits() {
+        withStores { store, p, defaults in
+            let weekly = PlanningIncomeSource(name: "Clases", amount: 100, cadence: "Semanal")
+            let annual = PlanningIncomeSource(name: "Ingreso anual", amount: 1200, cadence: "Anual")
+            XCTAssertTrue(p.setIncomeSources([weekly, annual])); XCTAssertEqual(p.monthlyIncome, Decimal(string: "533.33"))
+            XCTAssertEqual(FinancialPlanningStore(defaults: defaults).incomeSources, [weekly, annual])
+            XCTAssertTrue(store.movements.isEmpty)
+        }
+    }
+    func testStricterDetectionPreservesPreviouslyConfirmedFixedExpenses() {
+        withStores { store, p, defaults in
+            store.movements = [row(6, 2, name: "Café", amount: -100), row(6, 8, name: "Café", amount: -40), row(7, 20, name: "Café", amount: -90), row(7, 26, name: "Café", amount: -50)]
+            let saved = PlanningFixedExpense(name: "Café de oficina", amount: 140, category: "Tiendita", matchKey: p.fixedExpenseKey(store.movements[0]), startMonth: date(10))
+            XCTAssertTrue(p.setFixedExpenses([saved]))
+            XCTAssertTrue(p.recurringExpenseSuggestions(store, now: date(10)).isEmpty)
+            XCTAssertEqual(p.fixedLimits(store, month: date(10))["Tiendita"], 140)
+            XCTAssertEqual(FinancialPlanningStore(defaults: defaults).fixedExpenses, [saved])
+            XCTAssertEqual(store.movements.count, 4)
+        }
+    }
+    func testDismissingSuggestionPersistsAndIsReversibleWithoutClassifyingMovements() {
+        withStores { store, p, defaults in
+            store.movements = [row(6, 10), row(7, 10), row(8, 10)]
+            let suggestion = p.recurringExpenseSuggestions(store, now: date(10)).first!
+            XCTAssertTrue(p.setDismissedRecurringExpenses([suggestion.id]))
+            XCTAssertTrue(p.recurringExpenseSuggestions(store, now: date(10)).isEmpty)
+            let loaded = FinancialPlanningStore(defaults: defaults)
+            XCTAssertTrue(loaded.recurringExpenseSuggestions(store, now: date(10)).isEmpty)
+            XCTAssertTrue(loaded.fixedExpenses.isEmpty); XCTAssertNil(loaded.label(for: store.movements[0]).fixed)
+            XCTAssertTrue(loaded.setDismissedRecurringExpenses([]))
+            XCTAssertEqual(loaded.recurringExpenseSuggestions(store, now: date(10)).count, 1)
+            XCTAssertEqual(store.movements[0].category, "Software y suscripciones")
         }
     }
 

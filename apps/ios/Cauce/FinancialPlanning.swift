@@ -136,7 +136,7 @@ struct PlanningIncomeSource: Identifiable, Codable, Equatable {
     var cadence: String
     var account: String = ""
     var detectedKey: String? = nil
-    var monthlyAmount: Decimal { cadence == "Quincenal" ? amount * 2 : amount }
+    var monthlyAmount: Decimal { RecurringCadence(rawValue: cadence)?.monthlyAmount(amount) ?? amount }
 }
 
 enum FixedExpenseCadence: String, CaseIterable, Codable, Identifiable {
@@ -174,6 +174,7 @@ struct RecurringExpenseSuggestion: Identifiable {
     let regular: Bool
     let count: Int, observedMonths: Int
     let lastDate: Date
+    var movements: [Movement] = []
 }
 
 struct PlanningState: Codable {
@@ -194,12 +195,13 @@ struct PlanningState: Codable {
     var fixedMerchantRules: [String: Bool] = [:]
     // Optional for backward-compatible decoding of existing planning records.
     var fixedExpenses: [PlanningFixedExpense]? = nil
+    var dismissedRecurringExpenseKeys: [String]? = nil
 }
 @Observable final class FinancialPlanningStore {
     var state: PlanningState {
         didSet {
             snapshotCache.removeAll(); budgetGeneration = UUID()
-            if state.labels != oldValue.labels || state.installments != oldValue.installments || state.fixedMerchantRules != oldValue.fixedMerchantRules || state.fixedExpenses != oldValue.fixedExpenses {
+            if state.labels != oldValue.labels || state.installments != oldValue.installments || state.fixedMerchantRules != oldValue.fixedMerchantRules || state.fixedExpenses != oldValue.fixedExpenses || state.dismissedRecurringExpenseKeys != oldValue.dismissedRecurringExpenseKeys {
                 invalidateSpendingProjections()
             }
         }
@@ -239,6 +241,7 @@ struct PlanningState: Codable {
     @ObservationIgnored private var fixedMerchantIdentityCache: [UUID: (fingerprint: String, key: String, linkable: Bool)] = [:]
     @ObservationIgnored private var fixedExpenseIndex: [String: PlanningFixedExpense]?
     @ObservationIgnored private var recurringExpenseCache: (key: SpendingKey, day: Date, items: [RecurringExpenseSuggestion])?
+    @ObservationIgnored private var incomeSuggestionCache: (key: String, items: [RecurringFinancialItem])?
     @ObservationIgnored private var labelIdentityIndex: [String: PersonalExpenseLabel]?
     @ObservationIgnored private var monthFormatter: DateFormatter = {
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM"; return f
@@ -314,6 +317,7 @@ struct PlanningState: Codable {
     }
     func clearLocalData() {
         state = PlanningState(); loadError = nil
+        incomeSuggestionCache = nil
         defaults.removeObject(forKey: key); defaults.removeObject(forKey: key + ".backup")
         invalidateSpendingProjections(); hasUnsavedPlanChanges = false; revision = UUID()
     }
@@ -327,7 +331,7 @@ struct PlanningState: Codable {
         return incomeSources.reduce(0) { $0 + $1.monthlyAmount }
     }
     @discardableResult func setIncomeSources(_ sources: [PlanningIncomeSource]) -> Bool {
-        guard sources.allSatisfy({ !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.amount >= 0 && ["Mensual", "Quincenal"].contains($0.cadence) }), Set(sources.map(\.id)).count == sources.count else { return false }
+        guard sources.allSatisfy({ !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.amount >= 0 && !$0.amount.isNaN && RecurringCadence(rawValue: $0.cadence) != nil }), Set(sources.map(\.id)).count == sources.count else { return false }
         let previous = state
         state.incomeSources = sources
         // Preserve an equivalent aggregate for older app versions. This never
@@ -351,9 +355,22 @@ struct PlanningState: Codable {
         let cutoffs = store.periodMetrics.filter { account == nil || $0.source == account || $0.accountKey == account }.compactMap { store.statementCutoffDate(for: $0.id) }.filter { $0 <= now }
         return (cutoffs + [latestMovementDate(store, account: account, now: now)].compactMap { $0 }).max()
     }
-    func incomeSuggestions(_ store: FinanceStore) -> [RecurringFinancialItem] {
+    func incomeSuggestions(_ store: FinanceStore, now: Date = .now) -> [RecurringFinancialItem] {
+        let key = "\(ObjectIdentifier(store))|\(store.analyticsGeneration)|\(store.ledgerVersion)|\(budgetGeneration)|\(store.manualDashboardUnlockEnabled)|\(store.hasCanonicalRebuildPending)|\(Calendar.current.startOfDay(for: now))"
+        if let cached = incomeSuggestionCache, cached.key == key { return cached.items }
         let confirmedKeys = Set(incomeSources.compactMap(\.detectedKey))
-        return recurring(store.realIncomeMovements, income: true).filter { !confirmedKeys.contains($0.id) }
+        let from = Calendar.current.date(byAdding: .month, value: -12, to: now)!
+        let rows = store.realIncomeMovements.filter { $0.date >= from && $0.date <= now && $0.amount > 0 }
+        let items = recurring(rows, income: true).filter { !confirmedKeys.contains($0.id) }
+        incomeSuggestionCache = (key, items); return items
+    }
+    func receivedIncomeOptions(_ store: FinanceStore, now: Date = .now) -> [Movement] {
+        store.realIncomeMovements.filter { $0.amount > 0 && $0.date <= now }.sorted { $0.date > $1.date }
+    }
+    func incomeDraft(from movement: Movement, store: FinanceStore) -> PlanningIncomeSource {
+        let suggestion = incomeSuggestions(store).first { $0.movements.contains(where: { $0.id == movement.id }) }
+        return PlanningIncomeSource(name: suggestion?.name ?? movement.summaryDisplayTitle, amount: movement.amount,
+            cadence: suggestion?.cadence ?? "Mensual", account: movement.account, detectedKey: recurrenceKey(movement, income: true))
     }
     func monthKey(_ date: Date) -> String { monthFormatter.string(from: date) }
     func identity(_ movement: Movement) -> String {
@@ -608,6 +625,12 @@ struct PlanningState: Codable {
         plan.closed = true; setPlan(plan, for: month); return true
     }
     var fixedExpenses: [PlanningFixedExpense] { state.fixedExpenses ?? [] }
+    @discardableResult func setDismissedRecurringExpenses(_ keys: [String]) -> Bool {
+        let previous = state
+        state.dismissedRecurringExpenseKeys = Array(Set(keys)).sorted()
+        if save() { return true }
+        state = previous; return false
+    }
     @discardableResult func setFixedExpenses(_ expenses: [PlanningFixedExpense]) -> Bool {
         let keys = expenses.map(\.matchKey).filter { !$0.isEmpty }
         guard Set(expenses.map(\.id)).count == expenses.count, Set(keys).count == keys.count,
@@ -642,7 +665,7 @@ struct PlanningState: Codable {
         return fixedExpenseIndex?[fixedExpenseKey(movement)]
     }
     func canLinkFixedExpense(_ row: Movement) -> Bool {
-        guard row.kind != .msi, row.kind != .bankTransfer, row.kind != .cardPayment, row.kind != .income, row.kind != .credit else { return false }
+        guard !row.classificationTags.contains("loan-interest"), row.kind != .msi, row.kind != .bankTransfer, row.kind != .cardPayment, row.kind != .income, row.kind != .credit else { return false }
         // An unexpanded bank operation is not a reliable merchant identity.
         return fixedMerchantIdentity(row).linkable
     }
@@ -650,64 +673,57 @@ struct PlanningState: Codable {
         let value = projection(store); let day = Calendar.current.startOfDay(for: now)
         if let cache = recurringExpenseCache, cache.key == value.key, cache.day == day { return cache.items }
         let from = Calendar.current.date(byAdding: .month, value: -12, to: now)!
-        let configured = Set(fixedExpenses.map(\.matchKey))
+        let configured = Set(fixedExpenses.map(\.matchKey)).union(state.dismissedRecurringExpenseKeys ?? [])
         let rows = value.budgetRows.filter { $0.date >= from && $0.date <= now && $0.expenseContribution > 0 && personalContribution($0) > 0 && isOrdinary($0) && label(for: $0).fixed != false && canLinkFixedExpense($0) }
+        let latestByAccount = Dictionary(uniqueKeysWithValues: Set(rows.map(\.account)).compactMap { account in
+            latestDataDate(store, account: account, now: now).map { (account, $0) }
+        })
         let grouped = Dictionary(grouping: rows, by: fixedExpenseKey)
         let items = grouped.compactMap { key, rows -> RecurringExpenseSuggestion? in
-            guard !configured.contains(key), rows.count >= 3 else { return nil }
-            let sorted = rows.sorted { $0.date < $1.date }
-            let monthCount = Set(rows.map { monthKey($0.date) }).count
-            guard monthCount >= 2, Set(rows.map { Calendar.current.startOfDay(for: $0.date) }).count >= 3 else { return nil }
-            let amounts = rows.map { personalContribution($0) }.sorted()
-            let median = amounts.count.isMultiple(of: 2) ? (amounts[amounts.count / 2 - 1] + amounts[amounts.count / 2]) / 2 : amounts[amounts.count / 2]
-            guard median > 0 else { return nil }
-            let gaps = zip(sorted, sorted.dropFirst()).map { Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: $0.date), to: Calendar.current.startOfDay(for: $1.date)).day ?? 0 }.sorted()
-            let gap = gaps[gaps.count / 2]
-            let cadence: FixedExpenseCadence? = (5...9).contains(gap) ? .weekly : (12...18).contains(gap) ? .fortnightly : (25...35).contains(gap) ? .monthly : nil
-            let stable = amounts.allSatisfy { abs($0 - median) <= median / 10 }
-            let regular = cadence.map { cadence in
-                let range = cadence == .weekly ? 5...9 : cadence == .fortnightly ? 12...18 : 25...35
-                return stable && gaps.filter { range.contains($0) }.count * 4 >= gaps.count * 3
-            } ?? false
-            guard regular || rows.count >= 4 else { return nil }
-            // Irregular frequent merchants use a suggested monthly allowance,
-            // not a purported recurring bill. It always requires confirmation.
-            let totals = Dictionary(grouping: rows, by: { monthKey($0.date) }).values.map { $0.reduce(Decimal(0)) { $0 + personalContribution($1) } }.sorted()
-            let last = sorted.last!
-            return RecurringExpenseSuggestion(id: key, name: merchantLabel(last), account: last.account, category: category(last), amount: regular ? median : (totals.count.isMultiple(of: 2) ? (totals[totals.count / 2 - 1] + totals[totals.count / 2]) / 2 : totals[totals.count / 2]), cadence: regular ? cadence! : .monthly, regular: regular, count: rows.count, observedMonths: monthCount, lastDate: last.date)
-        }.sorted { $0.amount * $0.cadence.paymentsPerYear > $1.amount * $1.cadence.paymentsPerYear }
+            guard !configured.contains(key),
+                  let pattern = RecurringPattern.detect(rows.map { RecurringObservation(date: $0.date, amount: personalContribution($0)) }),
+                  let cadence = FixedExpenseCadence(rawValue: pattern.cadence.rawValue) else { return nil }
+            let observations = Set(pattern.observations)
+            let evidence = rows.filter { observations.contains(RecurringObservation(date: $0.date, amount: personalContribution($0))) }.sorted { $0.date < $1.date }
+            guard let last = evidence.last else { return nil }
+            // Recommend patterns still present near the account's latest data,
+            // not old habits from a year ago. Missing statements imply no cancellation.
+            let recency = cadence == .weekly ? 18 : cadence == .fortnightly ? 36 : cadence == .monthly ? 45 : 400
+            let latest = latestByAccount[last.account] ?? last.date
+            guard (Calendar.current.dateComponents([.day], from: last.date, to: latest).day ?? 0) <= recency else { return nil }
+            return RecurringExpenseSuggestion(id: key, name: merchantLabel(last), account: last.account, category: category(last), amount: pattern.amount, cadence: cadence, regular: true, count: evidence.count, observedMonths: Set(evidence.map { monthKey($0.date) }).count, lastDate: last.date, movements: evidence)
+        }.sorted {
+            if $0.count != $1.count { return $0.count > $1.count }
+            if $0.lastDate != $1.lastDate { return $0.lastDate > $1.lastDate }
+            return $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
         recurringExpenseCache = (value.key, day, items); return items
     }
     private func recurrenceKey(_ row: Movement, income: Bool) -> String {
         let descriptor = row.transferRecipient ?? row.normalizedMerchant ?? row.title
         guard income else { return (row.account + "|" + descriptor).lowercased() }
-        var normalized = descriptor.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX")).lowercased()
-        // Payroll descriptions often change folios and pay-period dates. Only
-        // normalize these on explicit payroll evidence; never group every SPEI
-        // from the same intermediary into a purported salary.
-        if normalized.range(of: #"\b(nomina|sueldo|salario|payroll)\b"#, options: .regularExpression) != nil {
-            normalized = normalized.replacingOccurrences(of: #"\b(ref(?:erencia)?|folio)\b.*$"#, with: "", options: .regularExpression)
-            normalized = normalized.replacingOccurrences(of: #"\b\w*\d\w*\b|\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b"#, with: " ", options: .regularExpression)
-            normalized = normalized.replacingOccurrences(of: #"[^a-z ]"#, with: " ", options: .regularExpression)
+        let evidence = [row.title, row.rawDescription, row.extractionEvidence?.sourceText].compactMap { $0 }
+        // A normalized merchant can have lost the payroll marker. Inspect the
+        // retained bank description as well, keeping employer names separate.
+        if let payroll = evidence.first(where: { RecurringPattern.hasPayrollEvidence([$0]) }) {
+            return RecurringPattern.normalized(row.account) + "|" + RecurringPattern.payrollDescriptor(payroll)
         }
-        normalized = normalized.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
-        return row.account.lowercased() + "|" + normalized
+        return RecurringPattern.normalized(row.account) + "|" + RecurringPattern.normalized(descriptor)
     }
     func recurring(_ rows: [Movement], income: Bool = false) -> [RecurringFinancialItem] {
         let grouped = Dictionary(grouping: rows) { recurrenceKey($0, income: income) }
         return grouped.compactMap { key, rows in
-            let sorted = rows.sorted { $0.date < $1.date }
-            guard sorted.count >= 3, Set(sorted.map { monthKey($0.date) }).count >= 2 else { return nil }
-            let amounts = sorted.map { abs($0.amount) }.sorted(); let median = amounts[amounts.count / 2]
-            guard median > 0, amounts.allSatisfy({ abs($0 - median) / median <= Decimal(string: "0.1")! }) else { return nil }
-            let gaps = zip(sorted, sorted.dropFirst()).map { Calendar.current.dateComponents([.day], from: $0.date, to: $1.date).day ?? 0 }.sorted()
-            let gap = gaps[gaps.count / 2]
-            guard (12...18).contains(gap) || (25...35).contains(gap) else { return nil }
-            let validGaps = gaps.filter { (12...18).contains(gap) ? (12...18).contains($0) : (25...35).contains($0) }
-            guard validGaps.count * 4 >= gaps.count * 3 else { return nil }
-            return RecurringFinancialItem(id: key, name: sorted.last!.displayMerchant ?? sorted.last!.title, amount: median, cadence: (12...18).contains(gap) ? "Quincenal" : "Mensual", isIncome: income, movement: sorted.last!)
-        }.sorted { $0.amount > $1.amount }
+            guard let pattern = RecurringPattern.detect(rows.map { RecurringObservation(date: $0.date, amount: abs($0.amount)) }) else { return nil }
+            let observations = Set(pattern.observations)
+            let evidence = rows.filter { observations.contains(RecurringObservation(date: $0.date, amount: abs($0.amount))) }.sorted { $0.date < $1.date }
+            guard let last = evidence.last else { return nil }
+            let payroll = income && RecurringPattern.hasPayrollEvidence([last.title, last.rawDescription ?? "", last.extractionEvidence?.sourceText ?? ""])
+            let payrollText = [last.title, last.rawDescription, last.extractionEvidence?.sourceText].compactMap { $0 }.first { RecurringPattern.hasPayrollEvidence([$0]) }
+            let name = payroll ? RecurringPattern.payrollDescriptor(payrollText ?? last.title).capitalized : last.transferRecipient ?? last.displayMerchant ?? last.title
+            return RecurringFinancialItem(id: key, name: name, amount: pattern.amount, cadence: pattern.cadence.rawValue, isIncome: income, movement: last, movements: evidence)
+        }.sorted { $0.annualCost > $1.annualCost }
     }
+
 }
 struct BudgetSnapshot {
     let period: FinancePeriod
@@ -732,7 +748,8 @@ struct RecurringFinancialItem: Identifiable {
     let cadence: String
     let isIncome: Bool
     let movement: Movement
-    var annualCost: Decimal { amount * (cadence == "Quincenal" ? 24 : 12) }
+    var movements: [Movement] = []
+    var annualCost: Decimal { amount * (RecurringCadence(rawValue: cadence)?.paymentsPerYear ?? 12) }
 }
 
 extension FinancialPlanningStore {

@@ -35,6 +35,8 @@ struct PlanningIncomeContent: View {
     @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     @State private var editing: PlanningIncomeSource?
+    @State private var showReceivedDeposits = false
+    @State private var selectedDepositSource: PlanningIncomeSource?
     @State private var deleting: PlanningIncomeSource?
     @State private var error: String?
     var body: some View {
@@ -56,28 +58,34 @@ struct PlanningIncomeContent: View {
                         Button { deleting = source } label: { Image(systemName: "trash").foregroundStyle(.secondary) }.buttonStyle(.borderless).accessibilityLabel("Eliminar \(source.name)")
                     }
                 }
-                Button { editing = PlanningIncomeSource(name: "", amount: 0, cadence: "Mensual") } label: { Label("Agregar ingreso", systemImage: "plus.circle") }
+                Button { editing = PlanningIncomeSource(name: "", amount: 0, cadence: "Mensual") } label: { Label("Agregar fuente manualmente", systemImage: "plus.circle") }
+                Button { showReceivedDeposits = true } label: { Label("Elegir un depósito recibido", systemImage: "tray.and.arrow.down") }
             } header: { Text("Tus fuentes de ingreso") } footer: {
                 if planning.state.incomeSources == nil, planning.state.incomeAmount != nil {
                     Text("Conservamos tu total anterior como Ingreso habitual. Si incluía varias fuentes, edítalo antes de agregarlas por separado para no sumarlas dos veces.")
                 }
             }
             let recurring = planning.incomeSuggestions(store)
-            if !recurring.isEmpty {
-                Section("Sugerencias · confirma cada fuente") {
-                    ForEach(recurring) { item in
+            Section("Ingresos con patrón periódico") {
+                if recurring.isEmpty {
+                    Text(store.realIncomeMovements.isEmpty ? "Aún no hay depósitos de ingreso cargados. Puedes agregar tus fuentes manualmente y subir después el estado de débito." : "Sin nuevas sugerencias automáticas. Puedes elegir un depósito recibido o agregar otra fuente manualmente.").font(.subheadline).foregroundStyle(.secondary)
+                }
+                ForEach(recurring) { item in
+                    VStack(alignment: .leading, spacing: 6) {
                         Button {
                             editing = PlanningIncomeSource(name: item.name, amount: item.amount, cadence: item.cadence, account: item.movement.account, detectedKey: item.id)
                         } label: {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(item.name)
                                 Text("\(item.movement.account) · \(planningMoney(item.amount)) · \(item.cadence)").font(.caption)
+                                Text("\(item.movements.count) depósitos con importe y fechas similares").font(.caption).foregroundStyle(.secondary)
                                 Text("Agregar como fuente").font(.caption.weight(.semibold))
                             }
                         }
+                        NavigationLink("Ver depósitos que respaldan la sugerencia") { IncomeDepositEvidenceView(rows: item.movements) }.font(.caption)
                     }
-                    Text("No se agregan automáticamente ni incluyen transferencias propias. Si falta una fuente, puedes agregarla manualmente.").font(.caption).foregroundStyle(.secondary)
                 }
+                Text("No se agregan automáticamente ni incluyen transferencias propias. Si falta una fuente, puedes agregarla manualmente.").font(.caption).foregroundStyle(.secondary)
             }
             if let error { Text(error).foregroundStyle(Color.marcelitoDanger) }
             Section("Depósitos recibidos") {
@@ -90,6 +98,14 @@ struct PlanningIncomeContent: View {
             if allowsDismiss { ToolbarItem(placement: .topBarTrailing) { Button("Listo") { dismiss() } } }
         }.scrollContentBackground(.hidden).background(MarcelitoAmbientBackground())
             .sheet(item: $editing) { source in PlanningIncomeSourceEditor(source: source) }
+            .sheet(isPresented: $showReceivedDeposits, onDismiss: {
+                if let source = selectedDepositSource { selectedDepositSource = nil; editing = source }
+            }) {
+                IncomeDepositPicker { movement in
+                    selectedDepositSource = planning.incomeDraft(from: movement, store: store)
+                    showReceivedDeposits = false
+                }
+            }
             .confirmationDialog("¿Eliminar esta fuente de ingreso?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible, presenting: deleting) { source in
                 Button("Eliminar fuente", role: .destructive) {
                     if !planning.setIncomeSources(planning.incomeSources.filter { $0.id != source.id }) { error = "No se pudo guardar el cambio. Tu información se conserva." }
@@ -119,19 +135,21 @@ struct PlanningIncomeSourceEditor: View {
                 Section {
                     TextField("Nombre, por ejemplo Nómina Santander", text: $name)
                     TextField("Importe MXN", text: $amount).keyboardType(.decimalPad)
-                    Picker("Frecuencia", selection: $cadence) { Text("Mensual").tag("Mensual"); Text("Quincenal").tag("Quincenal") }
+                    Picker("Frecuencia", selection: $cadence) { ForEach(RecurringCadence.allCases, id: \.rawValue) { Text($0.rawValue).tag($0.rawValue) } }
                     Picker("Cuenta", selection: $account) {
                         Text("Sin asociar").tag("")
                         ForEach(Array(Set(store.movements.map(\.account) + store.statements.map(\.source) + [source.account])).filter { !$0.isEmpty }.sorted(), id: \.self) { Text($0).tag($0) }
                     }
-                    if let value = parsePlanningAmount(amount) { LabeledContent("Equivalente mensual", value: planningMoney(cadence == "Quincenal" ? value * 2 : value)) }
-                } header: { Text("Fuente de ingreso") } footer: { Text("Quincenal equivale a dos pagos al mes. Registrar una fuente no crea depósitos ni cambia tus movimientos.") }
+                    if let value = parsePlanningAmount(amount) { LabeledContent("Equivalente mensual", value: planningMoney(RecurringCadence(rawValue: cadence)?.monthlyAmount(value) ?? value)) }
+                } header: { Text("Fuente de ingreso") } footer: { Text("Confirma el importe por pago y su frecuencia. Quincenal equivale a dos pagos al mes; semanal y anual usan un promedio mensual. Guardar una fuente no crea depósitos.") }
                 if let error { Text(error).foregroundStyle(Color.marcelitoDanger) }
                 Button("Guardar fuente") {
                     let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !trimmed.isEmpty, let number = parsePlanningAmount(amount) else { error = "Escribe un nombre y un importe válido."; return }
                     var updated = source; updated.name = trimmed; updated.amount = number; updated.cadence = cadence; updated.account = account
+                    if account != source.account { updated.detectedKey = nil }
                     var sources = planning.incomeSources
+                    if let key = updated.detectedKey, sources.contains(where: { $0.id != updated.id && $0.detectedKey == key }) { error = "Esta fuente ya está configurada. Edítala desde Tus fuentes de ingreso."; return }
                     if let index = sources.firstIndex(where: { $0.id == source.id }) { sources[index] = updated } else { sources.append(updated) }
                     if planning.setIncomeSources(sources) { dismiss() } else { error = "No se pudo guardar. Tu información anterior se conserva." }
                 }.buttonStyle(.marcelitoPrimary)
