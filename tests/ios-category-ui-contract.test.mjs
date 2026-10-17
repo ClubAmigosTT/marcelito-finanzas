@@ -124,7 +124,8 @@ test("Resumen muestra ritmo de gasto con periodos equivalentes y barras semanale
   assert.match(pace, /hasObservedRows \|\| isCovered/);
   assert.match(pace, /Faltan estados o capturas de algunos días/);
   assert.match(pace, /store\.spendingCoveredDays\(\)/);
-  assert.match(pace, /planning\.personalRows/);
+  assert.match(pace, /planning\.expenseRows/);
+  assert.doesNotMatch(pace, /planning\.personalRows|planning\.personalContribution/);
   assert.match(pace, /Faltan movimientos del mes actual/);
 });
 

@@ -1428,9 +1428,7 @@ private struct SpendingPaceSection: View {
 
     private var metrics: SpendingPaceMetrics? {
         SpendingPaceMetrics.calculate(
-            movements: planning.personalRows(store, period: FinancePeriod(start: Calendar.current.date(byAdding: .month, value: -1, to: FinancePeriod.month(.now).start)!, end: FinancePeriod.month(.now).end)).map { row in
-                var adjusted = row; adjusted.amount = -planning.personalContribution(row); return adjusted
-            },
+            movements: planning.expenseRows(store, period: FinancePeriod(start: Calendar.current.date(byAdding: .month, value: -1, to: FinancePeriod.month(.now).start)!, end: FinancePeriod.month(.now).end)),
             coveredDays: store.spendingCoveredDays(),
             now: .now,
             calendar: .current

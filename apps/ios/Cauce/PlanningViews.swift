@@ -245,9 +245,8 @@ struct ExpensesView: View {
     private var period: FinancePeriod { .selected(mode, date: selectedDate, from: from, through: through) }
     private var rows: [Movement] { planning.expenseRows(store, period: period).filter { account == "Todas" || $0.account == account } }
     private var total: Decimal { rows.reduce(0) { $0 + $1.expenseContribution } }
-    private var personal: Decimal { rows.reduce(0) { $0 + planning.personalContribution($1) } }
     private var categories: [(String, Decimal)] {
-        Dictionary(grouping: rows, by: { planning.category($0) }).map { ($0.key, $0.value.reduce(0) { $0 + planning.personalContribution($1) }) }.filter { $0.1 != 0 }.sorted { $0.1 > $1.1 }
+        Dictionary(grouping: rows, by: { planning.category($0) }).map { ($0.key, $0.value.reduce(0) { $0 + $1.expenseContribution }) }.filter { $0.1 != 0 }.sorted { $0.1 > $1.1 }
     }
     private var selectedRows: [Movement] { rows.filter { selectedCategory == nil || planning.category($0) == selectedCategory } }
     var body: some View {
@@ -374,16 +373,15 @@ struct ExpensesView: View {
     }
     private var totalsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            PlanningMetric(title: "Consumo registrado", value: planningMoney(total), period: period.label, explanation: "Compras por fecha del cargo, menos devoluciones. Excluye traspasos propios y pagos de tarjeta. Las compras MSI confirmadas se registran completas una vez; sus mensualidades son compromisos.")
-            PlanningMetric(title: "Gasto personal ordinario", value: planningMoney(personal), period: period.label, explanation: "Consumo menos viajes/extraordinarios y la parte compartida. El registro de quién debe qué conserva el importe pendiente por cobrar.")
+            PlanningMetric(title: "Gasto registrado", value: planningMoney(total), period: period.label, explanation: "Todo el gasto por fecha del cargo, incluidos viajes, extraordinarios y gastos compartidos, menos devoluciones. Excluye traspasos propios y pagos de tarjeta. Las compras MSI confirmadas se registran completas una vez; sus mensualidades son compromisos.")
             let c = Calendar.current
             let observedEnd = min(period.end, c.date(byAdding: .day, value: 1, to: c.startOfDay(for: .now))!)
             let days = max(0, c.dateComponents([.day], from: period.start, to: observedEnd).day ?? 0)
-            let purchases = rows.filter { planning.personalContribution($0) > 0 }
+            let purchases = rows.filter { $0.expenseContribution > 0 }
             HStack(alignment: .top, spacing: 10) {
-                PlanningMetric(title: "Promedio diario", value: days > 0 && monthIsCovered(store, period: period, through: observedEnd.addingTimeInterval(-1), account: account == "Todas" ? nil : account) ? planningMoney(personal / Decimal(days)) : "Faltan días", period: period.label, explanation: "Gasto personal del periodo / días transcurridos cubiertos. No convierte días sin estado en gasto cero.")
+                PlanningMetric(title: "Promedio diario", value: days > 0 && monthIsCovered(store, period: period, through: observedEnd.addingTimeInterval(-1), account: account == "Todas" ? nil : account) ? planningMoney(total / Decimal(days)) : "Faltan días", period: period.label, explanation: "Gasto registrado del periodo / días transcurridos cubiertos. No convierte días sin estado en gasto cero.")
                 PlanningMetric(title: "Movimientos", value: String(rows.count), period: period.label, explanation: "Movimientos de consumo y devoluciones del periodo seleccionado, incluyendo compras MSI confirmadas una vez.")
-                PlanningMetric(title: "Ticket promedio", value: purchases.isEmpty ? "Sin cargos" : planningMoney(purchases.reduce(0) { $0 + planning.personalContribution($1) } / Decimal(purchases.count)), period: period.label, explanation: "Suma de cargos personales positivos / número de esos cargos. No utiliza devoluciones como cargos ni divide entre cero.")
+                PlanningMetric(title: "Ticket promedio", value: purchases.isEmpty ? "Sin cargos" : planningMoney(purchases.reduce(0) { $0 + $1.expenseContribution } / Decimal(purchases.count)), period: period.label, explanation: "Suma de cargos positivos / número de esos cargos. No utiliza devoluciones como cargos ni divide entre cero.")
             }
         }
     }
@@ -398,8 +396,8 @@ struct ExpensesView: View {
                 let currentRange = FinancePeriod(start: period.start, end: c.date(byAdding: .day, value: count, to: period.start)!)
                 let previousRows = planning.expenseRows(store, period: range).filter { account == "Todas" || $0.account == account }
                 if !previousRows.isEmpty {
-                    let old = previousRows.reduce(0) { $0 + planning.personalContribution($1) }
-                    let current = rows.filter { currentRange.contains($0.date) }.reduce(0) { $0 + planning.personalContribution($1) }
+                    let old = previousRows.reduce(0) { $0 + $1.expenseContribution }
+                    let current = rows.filter { currentRange.contains($0.date) }.reduce(0) { $0 + $1.expenseContribution }
                     Text("\(current >= old ? "+" : "−")\(planningMoney(abs(current - old))) vs \(range.label)").font(.subheadline)
                     if !monthIsCovered(store, period: range, through: range.end.addingTimeInterval(-1), account: account == "Todas" ? nil : account) || !monthIsCovered(store, period: currentRange, through: currentRange.end.addingTimeInterval(-1), account: account == "Todas" ? nil : account) {
                         Text("Comparación parcial · faltan datos en uno o ambos periodos").font(.caption).foregroundStyle(Color.marcelitoAmber)
@@ -414,13 +412,16 @@ struct ExpensesView: View {
             ForEach(Array((showAll ? categories : Array(categories.prefix(5))).enumerated()), id: \.element.0) { _, item in
                 Button { selectedCategory = item.0; showCategories = true } label: {
                     VStack(alignment: .leading, spacing: 4) {
-                        HStack { Text(item.0); Spacer(); Text(planningMoney(item.1)).monospacedDigit(); Text(personal > 0 ? "\(Int((NSDecimalNumber(decimal: item.1 / personal * 100).doubleValue).rounded()))%" : "—").font(.caption).foregroundStyle(.secondary) }
-                        ProgressView(value: personal > 0 ? min(1, max(0, NSDecimalNumber(decimal: item.1 / personal).doubleValue)) : 0).tint(Color.marcelitoNavyMid)
+                        HStack { Text(item.0); Spacer(); Text(planningMoney(item.1)).monospacedDigit(); Text(total > 0 ? "\(Int((NSDecimalNumber(decimal: item.1 / total * 100).doubleValue).rounded()))%" : "—").font(.caption).foregroundStyle(.secondary) }
+                        ProgressView(value: total > 0 ? min(1, max(0, NSDecimalNumber(decimal: item.1 / total).doubleValue)) : 0).tint(Color.marcelitoNavyMid)
                         Text(categoryComparison(item.0, actual: item.1)).font(.caption2).foregroundStyle(.secondary)
                     }
                 }.buttonStyle(.plain)
             }
-            if categories.count > 5 { Button(showAll ? "Ver menos" : "Ver todas las categorías") { showAll.toggle() } }
+            if categories.count > 5 {
+                if !showAll { LabeledContent("Otras categorías", value: planningMoney(categories.dropFirst(5).reduce(0) { $0 + $1.1 })).font(.subheadline) }
+                Button(showAll ? "Ver menos" : "Ver todas las categorías") { showAll.toggle() }
+            }
             Text(period.label).font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -431,12 +432,12 @@ struct ExpensesView: View {
         let days = c.isDate(selectedDate, equalTo: .now, toGranularity: .month) ? c.component(.day, from: .now) : c.range(of: .day, in: .month, for: selectedDate)!.count
         let comparableDays = min(days, sampleMonths.map { c.range(of: .day, in: .month, for: $0)!.count }.min() ?? days)
         let comparableEnd = c.date(byAdding: .day, value: comparableDays, to: period.start)!
-        let actualComparable = rows.filter { $0.date < comparableEnd && planning.category($0) == category }.reduce(0) { $0 + planning.personalContribution($1) }
+        let actualComparable = rows.filter { $0.date < comparableEnd && planning.category($0) == category }.reduce(0) { $0 + $1.expenseContribution }
         let samples: [Decimal] = sampleMonths.compactMap { date in
             let range = FinancePeriod(start: date, end: c.date(byAdding: .day, value: comparableDays, to: date)!)
             let r = planning.expenseRows(store, period: range).filter { account == "Todas" || $0.account == account }
             guard !r.isEmpty else { return nil }
-            return r.filter { planning.category($0) == category }.reduce(0) { $0 + planning.personalContribution($1) }
+            return r.filter { planning.category($0) == category }.reduce(0) { $0 + $1.expenseContribution }
         }
         guard !samples.isEmpty else { return "Sin promedio comparable" }
         let avg = samples.reduce(0, +) / Decimal(samples.count)
@@ -445,7 +446,7 @@ struct ExpensesView: View {
         return "\(change >= 0 ? "↑" : "↓") \(Int(NSDecimalNumber(decimal: abs(change)).doubleValue.rounded()))% vs tu promedio · días 1–\(comparableDays) · historial observado"
     }
     private var merchantsSection: some View {
-        let merchants = Dictionary(grouping: rows, by: { planning.merchantLabel($0) }).map { ($0.key, $0.value.reduce(0) { $0 + planning.personalContribution($1) }) }.sorted { $0.1 > $1.1 }
+        let merchants = Dictionary(grouping: rows, by: { planning.merchantLabel($0) }).map { ($0.key, $0.value.reduce(0) { $0 + $1.expenseContribution }) }.sorted { $0.1 > $1.1 }
         return VStack(alignment: .leading, spacing: 8) {
             Text("Tus 10 comercios principales").font(.headline)
             ForEach(Array(merchants.prefix(10).enumerated()), id: \.offset) { _, merchant in HStack { Text(merchant.0).lineLimit(1); Spacer(); Text(planningMoney(merchant.1)).monospacedDigit() }.font(.subheadline) }
@@ -465,7 +466,7 @@ struct ExpensesView: View {
                         HStack { Text(monthName(month).capitalized); Spacer(); Text(month > .now ? "Aún no inicia" : "Sin gastos cargados").foregroundStyle(.secondary) }.font(.subheadline)
                     } else {
                         NavigationLink { PersonalMovementList(title: range.label, rows: monthlyRows, period: range) } label: {
-                            HStack { Text(monthName(month).capitalized); Spacer(); Text(planningMoney(monthlyRows.reduce(0) { $0 + planning.personalContribution($1) })).monospacedDigit() }
+                            HStack { Text(monthName(month).capitalized); Spacer(); Text(planningMoney(monthlyRows.reduce(0) { $0 + $1.expenseContribution })).monospacedDigit() }
                         }.buttonStyle(.plain)
                     }
                     Divider()
@@ -484,7 +485,7 @@ struct ExpensesView: View {
                                 Text("\(dailyRows.count) movimientos").font(.caption2).foregroundStyle(.secondary)
                             }
                             Spacer()
-                            Text(planningMoney(dailyRows.reduce(0) { $0 + planning.personalContribution($1) })).monospacedDigit()
+                            Text(planningMoney(dailyRows.reduce(0) { $0 + $1.expenseContribution })).monospacedDigit()
                             Image(systemName: "chevron.right").font(.caption)
                         }
                     }.buttonStyle(.plain)
@@ -496,16 +497,15 @@ struct ExpensesView: View {
     private var breakdown: some View {
         VStack(alignment: .leading, spacing: 7) {
             Text("Desglose · \(period.label)").font(.headline)
-            LabeledContent("Fijos", value: planningMoney(rows.filter { planning.isFixed($0) }.reduce(0) { $0 + planning.personalContribution($1) }))
-            LabeledContent("Variables", value: planningMoney(rows.filter { !planning.isFixed($0) }.reduce(0) { $0 + planning.personalContribution($1) }))
-            LabeledContent("Extraordinario / viajes / compartido", value: planningMoney(total - personal))
+            LabeledContent("Fijos", value: planningMoney(rows.filter { planning.isFixed($0) }.reduce(0) { $0 + $1.expenseContribution }))
+            LabeledContent("Variables", value: planningMoney(rows.filter { !planning.isFixed($0) }.reduce(0) { $0 + $1.expenseContribution }))
             NavigationLink("Quién debe qué") { SharedReceivablesView() }
         }.font(.subheadline)
     }
     private var accumulatedChart: some View {
         let points = chartPoints()
         return VStack(alignment: .leading, spacing: 8) {
-            HStack { Text(mode == .year ? "Gasto personal por mes" : "Gasto personal acumulado").font(.headline); CalculationHelp(explanation: "Suma del consumo personal por fecha del cargo. La línea de presupuesto incluye el principal completo de MSI en el mes de compra; Presupuesto muestra por separado sus mensualidades. Los puntos indican fines de semana.") }
+            HStack { Text(mode == .year ? "Gasto por mes" : "Gasto acumulado").font(.headline); CalculationHelp(explanation: "Todo el gasto por fecha del cargo, menos devoluciones. La línea discontinua es tu presupuesto ordinario y puede excluir gastos etiquetados; incluye el principal completo de MSI en el mes de compra. Presupuesto muestra por separado sus mensualidades. Los puntos indican fines de semana.") }
             Chart(points) { point in
                 if mode == .year { BarMark(x: .value("Mes", point.date, unit: .month), y: .value("Gasto", point.spend)).foregroundStyle(Color.marcelitoNavy) }
                 else { LineMark(x: .value("Fecha", point.date), y: .value("Gasto acumulado", point.spend)).foregroundStyle(Color.marcelitoNavy) }
@@ -523,12 +523,12 @@ struct ExpensesView: View {
             let byMonth = Dictionary(grouping: selectedRows) { FinancePeriod.month($0.date).start }
             return period.months().compactMap { month in
                 guard let monthlyRows = byMonth[month], !monthlyRows.isEmpty else { return nil }
-                return PlanningChartPoint(date: month, spend: NSDecimalNumber(decimal: monthlyRows.reduce(0) { $0 + planning.personalContribution($1) }).doubleValue, budget: nil)
+                return PlanningChartPoint(date: month, spend: NSDecimalNumber(decimal: monthlyRows.reduce(0) { $0 + $1.expenseContribution }).doubleValue, budget: nil)
             }
         }
         let limit = min(period.end, c.date(byAdding: .day, value: 1, to: c.startOfDay(for: .now))!)
         guard period.start < limit else { return [] }
-        let daily = selectedRows.reduce(into: [Date: Decimal]()) { values, row in values[c.startOfDay(for: row.date), default: 0] += planning.personalContribution(row) }
+        let daily = selectedRows.reduce(into: [Date: Decimal]()) { values, row in values[c.startOfDay(for: row.date), default: 0] += row.expenseContribution }
         let observedPeriod = FinancePeriod(start: period.start, end: limit)
         let monthlyBudgets: [Date: Decimal] = account == "Todas" ? Dictionary(uniqueKeysWithValues: observedPeriod.months().map { ($0, planning.consumptionBudget(store, month: $0)) }) : [:]
         var day = period.start; var accumulated: Decimal = 0; var budget: Decimal = 0; var result: [PlanningChartPoint] = []
@@ -689,7 +689,7 @@ struct BudgetView: View {
         let hasCharges = !planning.expenseRows(store, period: range).isEmpty
         return VStack(alignment: .leading, spacing: 16) {
             Text("Resumen anual · \(range.label)").font(.title3.bold())
-            PlanningMetric(title: "Gasto personal registrado", value: hasCharges ? planningMoney(planning.personalTotal(store, period: range)) : "Sin gastos cargados", period: range.label, explanation: "Consumo personal registrado por fecha del cargo durante el año. Los meses sin datos no se suponen en cero.")
+            PlanningMetric(title: "Gasto registrado", value: hasCharges ? planningMoney(planning.total(store, period: range)) : "Sin gastos cargados", period: range.label, explanation: "Todo el gasto registrado por fecha del cargo durante el año, incluidos viajes, extraordinarios y gastos compartidos, menos devoluciones. Excluye transferencias propias y pagos de tarjeta. Los meses sin datos no se suponen en cero.")
             Text("El presupuesto se guarda por mes. Toca un mes para editarlo.").font(.caption).foregroundStyle(.secondary)
             ForEach(range.months(), id: \.self) { value in
                 let monthlyRange = FinancePeriod.month(value)
@@ -697,7 +697,7 @@ struct BudgetView: View {
                 let plan = planning.state.budgets[planning.monthKey(value)]
                 Button { month = value; periodMode = .month } label: {
                     VStack(alignment: .leading, spacing: 5) {
-                        HStack { Text(monthName(value).capitalized).fontWeight(.semibold); Spacer(); Text(observed ? planningMoney(planning.personalTotal(store, period: monthlyRange)) : "Sin datos"); Image(systemName: "chevron.right").font(.caption) }
+                        HStack { Text(monthName(value).capitalized).fontWeight(.semibold); Spacer(); Text(observed ? planningMoney(planning.total(store, period: monthlyRange)) : "Sin datos"); Image(systemName: "chevron.right").font(.caption) }
                         if let plan {
                             Text("Meta de ahorro: \(planningMoney(plan.savingsTarget)) · límites guardados: \(planningMoney(plan.limits.values.reduce(0, +) + plan.fixedLimits.values.reduce(0, +)))").font(.caption).foregroundStyle(.secondary)
                         } else { Text("Sin plan mensual guardado").font(.caption).foregroundStyle(.secondary) }
@@ -826,7 +826,7 @@ struct MovementPlanningLabels: View {
     @State private var showMSI = false
     @State private var message: String?
     var body: some View {
-        Section("Gasto personal y presupuesto") {
+        Section("Etiquetas para presupuesto") {
             Toggle("Extraordinario", isOn: Binding(get: { planning.isExtraordinary(movement) }, set: { value in var l = planning.label(for: movement); l.extraordinary = value; planning.setLabel(l, for: movement) }))
             Toggle("Gasto fijo", isOn: Binding(get: { planning.isFixed(movement) }, set: { value in var l = planning.label(for: movement); l.fixed = value; planning.setLabel(l, for: movement) }))
             TextField("Por cobrar / compartido · persona", text: $person)
@@ -834,11 +834,11 @@ struct MovementPlanningLabels: View {
             Button("Guardar parte compartida") {
                 guard let amount = parsePlanningAmount(share), amount <= max(0, movement.expenseContribution), amount == 0 || !person.trimmingCharacters(in: .whitespaces).isEmpty else { message = "Indica la persona y un importe no mayor al gasto."; return }
                 var l = planning.label(for: movement); l.sharedPerson = person; l.sharedAmount = amount; planning.setLabel(l, for: movement)
-                message = "Parte compartida guardada. Se excluye del gasto personal."
+                message = "Parte compartida guardada en Por cobrar. El gasto completo sigue visible en Gastos."
             }
             Button(planning.isInstallmentRow(movement) ? "Ver compra MSI registrada" : "Registrar compra a MSI") { showMSI = true }
             if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
-            CalculationHelp(explanation: "Extraordinario y viaje se muestran en consumo total y se excluyen del presupuesto ordinario. Por cobrar excluye solo el importe asignado a la otra persona; cobrarlo reduce la cuenta pendiente y no convierte ese importe en consumo personal.")
+            CalculationHelp(explanation: "En Gastos siempre se muestra el importe completo, incluidos viajes, extraordinarios y gastos compartidos. Las etiquetas se conservan para planear el presupuesto y llevar lo que te deben. Por cobrar conserva quién te debe y cuánto; marcarlo como cobrado reduce esa cuenta pendiente.")
         }.onAppear { let l = planning.label(for: movement); person = l.sharedPerson; share = NSDecimalNumber(decimal: l.sharedAmount).stringValue }
             .sheet(isPresented: $showMSI) { InstallmentEditor(movement: movement) }
     }
@@ -1115,7 +1115,7 @@ struct LastRecordedMonthSummary: View {
             PeriodNavigationBar(label: period.label, move: movePeriod) { showPeriodPicker = true }
             if planning.hasData(store, period: period) {
                 HStack(alignment: .top, spacing: 12) {
-                    PlanningMetric(title: "Gasto personal registrado", value: planning.expenseRows(store, period: period).isEmpty ? "Sin cargos" : planningMoney(planning.personalTotal(store, period: period)), period: period.label, explanation: "Gasto personal ordinario por fecha del cargo en el periodo seleccionado. Excluye transferencias propias y pagos de tarjeta; no representa actividad en tiempo real.")
+                    PlanningMetric(title: "Gasto registrado", value: planning.expenseRows(store, period: period).isEmpty ? "Sin cargos" : planningMoney(planning.total(store, period: period)), period: period.label, explanation: "Todo el gasto registrado por fecha del cargo, incluidos viajes, extraordinarios y gastos compartidos, menos devoluciones. Excluye transferencias propias y pagos de tarjeta; no representa actividad en tiempo real.")
                     PlanningMetric(title: "Ingreso recibido", value: store.realIncomeMovements.contains(where: { period.contains($0.date) }) ? planningMoney(planning.observedIncome(store, period: period)) : "Sin depósitos", period: period.label, explanation: "Depósitos reales del periodo seleccionado. El ingreso habitual de tus fuentes se utiliza por separado para planear.")
                 }
                 if !monthIsCovered(store, period: period, through: min(.now, period.end.addingTimeInterval(-1))) {
@@ -1143,7 +1143,7 @@ struct HomePersonalMetrics: View {
             }
             if showActivity, planning.hasData(store, period: period), !store.operationalMetricsBlocked {
                 HStack(alignment: .top, spacing: 12) {
-                    PlanningMetric(title: "Gasto personal", value: planning.expenseRows(store, period: period).isEmpty ? "Sin cargos" : planningMoney(planning.personalTotal(store, period: period)), period: period.label, explanation: "Consumo ordinario por fecha del cargo. Excluye transferencias propias, pagos de tarjeta, extraordinarios y la parte compartida. MSI se registra completo el día de compra.")
+                    PlanningMetric(title: "Gasto registrado", value: planning.expenseRows(store, period: period).isEmpty ? "Sin cargos" : planningMoney(planning.total(store, period: period)), period: period.label, explanation: "Todo el gasto por fecha del cargo, incluidos viajes, extraordinarios y gastos compartidos, menos devoluciones. Excluye transferencias propias y pagos de tarjeta. MSI se registra completo el día de compra.")
                     PlanningMetric(title: "Ingreso recibido", value: store.realIncomeMovements.contains(where: { period.contains($0.date) }) ? planningMoney(planning.observedIncome(store, period: period)) : "Sin depósitos", period: period.label, explanation: "Depósitos de ingreso real en débito, excluyendo traspasos propios, devoluciones y pagos de tarjetas. Puede ser parcial si falta actualizar cuentas.")
                 }
                 Button("Ver ingresos") { showIncome = true }.font(.caption)
