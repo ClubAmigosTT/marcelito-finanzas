@@ -39,13 +39,13 @@ struct PlanningIncomeView: View {
                     LabeledContent("Total habitual al mes", value: planning.monthlyIncome.map(planningMoney) ?? "Sin configurar")
                         .font(.headline)
                 } footer: { Text("Se usa para planear tu presupuesto. Los depósitos realmente recibidos se muestran por separado.") }
-                Section("Tus fuentes de ingreso") {
+                Section {
                     ForEach(planning.incomeSources) { source in
                         HStack {
                             Button { editing = source } label: {
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(source.name).foregroundStyle(Color.marcelitoNavy)
-                                    Text("\(planningMoney(source.amount)) · \(source.cadence)" + (source.account.isEmpty ? "" : " · " + source.account)).font(.caption).foregroundStyle(.secondary)
+                                    Text(sourceSummary(source)).font(.caption).foregroundStyle(.secondary)
                                     Text("\(planningMoney(source.monthlyAmount)) al mes").font(.caption).foregroundStyle(Color.marcelitoNavyMid)
                                 }.frame(maxWidth: .infinity, alignment: .leading)
                             }.buttonStyle(.plain)
@@ -53,7 +53,7 @@ struct PlanningIncomeView: View {
                         }
                     }
                     Button { editing = PlanningIncomeSource(name: "", amount: 0, cadence: "Mensual") } label: { Label("Agregar ingreso", systemImage: "plus.circle") }
-                } footer: {
+                } header: { Text("Tus fuentes de ingreso") } footer: {
                     if planning.state.incomeSources == nil, planning.state.incomeAmount != nil {
                         Text("Conservamos tu total anterior como Ingreso habitual. Si incluía varias fuentes, edítalo antes de agregarlas por separado para no sumarlas dos veces.")
                     }
@@ -90,6 +90,10 @@ struct PlanningIncomeView: View {
                 } message: { _ in Text("Solo cambia tu ingreso habitual para presupuestar. Los depósitos y movimientos se conservan.") }
         }
     }
+    private func sourceSummary(_ source: PlanningIncomeSource) -> String {
+        [planningMoney(source.amount), source.cadence, source.account].filter { !$0.isEmpty }.joined(separator: " · ")
+    }
+
 }
 struct PlanningIncomeSourceEditor: View {
     @Environment(FinancialPlanningStore.self) private var planning
@@ -104,7 +108,7 @@ struct PlanningIncomeSourceEditor: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Fuente de ingreso") {
+                Section {
                     TextField("Nombre, por ejemplo Nómina Santander", text: $name)
                     TextField("Importe MXN", text: $amount).keyboardType(.decimalPad)
                     Picker("Frecuencia", selection: $cadence) { Text("Mensual").tag("Mensual"); Text("Quincenal").tag("Quincenal") }
@@ -113,7 +117,7 @@ struct PlanningIncomeSourceEditor: View {
                         ForEach(Array(Set(store.movements.map(\.account) + store.statements.map(\.source) + [source.account])).filter { !$0.isEmpty }.sorted(), id: \.self) { Text($0).tag($0) }
                     }
                     if let value = parsePlanningAmount(amount) { LabeledContent("Equivalente mensual", value: planningMoney(cadence == "Quincenal" ? value * 2 : value)) }
-                } footer: { Text("Quincenal equivale a dos pagos al mes. Registrar una fuente no crea depósitos ni cambia tus movimientos.") }
+                } header: { Text("Fuente de ingreso") } footer: { Text("Quincenal equivale a dos pagos al mes. Registrar una fuente no crea depósitos ni cambia tus movimientos.") }
                 if let error { Text(error).foregroundStyle(Color.marcelitoDanger) }
                 Button("Guardar fuente") {
                     let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)

@@ -83,9 +83,12 @@ struct HomeView: View {
     @State private var importStatus = "Preparando…"
     @State private var isDiagnosticsPresented = false
     @State private var isSettingsPresented = false
-    @State private var showLatestExpenses = false
-    @State private var latestExpenseDate = Date.now
-    @State private var latestExpenseMode: FinancePeriodMode = .month
+    private struct ExpensePresentation: Identifiable {
+        let id = UUID()
+        let date: Date
+        let mode: FinancePeriodMode
+    }
+    @State private var expensePresentation: ExpensePresentation?
 
     private var hasData: Bool { !store.movements.isEmpty || !store.statements.isEmpty }
 
@@ -102,7 +105,7 @@ struct HomeView: View {
             }
             if hasData {
                 HomeMonthlyPlanCard(upload: { isImporterPresented = true }, showLatest: { date in
-                    latestExpenseDate = date; latestExpenseMode = .month; showLatestExpenses = true
+                    expensePresentation = ExpensePresentation(date: date, mode: .month)
                 })
                 PlanningDataFreshness { isImporterPresented = true }
                 LedgerQualityBanner(store: store)
@@ -114,7 +117,7 @@ struct HomeView: View {
                 }
                 if !store.operationalMetricsBlocked, let latest = planning.latestMovementDate(store) {
                     LastRecordedMonthSummary(date: latest) { date, mode in
-                        latestExpenseDate = date; latestExpenseMode = mode; showLatestExpenses = true
+                        expensePresentation = ExpensePresentation(date: date, mode: mode)
                     }
                 }
             } else {
@@ -208,8 +211,8 @@ struct HomeView: View {
             .sheet(isPresented: $isSettingsPresented) {
                 SettingsView()
             }
-            .sheet(isPresented: $showLatestExpenses) {
-                ExpensesView(initialDate: latestExpenseDate, initialMode: latestExpenseMode, isPresentedAsSheet: true)
+            .sheet(item: $expensePresentation) { destination in
+                ExpensesView(initialDate: destination.date, initialMode: destination.mode, isPresentedAsSheet: true)
             }
             .confirmationDialog(
                 "Borrar datos del dispositivo",
