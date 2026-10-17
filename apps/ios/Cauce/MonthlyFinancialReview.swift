@@ -133,10 +133,8 @@ struct TransferReviewView: View {
 struct MonthlyFinancialReviewView: View {
     @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
+    @Environment(FinancialPlanningStore.self) private var planning
     @State private var month = Calendar(identifier: .gregorian).dateInterval(of: .month, for: .now)!.start
-    @State private var budgetText = ""
-    @State private var targetText = ""
-    @State private var planMessage: String?
     @State private var copiedSummary = false
     private var audit: MonthlyFinancialAudit { store.monthlyFinancialAudit(for: month) }
     private var months: [Date] {
@@ -147,28 +145,6 @@ struct MonthlyFinancialReviewView: View {
     private func monthLabel(_ value: Date) -> String {
         let formatter = DateFormatter(); formatter.locale = Locale(identifier: "es_MX")
         formatter.dateFormat = "MMMM yyyy"; return formatter.string(from: value).capitalized
-    }
-    private var planKey: String {
-        let parts = Calendar(identifier: .gregorian).dateComponents([.year, .month], from: month)
-        return "marcelito.monthlyPlan.\(parts.year!).\(parts.month!)"
-    }
-    private func amount(_ value: String) -> Decimal? {
-        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, trimmed.range(of: #"^\d+(?:[.,]\d{1,2})?$"#, options: .regularExpression) != nil else { return nil }
-        return Decimal(string: trimmed.replacingOccurrences(of: ",", with: "."), locale: Locale(identifier: "en_US_POSIX"))
-    }
-    private func loadPlan() {
-        budgetText = UserDefaults.standard.string(forKey: planKey + ".budget") ?? ""
-        targetText = UserDefaults.standard.string(forKey: planKey + ".target") ?? ""
-        planMessage = nil
-    }
-    private func savePlan() {
-        guard (budgetText.isEmpty || amount(budgetText) != nil), (targetText.isEmpty || amount(targetText) != nil) else {
-            planMessage = "Escribe importes positivos sin separadores de miles."; return
-        }
-        UserDefaults.standard.set(budgetText, forKey: planKey + ".budget")
-        UserDefaults.standard.set(targetText, forKey: planKey + ".target")
-        planMessage = "Plan guardado para este mes."
     }
     private func copySummary(_ report: MonthlyFinancialAudit) {
         var lines = ["Marcelito · resumen mensual · \(monthLabel(month))",
@@ -230,29 +206,10 @@ struct MonthlyFinancialReviewView: View {
                     }
                 }
                 Section("Tu presupuesto y ahorro") {
-                    HStack {
-                        Text("Presupuesto de gasto")
-                        TextField("Importe MXN", text: $budgetText).keyboardType(.decimalPad).multilineTextAlignment(.trailing)
-                    }
-                    HStack {
-                        Text("Meta de ahorro")
-                        TextField("Importe MXN", text: $targetText).keyboardType(.decimalPad).multilineTextAlignment(.trailing)
-                    }
-                    Button("Guardar plan del mes") { savePlan() }
-                    if let planMessage { Text(planMessage).font(.caption).foregroundStyle(.secondary) }
-                    if report.canUseForBudget {
-                        if let budget = amount(budgetText) {
-                            LabeledContent("Presupuesto restante", value: (budget - report.netSpending).formatted(.currency(code: "MXN")))
-                            if report.netSpending > budget { Text("Superaste el presupuesto que definiste.").font(.caption).foregroundStyle(Color.marcelitoAmber) }
-                        }
-                        if let target = amount(targetText) {
-                            LabeledContent("Excedente de ingresos", value: report.surplus.formatted(.currency(code: "MXN")))
-                            LabeledContent("Falta para tu meta", value: max(0, target - report.surplus).formatted(.currency(code: "MXN")))
-                            Text("El excedente no acredita una transferencia a una cuenta de ahorro.").font(.caption).foregroundStyle(.secondary)
-                        }
-                    } else {
-                        Text("Puedes guardar tu plan. El avance se mostrará cuando haya cobertura suficiente y se resuelvan las posibles transferencias.").font(.caption).foregroundStyle(.secondary)
-                    }
+                    SharedMonthlyPlanEditor(month: month)
+                    let snapshot = planning.snapshot(store, month: month)
+                    LabeledContent("Disponible del mismo plan", value: snapshot.remaining.map(planningMoney) ?? "Completa ingreso y compromisos")
+                    Text("Comparte el plan de Inicio y Presupuesto. Incluye todos los gastos; MSI y préstamos se descuentan una sola vez.").font(.caption).foregroundStyle(.secondary)
                 }
             }
             .navigationTitle("Resumen mensual")
@@ -267,7 +224,7 @@ struct MonthlyFinancialReviewView: View {
                 Button("Aceptar", role: .cancel) { }
             } message: { Text("Puedes pegar aquí el desglose del mes. No incluye PDFs ni números completos de cuenta.") }
             .scrollDismissesKeyboard(.interactively)
-            .onAppear { loadPlan() }.onChange(of: month) { _, _ in loadPlan() }
+
             .foregroundStyle(Color.marcelitoNavy)
             .scrollContentBackground(.hidden)
             .background(MarcelitoAmbientBackground())

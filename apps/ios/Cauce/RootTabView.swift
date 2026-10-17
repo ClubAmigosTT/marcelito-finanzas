@@ -18,6 +18,7 @@ struct RootTabView: View {
     @Environment(FinancialPlanningStore.self) private var planning
     @State private var showIncomeOnboarding = false
     @State private var automaticReplayStarted = false
+    @State private var showPayments = false
 
     var body: some View {
         TabView(selection: $selectedTab) {
@@ -55,8 +56,11 @@ struct RootTabView: View {
         // Start the pending replay once after authentication; the existing
         // single-flight rebuild keeps a simultaneous manual tap harmless.
         .sheet(isPresented: $showIncomeOnboarding) { PlanningIncomeView() }
+        .sheet(isPresented: $showPayments) { NavigationStack { PaymentAgendaView().toolbar { Button("Cerrar") { showPayments = false } } } }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("marcelito.notification.route"))) { _ in routeNotification() }
         .task {
-            showIncomeOnboarding = !planning.state.incomeOnboardingCompleted
+            routeNotification()
+            showIncomeOnboarding = !planning.state.incomeOnboardingCompleted && !showPayments
             await PlanningNotifications.refresh(store: store, planning: planning)
             guard !automaticReplayStarted else { return }
             automaticReplayStarted = true
@@ -71,6 +75,14 @@ struct RootTabView: View {
             await PlanningNotifications.refresh(store: store, planning: planning)
         }
     }
+    private func routeNotification() {
+        guard let destination = UserDefaults.standard.string(forKey: "marcelito.navigation.pending") else { return }
+        UserDefaults.standard.removeObject(forKey: "marcelito.navigation.pending")
+        if destination == "accounts" { selectedTab = .accounts }
+        else if destination == "budget" { selectedTab = .budget }
+        else { showIncomeOnboarding = false; showPayments = true }
+    }
+
 }
 
 struct HomeView: View {
@@ -81,6 +93,7 @@ struct HomeView: View {
     @State private var isDeleteConfirmationPresented = false
     @State private var importReport: ImportReport?
     @State private var isImporting = false
+    @State private var importTask: Task<Void, Never>?
     @State private var importProgress = 0
     @State private var importStatus = "Preparando…"
     @State private var isDiagnosticsPresented = false
@@ -110,6 +123,8 @@ struct HomeView: View {
                     expensePresentation = ExpensePresentation(date: date, mode: .month)
                 })
                 PlanningDataFreshness { isImporterPresented = true }
+                PlanningAccountCoverage(period: .month(.now))
+                NavigationLink("Próximos pagos") { PaymentAgendaView() }
                 LedgerQualityBanner(store: store)
                 HomePersonalMetrics(showActivity: false)
                 if store.dashboardIsBlocked || store.operationalMetricsBlocked {
@@ -182,7 +197,7 @@ struct HomeView: View {
             .disabled(isImporting)
             .overlay {
                 if isImporting {
-                    ImportProgressOverlay(progress: importProgress, status: importStatus)
+                    ImportProgressOverlay(progress: importProgress, status: importStatus, cancel: importTask.map { task in { task.cancel() } })
                         .transition(.opacity)
                 }
             }
@@ -253,9 +268,10 @@ struct HomeView: View {
                 stage: "import.start",
                 message: "Importación iniciada: \(urls.count) PDF(s)."
             )
-            Task { @MainActor in
+            importTask = Task { @MainActor in
                 var items: [ImportReportItem] = []
                 for (index, url) in urls.enumerated() {
+                    if Task.isCancelled { break }
                     importStatus = "Leyendo \(url.lastPathComponent)…"
                     let completedCount = Double(index)
                     let totalCount = max(Double(urls.count), 1)
@@ -264,12 +280,19 @@ struct HomeView: View {
                     do {
                         let summary = try await store.importPDFAsync(from: url, stage: { message in
                             importStatus = message
+                        }, progress: { fraction, message in
+                            guard isImporting else { return }
+                            importStatus = "Archivo \(index + 1)/\(urls.count) · " + message
+                            importProgress = max(importProgress, Int((Double(index) + fraction) / Double(max(1, urls.count)) * 100))
                         })
                         items.append(ImportReportItem(summary: summary))
                         DiagnosticsRecorder.record(
                             stage: "import.file",
                             message: "\(summary.source) · \(summary.period): \(summary.imported) movimiento(s)\(summary.usedOCR ? " · OCR" : "")."
                         )
+                    } catch is CancellationError {
+                        items.append(ImportReportItem(fileName: url.lastPathComponent, errorMessage: "Importación cancelada. Este archivo no se incorporó; los archivos anteriores se conservaron."))
+                        break
                     } catch {
                         DiagnosticsRecorder.record(
                             level: "error",
@@ -286,6 +309,7 @@ struct HomeView: View {
                 }
                 importStatus = "Listo"
                 isImporting = false
+                importTask = nil
                 importReport = ImportReport(fileCount: urls.count, items: items)
                 store.runAutomaticAuditIfNeeded(trigger: "import")
                 DiagnosticsRecorder.record(
@@ -511,6 +535,7 @@ struct ImportReportSheet: View {
 
                             ForEach(report.items) { item in
                                 ImportReportRow(item: item)
+                                if item.errorMessage != nil { RetryStatementImport(fileName: item.fileName) }
                             }
                         }
                     }
@@ -771,6 +796,7 @@ struct HistoricalDashboardBlockedCard: View {
 struct ImportProgressOverlay: View {
     let progress: Int
     let status: String
+    var cancel: (() -> Void)? = nil
 
     var body: some View {
         ZStack {
@@ -792,6 +818,7 @@ struct ImportProgressOverlay: View {
                             .lineLimit(2)
                     }
                 }
+                if let cancel { Button("Cancelar importación", action: cancel).font(.subheadline) }
                 ProgressView(value: Double(progress), total: 100)
                     .tint(Color.marcelitoAmber)
                 Text("\(progress)%")

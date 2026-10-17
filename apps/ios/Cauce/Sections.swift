@@ -186,6 +186,7 @@ struct MovementsView: View {
             List {
                 filtersSection
                 Section("Revisión financiera") {
+                    CategoryUndoButton()
                     Button("Resumen mensual") { isMonthlyReviewPresented = true }
                     Button("Revisar transferencias (\(store.pendingTransferReviewPairs.count) parejas)") { isTransferReviewPresented = true }
                 }
@@ -1806,6 +1807,7 @@ struct AccountsView: View {
     @State private var isStatementImporterPresented = false
     @State private var statementImportReport: ImportReport?
     @State private var isImportingStatements = false
+    @State private var statementImportTask: Task<Void, Never>?
     @State private var statementImportProgress = 0
     @State private var statementImportStatus = "Preparando…"
     @State private var isDiagnosticsPresented = false
@@ -1930,9 +1932,10 @@ struct AccountsView: View {
             statementImportProgress = 0
             statementImportStatus = urls.count == 1 ? "Preparando el estado…" : "Preparando \(urls.count) estados…"
             DiagnosticsRecorder.record(stage: "import.start", message: "Importación iniciada desde Cuentas: \(urls.count) PDF(s).")
-            Task { @MainActor in
+            statementImportTask = Task { @MainActor in
                 var items: [ImportReportItem] = []
                 for (index, url) in urls.enumerated() {
+                    if Task.isCancelled { break }
                     statementImportStatus = "Leyendo \(url.lastPathComponent)…"
                     let totalCount = max(Double(urls.count), 1)
                     statementImportProgress = Int((Double(index) / totalCount * 100).rounded())
@@ -1940,12 +1943,19 @@ struct AccountsView: View {
                     do {
                         let summary = try await store.importPDFAsync(from: url, stage: { message in
                             statementImportStatus = message
+                        }, progress: { fraction, message in
+                            guard isImportingStatements else { return }
+                            statementImportStatus = "Archivo \(index + 1)/\(urls.count) · " + message
+                            statementImportProgress = max(statementImportProgress, Int((Double(index) + fraction) / Double(max(1, urls.count)) * 100))
                         })
                         items.append(ImportReportItem(summary: summary))
                         DiagnosticsRecorder.record(
                             stage: "import.file",
                             message: "\(summary.source) · \(summary.period): \(summary.imported) movimiento(s)\(summary.usedOCR ? " · OCR" : "")."
                         )
+                    } catch is CancellationError {
+                        items.append(ImportReportItem(fileName: url.lastPathComponent, errorMessage: "Importación cancelada. Este archivo no se incorporó; los archivos anteriores se conservaron."))
+                        break
                     } catch {
                         DiagnosticsRecorder.record(level: "error", stage: "import.error", message: "\(url.lastPathComponent): \(error.localizedDescription)")
                         items.append(ImportReportItem(fileName: url.lastPathComponent, errorMessage: error.localizedDescription))
@@ -1955,6 +1965,7 @@ struct AccountsView: View {
                 }
                 statementImportStatus = "Listo"
                 isImportingStatements = false
+                statementImportTask = nil
                 statementImportReport = ImportReport(fileCount: urls.count, items: items)
                 store.runAutomaticAuditIfNeeded(trigger: "import")
                 DiagnosticsRecorder.record(
@@ -2304,7 +2315,7 @@ struct AccountsView: View {
             .disabled(isImportingStatements)
             .overlay {
                 if isImportingStatements {
-                    ImportProgressOverlay(progress: statementImportProgress, status: statementImportStatus)
+                    ImportProgressOverlay(progress: statementImportProgress, status: statementImportStatus, cancel: statementImportTask.map { task in { task.cancel() } })
                         .transition(.opacity)
                 }
             }

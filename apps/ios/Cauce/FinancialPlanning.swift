@@ -7,7 +7,7 @@ enum FinancePeriodMode: String, CaseIterable, Identifiable, Codable {
     case day = "Día", week = "Semana", month = "Mes", year = "Año", range = "Rango"
     var id: String { rawValue }
 }
-struct FinancePeriod: Hashable {
+struct FinancePeriod: Hashable, Codable {
     let start: Date
     let end: Date // exclusive, all queries share this convention
     func contains(_ date: Date) -> Bool { date >= start && date < end }
@@ -103,6 +103,8 @@ struct InstallmentCommitment: Identifiable, Codable, Equatable {
     }
 }
 struct SavingsGoal: Codable, Identifiable {
+    var archived: Bool? = nil
+    var entries: [SavingsEntry]? = nil
     var id = UUID()
     var name: String
     var target: Decimal
@@ -128,6 +130,11 @@ struct MonthBudgetPlan: Codable {
     var surplusDestination: SurplusDestination = .savings
     var carryIn: Decimal = 0
     var closed = false
+    var spendingLimit: Decimal? = nil
+    var closing: BudgetClosing? = nil
+    var legacyImported: Bool? = nil
+    var legacySpendingLimit: Decimal? = nil
+    var legacySavingsTarget: Decimal? = nil
 }
 struct PlanningIncomeSource: Identifiable, Codable, Equatable {
     var id = UUID()
@@ -184,6 +191,7 @@ struct PlanningState: Codable {
     // nil means a v1 total has not yet been split into sources. An explicit
     // empty array means the user removed every source, not a zero income.
     var incomeSources: [PlanningIncomeSource]? = nil
+    var incomeHistory: [IncomeRevision]? = nil
     var incomeOnboardingCompleted = false
     var labels: [String: PersonalExpenseLabel] = [:]
     var installments: [InstallmentCommitment] = []
@@ -191,6 +199,7 @@ struct PlanningState: Codable {
     var budgets: [String: MonthBudgetPlan] = [:]
     var goals: [SavingsGoal] = []
     var cardTerms: [String: CardPaymentTerms] = [:]
+    var cardPaymentLinks: [CardPaymentLink]? = nil
     var remindersEnabled = false
     var fixedMerchantRules: [String: Bool] = [:]
     // Optional for backward-compatible decoding of existing planning records.
@@ -308,6 +317,7 @@ struct PlanningState: Codable {
                 state = PlanningState(); loadError = "No se pudo abrir tu planificación. Los datos guardados se conservan."
             }
         } else { state = PlanningState() }
+        migrateLegacyMonthlyPlans(defaults: defaults)
     }
     @discardableResult func save() -> Bool {
         // Never overwrite a future/corrupted schema with an empty plan.
@@ -321,27 +331,36 @@ struct PlanningState: Codable {
         defaults.removeObject(forKey: key); defaults.removeObject(forKey: key + ".backup")
         invalidateSpendingProjections(); hasUnsavedPlanChanges = false; revision = UUID()
     }
-    var incomeSources: [PlanningIncomeSource] {
+    private var legacyIncomeSources: [PlanningIncomeSource] {
         if let sources = state.incomeSources { return sources }
         guard let amount = state.incomeAmount else { return [] }
         return [PlanningIncomeSource(id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, name: "Ingreso habitual", amount: amount, cadence: state.incomeCadence)]
     }
-    var monthlyIncome: Decimal? {
-        guard !incomeSources.isEmpty else { return nil }
-        return incomeSources.reduce(0) { $0 + $1.monthlyAmount }
+    func incomeSources(for month: Date) -> [PlanningIncomeSource] {
+        guard let history = state.incomeHistory, !history.isEmpty else { return legacyIncomeSources }
+        let start = FinancePeriod.month(month).start
+        return history.filter { $0.effectiveMonth <= start }.max { $0.effectiveMonth < $1.effectiveMonth }?.sources ?? []
     }
-    @discardableResult func setIncomeSources(_ sources: [PlanningIncomeSource]) -> Bool {
+    var incomeSources: [PlanningIncomeSource] { incomeSources(for: .now) }
+    func monthlyIncome(for month: Date) -> Decimal? {
+        let sources = incomeSources(for: month)
+        return sources.isEmpty ? nil : sources.reduce(0) { $0 + $1.monthlyAmount }
+    }
+    var monthlyIncome: Decimal? { monthlyIncome(for: .now) }
+    @discardableResult func setIncomeSources(_ sources: [PlanningIncomeSource], effectiveFrom month: Date = .now) -> Bool {
         guard sources.allSatisfy({ !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.amount >= 0 && !$0.amount.isNaN && RecurringCadence(rawValue: $0.cadence) != nil }), Set(sources.map(\.id)).count == sources.count else { return false }
         let previous = state
-        state.incomeSources = sources
-        // Preserve an equivalent aggregate for older app versions. This never
-        // creates a deposit in the audited ledger.
-        state.incomeAmount = sources.isEmpty ? nil : sources.reduce(0) { $0 + $1.monthlyAmount }
+        var history = state.incomeHistory ?? [IncomeRevision(effectiveMonth: .distantPast, sources: legacyIncomeSources)]
+        let start = FinancePeriod.month(month).start
+        history.removeAll { $0.effectiveMonth == start }
+        history.append(IncomeRevision(effectiveMonth: start, sources: sources))
+        state.incomeHistory = history.sorted { $0.effectiveMonth < $1.effectiveMonth }
+        state.incomeSources = incomeSources
+        state.incomeAmount = monthlyIncome
         state.incomeCadence = "Mensual"
         state.incomeOnboardingCompleted = true
         if save() { return true }
-        state = previous
-        return false
+        state = previous; return false
     }
     func latestMovementDate(_ store: FinanceStore, account: String? = nil, now: Date = .now) -> Date? {
         let dates = (store.netExpenseMovements + store.realIncomeMovements).filter { (account == nil || $0.account == account) && $0.date <= now }.map(\.date)
@@ -465,7 +484,7 @@ struct PlanningState: Codable {
         let value = projection(store)
         let key = PeriodCategoryKey(period: period, fixed: fixed)
         if let cached = budgetCategoryCache[key] { return cached }
-        let result = value.budgetRows.filter { period.contains($0.date) && isOrdinary($0) && (fixed == nil || isFixed($0) == fixed) }.reduce(into: [String: Decimal]()) { result, row in result[budgetCategory(row), default: 0] += personalContribution(row) }
+        let result = value.budgetRows.filter { period.contains($0.date) && (fixed == nil || isFixed($0) == fixed) }.reduce(into: [String: Decimal]()) { result, row in result[budgetCategory(row), default: 0] += row.expenseContribution }
         if budgetCategoryCache.count >= 96 { budgetCategoryCache.removeAll() }
         budgetCategoryCache[key] = result; return result
     }
@@ -540,8 +559,8 @@ struct PlanningState: Codable {
             // A newly confirmed fixed bill must also leave the historical
             // variable proposal, without rewriting historical classifications.
             let period = FinancePeriod.month(sample)
-            return projection(store).budgetRows.filter { period.contains($0.date) && isOrdinary($0) && !isFixed($0, planningFor: month) }
-                .reduce(into: [:]) { $0[category($1), default: 0] += personalContribution($1) }
+            return projection(store).budgetRows.filter { period.contains($0.date) && !isFixed($0, planningFor: month) }
+                .reduce(into: [:]) { $0[category($1), default: 0] += $1.expenseContribution }
         }
         let categories = Set(all.flatMap { $0.keys })
         let result = Dictionary(uniqueKeysWithValues: categories.map { category in
@@ -562,8 +581,8 @@ struct PlanningState: Codable {
         func observed(_ sample: Date) -> [String: Decimal] {
             guard !fixedExpenses.isEmpty else { return budgetCategoryTotals(store, period: .month(sample), fixed: true) }
             let period = FinancePeriod.month(sample)
-            return projection(store).budgetRows.filter { period.contains($0.date) && isOrdinary($0) && isFixed($0, planningFor: month) && !managed.contains(fixedExpenseKey($0)) }
-                .reduce(into: [:]) { $0[category($1), default: 0] += personalContribution($1) }
+            return projection(store).budgetRows.filter { period.contains($0.date) && isFixed($0, planningFor: month) && !managed.contains(fixedExpenseKey($0)) }
+                .reduce(into: [:]) { $0[category($1), default: 0] += $1.expenseContribution }
         }
         let previousFixed = observed(previous)
         var result = previousFixed.isEmpty ? observed(month) : previousFixed
@@ -572,6 +591,7 @@ struct PlanningState: Codable {
     }
     func plan(for date: Date) -> MonthBudgetPlan { state.budgets[monthKey(date)] ?? MonthBudgetPlan() }
     func setPlan(_ plan: MonthBudgetPlan, for date: Date, persist: Bool = true) {
+        guard self.plan(for: date).closing == nil else { return }
         state.budgets[monthKey(date)] = plan
         hasUnsavedPlanChanges = true
         if persist { save() }
@@ -591,6 +611,7 @@ struct PlanningState: Codable {
         limits(store, month: month).values.reduce(0, +) + fixedLimits(store, month: month).values.reduce(0, +) + state.installments.filter { FinancePeriod.month(month).contains($0.purchaseDate) }.reduce(0) { $0 + $1.total }
     }
     func snapshot(_ store: FinanceStore, month: Date, now: Date = .now) -> BudgetSnapshot {
+        if let closing = plan(for: month).closing { return closing.snapshot(in: .month(month)) }
         _ = projection(store); _ = budgetGeneration
         let cacheKey = SnapshotKey(month: FinancePeriod.month(month).start, day: Calendar.current.startOfDay(for: now))
         if let cached = snapshotCache[cacheKey] { return cached }
@@ -600,11 +621,11 @@ struct PlanningState: Codable {
         let fixedOverrun = budgetCategoryTotals(store, period: period, fixed: true).reduce(Decimal(0)) { $0 + max(0, $1.value - fixedByCategory[$1.key, default: 0]) }
         let variableSpent = budgetCategoryTotals(store, period: period, fixed: false).values.reduce(0, +)
         let monthlyMSI = commitments(store, month: month)
-        let income = monthlyIncome
+        let income = monthlyIncome(for: month)
         let loanReserve = store.loanLedger.reserve(month: month, paid: store.loanPaid(in: period))
         let unknownLoans = loanReserve.reserved == nil || store.loanLedger.loadError != nil
         let unknown = hasUnknownCommitments(store, month: month)
-        let available = unknown || unknownLoans ? nil : income.map { $0 + plan.carryIn - fixedBudget - fixedOverrun - plan.savingsTarget - monthlyMSI - (loanReserve.reserved ?? 0) }
+        let available = unknown || unknownLoans ? nil : income.map { min($0 + plan.carryIn - plan.savingsTarget, plan.spendingLimit ?? ($0 + plan.carryIn - plan.savingsTarget)) - fixedBudget - fixedOverrun - monthlyMSI - (loanReserve.reserved ?? 0) }
         let remaining = available.map { $0 - variableSpent }
         let c = Calendar.current
         let today = c.startOfDay(for: now)
@@ -613,16 +634,6 @@ struct PlanningState: Codable {
         let value = BudgetSnapshot(period: period, income: income, fixed: fixedBudget, msi: monthlyMSI, savings: plan.savingsTarget, variableSpent: variableSpent, available: available, remaining: remaining, remainingDays: days, hasData: hasData(store, period: period), hasUnknownCommitments: unknown, fixedOverrun: fixedOverrun, loans: loanReserve.reserved, hasUnknownLoans: unknownLoans)
         if snapshotCache.count >= 24 { snapshotCache.removeAll() }
         snapshotCache[cacheKey] = value; return value
-    }
-    @discardableResult func closeMonth(_ month: Date, surplus: Decimal) -> Bool {
-        let range = FinancePeriod.month(month)
-        guard range.end <= Date.now, !plan(for: month).closed, surplus >= 0 else { return false }
-        var plan = plan(for: month)
-        if plan.surplusDestination == .nextMonth {
-            var next = self.plan(for: range.end); next.carryIn += surplus; setPlan(next, for: range.end)
-        } else if !state.goals.isEmpty { state.goals[0].saved += surplus }
-        else { return false }
-        plan.closed = true; setPlan(plan, for: month); return true
     }
     var fixedExpenses: [PlanningFixedExpense] { state.fixedExpenses ?? [] }
     @discardableResult func setDismissedRecurringExpenses(_ keys: [String]) -> Bool {
@@ -674,17 +685,17 @@ struct PlanningState: Codable {
         if let cache = recurringExpenseCache, cache.key == value.key, cache.day == day { return cache.items }
         let from = Calendar.current.date(byAdding: .month, value: -12, to: now)!
         let configured = Set(fixedExpenses.map(\.matchKey)).union(state.dismissedRecurringExpenseKeys ?? [])
-        let rows = value.budgetRows.filter { $0.date >= from && $0.date <= now && $0.expenseContribution > 0 && personalContribution($0) > 0 && isOrdinary($0) && label(for: $0).fixed != false && canLinkFixedExpense($0) }
+        let rows = value.budgetRows.filter { $0.date >= from && $0.date <= now && $0.expenseContribution > 0 && isOrdinary($0) && label(for: $0).fixed != false && canLinkFixedExpense($0) }
         let latestByAccount = Dictionary(uniqueKeysWithValues: Set(rows.map(\.account)).compactMap { account in
             latestDataDate(store, account: account, now: now).map { (account, $0) }
         })
         let grouped = Dictionary(grouping: rows, by: fixedExpenseKey)
         let items = grouped.compactMap { key, rows -> RecurringExpenseSuggestion? in
             guard !configured.contains(key),
-                  let pattern = RecurringPattern.detect(rows.map { RecurringObservation(date: $0.date, amount: personalContribution($0)) }),
+                  let pattern = RecurringPattern.detect(rows.map { RecurringObservation(date: $0.date, amount: $0.expenseContribution) }),
                   let cadence = FixedExpenseCadence(rawValue: pattern.cadence.rawValue) else { return nil }
             let observations = Set(pattern.observations)
-            let evidence = rows.filter { observations.contains(RecurringObservation(date: $0.date, amount: personalContribution($0))) }.sorted { $0.date < $1.date }
+            let evidence = rows.filter { observations.contains(RecurringObservation(date: $0.date, amount: $0.expenseContribution)) }.sorted { $0.date < $1.date }
             guard let last = evidence.last else { return nil }
             // Recommend patterns still present near the account's latest data,
             // not old habits from a year ago. Missing statements imply no cancellation.
@@ -725,7 +736,7 @@ struct PlanningState: Codable {
     }
 
 }
-struct BudgetSnapshot {
+struct BudgetSnapshot: Codable {
     let period: FinancePeriod
     let income: Decimal?
     let fixed: Decimal

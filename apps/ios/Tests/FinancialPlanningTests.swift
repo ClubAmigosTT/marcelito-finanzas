@@ -64,7 +64,7 @@ import XCTest
             XCTAssertEqual(p.personalTotal(store, period: period), 0)
             label.extraordinary = false; p.setLabel(label, for: movement)
             p.state.fixedMerchantRules[p.merchantKey(movement)] = true
-            XCTAssertEqual(p.budgetCategoryTotals(store, period: period, fixed: true)["Tiendita"], 700)
+            XCTAssertEqual(p.budgetCategoryTotals(store, period: period, fixed: true)["Tiendita"], 1000)
             XCTAssertTrue(p.budgetCategoryTotals(store, period: period, fixed: false).isEmpty)
             XCTAssertEqual(store.movements[0].amount, -1000)
         }
@@ -441,14 +441,14 @@ import XCTest
             XCTAssertEqual(s.statementMetricForTesting(authoritative).debtBalance, 1000)
         }
     }
-    func testSavingsGoalAndCloseAreIdempotent() {
-        withStores { _, p, _ in
-            p.state.goals = [SavingsGoal(name: "Fondo", target: 10000, saved: 1000, monthlyContribution: 2000)]
-            XCTAssertEqual(p.state.goals[0].estimatedMonths, 5)
-            XCTAssertTrue(p.closeMonth(date(6, 1), surplus: 100))
-            XCTAssertEqual(p.state.goals[0].saved, 1100)
-            XCTAssertFalse(p.closeMonth(date(6, 1), surplus: 100))
-            XCTAssertFalse(p.closeMonth(date(12, 1), surplus: 100))
+    func testSavingsGoalAndUncoveredCloseCannotAssignUnprovenSurplus() {
+        withStores { store, p, _ in
+            let goal = SavingsGoal(name: "Fondo", target: 10000, saved: 1000, monthlyContribution: 2000)
+            p.state.goals = [goal]
+            XCTAssertEqual(goal.estimatedMonths, 5)
+            XCTAssertFalse(p.closeMonth(date(6,1),store:store,goalID:goal.id))
+            XCTAssertEqual(p.state.goals[0].saved,1000)
+            XCTAssertFalse(p.closeMonth(date(12,1),store:store,goalID:goal.id))
         }
     }
     func testMedianUsesThreeCoveredMonthsAndKeepsFixedSeparate() {

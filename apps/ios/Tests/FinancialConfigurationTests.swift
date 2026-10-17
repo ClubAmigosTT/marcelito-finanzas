@@ -129,7 +129,7 @@ import XCTest
             let item = PlanningFixedExpense(name: "Internet", amount: 500, category: "Software y suscripciones", matchKey: p.fixedExpenseKey(ordinary), startMonth: date(10))
             XCTAssertTrue(p.setFixedExpenses([item]))
             XCTAssertTrue(p.isFixed(ordinary)); XCTAssertFalse(p.isFixed(exception))
-            XCTAssertEqual(p.budgetCategoryTotals(store, period: .month(date(10)), fixed: false)[item.category], 400)
+            XCTAssertEqual(p.budgetCategoryTotals(store, period: .month(date(10)), fixed: false)[item.category], 500)
             XCTAssertEqual(p.label(for: exception).sharedPerson, "Ana")
             XCTAssertTrue(p.setFixedExpenses([])); XCTAssertFalse(p.isFixed(ordinary))
             XCTAssertEqual(p.label(for: exception).fixed, false); XCTAssertEqual(store.movements.count, 2)

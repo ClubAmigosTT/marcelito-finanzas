@@ -207,7 +207,7 @@ struct PlanningFixedExpenseEditor: View {
             Form {
                 Section("Gasto fijo") {
                     TextField("Nombre · renta, internet…", text: $name)
-                    TextField("Importe de tu parte · MXN", text: $amount).keyboardType(.decimalPad)
+                    TextField("Importe del pago · MXN", text: $amount).keyboardType(.decimalPad)
                     Picker("Frecuencia", selection: $cadence) { ForEach(FixedExpenseCadence.allCases) { Text($0.rawValue).tag($0) } }
                     Picker("Categoría de presupuesto", selection: $category) { ForEach(categories, id: \.self) { Text($0).tag($0) } }
                     if let amount = parsePlanningAmount(amount), amount > 0 {

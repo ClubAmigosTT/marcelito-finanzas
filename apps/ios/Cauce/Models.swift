@@ -1050,7 +1050,7 @@ struct LedgerAuditRun: Codable, Identifiable {
 /// Single-key envelope used as the active ledger pointer. Keeping movements
 /// and statements in one value prevents a crash between two UserDefaults
 /// writes from producing a mixed-generation ledger.
-private struct LedgerEnvelope: Codable {
+struct LedgerEnvelope: Codable {
     let schemaVersion: Int
     let version: UUID
     let savedAt: Date
@@ -3899,7 +3899,7 @@ final class FinanceStore {
         if let value = cachedProjection(spendingCoverageCache[key]) { return value }
         let value: Set<Date> = {
         let calendar = Calendar.current
-        let selected = statements.filter { account == nil || $0.source == account }
+        let selected = statements.filter { account == nil || $0.source == account || $0.accountKey == account }
         let groups = Dictionary(grouping: selected) { $0.accountKey ?? $0.source }
         var common: Set<Date>?
         for records in groups.values {
@@ -5096,6 +5096,8 @@ final class FinanceStore {
     /// Creates an isolated, empty store for parser-only probes. It must never
     /// read or write UserDefaults: PDF extraction can call this from a detached
     /// background task while the live store is committing a ledger snapshot.
+    static func blockedRecoveryStore() -> FinanceStore { FinanceStore(reconciliationOnly: true) }
+
     private init(reconciliationOnly: Bool) {
         loanLedger = LoanLedger(defaults: nil)
         isReconciliationOnly = reconciliationOnly
@@ -5108,9 +5110,54 @@ final class FinanceStore {
         manualDashboardUnlockEnabled = false
     }
 
+    @ObservationIgnored private var categoryUndoCache: CategoryUndoRecord?
+    var categoryUndoCount: Int {
+        _ = ledgerVersion
+        if categoryUndoCache == nil, let data = UserDefaults.standard.data(forKey: "marcelito.categoryUndo.v1") {
+            categoryUndoCache = try? JSONDecoder().decode(CategoryUndoRecord.self, from: data)
+        }
+        guard let record = categoryUndoCache, record.version == ledgerVersion else { return 0 }
+        return record.rows.count
+    }
+    @discardableResult func undoLastCategoryChange() -> Bool {
+        guard categoryUndoCount > 0, let record = categoryUndoCache else { return false }
+        let defaults = UserDefaults.standard
+        guard (defaults.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]) == record.expectedRules,
+              (defaults.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]) == record.expectedOverrides,
+              defaults.data(forKey: "marcelito.manualReviews.v1") == record.expectedReviews else { return false }
+        let current = Dictionary(movements.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for expected in record.expectedRows {
+            guard let row = current[expected.id], row.category == expected.category,
+                  row.classificationTags == expected.classificationTags, row.travelRelated == expected.travelRelated,
+                  row.manuallyReviewed == expected.manuallyReviewed,
+                  row.manuallyAccountingReviewed == expected.manuallyAccountingReviewed else { return false }
+        }
+        let originals = Dictionary(record.rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        movements = movements.map { current in
+            guard let previous = originals[current.id] else { return current }
+            // Undo only the category metadata. Never restore an old amount,
+            // date, movement kind, transfer pairing or extraction evidence.
+            var restored = current
+            restored.category = previous.category; restored.classificationTags = previous.classificationTags
+            restored.travelRelated = previous.travelRelated; restored.manuallyReviewed = previous.manuallyReviewed
+            restored.manuallyAccountingReviewed = previous.manuallyAccountingReviewed
+            return restored
+        }
+        defaults.set(record.rules, forKey: categoryRulesKey)
+        defaults.set(record.overrides, forKey: manualCategoryOverridesKey)
+        if let reviews = record.reviews { defaults.set(reviews, forKey: "marcelito.manualReviews.v1") }
+        else { defaults.removeObject(forKey: "marcelito.manualReviews.v1") }
+        persist(markingChange: true)
+        categoryUndoCache = nil; defaults.removeObject(forKey: "marcelito.categoryUndo.v1")
+        return true
+    }
     @discardableResult
     func updateCategory(for movement: Movement, to category: String, applyToMerchant: Bool) -> Bool {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return false }
+        let beforeRows = movements
+        let beforeRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
+        let beforeOverrides = UserDefaults.standard.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
+        let beforeReviews = UserDefaults.standard.data(forKey: "marcelito.manualReviews.v1")
         let key = categoryRuleKey(for: movements[index])
         func apply(_ targetIndex: Int, manuallyReviewed: Bool) {
             let title = movements[targetIndex].normalizedMerchant ?? movements[targetIndex].displayMerchant ?? movements[targetIndex].title
@@ -5175,6 +5222,16 @@ final class FinanceStore {
             }
         }
         persist(markingChange: true)
+        let changed = zip(beforeRows, movements).filter { old, new in old.category != new.category || old.manuallyReviewed != new.manuallyReviewed || old.manuallyAccountingReviewed != new.manuallyAccountingReviewed || old.classificationTags != new.classificationTags || old.travelRelated != new.travelRelated }.map { $0.0 }
+        if !changed.isEmpty || beforeRules != (UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]) {
+            let changedIDs = Set(changed.isEmpty ? [beforeRows[index].id] : changed.map(\.id))
+            let record = CategoryUndoRecord(version: ledgerVersion, rows: changed.isEmpty ? [beforeRows[index]] : changed, rules: beforeRules, overrides: beforeOverrides, reviews: beforeReviews,
+                expectedRows: movements.filter { changedIDs.contains($0.id) },
+                expectedRules: UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:],
+                expectedOverrides: UserDefaults.standard.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:],
+                expectedReviews: UserDefaults.standard.data(forKey: "marcelito.manualReviews.v1"))
+            if let data = try? JSONEncoder().encode(record) { UserDefaults.standard.set(data, forKey: "marcelito.categoryUndo.v1"); categoryUndoCache = record }
+        }
         DiagnosticsRecorder.record(
             stage: "categories.manual",
             message: "Categoría manual actualizada a \(category)."
@@ -5702,6 +5759,8 @@ final class FinanceStore {
         canonicalRebuildPending = false
         ledgerRefreshState = .ready
         persist()
+        categoryUndoCache = nil
+        UserDefaults.standard.removeObject(forKey: "marcelito.categoryUndo.v1")
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: movementKey)
         defaults.removeObject(forKey: statementKey)
@@ -6588,7 +6647,8 @@ final class FinanceStore {
         allowOCR: Bool,
         sourceOverride: String?,
         kindOverride: StatementKind?,
-        learnedRules: [String: String]
+        learnedRules: [String: String],
+        progress: (@Sendable (Double, String) -> Void)? = nil
     ) throws -> PDFImportExtraction {
         guard data.count <= 50 * 1024 * 1024 else {
             throw FinanceImportError.documentTooLarge
@@ -6609,6 +6669,7 @@ final class FinanceStore {
         var pageTexts: [String] = []
         for index in 0..<document.pageCount {
             try Task.checkCancellation()
+            progress?(0.05 + 0.25 * Double(index + 1) / Double(max(1, document.pageCount)), "Texto · página \(index + 1) de \(document.pageCount)")
             guard let pageText = document.page(at: index)?.string,
                   !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             pageTexts.append("__PDF_PAGE_\(index + 1)__\n\(pageText)")
@@ -6689,7 +6750,8 @@ final class FinanceStore {
                 from: document,
                 pageIndexes: rappiPages,
                 prioritizeNumericEvidence: selectableSource == "Rappi",
-                issuerHint: selectableSource
+                issuerHint: selectableSource,
+                progress: progress
             )
             : []
         try Task.checkCancellation()
@@ -6831,7 +6893,8 @@ final class FinanceStore {
                 from: document,
                 pageIndexes: administrativePageIndexes,
                 prioritizeNumericEvidence: true,
-                issuerHint: source
+                issuerHint: source,
+                progress: progress
             )
             let administrativeText = Self.ocrText(from: administrativeObservations)
             accountKey = Self.maskedAccountKey(from: administrativeText, source: source)
@@ -6905,7 +6968,8 @@ final class FinanceStore {
                     pageIndexes: nil,
                     prioritizeNumericEvidence: false,
                     forceRegionRecovery: true,
-                    issuerHint: source
+                    issuerHint: source,
+                progress: progress
                 )
                 try Task.checkCancellation()
                 let retryResult = Self.parseSantanderTable(
@@ -7737,7 +7801,8 @@ final class FinanceStore {
     private static func extractPDFUsingCache(
         data: Data, fileName: String, allowOCR: Bool,
         sourceOverride: String?, kindOverride: StatementKind?, learnedRules: [String: String],
-        forceFresh: Bool = false
+        forceFresh: Bool = false,
+        progress: (@Sendable (Double, String) -> Void)? = nil
     ) throws -> PDFImportExtraction {
         let fingerprint = pdfFingerprint(data)
         let keyData = try JSONSerialization.data(withJSONObject: [
@@ -7754,6 +7819,7 @@ final class FinanceStore {
            var cached = cache?.load(PDFImportExtraction.self, key: key),
            cached.sourceFingerprint == fingerprint {
             cached.documentData = data
+            progress?(0.85, "Lectura guardada · validando estado…")
             return cached
         }
         if forceFresh {
@@ -7764,7 +7830,7 @@ final class FinanceStore {
         }
         let result = try extractPDF(data: data, fileName: fileName, allowOCR: allowOCR,
                                     sourceOverride: sourceOverride, kindOverride: kindOverride,
-                                    learnedRules: learnedRules)
+                                    learnedRules: learnedRules, progress: progress)
         // Keep uncertain readings out of the cache so an explicit retry always
         // performs fresh extraction. Certification also bypasses this helper.
         let reconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
@@ -7862,7 +7928,8 @@ final class FinanceStore {
         kindOverride: StatementKind? = nil,
         normalizeAfterImport: Bool = true,
         forceFresh: Bool = false,
-        stage: ((String) -> Void)? = nil
+        stage: ((String) -> Void)? = nil,
+        progress: (@MainActor @Sendable (Double, String) -> Void)? = nil
     ) async throws -> ImportSummary {
         let didStartAccessing = url.startAccessingSecurityScopedResource()
         defer {
@@ -7885,13 +7952,15 @@ final class FinanceStore {
                     sourceOverride: sourceOverride,
                     kindOverride: kindOverride,
                     learnedRules: learnedRules,
-                    forceFresh: forceFresh
+                    forceFresh: forceFresh,
+                    progress: { fraction, message in Task { @MainActor in progress?(fraction, message) } }
                 )
             }
         }
         try Task.checkCancellation()
         DiagnosticsRecorder.record(stage: "import.extract.done", message: "\(localExtraction.source): \(localExtraction.pageCount) página(s), \(localExtraction.candidates.count) fila(s); incorporando al libro en la interfaz.")
         stage?("\(Self.localExtractionStage(for: localExtraction.recoveryAttempts)); conciliando contra los totales…")
+        progress?(0.92, "Conciliando y guardando…")
         let extraction = localExtraction
         try Task.checkCancellation()
         let result = try applyPDFExtraction(
@@ -7902,6 +7971,7 @@ final class FinanceStore {
             normalizeAfterImport: normalizeAfterImport
         )
         DiagnosticsRecorder.record(stage: "import.commit.done", message: "\(result.source): \(result.imported) movimiento(s) guardado(s).")
+        progress?(1, "Estado guardado")
         return result
     }
 
@@ -9222,7 +9292,8 @@ final class FinanceStore {
         pageIndexes: Set<Int>? = nil,
         prioritizeNumericEvidence: Bool = false,
         forceRegionRecovery: Bool = false,
-        issuerHint: String? = nil
+        issuerHint: String? = nil,
+        progress: (@Sendable (Double, String) -> Void)? = nil
     ) -> [OCRObservation] {
         var observations: [OCRObservation] = []
         let ciContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -9670,6 +9741,7 @@ final class FinanceStore {
 
         for pageIndex in 0..<document.pageCount {
             if Task.isCancelled { break }
+            progress?(0.3 + 0.55 * Double(pageIndex + 1) / Double(max(1, document.pageCount)), "OCR · página \(pageIndex + 1) de \(document.pageCount)")
             if let pageIndexes, !pageIndexes.contains(pageIndex) { continue }
             autoreleasepool {
                 guard !Task.isCancelled else { return }

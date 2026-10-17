@@ -26,7 +26,8 @@ struct PlanningMetric: View {
     }
 }
 struct PlanningIncomeView: View {
-    var body: some View { NavigationStack { PlanningIncomeContent(allowsDismiss: true) } }
+    var month = Date.now
+    var body: some View { NavigationStack { PlanningIncomeContent(month: month, allowsDismiss: true) } }
 }
 struct PlanningIncomeContent: View {
     var month: Date = .now
@@ -38,15 +39,18 @@ struct PlanningIncomeContent: View {
     @State private var showReceivedDeposits = false
     @State private var selectedDepositSource: PlanningIncomeSource?
     @State private var deleting: PlanningIncomeSource?
+    @State private var incomeMonth = Date.now
     @State private var error: String?
     var body: some View {
         Form {
             Section {
-                LabeledContent("Total habitual al mes", value: planning.monthlyIncome.map(planningMoney) ?? "Sin configurar")
+                DatePicker("Ingreso vigente desde el mes de", selection: $incomeMonth, displayedComponents: .date)
+                Text(FinancePeriod.month(incomeMonth).label).font(.caption).foregroundStyle(.secondary)
+                LabeledContent("Total habitual al mes", value: planning.monthlyIncome(for: incomeMonth).map(planningMoney) ?? "Sin configurar")
                     .font(.headline)
-            } footer: { Text("Se usa para planear tu presupuesto. Los depósitos realmente recibidos se muestran por separado.") }
+            } footer: { Text("Se usa para planear tu presupuesto. Los depósitos realmente recibidos se muestran por separado. Los cambios aplican desde el mes elegido; los cierres guardados se conservan.") }
             Section {
-                ForEach(planning.incomeSources) { source in
+                ForEach(planning.incomeSources(for: incomeMonth)) { source in
                     HStack {
                         Button { editing = source } label: {
                             VStack(alignment: .leading, spacing: 4) {
@@ -94,10 +98,10 @@ struct PlanningIncomeContent: View {
             if allowsDismiss && !planning.state.incomeOnboardingCompleted {
                 Button("Configurar después") { planning.state.incomeOnboardingCompleted = true; if planning.save() { dismiss() } }
             }
-        }.navigationTitle("Ingresos").toolbar {
+        }.navigationTitle("Ingresos").onAppear { incomeMonth = FinancePeriod.month(month).start }.toolbar {
             if allowsDismiss { ToolbarItem(placement: .topBarTrailing) { Button("Listo") { dismiss() } } }
         }.scrollContentBackground(.hidden).background(MarcelitoAmbientBackground())
-            .sheet(item: $editing) { source in PlanningIncomeSourceEditor(source: source) }
+            .sheet(item: $editing) { source in PlanningIncomeSourceEditor(source: source, effectiveFrom: incomeMonth) }
             .sheet(isPresented: $showReceivedDeposits, onDismiss: {
                 if let source = selectedDepositSource { selectedDepositSource = nil; editing = source }
             }) {
@@ -108,7 +112,7 @@ struct PlanningIncomeContent: View {
             }
             .confirmationDialog("¿Eliminar esta fuente de ingreso?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible, presenting: deleting) { source in
                 Button("Eliminar fuente", role: .destructive) {
-                    if !planning.setIncomeSources(planning.incomeSources.filter { $0.id != source.id }) { error = "No se pudo guardar el cambio. Tu información se conserva." }
+                    if !planning.setIncomeSources(planning.incomeSources(for: incomeMonth).filter { $0.id != source.id }, effectiveFrom: incomeMonth) { error = "No se pudo guardar el cambio. Tu información se conserva." }
                     deleting = nil
                 }
                 Button("Cancelar", role: .cancel) { deleting = nil }
@@ -124,6 +128,8 @@ struct PlanningIncomeSourceEditor: View {
     @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
     let source: PlanningIncomeSource
+    var effectiveFrom = Date.now
+    @State private var appliesFrom = Date.now
     @State private var name = ""
     @State private var amount = ""
     @State private var cadence = "Mensual"
@@ -133,6 +139,7 @@ struct PlanningIncomeSourceEditor: View {
         NavigationStack {
             Form {
                 Section {
+                    DatePicker("Aplicar desde el mes de", selection: $appliesFrom, displayedComponents: .date)
                     TextField("Nombre, por ejemplo Nómina Santander", text: $name)
                     TextField("Importe MXN", text: $amount).keyboardType(.decimalPad)
                     Picker("Frecuencia", selection: $cadence) { ForEach(RecurringCadence.allCases, id: \.rawValue) { Text($0.rawValue).tag($0.rawValue) } }
@@ -148,14 +155,14 @@ struct PlanningIncomeSourceEditor: View {
                     guard !trimmed.isEmpty, let number = parsePlanningAmount(amount) else { error = "Escribe un nombre y un importe válido."; return }
                     var updated = source; updated.name = trimmed; updated.amount = number; updated.cadence = cadence; updated.account = account
                     if account != source.account { updated.detectedKey = nil }
-                    var sources = planning.incomeSources
+                    var sources = planning.incomeSources(for: appliesFrom)
                     if let key = updated.detectedKey, sources.contains(where: { $0.id != updated.id && $0.detectedKey == key }) { error = "Esta fuente ya está configurada. Edítala desde Tus fuentes de ingreso."; return }
                     if let index = sources.firstIndex(where: { $0.id == source.id }) { sources[index] = updated } else { sources.append(updated) }
-                    if planning.setIncomeSources(sources) { dismiss() } else { error = "No se pudo guardar. Tu información anterior se conserva." }
+                    if planning.setIncomeSources(sources, effectiveFrom: appliesFrom) { dismiss() } else { error = "No se pudo guardar. Tu información anterior se conserva." }
                 }.buttonStyle(.marcelitoPrimary)
             }.navigationTitle("Fuente de ingreso").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Cancelar") { dismiss() } } }
-        }.onAppear { name = source.name; amount = source.name.isEmpty && source.amount == 0 ? "" : NSDecimalNumber(decimal: source.amount).stringValue; cadence = source.cadence; account = source.account }
+        }.onAppear { appliesFrom = effectiveFrom; name = source.name; amount = source.name.isEmpty && source.amount == 0 ? "" : NSDecimalNumber(decimal: source.amount).stringValue; cadence = source.cadence; account = source.account }
     }
 }
 func parsePlanningAmount(_ text: String, precision: Int = 2) -> Decimal? {
@@ -178,7 +185,7 @@ struct HomeMonthlyPlanCard: View {
             HStack {
                 Text(snapshot.hasData ? "Te queda este mes" : "\(month.label) · Presupuesto del mes")
                 Spacer()
-                CalculationHelp(explanation: "Ingreso confirmado − gastos fijos presupuestados − exceso gastado en fijos − meta de ahorro − mensualidades MSI − reserva de préstamos − gasto variable personal. Sin movimientos del mes todavía no se conoce el restante real. Las cifras son provisionales cuando faltan estados o capturas.")
+                CalculationHelp(explanation: "Ingreso confirmado − gastos fijos presupuestados − exceso gastado en fijos − meta de ahorro − mensualidades MSI − reserva de préstamos − todo el gasto variable registrado, incluidos viajes, extraordinarios y montos por cobrar. Sin movimientos del mes todavía no se conoce el restante real. Las cifras son provisionales cuando faltan estados o capturas.")
             }
             if store.operationalMetricsBlocked {
                 Text("Revisa tus estados para calcular el disponible").font(.headline)
@@ -271,6 +278,7 @@ struct ExpensesView: View {
         NavigationStack {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
+                    CategoryUndoButton()
                     if store.operationalMetricsBlocked { HistoricalDashboardBlockedCard(store: store) }
                     else if rows.isEmpty {
                         emptyPeriodSection
@@ -623,13 +631,14 @@ struct BudgetView: View {
     @State private var periodMode: FinancePeriodMode = .month
     @State private var showPeriodPicker = false
     @State private var showIncome = false
-    @State private var savingsText = ""
     @State private var showDecision = false
     @State private var closeMessage: String?
+    @State private var selectedGoalID: UUID?
+    @State private var reopenConfirmation = false
     private var snapshot: BudgetSnapshot { planning.snapshot(store, month: month) }
     private var limits: [String: Decimal] { planning.limits(store, month: month) }
     private var fixed: [String: Decimal] { planning.fixedLimits(store, month: month) }
-    private var actual: [String: Decimal] { planning.budgetCategoryTotals(store, period: .month(month)) }
+    private var actual: [String: Decimal] { planning.plan(for: month).closing?.categorySpent ?? planning.budgetCategoryTotals(store, period: .month(month)) }
     private var categories: [String] { Array(Set(personalExpenseCategories.filter { $0 != "Otros / Por revisar" }).union(limits.keys).union(fixed.keys)).sorted() }
     var body: some View {
         NavigationStack {
@@ -654,12 +663,11 @@ struct BudgetView: View {
                     }.padding(.horizontal, 18).padding(.vertical, 6).background(.regularMaterial)
                 }
                 .sheet(isPresented: $showPeriodPicker) { PeriodSelectionSheet(mode: periodMode, date: month) { month = $0 } }
-                .sheet(isPresented: $showIncome) { PlanningIncomeView() }
+                .sheet(isPresented: $showIncome) { PlanningIncomeView(month: month) }
                 .sheet(isPresented: $showDecision) { AffordabilityView(month: month) }
-                .onAppear { loadTarget() }
                 .onDisappear { planning.savePendingPlanChanges() }
                 .onChange(of: section) { _, _ in planning.savePendingPlanChanges() }
-                .onChange(of: month) { _, _ in planning.savePendingPlanChanges(); loadTarget() }
+                .onChange(of: month) { _, _ in planning.savePendingPlanChanges() }
                 .alert("Cierre mensual", isPresented: Binding(get: { closeMessage != nil }, set: { if !$0 { closeMessage = nil } })) { Button("Aceptar") { closeMessage = nil } } message: { Text(closeMessage ?? "") }
         }
     }
@@ -672,7 +680,8 @@ struct BudgetView: View {
                     budgetSummary
                     Button("Configurar ingresos y depósitos") { section = .income }
                     if !snapshot.hasData { Text("Sin movimientos de este mes. Define tu plan; el gasto se actualizará al subir estados o capturas.").font(.caption).foregroundStyle(.secondary) }
-                    targetSection
+                    SharedMonthlyPlanEditor(month: month)
+                    PlanningAccountCoverage(period: .month(month))
                     if !planning.proposals(store, month: month).isEmpty { Text("Propuesta: mediana de " + planning.proposalMonths(store, before: month).reversed().map { FinancePeriod.month($0).label }.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary) }
                     if planning.proposals(store, month: month).isEmpty {
                         Text("Necesitamos tres meses naturales completos para proponer la mediana variable. Puedes definir tus montos ahora.").font(.caption).foregroundStyle(.secondary)
@@ -682,8 +691,9 @@ struct BudgetView: View {
                     ForEach(categories.filter { fixed[$0] != nil }, id: \.self) { budgetRow($0, fixed: true) }
                     Text("Variables").font(.headline)
                     ForEach(categories, id: \.self) { budgetRow($0, fixed: false) }
+                    if planning.plan(for: month).closed { Text("Mes cerrado. Los importes guardados se conservan; reabre el cierre para hacer cambios.").font(.caption) }
                     let planned = limits.values.reduce(0, +) + fixed.values.reduce(0, +)
-                    if let income = planning.monthlyIncome, let loans = snapshot.loans {
+                    if let income = snapshot.income, let loans = snapshot.loans {
                         PlanningMetric(title: "Ahorro con este plan", value: planningMoney(income - planned - snapshot.msi - loans), period: snapshot.period.label, explanation: "Ingreso mensual confirmado menos límites de categorías, mensualidades MSI y reserva para préstamos. Cambia en vivo con los sliders. La meta de ahorro es un objetivo y no un gasto adicional en esta cifra.")
                     }
                     installmentSection
@@ -730,11 +740,10 @@ struct BudgetView: View {
             }
         }
     }
-    private func loadTarget() { savingsText = NSDecimalNumber(decimal: planning.plan(for: month).savingsTarget).stringValue }
     private var budgetSummary: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let remaining = snapshot.remaining {
-                PlanningMetric(title: "Disponible variable", value: planningMoney(remaining), period: snapshot.period.label, explanation: "Ingreso − fijos − exceso gastado en fijos − meta de ahorro − mensualidades MSI − reserva de préstamos − variable gastado + sobrante trasladado. Los viajes, extraordinarios y la parte compartida se muestran aparte. Disponible provisional si faltan movimientos.")
+                PlanningMetric(title: "Disponible variable", value: planningMoney(remaining), period: snapshot.period.label, explanation: "Ingreso − fijos − exceso gastado en fijos − meta de ahorro − mensualidades MSI − reserva de préstamos − variable gastado + sobrante trasladado. Incluye viajes, extraordinarios y montos compartidos pendientes de cobro. Disponible provisional si faltan movimientos.")
                 PlanningMetric(title: "Disponible por día", value: snapshot.daily.map(planningMoney) ?? "Mes terminado", period: snapshot.period.label, explanation: "Disponible variable restante / días restantes del mes, incluyendo hoy. Nunca divide entre cero.")
             } else if snapshot.hasUnknownLoans {
                 Text("Completa el valor de UDI de tu préstamo para calcular el disponible").font(.headline)
@@ -745,28 +754,20 @@ struct BudgetView: View {
                 Text("Configura tu ingreso para calcular el disponible").font(.headline)
                 Button("Definir ingreso") { showIncome = true }
             }
-            HStack { Text("Ingreso mensual"); Spacer(); Button(planning.monthlyIncome.map(planningMoney) ?? "Configurar") { showIncome = true } }
+            HStack { Text("Ingreso mensual"); Spacer(); Button(snapshot.income.map(planningMoney) ?? "Configurar") { showIncome = true } }
             LabeledContent("Fijos previstos", value: planningMoney(snapshot.fixed))
             if snapshot.fixedOverrun > 0 { LabeledContent("Exceso en gastos fijos", value: planningMoney(snapshot.fixedOverrun)) }
-            if snapshot.hasData { LabeledContent("Fuera del presupuesto personal", value: planningMoney(planning.total(store, period: snapshot.period) - planning.personalTotal(store, period: snapshot.period))) }
+
             if !store.loanLedger.state.accounts.isEmpty { LabeledContent("Reserva de préstamos", value: snapshot.loans.map { "~" + planningMoney($0) } ?? "Falta valor UDI") }
             LabeledContent("Mensualidades MSI", value: snapshot.hasUnknownCommitments ? "Falta detalle MSI" : planningMoney(snapshot.msi))
             if !monthIsCovered(store, period: snapshot.period, through: min(.now, snapshot.period.end.addingTimeInterval(-1))) { Text("Plan provisional · faltan movimientos por actualizar").font(.caption).foregroundStyle(Color.marcelitoAmber) }
             Text("Consumo y presupuesto por fecha del cargo. MSI: compra completa en Gastos; mensualidades como compromisos aquí.").font(.caption).foregroundStyle(.secondary)
         }.marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 14)
     }
-    private var targetSection: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text("Meta de ahorro del mes").font(.headline)
-            HStack {
-                TextField("Importe MXN", text: $savingsText).keyboardType(.decimalPad)
-                Button("Guardar") { guard let number = parsePlanningAmount(savingsText) else { return }; var plan = planning.plan(for: month); plan.savingsTarget = number; planning.setPlan(plan, for: month) }
-            }
-        }
-    }
     private func budgetRow(_ category: String, fixed: Bool) -> some View {
         let limit = fixed ? self.fixed[category] ?? 0 : limits[category] ?? 0
-        let spent = planning.budgetCategoryTotals(store, period: .month(month), fixed: fixed)[category] ?? 0
+        let closing = planning.plan(for: month).closing
+        let spent = closing.map { fixed ? ($0.fixedSpent?[category] ?? 0) : (($0.categorySpent?[category] ?? 0) - ($0.fixedSpent?[category] ?? 0)) } ?? planning.budgetCategoryTotals(store, period: .month(month), fixed: fixed)[category] ?? 0
         let ratio = limit > 0 ? NSDecimalNumber(decimal: spent / limit).doubleValue : (spent > 0 ? 1 : 0)
         let c = Calendar.current
         let elapsed = c.isDate(month, equalTo: .now, toGranularity: .month) ? c.component(.day, from: .now) : c.range(of: .day, in: .month, for: month)!.count
@@ -776,7 +777,7 @@ struct BudgetView: View {
             HStack { Text(category).font(.subheadline.weight(.semibold)); Spacer(); Text(planningMoney(limit)).monospacedDigit() }
             Slider(value: Binding(get: { NSDecimalNumber(decimal: fixed ? self.fixed[category] ?? 0 : limits[category] ?? 0).doubleValue }, set: { value in
                 var plan = planning.plan(for: month); if fixed { plan.fixedLimits[category] = Decimal(Int(value)) } else { plan.limits[category] = Decimal(Int(value)) }; planning.setPlan(plan, for: month, persist: false)
-            }), in: 0...max(5000, NSDecimalNumber(decimal: max(limit, planning.monthlyIncome ?? 0)).doubleValue), step: 50, onEditingChanged: { editing in if !editing { planning.savePendingPlanChanges() } }).tint(Color.marcelitoNavy)
+            }), in: 0...max(5000, NSDecimalNumber(decimal: max(limit, planning.monthlyIncome(for: month) ?? 0)).doubleValue), step: 50, onEditingChanged: { editing in if !editing { planning.savePendingPlanChanges() } }).tint(Color.marcelitoNavy).disabled(planning.plan(for: month).closed)
             ProgressView(value: min(1, max(0, ratio))).tint(color)
             Text("\(snapshot.hasData && actual[category] != nil ? planningMoney(spent) + " usados" : "Sin cargos registrados") · \(snapshot.period.label) · \(fixed ? "fijo" : "variable")").font(.caption2).foregroundStyle(.secondary)
             if ratio >= 0.8, elapsed < 20, c.isDate(month, equalTo: .now, toGranularity: .month), limit > 0 { Text("Ya usaste al menos 80% antes del día 20").font(.caption).foregroundStyle(Color.marcelitoAmber) }
@@ -794,24 +795,39 @@ struct BudgetView: View {
     }
     private var closingSection: some View {
         let range = FinancePeriod.month(month)
-        let income = planning.observedIncome(store, period: range)
-        let spent = store.netExpenseMovements.filter { range.contains($0.date) && !planning.isInstallmentRow($0, store: store) }.reduce(0) { $0 + $1.expenseContribution }
-        let surplus = income - spent - snapshot.msi - store.loanPrincipalPaid(in: range)
+        let plan = planning.plan(for: month)
+        let surplus = planning.cashSurplus(store, month: month)
         return VStack(alignment: .leading, spacing: 8) {
-            HStack { Text("Cierre mensual").font(.headline); CalculationHelp(explanation: "Ingreso real recibido menos consumo de caja, mensualidades MSI y capital de abonos de préstamo vinculados. El interés ya está en el consumo. Para proponer ahorro aquí también se descuentan extraordinarios y partes compartidas que ya pagaste; marcar un cobro no crea dinero bancario. Es una asignación en el plan, no una transferencia ni prueba del saldo bancario.") }
-            Picker("Sobrante", selection: Binding(get: { planning.plan(for: month).surplusDestination }, set: { destination in var plan = planning.plan(for: month); plan.surplusDestination = destination; planning.setPlan(plan, for: month) })) {
-                ForEach(SurplusDestination.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-            }.pickerStyle(.segmented)
-            if range.end > .now { Text("Disponible al terminar el mes y completar los movimientos.").font(.caption).foregroundStyle(.secondary) }
-            else if snapshot.hasUnknownLoans { Text("Completa el préstamo antes de cerrar el mes.").font(.caption).foregroundStyle(.secondary) }
-            else if snapshot.hasUnknownCommitments { Text("Completa las mensualidades MSI antes de cerrar el mes.").font(.caption).foregroundStyle(.secondary) }
-            else if !monthIsCovered(store, period: range, through: range.end.addingTimeInterval(-1)) { Text("Completa los estados del mes para confirmar el sobrante.").font(.caption).foregroundStyle(.secondary) }
-            else if surplus > 0 {
-                Text("Podrías destinar \(planningMoney(surplus)) a \(planning.plan(for: month).surplusDestination == .savings ? (planning.state.goals.first?.name ?? "una meta de ahorro") : "tu próximo mes").").font(.subheadline)
-                Button(planning.plan(for: month).closed ? "Cierre guardado" : "Confirmar destino del sobrante") {
-                    closeMessage = planning.closeMonth(month, surplus: surplus) ? "Destino registrado. Es una asignación en tu plan; no mueve dinero del banco." : "Crea una meta de ahorro antes de confirmar."
-                }.disabled(planning.plan(for: month).closed)
-            } else { Text("No hay sobrante observado para asignar.").font(.caption) }
+            HStack { Text("Cierre mensual").font(.headline); CalculationHelp(explanation: "Se guarda una instantánea del ingreso, presupuesto y disponible. Las asignaciones a metas son registros del plan; no mueven dinero bancario. Reabrir revierte la asignación para evitar duplicarla.") }
+            if let closing = plan.closing {
+                Text("Cierre guardado el " + planningDayLabel(closing.recordedAt)).font(.caption)
+                LabeledContent("Resultado de caja guardado", value: planningMoney(closing.surplus))
+                Button("Reabrir y recalcular") { reopenConfirmation = true }
+                    .confirmationDialog("¿Reabrir este cierre?", isPresented: $reopenConfirmation, titleVisibility: .visible) {
+                        Button("Revertir asignación y reabrir", role: .destructive) { closeMessage = planning.reopenMonth(month) ? "Cierre reabierto. La asignación anterior se revirtió." : "No se pudo reabrir: revisa el saldo de la meta o el cierre del mes siguiente." }
+                    } message: { Text("Se revierte el sobrante asignado. Podrás revisar los datos actuales y cerrar de nuevo.") }
+            } else if plan.closed {
+                Text("Cierre de una versión anterior, sin instantánea. Conservamos la asignación original; no se volverá a acreditar.").font(.caption)
+            } else {
+                Picker("Sobrante", selection: Binding(get: { plan.surplusDestination }, set: { destination in var updated = planning.plan(for: month); updated.surplusDestination = destination; planning.setPlan(updated, for: month) })) {
+                    ForEach(SurplusDestination.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                }.pickerStyle(.segmented)
+                if plan.surplusDestination == .savings {
+                    Picker("Meta de destino", selection: $selectedGoalID) {
+                        Text("Selecciona una meta").tag(nil as UUID?)
+                        ForEach(planning.activeGoals) { Text($0.name).tag(Optional($0.id)) }
+                    }
+                }
+                if range.end > .now { Text("Disponible al terminar el mes y completar los movimientos.").font(.caption) }
+                else if snapshot.hasUnknownLoans || snapshot.hasUnknownCommitments { Text("Completa tus préstamos y MSI antes de cerrar.").font(.caption) }
+                else if !monthIsCovered(store, period: range, through: range.end.addingTimeInterval(-1)) { Text("Completa los estados del mes para confirmar el sobrante.").font(.caption) }
+                else {
+                    Text("Resultado de caja observado: " + planningMoney(surplus)).font(.subheadline)
+                    Button("Confirmar destino y guardar cierre") {
+                        closeMessage = planning.closeMonth(month, store: store, goalID: selectedGoalID) ? "Cierre y destino guardados. No se mueve dinero bancario." : "Revisa las transferencias pendientes y selecciona una meta de destino."
+                    }
+                }
+            }
         }
     }
 }
@@ -826,8 +842,8 @@ struct IncomeOverviewView: View {
         let rows = store.realIncomeMovements.filter { range.contains($0.date) }
         List {
             Section(range.label) {
-                LabeledContent("Ingreso habitual mensual", value: planning.monthlyIncome.map(planningMoney) ?? "Sin configurar")
-                ForEach(planning.incomeSources) { source in
+                LabeledContent("Ingreso habitual mensual", value: planning.monthlyIncome(for: month).map(planningMoney) ?? "Sin configurar")
+                ForEach(planning.incomeSources(for: month)) { source in
                     LabeledContent(source.name, value: "\(planningMoney(source.amount)) · \(source.cadence)")
                 }
                 Button("Editar fuentes de ingreso") { edit = true }
@@ -837,7 +853,7 @@ struct IncomeOverviewView: View {
             Section("Depósitos · excluye transferencias propias") {
                 ForEach(rows) { row in NavigationLink { MovementDetailView(movement: row) } label: { VStack(alignment: .leading) { Text(row.title); Text("\(planningMoney(abs(row.amount))) · \(row.account)").font(.caption) } } }
             }
-        }.navigationTitle("Ingresos").sheet(isPresented: $edit) { PlanningIncomeView() }
+        }.navigationTitle("Ingresos").sheet(isPresented: $edit) { PlanningIncomeView(month: month) }
     }
 }
 
@@ -955,18 +971,37 @@ struct AffordabilityView: View {
     @State private var amount = ""
     @State private var installments = false
     @State private var count = 3
+    @State private var fundingID: UUID?
+    private var fundingAccounts: [StatementMetric] {
+        Dictionary(grouping: store.periodMetrics) { $0.accountKey ?? $0.source }.values.compactMap { records in
+            records.max { (store.statementCutoffDate(for: $0.id) ?? .distantPast) < (store.statementCutoffDate(for: $1.id) ?? .distantPast) }
+        }.sorted { $0.source < $1.source }
+    }
     var body: some View {
         NavigationStack {
             Form {
                 Section("¿Me alcanza?") {
                     TextField("Importe MXN", text: $amount).keyboardType(.decimalPad)
+                    Picker("Cuenta o tarjeta de pago", selection: $fundingID) {
+                        Text("Selecciona una cuenta").tag(nil as UUID?)
+                        ForEach(fundingAccounts) { metric in Text(metric.source + " · " + metric.period).tag(Optional(metric.id)) }
+                    }
                     Toggle("Pagar a MSI", isOn: $installments)
                     if installments { Stepper("\(count) meses", value: $count, in: 2...36) }
                     Text("Simulación basada en tu ingreso y plan. No registra una compra ni considera comisiones de financiamiento.").font(.caption).foregroundStyle(.secondary)
                 }
                 if let value = parsePlanningAmount(amount), value > 0 {
-                    if planning.monthlyIncome == nil { Text("Configura tu ingreso para saber cómo queda tu disponible.") }
+                    if planning.monthlyIncome(for: month) == nil { Text("Configura tu ingreso para saber cómo queda tu disponible.") }
                     else {
+                        if let metric = fundingAccounts.first(where: { $0.id == fundingID }) {
+                            let balance = metric.kind == .card ? metric.creditAvailable : metric.cashBalance
+                            if let balance {
+                                LabeledContent(metric.kind == .card ? "Crédito al último corte" : "Efectivo al último corte", value: planningMoney(balance))
+                                Text(balance >= value ? "El importe cabe en ese saldo registrado." : "El importe supera el saldo registrado.").font(.subheadline)
+                                if installments && metric.kind != .card { Text("Selecciona una tarjeta para evaluar MSI.").font(.caption) }
+                            } else { Text("Falta el saldo o crédito disponible de esta cuenta para evaluar la liquidez.").font(.caption) }
+                            Text("Saldo al corte: " + (store.statementCutoffDate(for: metric.id).map(planningDayLabel) ?? "sin fecha confirmada") + ". Los movimientos posteriores pueden cambiarlo.").font(.caption).foregroundStyle(.secondary)
+                        } else { Text("Selecciona la cuenta de pago para contrastar el presupuesto con su saldo registrado.").font(.caption) }
                         let monthly = installments ? value / Decimal(count) : value
                         Section("Después de esta compra") {
                             ForEach(0..<(installments ? count : 1), id: \.self) { offset in
@@ -978,7 +1013,7 @@ struct AffordabilityView: View {
                                 HStack {
                                     Text(FinancePeriod.month(date).label)
                                     Spacer()
-                                    Text(baseline.map { planningMoney($0 - monthly) } ?? (snapshot.hasUnknownCommitments ? "Falta detalle MSI" : "Sin ingreso")).foregroundStyle((baseline ?? 0) < monthly ? Color.marcelitoDanger : Color.marcelitoNavy)
+                                    Text(baseline.map { planningMoney($0 - monthly) } ?? (snapshot.hasUnknownLoans ? "Falta información del préstamo o UDI" : snapshot.hasUnknownCommitments ? "Falta detalle MSI" : "Sin ingreso para este mes")).foregroundStyle((baseline ?? 0) < monthly ? Color.marcelitoDanger : Color.marcelitoNavy)
                                 }
                             }
                             Text("Estimación; el siguiente mes usa los límites definidos. Si no existe un plan de ese mes, el resultado aún no contempla todos sus gastos.").font(.caption).foregroundStyle(.secondary)
@@ -989,49 +1024,6 @@ struct AffordabilityView: View {
         }
     }
 }
-struct SavingsGoalsView: View {
-    @Environment(FinanceStore.self) private var store
-    @Environment(FinancialPlanningStore.self) private var planning
-    @State private var name = "Fondo de emergencia"
-    @State private var target = ""
-    @State private var saved = ""
-    @State private var contribution = ""
-    @State private var error: String?
-    var body: some View {
-        List {
-            ForEach(planning.state.goals) { goal in
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(goal.name).font(.headline)
-                    Text("\(planningMoney(goal.saved)) de \(planningMoney(goal.target))")
-                    ProgressView(value: min(1, max(0, NSDecimalNumber(decimal: goal.target > 0 ? goal.saved / goal.target : 0).doubleValue)))
-                    let contributions = planning.state.goals.reduce(Decimal(0)) { $0 + $1.monthlyContribution }
-                    let weight = contributions > 0 ? goal.monthlyContribution / contributions : 1 / Decimal(max(1, planning.state.goals.count))
-                    let observedRate = planning.observedOrdinarySavings(store, before: .now).map { $0 * weight }
-                    if let rate = observedRate, rate > 0, let estimate = Calendar.current.date(byAdding: .month, value: Int(ceil(NSDecimalNumber(decimal: max(0, goal.target - goal.saved) / rate).doubleValue)), to: .now) {
-                        Text("~\(FinancePeriod.month(estimate).label) al ritmo observado, repartido entre metas · \(planningMoney(rate))/mes").font(.caption)
-                    } else if observedRate != nil {
-                        Text(weight == 0 ? "Esta meta aún no tiene aportación prevista." : "Tu ritmo actual no genera ahorro para esta meta. Revisa tu presupuesto.").font(.caption).foregroundStyle(.secondary)
-                    } else if let months = goal.estimatedMonths, let date = Calendar.current.date(byAdding: .month, value: months, to: .now) {
-                        Text("~\(FinancePeriod.month(date).label) · si apartas \(planningMoney(goal.monthlyContribution)) al mes").font(.caption)
-                    } else { Text("Define una aportación mensual para estimar la fecha.").font(.caption) }
-                    CalculationHelp(explanation: "Meses estimados = redondeo hacia arriba de (meta − ahorro registrado) / aportación mensual. El ritmo observado usa ingreso recibido menos consumo total en los últimos meses completos disponibles, repartido según las aportaciones de tus metas (o en partes iguales cuando no están definidas). No supone rendimientos ni movimientos bancarios. Puedes ajustar la aportación cuando cambie tu ritmo.")
-                }
-            }
-            Section("Agregar meta") {
-                TextField("Meta · emergencia, viaje…", text: $name)
-                TextField("Monto objetivo MXN", text: $target).keyboardType(.decimalPad)
-                TextField("Ahorrado MXN", text: $saved).keyboardType(.decimalPad)
-                TextField("Aportación mensual MXN", text: $contribution).keyboardType(.decimalPad)
-                Button("Guardar meta") {
-                    guard let total = parsePlanningAmount(target), total > 0, let current = parsePlanningAmount(saved), let monthly = parsePlanningAmount(contribution), !name.trimmingCharacters(in: .whitespaces).isEmpty else { error = "Completa el objetivo, ahorro actual y aportación mensual."; return }
-                    planning.state.goals.append(SavingsGoal(name: name, target: total, saved: current, monthlyContribution: monthly)); planning.save(); target = ""; saved = ""; contribution = ""; error = nil
-                }
-                if let error { Text(error).foregroundStyle(Color.marcelitoDanger) }
-            }
-        }.navigationTitle("Metas de ahorro")
-    }
-}
-
 struct AccountPlanningStatus: View {
     @Environment(FinancialPlanningStore.self) private var planning
     @Environment(FinanceStore.self) private var store
@@ -1050,7 +1042,9 @@ struct AccountPlanningStatus: View {
                 let terms = planning.state.cardTerms[key].flatMap { $0.statementID == latest?.id ? $0 : nil }
                 let due = terms?.dueDate ?? latest?.summary?.paymentDueDate
                 if let amount = latest?.summary?.paymentForNoInterest, let due {
-                    Text("Paga \(planningMoney(amount)) antes del \(due.formatted(.dateTime.locale(Locale(identifier: "es_MX")).day().month())) para no pagar intereses").font(.headline)
+                    let payment = latest.flatMap { store.cyclePayment($0, planning: planning) }
+                    Text(payment?.remaining == 0 ? "Pago cubierto con movimientos registrados" : "Restante registrado: \(planningMoney(payment?.remaining ?? amount)) · vence el \(due.formatted(.dateTime.locale(Locale(identifier: "es_MX")).day().month()))").font(.headline)
+                    NavigationLink("Ver pagos y vencimientos") { PaymentAgendaView() }
                     Text("\(latest.map(conciseStatementPeriod) ?? "Ciclo de corte") · confirma pagos recientes en el banco").font(.caption).foregroundStyle(.secondary)
                 } else { Text("Confirma la fecha límite y el pago para no generar intereses en tu estado.").font(.caption) }
                 Button("Fecha límite y tasa") { showTerms = true }
@@ -1063,7 +1057,7 @@ struct AccountPlanningStatus: View {
                 let plans = planning.state.installments.filter { $0.account == key || $0.account == source }
                 if !plans.isEmpty {
                     Text("MSI activos").font(.headline)
-                    ForEach(plans.filter { $0.remaining(after: .now.addingTimeInterval(-86400 * 31)) > 0 }) { item in
+                    ForEach(plans.filter { $0.remaining(after: FinancePeriod.month(.now).start.addingTimeInterval(-1)) > 0 }) { item in
                         VStack(alignment: .leading) {
                             Text(item.merchant).font(.subheadline)
                             Text("\(planningMoney(item.due(in: .now))) este mes · \(item.remaining(after: FinancePeriod.month(.now).start.addingTimeInterval(-1))) mensualidades restantes").font(.caption).foregroundStyle(.secondary)
