@@ -160,7 +160,7 @@ struct HomeMonthlyPlanCard: View {
             HStack {
                 Text(snapshot.hasData ? "Te queda este mes" : "\(month.label) · Presupuesto del mes")
                 Spacer()
-                CalculationHelp(explanation: "Ingreso confirmado − gastos fijos presupuestados − exceso gastado en fijos − meta de ahorro − mensualidades MSI − gasto variable personal. Sin movimientos del mes todavía no se conoce el restante real. Las cifras son provisionales cuando faltan estados o capturas.")
+                CalculationHelp(explanation: "Ingreso confirmado − gastos fijos presupuestados − exceso gastado en fijos − meta de ahorro − mensualidades MSI − reserva de préstamos − gasto variable personal. Sin movimientos del mes todavía no se conoce el restante real. Las cifras son provisionales cuando faltan estados o capturas.")
             }
             if store.operationalMetricsBlocked {
                 Text("Revisa tus estados para calcular el disponible").font(.headline)
@@ -175,6 +175,9 @@ struct HomeMonthlyPlanCard: View {
             } else if let remaining = snapshot.remaining {
                 Text("\(planningMoney(remaining)) este mes · \(snapshot.daily.map(planningMoney) ?? "—") por día").font(.title2.bold()).monospacedDigit()
                 if !monthIsCovered(store, period: month, through: .now) { Text("Disponible provisional · faltan movimientos por actualizar").font(.caption) }
+            } else if snapshot.hasUnknownLoans {
+                Text("Completa el valor de UDI de tu préstamo para calcular el disponible").font(.headline)
+                NavigationLink("Revisar préstamos") { LoanAccountsView() }
             } else if snapshot.hasUnknownCommitments {
                 Text("Completa el detalle de tus mensualidades MSI para calcular el disponible").font(.headline)
             } else {
@@ -657,10 +660,19 @@ struct BudgetView: View {
                     Text("Variables").font(.headline)
                     ForEach(categories, id: \.self) { budgetRow($0, fixed: false) }
                     let planned = limits.values.reduce(0, +) + fixed.values.reduce(0, +)
-                    if let income = planning.monthlyIncome {
-                        PlanningMetric(title: "Ahorro con este plan", value: planningMoney(income - planned - snapshot.msi), period: snapshot.period.label, explanation: "Ingreso mensual confirmado menos límites de categorías y mensualidades MSI. Cambia en vivo con los sliders. La meta de ahorro es un objetivo y no un gasto adicional en esta cifra.")
+                    if let income = planning.monthlyIncome, let loans = snapshot.loans {
+                        PlanningMetric(title: "Ahorro con este plan", value: planningMoney(income - planned - snapshot.msi - loans), period: snapshot.period.label, explanation: "Ingreso mensual confirmado menos límites de categorías, mensualidades MSI y reserva para préstamos. Cambia en vivo con los sliders. La meta de ahorro es un objetivo y no un gasto adicional en esta cifra.")
                     }
                     installmentSection
+                    if !store.loanLedger.state.accounts.isEmpty {
+                        VStack(alignment: .leading, spacing: 7) {
+                            Text("Préstamos").font(.headline)
+                            LabeledContent("Cuotas y abonos previstos", value: snapshot.loans.map { "~" + planningMoney($0) } ?? "Falta valor UDI")
+                            LabeledContent("Abonos bancarios vinculados", value: planningMoney(store.loanPaid(in: snapshot.period)))
+                            Text("La reserva usa la cuota del mes más el extra que configures, o el total pagado si es mayor. Los intereses vinculados no se descuentan otra vez como variables.").font(.caption).foregroundStyle(.secondary)
+                            NavigationLink("Ver préstamos y configurar abono extra") { LoanAccountsView() }
+                        }
+                    }
                     closingSection
                     Button("¿Me alcanza?") { showDecision = true }.buttonStyle(.marcelitoPrimary)
                     Button("Configurar gastos fijos y recurrentes") { section = .fixed }
@@ -699,8 +711,11 @@ struct BudgetView: View {
     private var budgetSummary: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let remaining = snapshot.remaining {
-                PlanningMetric(title: "Disponible variable", value: planningMoney(remaining), period: snapshot.period.label, explanation: "Ingreso − fijos − exceso gastado en fijos − meta de ahorro − mensualidades MSI − variable gastado + sobrante trasladado. Los viajes, extraordinarios y la parte compartida se muestran aparte. Disponible provisional si faltan movimientos.")
+                PlanningMetric(title: "Disponible variable", value: planningMoney(remaining), period: snapshot.period.label, explanation: "Ingreso − fijos − exceso gastado en fijos − meta de ahorro − mensualidades MSI − reserva de préstamos − variable gastado + sobrante trasladado. Los viajes, extraordinarios y la parte compartida se muestran aparte. Disponible provisional si faltan movimientos.")
                 PlanningMetric(title: "Disponible por día", value: snapshot.daily.map(planningMoney) ?? "Mes terminado", period: snapshot.period.label, explanation: "Disponible variable restante / días restantes del mes, incluyendo hoy. Nunca divide entre cero.")
+            } else if snapshot.hasUnknownLoans {
+                Text("Completa el valor de UDI de tu préstamo para calcular el disponible").font(.headline)
+                NavigationLink("Revisar préstamos") { LoanAccountsView() }
             } else if snapshot.hasUnknownCommitments {
                 Text("Faltan las mensualidades de tus MSI para calcular el disponible").font(.headline)
             } else {
@@ -711,6 +726,7 @@ struct BudgetView: View {
             LabeledContent("Fijos previstos", value: planningMoney(snapshot.fixed))
             if snapshot.fixedOverrun > 0 { LabeledContent("Exceso en gastos fijos", value: planningMoney(snapshot.fixedOverrun)) }
             if snapshot.hasData { LabeledContent("Fuera del presupuesto personal", value: planningMoney(planning.total(store, period: snapshot.period) - planning.personalTotal(store, period: snapshot.period))) }
+            if !store.loanLedger.state.accounts.isEmpty { LabeledContent("Reserva de préstamos", value: snapshot.loans.map { "~" + planningMoney($0) } ?? "Falta valor UDI") }
             LabeledContent("Mensualidades MSI", value: snapshot.hasUnknownCommitments ? "Falta detalle MSI" : planningMoney(snapshot.msi))
             if !monthIsCovered(store, period: snapshot.period, through: min(.now, snapshot.period.end.addingTimeInterval(-1))) { Text("Plan provisional · faltan movimientos por actualizar").font(.caption).foregroundStyle(Color.marcelitoAmber) }
             Text("Consumo y presupuesto por fecha del cargo. MSI: compra completa en Gastos; mensualidades como compromisos aquí.").font(.caption).foregroundStyle(.secondary)
@@ -757,13 +773,14 @@ struct BudgetView: View {
         let range = FinancePeriod.month(month)
         let income = planning.observedIncome(store, period: range)
         let spent = store.netExpenseMovements.filter { range.contains($0.date) && !planning.isInstallmentRow($0, store: store) }.reduce(0) { $0 + $1.expenseContribution }
-        let surplus = income - spent - snapshot.msi
+        let surplus = income - spent - snapshot.msi - store.loanPrincipalPaid(in: range)
         return VStack(alignment: .leading, spacing: 8) {
-            HStack { Text("Cierre mensual").font(.headline); CalculationHelp(explanation: "Ingreso real recibido menos consumo de caja y mensualidades MSI. Para proponer ahorro aquí también se descuentan extraordinarios y partes compartidas que ya pagaste; marcar un cobro no crea dinero bancario. Es una asignación en el plan, no una transferencia ni prueba del saldo bancario.") }
+            HStack { Text("Cierre mensual").font(.headline); CalculationHelp(explanation: "Ingreso real recibido menos consumo de caja, mensualidades MSI y capital de abonos de préstamo vinculados. El interés ya está en el consumo. Para proponer ahorro aquí también se descuentan extraordinarios y partes compartidas que ya pagaste; marcar un cobro no crea dinero bancario. Es una asignación en el plan, no una transferencia ni prueba del saldo bancario.") }
             Picker("Sobrante", selection: Binding(get: { planning.plan(for: month).surplusDestination }, set: { destination in var plan = planning.plan(for: month); plan.surplusDestination = destination; planning.setPlan(plan, for: month) })) {
                 ForEach(SurplusDestination.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }.pickerStyle(.segmented)
             if range.end > .now { Text("Disponible al terminar el mes y completar los movimientos.").font(.caption).foregroundStyle(.secondary) }
+            else if snapshot.hasUnknownLoans { Text("Completa el préstamo antes de cerrar el mes.").font(.caption).foregroundStyle(.secondary) }
             else if snapshot.hasUnknownCommitments { Text("Completa las mensualidades MSI antes de cerrar el mes.").font(.caption).foregroundStyle(.secondary) }
             else if !monthIsCovered(store, period: range, through: range.end.addingTimeInterval(-1)) { Text("Completa los estados del mes para confirmar el sobrante.").font(.caption).foregroundStyle(.secondary) }
             else if surplus > 0 {
@@ -1122,7 +1139,7 @@ struct HomePersonalMetrics: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 12) {
                 PlanningMetric(title: "Efectivo", value: store.dashboardIsBlocked ? "Por revisar" : store.cashAvailable.map(planningMoney) ?? "Falta estado", period: balancePeriodLabel(store, kind: .bank), explanation: "Suma de saldos de cuentas de débito en sus últimos cortes conciliados. No incluye crédito disponible.")
-                PlanningMetric(title: "Deuda", value: store.dashboardIsBlocked ? "Por revisar" : store.debtTotal.map(planningMoney) ?? "Falta estado", period: balancePeriodLabel(store, kind: .card), explanation: "Deuda financiera declarada. Cuando existe límite y disponible, su diferencia incluye principal pendiente MSI. No es solo el pago de este mes.")
+                PlanningMetric(title: "Deuda", value: store.dashboardIsBlocked ? "Por revisar" : store.debtTotal.map(planningMoney) ?? store.loanDebtUnavailableLabel, period: balancePeriodLabel(store, kind: .card) + (store.loanBalancePeriodLabel.isEmpty ? "" : " · " + store.loanBalancePeriodLabel), explanation: "Deuda de tarjetas más capital e intereses vencidos confirmados de préstamos. UDIS se convierte con el último valor fechado y confirmado; no agrega intereses futuros. Si falta el valor UDI, la deuda total queda pendiente. El principal MSI forma parte del saldo de tarjetas.")
             }
             if showActivity, planning.hasData(store, period: period), !store.operationalMetricsBlocked {
                 HStack(alignment: .top, spacing: 12) {

@@ -1067,7 +1067,8 @@ struct MetricDetailSheet: View {
         case .cash:
             statementTrend(kind: .bank, keyPath: \.cashBalance)
         case .debt:
-            statementTrend(kind: .card, keyPath: \.debtBalance)
+            if store.loanLedger.state.accounts.isEmpty { return statementTrend(kind: .card, keyPath: \.debtBalance) }
+            return Array(store.balanceHistory.compactMap { point in point.debt.map { MetricTrendPoint(id: point.date.description, label: dateLabel(point.date), value: NSDecimalNumber(decimal: $0).doubleValue) } }.suffix(8))
         case .expense:
             store.cashFlowHistory.filter { Calendar.current.isDate($0.date, equalTo: .now, toGranularity: .month) }.suffix(12).map { point in
                 MetricTrendPoint(id: point.id.description, label: dateLabel(point.date), value: point.expense)
@@ -1169,7 +1170,10 @@ struct MetricDetailSheet: View {
                             .font(.system(.largeTitle, design: .rounded).weight(.bold))
                             .monospacedDigit()
                             .foregroundStyle(Color.marcelitoNavy)
-                        Text(metric.explanation)
+                        if (metric == .debt || metric == .patrimony), !store.loanLedger.state.accounts.isEmpty {
+                            LoanPositionSection()
+                        }
+                        Text(metric == .debt && !store.loanLedger.state.accounts.isEmpty ? "Tarjetas más capital e intereses vencidos confirmados de préstamos. UDIS con valor fechado; excluye intereses futuros." : metric.explanation)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }

@@ -275,8 +275,10 @@ struct PlanningState: Codable {
         for identity in uniqueIdentities {
             if let index = identityIndices[identity]?.first { excludedIDs.insert(store.movements[index].id) }
         }
-        let budgetRows = store.netExpenseMovements.filter { !excludedIDs.contains($0.id) }
-        var expenses = budgetRows
+        let consumptionRows = store.netExpenseMovements.filter { !excludedIDs.contains($0.id) }
+        // Interest stays in consumption; the complete loan cash payment is reserved once below.
+        let budgetRows = consumptionRows.filter { !$0.classificationTags.contains("loan-interest") }
+        var expenses = consumptionRows
         for plan in plans {
             let indices = plan.linkedMovementIDs.compactMap { indexByID[$0] }
                 + plan.linkedIdentities.filter { uniqueIdentities.contains($0) }.compactMap { identityIndices[$0]?.first }
@@ -582,14 +584,16 @@ struct PlanningState: Codable {
         let variableSpent = budgetCategoryTotals(store, period: period, fixed: false).values.reduce(0, +)
         let monthlyMSI = commitments(store, month: month)
         let income = monthlyIncome
+        let loanReserve = store.loanLedger.reserve(month: month, paid: store.loanPaid(in: period))
+        let unknownLoans = loanReserve.reserved == nil || store.loanLedger.loadError != nil
         let unknown = hasUnknownCommitments(store, month: month)
-        let available = unknown ? nil : income.map { $0 + plan.carryIn - fixedBudget - fixedOverrun - plan.savingsTarget - monthlyMSI }
+        let available = unknown || unknownLoans ? nil : income.map { $0 + plan.carryIn - fixedBudget - fixedOverrun - plan.savingsTarget - monthlyMSI - (loanReserve.reserved ?? 0) }
         let remaining = available.map { $0 - variableSpent }
         let c = Calendar.current
         let today = c.startOfDay(for: now)
         let from = max(period.start, today)
         let days = from < period.end ? c.dateComponents([.day], from: from, to: period.end).day ?? 0 : 0
-        let value = BudgetSnapshot(period: period, income: income, fixed: fixedBudget, msi: monthlyMSI, savings: plan.savingsTarget, variableSpent: variableSpent, available: available, remaining: remaining, remainingDays: days, hasData: hasData(store, period: period), hasUnknownCommitments: unknown, fixedOverrun: fixedOverrun)
+        let value = BudgetSnapshot(period: period, income: income, fixed: fixedBudget, msi: monthlyMSI, savings: plan.savingsTarget, variableSpent: variableSpent, available: available, remaining: remaining, remainingDays: days, hasData: hasData(store, period: period), hasUnknownCommitments: unknown, fixedOverrun: fixedOverrun, loans: loanReserve.reserved, hasUnknownLoans: unknownLoans)
         if snapshotCache.count >= 24 { snapshotCache.removeAll() }
         snapshotCache[cacheKey] = value; return value
     }
@@ -718,6 +722,8 @@ struct BudgetSnapshot {
     let hasData: Bool
     let hasUnknownCommitments: Bool
     var fixedOverrun: Decimal = 0
+    var loans: Decimal? = 0
+    var hasUnknownLoans = false
     var daily: Decimal? { guard let remaining, remainingDays > 0 else { return nil }; return remaining / Decimal(remainingDays) }
 }
 struct RecurringFinancialItem: Identifiable {

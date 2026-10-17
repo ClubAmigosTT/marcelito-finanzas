@@ -1060,6 +1060,9 @@ private struct LedgerEnvelope: Codable {
 
 @Observable
 final class FinanceStore {
+    let loanLedger: LoanLedger
+    @ObservationIgnored var loanProjectionCache: LoanSpendingProjection?
+
     /// Bump when native extraction, OCR or reconciliation rules change, or
     /// when saved PDF results need a deliberate replay. This release forces
     /// older persisted snapshots through the current reader; the refresh stays
@@ -2135,6 +2138,7 @@ final class FinanceStore {
             && expectedRebuildCount > 0
             && reconstructedStatementCount < expectedRebuildCount
         let canonicalGross = eligibleMovements.filter(isSpend).reduce(Decimal(0)) { $0 + absolute($1.amount) }
+            + loanSpendingProjection.interestRows.reduce(0) { $0 + absolute($1.amount) }
         let canonicalRefunds = eligibleMovements.filter { movementKind($0) == .refund }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let canonicalNetSpend = max(Decimal(0), canonicalGross - canonicalRefunds)
         let onePercent = Decimal(string: "0.01", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(0.01)
@@ -2924,7 +2928,7 @@ final class FinanceStore {
                 }
                 let review = canonical.filter { ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains($0.category) }
                 let income = canonical.filter(isRealIncome)
-                let expenses = canonical.filter(isSpend)
+                let expenses = canonical.filter(isSpend) + loanSpendingProjection.interestRows.filter { $0.statementId == statement.id }
                 let transfers = canonical.filter { movementKind($0) == .bankTransfer }
                 let cardPayments = canonical.filter { movementKind($0) == .cardPayment }
                 let refunds = canonical.filter { movementKind($0) == .refund }
@@ -3125,11 +3129,7 @@ final class FinanceStore {
             .reduce(0) { $0 + absolute($1.amount) }
     }
     var directBankSpend: Decimal {
-        eligibleMovements.filter { movement in
-            guard isSpend(movement), let statementId = movement.statementId,
-                  let statement = statements.first(where: { $0.id == statementId }) else { return false }
-            return statementKind(statement) != .card
-        }.reduce(0) { $0 + absolute($1.amount) }
+        netExpenseMovements.filter { $0.kind != .refund && isBankMovement($0) }.reduce(0) { $0 + absolute($1.amount) }
     }
     var rawExpense: Decimal { eligibleMovements.filter { $0.flow == .expense }.reduce(0) { $0 + absolute($1.amount) } }
     var excludedCardPayments: Decimal { eligibleMovements.filter { movementKind($0) == .cardPayment && isBankMovement($0) }.reduce(0) { $0 + absolute($1.amount) } }
@@ -3140,17 +3140,21 @@ final class FinanceStore {
     var totalIncome: Decimal { realIncome }
     var totalTransfers: Decimal { eligibleMovements.filter { $0.flow == .transfer && $0.amount < 0 }.reduce(0) { $0 + absolute($1.amount) } }
     var totalExpenses: Decimal { consolidatedRealSpend }
-    var realExpenseMovements: [Movement] { eligibleMovements.filter(isSpend) }
+    var loanEligibleBankMovements: [Movement] {
+        let bankIDs = Set(statements.filter { statementKind($0) == .bank }.map(\.id))
+        return eligibleMovements.filter { $0.statementId.map(bankIDs.contains) == true }
+    }
+    var realExpenseMovements: [Movement] { netExpenseMovements.filter { $0.kind != .refund } }
     /// Shared net-spend population for every analytical screen and drilldown.
     var netExpenseMovements: [Movement] {
         if let value = cachedProjection(netExpenseCache) { return value }
         let value: [Movement] = {
-        eligibleMovements.filter { isSpend($0) || (movementKind($0) == .refund && $0.amount > 0) }
+        (eligibleMovements.filter { isSpend($0) || (movementKind($0) == .refund && $0.amount > 0) }
             .map { row in
                 var result = row
                 result.kind = movementKind(row)
                 return result
-            }
+            } + loanSpendingProjection.interestRows)
 
         }()
         netExpenseCache = projectionEntry(value)
@@ -3187,8 +3191,13 @@ final class FinanceStore {
     var cashAvailable: Decimal? {
         completeSum(latestCompleteMetrics(.bank).map(\.cashBalance))
     }
+    var cardDebtTotal: Decimal? { completeSum(latestCompleteMetrics(.card).map(\.debtBalance)) }
     var debtTotal: Decimal? {
-        completeSum(latestCompleteMetrics(.card).map(\.debtBalance))
+        guard loanLedger.loadError == nil else { return nil }
+        if loanLedger.state.accounts.isEmpty { return cardDebtTotal }
+        let hasCards = statements.contains { statementKind($0) == .card }
+        guard let cards = hasCards ? cardDebtTotal : Decimal(0), let loans = loanLedger.debt() else { return nil }
+        return cards + loans
     }
     var liquidPatrimony: Decimal? {
         guard let cashAvailable, let debtTotal else { return nil }
@@ -3220,14 +3229,18 @@ final class FinanceStore {
             guard let date = periodDate(from: metric.period) else { return nil }
             return (metric, date)
         }
-        return Set(dated.map { $0.1 }).sorted().map { date in
+        let loanDates = loanLedger.state.accounts.flatMap { $0.statements.map(\.asOf) }
+        return Set(dated.map { $0.1 } + loanDates).sorted().map { date in
             let latest = latestMetricsBySource(dated.filter { $0.1 <= date }.map { $0.0 })
             guard Set(latest.map { $0.accountKey ?? "\($0.source)|\($0.kind)" }) == keys else {
                 return BalanceSnapshot(date: date, cash: nil, debt: nil)
             }
+            let cardDebt = completeSum(latest.filter { $0.kind == .card }.map(\.debtBalance))
+            let hasCards = latest.contains { $0.kind == .card }
+            let loans = loanLedger.debt(asOf: date)
+            let debt: Decimal? = loanLedger.loadError != nil ? nil : (loanLedger.state.accounts.isEmpty ? cardDebt : (hasCards ? cardDebt : Decimal(0)).flatMap { cards in loans.map { cards + $0 } })
             return BalanceSnapshot(date: date,
-                cash: completeSum(latest.filter { $0.kind == .bank }.map(\.cashBalance)),
-                debt: completeSum(latest.filter { $0.kind == .card }.map(\.debtBalance)))
+                cash: completeSum(latest.filter { $0.kind == .bank }.map(\.cashBalance)), debt: debt)
         }
 
         }()
@@ -3289,7 +3302,7 @@ final class FinanceStore {
         var expenseByDay: [Date: Decimal] = [:]
         let calendar = Calendar.current
 
-        for movement in eligibleMovements {
+        for movement in eligibleMovements + loanSpendingProjection.interestRows {
             let day = calendar.startOfDay(for: movement.date)
             if isRealIncome(movement) {
                 incomeByDay[day, default: 0] += absolute(movement.amount)
@@ -3555,7 +3568,7 @@ final class FinanceStore {
     }
 
     private func isSpend(_ movement: Movement) -> Bool {
-        guard movement.flow == .expense else { return false }
+        guard movement.flow == .expense, loanSpendingProjection.payments[movement.id] == nil else { return false }
         // An MSI plan is a debt schedule, not a second real purchase. Keep it
         // in card reconciliation/new-cargo controls, but exclude it from
         // Gasto real, cash flow and savings-rate aggregates.
@@ -4899,6 +4912,7 @@ final class FinanceStore {
 
     init() {
         let defaults = UserDefaults.standard
+        loanLedger = LoanLedger(defaults: defaults)
         isReconciliationOnly = false
         manualDashboardUnlockEnabled = false
         defaults.removeObject(forKey: manualDashboardUnlockKey)
@@ -5072,6 +5086,7 @@ final class FinanceStore {
             defaults.set(Self.extractionReplayVersion, forKey: Self.extractionReplayVersionKey)
         }
         refreshCanonicalRebuildStatus()
+        loanLedger.onChange = { [weak self] in self?.invalidateDerivedProjections() }
         DiagnosticsRecorder.record(
             stage: "store.init",
             message: "Libro \(ledgerVersion.uuidString.prefix(8)) cargado: \(statements.count) estado(s), \(movements.count) movimiento(s)."
@@ -5082,6 +5097,7 @@ final class FinanceStore {
     /// read or write UserDefaults: PDF extraction can call this from a detached
     /// background task while the live store is committing a ledger snapshot.
     private init(reconciliationOnly: Bool) {
+        loanLedger = LoanLedger(defaults: nil)
         isReconciliationOnly = reconciliationOnly
         movements = []
         statements = []
@@ -5391,7 +5407,7 @@ final class FinanceStore {
         let rows = eligibleMovements.filter { $0.date >= interval.start && $0.date < interval.end }
         let grouped: [MonthlyAuditBucket: [Movement]] = [
             .income: rows.filter(isRealIncome),
-            .spending: rows.filter(isSpend),
+            .spending: rows.filter(isSpend) + loanSpendingProjection.interestRows.filter { $0.date >= interval.start && $0.date < interval.end },
             .refunds: rows.filter { movementKind($0) == .refund && $0.amount > 0 },
             .transferOut: rows.filter { movementKind($0) == .bankTransfer && $0.amount < 0 },
             .transferIn: rows.filter { movementKind($0) == .bankTransfer && $0.amount > 0 },
@@ -5423,6 +5439,9 @@ final class FinanceStore {
     }
 
     private func monthlyFundingBridge(interval: DateInterval, incomeLessSpending: Decimal, calendar: Calendar) -> MonthlyFundingBridge? {
+        // A loan with dated UDI valuations needs exact month-end principal/FX evidence.
+        // Bank/card cuts alone cannot prove that bridge after adding a loan.
+        guard loanLedger.state.accounts.isEmpty, loanLedger.loadError == nil else { return nil }
         // Never carry different account cutoffs forward to fabricate a month-end balance.
         guard statements.allSatisfy({ $0.accountKey != nil }) else { return nil }
         let groups = Dictionary(grouping: statements) { "\($0.source)|\($0.accountKey!)" }
@@ -5671,6 +5690,7 @@ final class FinanceStore {
     }
 
     func clearLocalData() {
+        loanLedger.clear()
         UserDefaults.standard.removeObject(forKey: "marcelito.manualReviews.v1")
         movements = []
         statements = []
@@ -5714,6 +5734,7 @@ final class FinanceStore {
         defaults.removeObject(forKey: bankScreenshotCaptureStorageKey)
         try? FileManager.default.removeItem(at: statementFilesDirectoryURL)
         try? FileManager.default.removeItem(at: bankScreenshotFilesDirectoryURL)
+        if let directory = try? LoanPDFReader.directory() { try? FileManager.default.removeItem(at: directory) }
     }
 
     /// Devuelve la URL local del PDF importado. Solo se aceptan nombres de
@@ -6593,6 +6614,9 @@ final class FinanceStore {
             pageTexts.append("__PDF_PAGE_\(index + 1)__\n\(pageText)")
         }
         var extractedText = pageTexts.joined(separator: "\n")
+        if ITAMLoanReader.recognizes(extractedText) {
+            throw LoanError.invalid("Este es un préstamo ITAM. Agrégalo desde Cuentas → Préstamos para conservar cuotas y abonos sin contarlos como compras.")
+        }
         let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // A PDF can expose a text layer even when its line breaks are unusual

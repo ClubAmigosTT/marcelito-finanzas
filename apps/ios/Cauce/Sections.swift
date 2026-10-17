@@ -577,6 +577,14 @@ struct MovementDetailView: View {
                         .foregroundStyle(Color.marcelitoAmber)
                 }
             }
+            if let link = store.loanSpendingProjection.payments[currentMovement.id] {
+                Section("Abono de préstamo confirmado") {
+                    LabeledContent("Capital", value: planningMoney(abs(currentMovement.amount) - link.receiptInterest))
+                    LabeledContent("Intereses", value: planningMoney(link.receiptInterest))
+                    Text("El capital se excluye del consumo. El presupuesto cuenta el abono completo una vez. Tu categoría original se conserva.").font(.caption).foregroundStyle(.secondary)
+                    NavigationLink("Ver aplicación del abono") { LoanReceiptDetailView(accountID: link.accountID, receiptID: link.receiptID) }
+                }
+            }
             if let confidence = currentMovement.reconciliationConfidence,
                let reason = currentMovement.reconciliationReason {
                 Section("Conciliación entre cuentas") {
@@ -619,6 +627,12 @@ struct MovementDetailView: View {
                     }
                 }
             }
+            if let link = store.loanSpendingProjection.interestLinks[currentMovement.id] {
+                LabeledContent("Categoría", value: "Comisiones y finanzas")
+                LabeledContent("Tipo de movimiento", value: "Interés del préstamo")
+                Text("Este importe es el componente de interés del abono bancario vinculado. Su desglose se conserva como aparece en ITAM.").font(.caption).foregroundStyle(.secondary)
+                NavigationLink("Ver abono completo") { LoanReceiptDetailView(accountID: link.accountID, receiptID: link.receiptID) }
+            } else {
             Picker("Categoría", selection: Binding(
                 get: { selectedCategory },
                 set: {
@@ -684,6 +698,7 @@ struct MovementDetailView: View {
                     store.updateClassification(for: movement, kind: selectedKind, travelRelated: $0)
                 }
             ))
+            }
         }
         .alert("¿Son la misma transferencia entre tus cuentas?", isPresented: Binding(
             get: { counterpartToConfirm != nil },
@@ -2214,6 +2229,16 @@ struct AccountsView: View {
                     LedgerQualityBanner(store: store)
                 }
                 accountsHeading
+                NavigationLink { LoanAccountsView() } label: {
+                    HStack {
+                        Image(systemName: "building.columns")
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text("Préstamos").font(.headline)
+                            Text(store.loanLedger.state.accounts.isEmpty ? "Agregar estado ITAM · cuotas y abonos" : "\(store.loanLedger.state.accounts.count) préstamo(s) · ver saldo y abonos").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer(); Image(systemName: "chevron.right").font(.caption)
+                    }.padding(14).background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16))
+                }.buttonStyle(.plain).accessibilityIdentifier("accounts.loans")
                 accountCarousel
                 if let account = selectedAccount {
                     selectedAccountContent(account)
@@ -3155,6 +3180,7 @@ struct NetWorthView: View {
 
                     debtCoverageSection
                     creditSection
+                    LoanPositionSection()
                     evolutionSection
                 }
                 .padding(.horizontal, 20)
@@ -3186,7 +3212,7 @@ struct NetWorthView: View {
             Text("Crédito")
                 .font(.headline)
                 .padding(.bottom, 2)
-            PositionMetricRow(title: "Deuda actual", value: money(store.debtTotal))
+            PositionMetricRow(title: "Deuda en tarjetas", value: money(store.cardDebtTotal))
 
             if store.dashboardIsBlocked {
                 PositionMetricRow(title: "Utilización", value: "Bloqueado")
