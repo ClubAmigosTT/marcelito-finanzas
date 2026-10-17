@@ -42,6 +42,11 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
   assert.doesNotMatch(sections, /try store\.importPDF\(/);
 
   assert.match(models, /func importPDFAsync\(/);
+  // Nonisolated async methods resume on the generic executor even when their
+  // caller is MainActor. The worker reads PDFs; UI progress and the mutable
+  // observable ledger must resume on MainActor after that await.
+  assert.match(models, /@MainActor\s+func importPDFAsync\(/);
+  assert.match(models, /@MainActor\s+func inspectPDFAsync\(/);
   assert.match(pdfCache, /actor PDFExtractionCoordinator/);
   assert.match(models, /PDFExtractionCoordinator\.shared\.perform/);
   const importBlock = models.match(/func importPDFAsync\([\s\S]*?func inspectPDFAsync/)?.[0];

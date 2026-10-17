@@ -65,6 +65,13 @@ final class PDFReadingCacheTests: XCTestCase {
         XCTAssertEqual(probe.maximumConcurrent, 1)
     }
 
+    @MainActor
+    func testExtractionLeavesMainActorAndReturnsToTheCaller() async throws {
+        let wasMainThread = try await PDFExtractionCoordinator().perform { Thread.isMainThread }
+        XCTAssertFalse(wasMainThread, "PDFKit/Vision work must not move onto the UI executor.")
+        XCTAssertTrue(Thread.isMainThread, "The UI caller resumes on its own actor after extraction.")
+    }
+
     func testExtractionCoordinatorStopsCanceledPageWork() async throws {
         let coordinator = PDFExtractionCoordinator()
         let started = AsyncStream<Void>.makeStream(of: Void.self)

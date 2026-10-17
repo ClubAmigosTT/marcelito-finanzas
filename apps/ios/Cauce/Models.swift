@@ -7825,8 +7825,10 @@ final class FinanceStore {
     }
 
     /// Asynchronous import path used by the UI. PDFKit parsing and Vision OCR
-    /// run off the main actor; only the small ledger commit returns to the
-    /// store's isolation context after extraction completes.
+    /// run off the main actor. Resume progress callbacks and the observed
+    /// ledger commit on MainActor: a nonisolated async method otherwise resumes
+    /// on the generic executor and races SwiftUI's live ledger/cache reads.
+    @MainActor
     func importPDFAsync(
         from url: URL,
         allowOCR: Bool = true,
@@ -7848,6 +7850,7 @@ final class FinanceStore {
         let fileName = url.lastPathComponent
         let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
         try Task.checkCancellation()
+        DiagnosticsRecorder.record(stage: "import.extract.start", message: "Lectura iniciada: \(fileName).")
         let localExtraction = try await PDFExtractionCoordinator.shared.perform {
             let documentData = try Self.readPDFData(from: url)
             return try autoreleasepool {
@@ -7863,22 +7866,27 @@ final class FinanceStore {
             }
         }
         try Task.checkCancellation()
+        DiagnosticsRecorder.record(stage: "import.extract.done", message: "\(localExtraction.source): \(localExtraction.pageCount) página(s), \(localExtraction.candidates.count) fila(s); incorporando al libro en la interfaz.")
         stage?("\(Self.localExtractionStage(for: localExtraction.recoveryAttempts)); conciliando contra los totales…")
         let extraction = localExtraction
         try Task.checkCancellation()
-        return try applyPDFExtraction(
+        let result = try applyPDFExtraction(
             extraction,
             url: url,
             preserveExistingOnEmpty: preserveExistingOnEmpty,
             requireValidReconciliation: requireValidReconciliation,
             normalizeAfterImport: normalizeAfterImport
         )
+        DiagnosticsRecorder.record(stage: "import.commit.done", message: "\(result.source): \(result.imported) movimiento(s) guardado(s).")
+        return result
     }
 
     /// Inspects a PDF with the production reader without writing anything to
     /// the canonical ledger. This is the device-side path used by the native
     /// corpus certifier: Vision, reconciliation and quality gates are exactly
     /// the same as a normal import, but the temporary result is discarded.
+    /// Its progress callback also updates SwiftUI state after worker extraction.
+    @MainActor
     func inspectPDFAsync(
         from url: URL,
         allowOCR: Bool = true,
