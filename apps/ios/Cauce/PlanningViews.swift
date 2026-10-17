@@ -555,15 +555,19 @@ struct PersonalMovementRows: View {
     var body: some View {
         LazyVStack(spacing: 10) {
             ForEach(rows) { movement in
+                let loanInterest = store.loanSpendingProjection.interestLinks[movement.id]
                 VStack(alignment: .leading, spacing: 4) {
                     NavigationLink {
-                        if store.movements.contains(where: { $0.id == movement.id }) { MovementDetailView(movement: movement) }
+                        if loanInterest != nil || store.movements.contains(where: { $0.id == movement.id }) { MovementDetailView(movement: movement) }
                         else { Text("Compra MSI registrada: \(movement.title)").padding() }
                     } label: {
                         HStack { Text(planning.merchantLabel(movement)).lineLimit(1); Spacer(); Text(planningMoney(movement.expenseContribution)).monospacedDigit() }
                     }.buttonStyle(.plain)
                     Text(movement.date, format: .dateTime.locale(Locale(identifier: "es_MX")).day().month(.abbreviated).year()).font(.caption2).foregroundStyle(.secondary)
                     HStack {
+                        if loanInterest != nil {
+                            Text(planning.category(movement)).font(.caption)
+                        } else {
                         Menu {
                             Section("Solo este movimiento") {
                                 ForEach(personalExpenseCategories, id: \.self) { category in
@@ -582,8 +586,9 @@ struct PersonalMovementRows: View {
                                 }
                             }
                         } label: { Label(planning.category(movement), systemImage: "pencil").font(.caption) }
+                        }
                         Spacer()
-                        Text(planning.isFixed(movement) ? "Fijo" : "Variable").font(.caption2).foregroundStyle(.secondary)
+                        Text(loanInterest != nil ? "Interés" : planning.isFixed(movement) ? "Fijo" : "Variable").font(.caption2).foregroundStyle(.secondary)
                     }
                     Divider()
                 }

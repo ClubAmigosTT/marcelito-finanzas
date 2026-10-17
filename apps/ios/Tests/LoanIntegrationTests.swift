@@ -26,7 +26,8 @@ import XCTest
     func testConfirmationSeparatesPrincipalAndInterestWithoutRewritingManualClassification() throws {
         try withStores { store, p in
             let (loan, receipt, row) = try setup(store)
-            let original = try JSONEncoder().encode(store.movements)
+            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+            let original = try encoder.encode(store.movements)
             XCTAssertEqual(store.consolidatedRealSpend, 500)
             XCTAssertEqual(store.loanBankCandidates(for: receipt).count, 1)
             try store.confirmLoanPayment(accountID: loan.accountID, receipt: receipt, movement: row)
@@ -38,7 +39,7 @@ import XCTest
             XCTAssertEqual(store.statementAudits.first?.expenseTotal, 100)
             XCTAssertEqual(store.monthlyFinancialAudit(for: row.date).rows[.spending]?.reduce(Decimal(0)) { $0 + abs($1.amount) }, 100)
             XCTAssertEqual(store.loanPaid(in: .month(row.date)), 500); XCTAssertEqual(store.loanPrincipalPaid(in: .month(row.date)), 400)
-            XCTAssertEqual(try JSONEncoder().encode(store.movements), original)
+            XCTAssertEqual(try encoder.encode(store.movements), original)
             XCTAssertEqual(p.total(store, period: .month(row.date)), 100)
             XCTAssertTrue(p.budgetCategoryTotals(store, period: .month(row.date)).isEmpty)
             p.state.incomeAmount = 5000
