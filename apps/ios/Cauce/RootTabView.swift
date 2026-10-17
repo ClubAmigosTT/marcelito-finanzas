@@ -1063,18 +1063,18 @@ struct MetricDetailSheet: View {
     private var trend: [MetricTrendPoint] {
         switch metric {
         case .patrimony:
-            patrimonyTrend()
+            return patrimonyTrend()
         case .cash:
-            statementTrend(kind: .bank, keyPath: \.cashBalance)
+            return statementTrend(kind: .bank, keyPath: \.cashBalance)
         case .debt:
             if store.loanLedger.state.accounts.isEmpty { return statementTrend(kind: .card, keyPath: \.debtBalance) }
             return Array(store.balanceHistory.compactMap { point in point.debt.map { MetricTrendPoint(id: point.date.description, label: dateLabel(point.date), value: NSDecimalNumber(decimal: $0).doubleValue) } }.suffix(8))
         case .expense:
-            store.cashFlowHistory.filter { Calendar.current.isDate($0.date, equalTo: .now, toGranularity: .month) }.suffix(12).map { point in
+            return store.cashFlowHistory.filter { Calendar.current.isDate($0.date, equalTo: .now, toGranularity: .month) }.suffix(12).map { point in
                 MetricTrendPoint(id: point.id.description, label: dateLabel(point.date), value: point.expense)
             }
         case .flow:
-            store.cashFlowHistory.filter { Calendar.current.isDate($0.date, equalTo: .now, toGranularity: .month) }.suffix(12).map { point in
+            return store.cashFlowHistory.filter { Calendar.current.isDate($0.date, equalTo: .now, toGranularity: .month) }.suffix(12).map { point in
                 MetricTrendPoint(id: point.id.description, label: dateLabel(point.date), value: point.net)
             }
         }
