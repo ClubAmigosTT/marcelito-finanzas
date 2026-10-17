@@ -139,6 +139,43 @@ struct PlanningIncomeSource: Identifiable, Codable, Equatable {
     var monthlyAmount: Decimal { cadence == "Quincenal" ? amount * 2 : amount }
 }
 
+enum FixedExpenseCadence: String, CaseIterable, Codable, Identifiable {
+    case monthly = "Mensual", fortnightly = "Quincenal", weekly = "Semanal", annual = "Anual"
+    var id: String { rawValue }
+    var paymentsPerYear: Decimal {
+        switch self { case .monthly: return 12; case .fortnightly: return 24; case .weekly: return 52; case .annual: return 1 }
+    }
+}
+struct PlanningFixedExpense: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var name: String
+    var amount: Decimal
+    var cadence: FixedExpenseCadence = .monthly
+    var category: String
+    // A bank-scoped merchant/recipient key. Never matches every generic SPEI.
+    var matchKey: String = ""
+    var account: String = ""
+    var startMonth: Date
+    var endMonth: Date? = nil
+    var monthlyAmount: Decimal {
+        var value = amount * cadence.paymentsPerYear / 12
+        var rounded: Decimal = 0; NSDecimalRound(&rounded, &value, 2, .plain)
+        return rounded
+    }
+    func includes(_ month: Date) -> Bool {
+        let target = FinancePeriod.month(month).start
+        return target >= FinancePeriod.month(startMonth).start && endMonth.map { target <= FinancePeriod.month($0).start } != false
+    }
+}
+struct RecurringExpenseSuggestion: Identifiable {
+    let id: String, name: String, account: String, category: String
+    let amount: Decimal
+    let cadence: FixedExpenseCadence
+    let regular: Bool
+    let count: Int, observedMonths: Int
+    let lastDate: Date
+}
+
 struct PlanningState: Codable {
     var schema = 1
     var incomeAmount: Decimal? = nil
@@ -155,12 +192,14 @@ struct PlanningState: Codable {
     var cardTerms: [String: CardPaymentTerms] = [:]
     var remindersEnabled = false
     var fixedMerchantRules: [String: Bool] = [:]
+    // Optional for backward-compatible decoding of existing planning records.
+    var fixedExpenses: [PlanningFixedExpense]? = nil
 }
 @Observable final class FinancialPlanningStore {
     var state: PlanningState {
         didSet {
             snapshotCache.removeAll(); budgetGeneration = UUID()
-            if state.labels != oldValue.labels || state.installments != oldValue.installments || state.fixedMerchantRules != oldValue.fixedMerchantRules {
+            if state.labels != oldValue.labels || state.installments != oldValue.installments || state.fixedMerchantRules != oldValue.fixedMerchantRules || state.fixedExpenses != oldValue.fixedExpenses {
                 invalidateSpendingProjections()
             }
         }
@@ -197,6 +236,9 @@ struct PlanningState: Codable {
     @ObservationIgnored private var expenseRowCache: [FinancePeriod: [Movement]] = [:]
     @ObservationIgnored private var budgetCategoryCache: [PeriodCategoryKey: [String: Decimal]] = [:]
     @ObservationIgnored private var categoryCache: [PeriodCategoryKey: [String: Decimal]] = [:]
+    @ObservationIgnored private var fixedMerchantIdentityCache: [UUID: (fingerprint: String, key: String, linkable: Bool)] = [:]
+    @ObservationIgnored private var fixedExpenseIndex: [String: PlanningFixedExpense]?
+    @ObservationIgnored private var recurringExpenseCache: (key: SpendingKey, day: Date, items: [RecurringExpenseSuggestion])?
     @ObservationIgnored private var labelIdentityIndex: [String: PersonalExpenseLabel]?
     @ObservationIgnored private var monthFormatter: DateFormatter = {
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM"; return f
@@ -206,12 +248,13 @@ struct PlanningState: Codable {
     private(set) var hasUnsavedPlanChanges = false
     private func invalidateSpendingProjections() {
         spendingProjection = nil; expenseRowCache.removeAll(); periodTotalCache.removeAll(); snapshotCache.removeAll(); budgetCategoryCache.removeAll(); categoryCache.removeAll()
-        labelIdentityIndex = nil; proposalCache.removeAll(); fixedCache.removeAll()
+        labelIdentityIndex = nil; fixedMerchantIdentityCache.removeAll(); fixedExpenseIndex = nil; recurringExpenseCache = nil; proposalCache.removeAll(); fixedCache.removeAll()
         analysisGeneration = UUID()
     }
     private func projection(_ store: FinanceStore) -> SpendingProjection {
         let key = SpendingKey(store: ObjectIdentifier(store), content: store.analyticsGeneration, ledger: store.ledgerVersion, planning: analysisGeneration, provisional: store.manualDashboardUnlockEnabled, pending: store.hasCanonicalRebuildPending)
         if let projection = spendingProjection, projection.key == key { return projection }
+        fixedMerchantIdentityCache.removeAll()
         expenseRowCache.removeAll(); periodTotalCache.removeAll(); snapshotCache.removeAll(); budgetCategoryCache.removeAll(); categoryCache.removeAll()
         let plans = state.installments
         let directIDs = Set(plans.flatMap(\.linkedMovementIDs))
@@ -341,10 +384,17 @@ struct PlanningState: Codable {
     func merchantKey(_ movement: Movement) -> String {
         (movement.normalizedMerchant ?? movement.displayMerchant ?? movement.title).folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX")).lowercased()
     }
-    func isFixed(_ movement: Movement) -> Bool {
+    func isFixed(_ movement: Movement) -> Bool { isFixed(movement, planningFor: movement.date) }
+    private func isFixed(_ movement: Movement, planningFor month: Date) -> Bool {
         if let value = label(for: movement).fixed { return value }
+        if !fixedExpenses.isEmpty, configuredFixedExpense(for: movement)?.includes(month) == true { return true }
         if !state.fixedMerchantRules.isEmpty, let value = state.fixedMerchantRules[merchantKey(movement)] { return value }
         return movement.classificationTags.contains("fijo")
+    }
+    private func budgetCategory(_ movement: Movement) -> String {
+        if !fixedExpenses.isEmpty, label(for: movement).fixed != false,
+           let item = configuredFixedExpense(for: movement), item.includes(movement.date) { return item.category }
+        return category(movement)
     }
     func isExtraordinary(_ movement: Movement) -> Bool { label(for: movement).extraordinary ?? (movement.travelRelated || movement.classificationTags.contains("viaje") || movement.classificationTags.contains("extraordinario")) }
     func isOrdinary(_ movement: Movement) -> Bool { !isExtraordinary(movement) }
@@ -396,7 +446,7 @@ struct PlanningState: Codable {
         let value = projection(store)
         let key = PeriodCategoryKey(period: period, fixed: fixed)
         if let cached = budgetCategoryCache[key] { return cached }
-        let result = value.budgetRows.filter { period.contains($0.date) && isOrdinary($0) && (fixed == nil || isFixed($0) == fixed) }.reduce(into: [String: Decimal]()) { result, row in result[category(row), default: 0] += personalContribution(row) }
+        let result = value.budgetRows.filter { period.contains($0.date) && isOrdinary($0) && (fixed == nil || isFixed($0) == fixed) }.reduce(into: [String: Decimal]()) { result, row in result[budgetCategory(row), default: 0] += personalContribution(row) }
         if budgetCategoryCache.count >= 96 { budgetCategoryCache.removeAll() }
         budgetCategoryCache[key] = result; return result
     }
@@ -466,7 +516,14 @@ struct PlanningState: Codable {
         // one year. A partial immediately preceding month never becomes zero.
         let complete = proposalMonths(store, before: month)
         guard complete.count == 3 else { proposalCache[cacheKey] = [:]; return [:] }
-        let all = complete.map { budgetCategoryTotals(store, period: .month($0), fixed: false) }
+        let all = complete.map { sample -> [String: Decimal] in
+            guard !fixedExpenses.isEmpty else { return budgetCategoryTotals(store, period: .month(sample), fixed: false) }
+            // A newly confirmed fixed bill must also leave the historical
+            // variable proposal, without rewriting historical classifications.
+            let period = FinancePeriod.month(sample)
+            return projection(store).budgetRows.filter { period.contains($0.date) && isOrdinary($0) && !isFixed($0, planningFor: month) }
+                .reduce(into: [:]) { $0[category($1), default: 0] += personalContribution($1) }
+        }
         let categories = Set(all.flatMap { $0.keys })
         let result = Dictionary(uniqueKeysWithValues: categories.map { category in
             let values = all.map { max(0, $0[category, default: 0]) }.sorted()
@@ -481,8 +538,17 @@ struct PlanningState: Codable {
         // Most recent observed month, fixed labels only; incomplete history is
         // disclosed in the UI and the amounts remain editable.
         let previous = Calendar.current.date(byAdding: .month, value: -1, to: FinancePeriod.month(month).start)!
-        let previousFixed = budgetCategoryTotals(store, period: .month(previous), fixed: true)
-        let result = previousFixed.isEmpty ? budgetCategoryTotals(store, period: .month(month), fixed: true) : previousFixed
+        let configured = fixedExpenses.filter { $0.includes(month) }
+        let managed = Set(configured.map(\.matchKey).filter { !$0.isEmpty })
+        func observed(_ sample: Date) -> [String: Decimal] {
+            guard !fixedExpenses.isEmpty else { return budgetCategoryTotals(store, period: .month(sample), fixed: true) }
+            let period = FinancePeriod.month(sample)
+            return projection(store).budgetRows.filter { period.contains($0.date) && isOrdinary($0) && isFixed($0, planningFor: month) && !managed.contains(fixedExpenseKey($0)) }
+                .reduce(into: [:]) { $0[category($1), default: 0] += personalContribution($1) }
+        }
+        let previousFixed = observed(previous)
+        var result = previousFixed.isEmpty ? observed(month) : previousFixed
+        for item in configured { result[item.category, default: 0] += item.monthlyAmount }
         fixedCache[cacheKey] = result; return result
     }
     func plan(for date: Date) -> MonthBudgetPlan { state.budgets[monthKey(date)] ?? MonthBudgetPlan() }
@@ -510,18 +576,20 @@ struct PlanningState: Codable {
         let cacheKey = SnapshotKey(month: FinancePeriod.month(month).start, day: Calendar.current.startOfDay(for: now))
         if let cached = snapshotCache[cacheKey] { return cached }
         let period = FinancePeriod.month(month); let plan = plan(for: month)
-        let fixedBudget = fixedLimits(store, month: month).values.reduce(0, +)
+        let fixedByCategory = fixedLimits(store, month: month)
+        let fixedBudget = fixedByCategory.values.reduce(0, +)
+        let fixedOverrun = budgetCategoryTotals(store, period: period, fixed: true).reduce(Decimal(0)) { $0 + max(0, $1.value - fixedByCategory[$1.key, default: 0]) }
         let variableSpent = budgetCategoryTotals(store, period: period, fixed: false).values.reduce(0, +)
         let monthlyMSI = commitments(store, month: month)
         let income = monthlyIncome
         let unknown = hasUnknownCommitments(store, month: month)
-        let available = unknown ? nil : income.map { $0 + plan.carryIn - fixedBudget - plan.savingsTarget - monthlyMSI }
+        let available = unknown ? nil : income.map { $0 + plan.carryIn - fixedBudget - fixedOverrun - plan.savingsTarget - monthlyMSI }
         let remaining = available.map { $0 - variableSpent }
         let c = Calendar.current
         let today = c.startOfDay(for: now)
         let from = max(period.start, today)
         let days = from < period.end ? c.dateComponents([.day], from: from, to: period.end).day ?? 0 : 0
-        let value = BudgetSnapshot(period: period, income: income, fixed: fixedBudget, msi: monthlyMSI, savings: plan.savingsTarget, variableSpent: variableSpent, available: available, remaining: remaining, remainingDays: days, hasData: hasData(store, period: period), hasUnknownCommitments: unknown)
+        let value = BudgetSnapshot(period: period, income: income, fixed: fixedBudget, msi: monthlyMSI, savings: plan.savingsTarget, variableSpent: variableSpent, available: available, remaining: remaining, remainingDays: days, hasData: hasData(store, period: period), hasUnknownCommitments: unknown, fixedOverrun: fixedOverrun)
         if snapshotCache.count >= 24 { snapshotCache.removeAll() }
         snapshotCache[cacheKey] = value; return value
     }
@@ -534,6 +602,77 @@ struct PlanningState: Codable {
         } else if !state.goals.isEmpty { state.goals[0].saved += surplus }
         else { return false }
         plan.closed = true; setPlan(plan, for: month); return true
+    }
+    var fixedExpenses: [PlanningFixedExpense] { state.fixedExpenses ?? [] }
+    @discardableResult func setFixedExpenses(_ expenses: [PlanningFixedExpense]) -> Bool {
+        let keys = expenses.map(\.matchKey).filter { !$0.isEmpty }
+        guard Set(expenses.map(\.id)).count == expenses.count, Set(keys).count == keys.count,
+              expenses.allSatisfy({ !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.amount > 0 && !$0.amount.isNaN && !$0.category.isEmpty && !["Ingresos", "Transferencia", "Transferencias"].contains($0.category) && validFixedExpenseDates($0) }) else { return false }
+        let previous = state
+        state.fixedExpenses = expenses
+        if save() { return true }
+        state = previous; return false
+    }
+    private func validFixedExpenseDates(_ expense: PlanningFixedExpense) -> Bool {
+        expense.endMonth.map { FinancePeriod.month($0).start >= FinancePeriod.month(expense.startMonth).start } ?? true
+    }
+    func fixedExpenseKey(_ movement: Movement) -> String { fixedMerchantIdentity(movement).key }
+    private func fixedMerchantIdentity(_ movement: Movement) -> (key: String, linkable: Bool) {
+        let fingerprint = [movement.account, movement.title, movement.normalizedMerchant ?? "", movement.displayMerchant ?? "", movement.rawDescription ?? "", movement.extractionEvidence?.sourceText ?? "", String(describing: movement.kind), String(describing: movement.flow)].joined(separator: "\u{001F}")
+        if let cached = fixedMerchantIdentityCache[movement.id], cached.fingerprint == fingerprint { return (cached.key, cached.linkable) }
+        let primary = movement.normalizedMerchant ?? movement.displayMerchant ?? movement.title
+        let isTransfer = movement.hasTransferOrSpeiDescriptor || primary.range(of: #"(?i)spei|transf"#, options: .regularExpression) != nil
+        let recipient = isTransfer ? movement.transferRecipient : nil
+        let descriptor = recipient ?? movement.normalizedMerchant ?? movement.displayMerchant ?? movement.title
+        let key = (movement.account + "|" + descriptor).folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX")).lowercased()
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+        let linkable = !isTransfer || recipient?.isEmpty == false
+        if fixedMerchantIdentityCache.count >= 4096 { fixedMerchantIdentityCache.removeAll() }
+        fixedMerchantIdentityCache[movement.id] = (fingerprint, key, linkable)
+        return (key, linkable)
+    }
+    private func configuredFixedExpense(for movement: Movement) -> PlanningFixedExpense? {
+        if fixedExpenseIndex == nil {
+            fixedExpenseIndex = fixedExpenses.reduce(into: [:]) { if !$1.matchKey.isEmpty { $0[$1.matchKey] = $1 } }
+        }
+        return fixedExpenseIndex?[fixedExpenseKey(movement)]
+    }
+    func canLinkFixedExpense(_ row: Movement) -> Bool {
+        guard row.kind != .msi, row.kind != .bankTransfer, row.kind != .cardPayment, row.kind != .income, row.kind != .credit else { return false }
+        // An unexpanded bank operation is not a reliable merchant identity.
+        return fixedMerchantIdentity(row).linkable
+    }
+    func recurringExpenseSuggestions(_ store: FinanceStore, now: Date = .now) -> [RecurringExpenseSuggestion] {
+        let value = projection(store); let day = Calendar.current.startOfDay(for: now)
+        if let cache = recurringExpenseCache, cache.key == value.key, cache.day == day { return cache.items }
+        let from = Calendar.current.date(byAdding: .month, value: -12, to: now)!
+        let configured = Set(fixedExpenses.map(\.matchKey))
+        let rows = value.budgetRows.filter { $0.date >= from && $0.date <= now && $0.expenseContribution > 0 && personalContribution($0) > 0 && isOrdinary($0) && label(for: $0).fixed != false && canLinkFixedExpense($0) }
+        let grouped = Dictionary(grouping: rows, by: fixedExpenseKey)
+        let items = grouped.compactMap { key, rows -> RecurringExpenseSuggestion? in
+            guard !configured.contains(key), rows.count >= 3 else { return nil }
+            let sorted = rows.sorted { $0.date < $1.date }
+            let monthCount = Set(rows.map { monthKey($0.date) }).count
+            guard monthCount >= 2, Set(rows.map { Calendar.current.startOfDay(for: $0.date) }).count >= 3 else { return nil }
+            let amounts = rows.map { personalContribution($0) }.sorted()
+            let median = amounts.count.isMultiple(of: 2) ? (amounts[amounts.count / 2 - 1] + amounts[amounts.count / 2]) / 2 : amounts[amounts.count / 2]
+            guard median > 0 else { return nil }
+            let gaps = zip(sorted, sorted.dropFirst()).map { Calendar.current.dateComponents([.day], from: Calendar.current.startOfDay(for: $0.date), to: Calendar.current.startOfDay(for: $1.date)).day ?? 0 }.sorted()
+            let gap = gaps[gaps.count / 2]
+            let cadence: FixedExpenseCadence? = (5...9).contains(gap) ? .weekly : (12...18).contains(gap) ? .fortnightly : (25...35).contains(gap) ? .monthly : nil
+            let stable = amounts.allSatisfy { abs($0 - median) <= median / 10 }
+            let regular = cadence.map { cadence in
+                let range = cadence == .weekly ? 5...9 : cadence == .fortnightly ? 12...18 : 25...35
+                return stable && gaps.filter { range.contains($0) }.count * 4 >= gaps.count * 3
+            } ?? false
+            guard regular || rows.count >= 4 else { return nil }
+            // Irregular frequent merchants use a suggested monthly allowance,
+            // not a purported recurring bill. It always requires confirmation.
+            let totals = Dictionary(grouping: rows, by: { monthKey($0.date) }).values.map { $0.reduce(Decimal(0)) { $0 + personalContribution($1) } }.sorted()
+            let last = sorted.last!
+            return RecurringExpenseSuggestion(id: key, name: merchantLabel(last), account: last.account, category: category(last), amount: regular ? median : (totals.count.isMultiple(of: 2) ? (totals[totals.count / 2 - 1] + totals[totals.count / 2]) / 2 : totals[totals.count / 2]), cadence: regular ? cadence! : .monthly, regular: regular, count: rows.count, observedMonths: monthCount, lastDate: last.date)
+        }.sorted { $0.amount * $0.cadence.paymentsPerYear > $1.amount * $1.cadence.paymentsPerYear }
+        recurringExpenseCache = (value.key, day, items); return items
     }
     private func recurrenceKey(_ row: Movement, income: Bool) -> String {
         let descriptor = row.transferRecipient ?? row.normalizedMerchant ?? row.title
@@ -578,6 +717,7 @@ struct BudgetSnapshot {
     let remainingDays: Int
     let hasData: Bool
     let hasUnknownCommitments: Bool
+    var fixedOverrun: Decimal = 0
     var daily: Decimal? { guard let remaining, remainingDays > 0 else { return nil }; return remaining / Decimal(remainingDays) }
 }
 struct RecurringFinancialItem: Identifiable {

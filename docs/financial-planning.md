@@ -21,8 +21,8 @@ Registrar un plan no prueba que estén registrados todos los MSI de una cuenta. 
 ## Presupuesto
 
 - Variables: mediana por categoría de los últimos tres meses naturales completos disponibles (buscando como máximo doce meses) con cobertura de todas las cuentas. Un mes ausente no entra como cero.
-- Fijos: cargos marcados fijos del mes anterior observado (si no hay, del mes seleccionado). Propuestas editables; fijos y variables de la misma categoría tienen límites independientes.
-- Disponible variable = ingreso habitual + arrastre − fijos − meta de ahorro − mensualidades MSI.
+- Fijos: gastos configurados y confirmados con importe, frecuencia, categoría y vigencia. Para otros comercios, se conservan los cargos marcados fijos del mes anterior observado (si no hay, del mes seleccionado). Los límites mensuales que el usuario haya guardado por categoría tienen prioridad; fijos y variables mantienen límites independientes.
+- Disponible variable = ingreso habitual + arrastre − fijos previstos − exceso observado en fijos por categoría − meta de ahorro − mensualidades MSI. Un cargo fijo ya cubierto por la reserva no se vuelve a restar; su exceso sí reduce el disponible.
 - Restante = disponible variable − variable ordinario gastado.
 - Diario = restante / días restantes, incluyendo hoy; al terminar el mes no se divide entre cero.
 - Ahorro con el plan = ingreso − límites fijos/variables − mensualidades MSI; la meta de ahorro no se resta dos veces.
@@ -32,7 +32,7 @@ Comparaciones de consumo usan ventanas equivalentes. Comparaciones parciales se 
 
 ## Herramientas y recordatorios
 
-El simulador de contado/MSI no modifica el libro y advierte cuando faltan planes de meses futuros. Los recurrentes requieren tres observaciones, cadencia mensual/quincenal e importes dentro del 10% de la mediana; requieren confirmación para convertirse en fijos.
+El simulador de contado/MSI no modifica el libro y advierte cuando faltan planes de meses futuros. Los ingresos recurrentes requieren tres observaciones, cadencia mensual/quincenal e importes dentro del 10% de la mediana. Los posibles gastos fijos requieren tres cargos semanales/quincenales/mensuales comparables en al menos dos meses; los comercios frecuentes sin patrón requieren cuatro cargos en al menos dos meses. Toda sugerencia requiere confirmación.
 
 Metas muestran una fecha estimada por ahorro observado (ingreso real menos consumo total) de meses completos, repartido entre metas según sus aportaciones; o por aportación confirmada cuando no hay historial. No suponen rendimientos.
 
@@ -64,3 +64,14 @@ La inspección visual interactiva del simulador requiere la Mac desbloqueada. La
 - Inicio's recorded activity can browse months or years independently of the explicitly current-month budget. Ver movimientos opens exactly that period in Gastos.
 - Presupuesto supports month navigation plus an annual overview with each month's recorded spending and explicitly saved plan. The annual overview does not multiply the current income into purported historical income or invent monthly plans. Swipe navigation is restricted to the header so sliders remain editable.
 - Patrimonio's evolution supports movable 6/12-month windows or a selected calendar year. Current balance metrics retain the latest cutoff dates and current historical comparison. Separate chart series prevent drawing a line across missing monthly positions.
+
+## Configuración de ingresos y gastos fijos
+
+- Presupuesto conserva tres pestañas internas siempre accesibles: Plan, Ingresos y Gastos fijos. Las cinco pestañas principales se mantienen visibles. Ingresos reutiliza las fuentes guardadas y permite agregar, editar y eliminar varias fuentes; los depósitos reales siguen separados.
+- Cada gasto fijo guarda nombre, importe de la parte personal, frecuencia, categoría, comercio/cuenta opcional, primer mes y último mes opcional. La reserva mensual equivale a importe × 12/12, × 24/12, × 52/12 o × 1/12 para mensual, quincenal, semanal o anual, con redondeo a centavos. Las frecuencias semanal y anual son reservas promedio, no un calendario exacto de pagos.
+- La asociación al comercio se limita al banco y a la identidad de comercio o destinatario. Una descripción SPEI genérica sin destinatario no se propone como comercio vinculable. Los cargos MSI, pagos de tarjetas y traspasos propios quedan fuera de la detección.
+- Las propuestas usan solo cargos ordinarios personales del último año. Un patrón periódico con variación de importe máxima del 10% sugiere un posible fijo. Si un comercio frecuente no cumple ese patrón, propone la mediana del gasto de sus meses observados y advierte que requiere revisión, incluidos los meses parciales.
+- Nada se guarda automáticamente. Al confirmar, el gasto entra a los meses de su vigencia y sus cargos se separan de los variables. Las excepciones manuales por movimiento y las categorías del libro se conservan. La propuesta de variables excluye el comercio confirmado para el mes que se está planificando, sin cambiar clasificaciones de meses anteriores.
+- La reserva confirmada sustituye la inferencia del mismo comercio y evita sumarlo dos veces. Los límites mensuales manuales por categoría prevalecen. Editar o quitar un gasto no borra movimientos, etiquetas, fuentes de ingreso ni presupuestos; para terminarlo conservando su vigencia anterior, se define el último mes.
+- `fixedExpenses` es opcional en el esquema v1: los datos anteriores siguen cargando. Las escrituras conservan la copia previa; se rechazan duplicados de comercio, importes no positivos, categorías de ingreso/transferencia y vigencias invertidas. No se sobrescriben datos corruptos o de esquema futuro.
+- La detección y las identidades de comercio se reutilizan mientras el libro y las etiquetas no cambien; editar sliders no vuelve a recorrer el libro ni ejecuta una escritura por cargo.

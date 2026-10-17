@@ -26,6 +26,11 @@ struct PlanningMetric: View {
     }
 }
 struct PlanningIncomeView: View {
+    var body: some View { NavigationStack { PlanningIncomeContent(allowsDismiss: true) } }
+}
+struct PlanningIncomeContent: View {
+    var month: Date = .now
+    var allowsDismiss = false
     @Environment(FinancialPlanningStore.self) private var planning
     @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
@@ -33,62 +38,65 @@ struct PlanningIncomeView: View {
     @State private var deleting: PlanningIncomeSource?
     @State private var error: String?
     var body: some View {
-        NavigationStack {
-            Form {
-                Section {
-                    LabeledContent("Total habitual al mes", value: planning.monthlyIncome.map(planningMoney) ?? "Sin configurar")
-                        .font(.headline)
-                } footer: { Text("Se usa para planear tu presupuesto. Los depósitos realmente recibidos se muestran por separado.") }
-                Section {
-                    ForEach(planning.incomeSources) { source in
-                        HStack {
-                            Button { editing = source } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(source.name).foregroundStyle(Color.marcelitoNavy)
-                                    Text(sourceSummary(source)).font(.caption).foregroundStyle(.secondary)
-                                    Text("\(planningMoney(source.monthlyAmount)) al mes").font(.caption).foregroundStyle(Color.marcelitoNavyMid)
-                                }.frame(maxWidth: .infinity, alignment: .leading)
-                            }.buttonStyle(.plain)
-                            Button { deleting = source } label: { Image(systemName: "trash").foregroundStyle(.secondary) }.buttonStyle(.borderless).accessibilityLabel("Eliminar \(source.name)")
-                        }
-                    }
-                    Button { editing = PlanningIncomeSource(name: "", amount: 0, cadence: "Mensual") } label: { Label("Agregar ingreso", systemImage: "plus.circle") }
-                } header: { Text("Tus fuentes de ingreso") } footer: {
-                    if planning.state.incomeSources == nil, planning.state.incomeAmount != nil {
-                        Text("Conservamos tu total anterior como Ingreso habitual. Si incluía varias fuentes, edítalo antes de agregarlas por separado para no sumarlas dos veces.")
+        Form {
+            Section {
+                LabeledContent("Total habitual al mes", value: planning.monthlyIncome.map(planningMoney) ?? "Sin configurar")
+                    .font(.headline)
+            } footer: { Text("Se usa para planear tu presupuesto. Los depósitos realmente recibidos se muestran por separado.") }
+            Section {
+                ForEach(planning.incomeSources) { source in
+                    HStack {
+                        Button { editing = source } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(source.name).foregroundStyle(Color.marcelitoNavy)
+                                Text(sourceSummary(source)).font(.caption).foregroundStyle(.secondary)
+                                Text("\(planningMoney(source.monthlyAmount)) al mes").font(.caption).foregroundStyle(Color.marcelitoNavyMid)
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                        }.buttonStyle(.plain)
+                        Button { deleting = source } label: { Image(systemName: "trash").foregroundStyle(.secondary) }.buttonStyle(.borderless).accessibilityLabel("Eliminar \(source.name)")
                     }
                 }
-                let recurring = planning.incomeSuggestions(store)
-                if !recurring.isEmpty {
-                    Section("Sugerencias · confirma cada fuente") {
-                        ForEach(recurring) { item in
-                            Button {
-                                editing = PlanningIncomeSource(name: item.name, amount: item.amount, cadence: item.cadence, account: item.movement.account, detectedKey: item.id)
-                            } label: {
-                                VStack(alignment: .leading, spacing: 4) {
-                                    Text(item.name)
-                                    Text("\(item.movement.account) · \(planningMoney(item.amount)) · \(item.cadence)").font(.caption)
-                                    Text("Agregar como fuente").font(.caption.weight(.semibold))
-                                }
+                Button { editing = PlanningIncomeSource(name: "", amount: 0, cadence: "Mensual") } label: { Label("Agregar ingreso", systemImage: "plus.circle") }
+            } header: { Text("Tus fuentes de ingreso") } footer: {
+                if planning.state.incomeSources == nil, planning.state.incomeAmount != nil {
+                    Text("Conservamos tu total anterior como Ingreso habitual. Si incluía varias fuentes, edítalo antes de agregarlas por separado para no sumarlas dos veces.")
+                }
+            }
+            let recurring = planning.incomeSuggestions(store)
+            if !recurring.isEmpty {
+                Section("Sugerencias · confirma cada fuente") {
+                    ForEach(recurring) { item in
+                        Button {
+                            editing = PlanningIncomeSource(name: item.name, amount: item.amount, cadence: item.cadence, account: item.movement.account, detectedKey: item.id)
+                        } label: {
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text(item.name)
+                                Text("\(item.movement.account) · \(planningMoney(item.amount)) · \(item.cadence)").font(.caption)
+                                Text("Agregar como fuente").font(.caption.weight(.semibold))
                             }
                         }
-                        Text("No se agregan automáticamente ni incluyen transferencias propias. Si falta una fuente, puedes agregarla manualmente.").font(.caption).foregroundStyle(.secondary)
                     }
+                    Text("No se agregan automáticamente ni incluyen transferencias propias. Si falta una fuente, puedes agregarla manualmente.").font(.caption).foregroundStyle(.secondary)
                 }
-                if let error { Text(error).foregroundStyle(Color.marcelitoDanger) }
-                if !planning.state.incomeOnboardingCompleted {
-                    Button("Configurar después") { planning.state.incomeOnboardingCompleted = true; if planning.save() { dismiss() } }
+            }
+            if let error { Text(error).foregroundStyle(Color.marcelitoDanger) }
+            Section("Depósitos recibidos") {
+                NavigationLink("Ver ingresos recibidos por mes") { IncomeOverviewView(month: month) }
+            }
+            if allowsDismiss && !planning.state.incomeOnboardingCompleted {
+                Button("Configurar después") { planning.state.incomeOnboardingCompleted = true; if planning.save() { dismiss() } }
+            }
+        }.navigationTitle("Ingresos").toolbar {
+            if allowsDismiss { ToolbarItem(placement: .topBarTrailing) { Button("Listo") { dismiss() } } }
+        }.scrollContentBackground(.hidden).background(MarcelitoAmbientBackground())
+            .sheet(item: $editing) { source in PlanningIncomeSourceEditor(source: source) }
+            .confirmationDialog("¿Eliminar esta fuente de ingreso?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible, presenting: deleting) { source in
+                Button("Eliminar fuente", role: .destructive) {
+                    if !planning.setIncomeSources(planning.incomeSources.filter { $0.id != source.id }) { error = "No se pudo guardar el cambio. Tu información se conserva." }
+                    deleting = nil
                 }
-            }.navigationTitle("Ingresos").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Listo") { dismiss() } } }
-                .sheet(item: $editing) { source in PlanningIncomeSourceEditor(source: source) }
-                .confirmationDialog("¿Eliminar esta fuente de ingreso?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible, presenting: deleting) { source in
-                    Button("Eliminar fuente", role: .destructive) {
-                        if !planning.setIncomeSources(planning.incomeSources.filter { $0.id != source.id }) { error = "No se pudo guardar el cambio. Tu información se conserva." }
-                        deleting = nil
-                    }
-                    Button("Cancelar", role: .cancel) { deleting = nil }
-                } message: { _ in Text("Solo cambia tu ingreso habitual para presupuestar. Los depósitos y movimientos se conservan.") }
-        }
+                Button("Cancelar", role: .cancel) { deleting = nil }
+            } message: { _ in Text("Solo cambia tu ingreso habitual para presupuestar. Los depósitos y movimientos se conservan.") }
     }
     private func sourceSummary(_ source: PlanningIncomeSource) -> String {
         [planningMoney(source.amount), source.cadence, source.account].filter { !$0.isEmpty }.joined(separator: " · ")
@@ -152,7 +160,7 @@ struct HomeMonthlyPlanCard: View {
             HStack {
                 Text(snapshot.hasData ? "Te queda este mes" : "\(month.label) · Presupuesto del mes")
                 Spacer()
-                CalculationHelp(explanation: "Ingreso confirmado − gastos fijos presupuestados − meta de ahorro − mensualidades MSI − gasto variable personal. Sin movimientos del mes todavía no se conoce el restante real. Las cifras son provisionales cuando faltan estados o capturas.")
+                CalculationHelp(explanation: "Ingreso confirmado − gastos fijos presupuestados − exceso gastado en fijos − meta de ahorro − mensualidades MSI − gasto variable personal. Sin movimientos del mes todavía no se conoce el restante real. Las cifras son provisionales cuando faltan estados o capturas.")
             }
             if store.operationalMetricsBlocked {
                 Text("Revisa tus estados para calcular el disponible").font(.headline)
@@ -584,6 +592,7 @@ struct PersonalMovementRows: View {
 struct BudgetView: View {
     @Environment(FinanceStore.self) private var store
     @Environment(FinancialPlanningStore.self) private var planning
+    @State private var section: BudgetWorkspaceSection = .plan
     @State private var month = Date.now
     @State private var periodMode: FinancePeriodMode = .month
     @State private var showPeriodPicker = false
@@ -595,16 +604,47 @@ struct BudgetView: View {
     private var limits: [String: Decimal] { planning.limits(store, month: month) }
     private var fixed: [String: Decimal] { planning.fixedLimits(store, month: month) }
     private var actual: [String: Decimal] { planning.budgetCategoryTotals(store, period: .month(month)) }
-    private var categories: [String] { Array(Set(personalExpenseCategories.filter { $0 != "Otros / Por revisar" }).union(limits.keys)).sorted() }
+    private var categories: [String] { Array(Set(personalExpenseCategories.filter { $0 != "Otros / Por revisar" }).union(limits.keys).union(fixed.keys)).sorted() }
     var body: some View {
         NavigationStack {
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    if periodMode == .year { annualBudgetSummary }
-                    else {
+            Group {
+                switch section {
+                case .income: PlanningIncomeContent(month: month)
+                case .fixed: RecurringChargesView(month: month)
+                case .plan:
+                    planContent
+                }
+            }.navigationTitle(section.title).background(MarcelitoAmbientBackground()).foregroundStyle(Color.marcelitoNavy)
+                .safeAreaInset(edge: .top) {
+                    VStack(spacing: 8) {
+                        Picker("Sección de presupuesto", selection: $section) {
+                            ForEach(BudgetWorkspaceSection.allCases) { Text($0.rawValue).tag($0) }
+                        }.pickerStyle(.segmented).accessibilityIdentifier("budget.configuration.tabs")
+                        if section == .plan {
+                            Picker("Periodo de presupuesto", selection: $periodMode) { Text("Mes").tag(FinancePeriodMode.month); Text("Año").tag(FinancePeriodMode.year) }.pickerStyle(.segmented)
+                            PeriodNavigationBar(label: budgetPeriod.label, move: moveBudgetPeriod) { showPeriodPicker = true }
+                            Text("Desliza aquí para cambiar de periodo").font(.caption2).foregroundStyle(.secondary)
+                        }
+                    }.padding(.horizontal, 18).padding(.vertical, 6).background(.regularMaterial)
+                }
+                .sheet(isPresented: $showPeriodPicker) { PeriodSelectionSheet(mode: periodMode, date: month) { month = $0 } }
+                .sheet(isPresented: $showIncome) { PlanningIncomeView() }
+                .sheet(isPresented: $showDecision) { AffordabilityView(month: month) }
+                .onAppear { loadTarget() }
+                .onDisappear { planning.savePendingPlanChanges() }
+                .onChange(of: section) { _, _ in planning.savePendingPlanChanges() }
+                .onChange(of: month) { _, _ in planning.savePendingPlanChanges(); loadTarget() }
+                .alert("Cierre mensual", isPresented: Binding(get: { closeMessage != nil }, set: { if !$0 { closeMessage = nil } })) { Button("Aceptar") { closeMessage = nil } } message: { Text(closeMessage ?? "") }
+        }
+    }
+    private var planContent: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 18) {
+                if periodMode == .year { annualBudgetSummary }
+                else {
                     Text(snapshot.period.label + " · mes natural").font(.caption).foregroundStyle(.secondary)
                     budgetSummary
-                    NavigationLink("Ingresos y depósitos") { IncomeOverviewView(month: month) }
+                    Button("Configurar ingresos y depósitos") { section = .income }
                     if !snapshot.hasData { Text("Sin movimientos de este mes. Define tu plan; el gasto se actualizará al subir estados o capturas.").font(.caption).foregroundStyle(.secondary) }
                     targetSection
                     if !planning.proposals(store, month: month).isEmpty { Text("Propuesta: mediana de " + planning.proposalMonths(store, before: month).reversed().map { FinancePeriod.month($0).label }.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary) }
@@ -612,7 +652,7 @@ struct BudgetView: View {
                         Text("Necesitamos tres meses naturales completos para proponer la mediana variable. Puedes definir tus montos ahora.").font(.caption).foregroundStyle(.secondary)
                     }
                     Text("Fijos").font(.headline)
-                    if fixed.isEmpty { Text("Marca tus cargos fijos desde el detalle de un movimiento. Los importes del último mes observado se propondrán aquí.").font(.caption).foregroundStyle(.secondary) }
+                    if fixed.isEmpty { Text("Agrega o confirma tus gastos fijos en la pestaña Gastos fijos.").font(.caption).foregroundStyle(.secondary) }
                     ForEach(categories.filter { fixed[$0] != nil }, id: \.self) { budgetRow($0, fixed: true) }
                     Text("Variables").font(.headline)
                     ForEach(categories, id: \.self) { budgetRow($0, fixed: false) }
@@ -623,26 +663,11 @@ struct BudgetView: View {
                     installmentSection
                     closingSection
                     Button("¿Me alcanza?") { showDecision = true }.buttonStyle(.marcelitoPrimary)
-                    NavigationLink("Suscripciones y recurrentes") { RecurringChargesView() }
+                    Button("Configurar gastos fijos y recurrentes") { section = .fixed }
                     NavigationLink("Metas de ahorro") { SavingsGoalsView() }
                     PlanningReminderToggle()
-                    }
-                }.padding(18)
-            }.navigationTitle("Presupuesto").background(MarcelitoAmbientBackground()).foregroundStyle(Color.marcelitoNavy)
-                .safeAreaInset(edge: .top) {
-                    VStack(spacing: 4) {
-                        Picker("Periodo de presupuesto", selection: $periodMode) { Text("Mes").tag(FinancePeriodMode.month); Text("Año").tag(FinancePeriodMode.year) }.pickerStyle(.segmented)
-                        PeriodNavigationBar(label: budgetPeriod.label, move: moveBudgetPeriod) { showPeriodPicker = true }
-                        Text("Desliza aquí para cambiar de periodo").font(.caption2).foregroundStyle(.secondary)
-                    }.padding(.horizontal, 18).padding(.vertical, 6).background(.regularMaterial)
                 }
-                .sheet(isPresented: $showPeriodPicker) { PeriodSelectionSheet(mode: periodMode, date: month) { month = $0 } }
-                .sheet(isPresented: $showIncome) { PlanningIncomeView() }
-                .sheet(isPresented: $showDecision) { AffordabilityView(month: month) }
-                .onAppear { loadTarget() }
-                .onDisappear { planning.savePendingPlanChanges() }
-                .onChange(of: month) { _, _ in planning.savePendingPlanChanges(); loadTarget() }
-                .alert("Cierre mensual", isPresented: Binding(get: { closeMessage != nil }, set: { if !$0 { closeMessage = nil } })) { Button("Aceptar") { closeMessage = nil } } message: { Text(closeMessage ?? "") }
+            }.padding(18)
         }
     }
     private var budgetPeriod: FinancePeriod { .selected(periodMode, date: month, from: month, through: month) }
@@ -674,7 +699,7 @@ struct BudgetView: View {
     private var budgetSummary: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let remaining = snapshot.remaining {
-                PlanningMetric(title: "Disponible variable", value: planningMoney(remaining), period: snapshot.period.label, explanation: "Ingreso − fijos − meta de ahorro − mensualidades MSI − variable gastado + sobrante trasladado. Los viajes, extraordinarios y la parte compartida se muestran aparte. Disponible provisional si faltan movimientos.")
+                PlanningMetric(title: "Disponible variable", value: planningMoney(remaining), period: snapshot.period.label, explanation: "Ingreso − fijos − exceso gastado en fijos − meta de ahorro − mensualidades MSI − variable gastado + sobrante trasladado. Los viajes, extraordinarios y la parte compartida se muestran aparte. Disponible provisional si faltan movimientos.")
                 PlanningMetric(title: "Disponible por día", value: snapshot.daily.map(planningMoney) ?? "Mes terminado", period: snapshot.period.label, explanation: "Disponible variable restante / días restantes del mes, incluyendo hoy. Nunca divide entre cero.")
             } else if snapshot.hasUnknownCommitments {
                 Text("Faltan las mensualidades de tus MSI para calcular el disponible").font(.headline)
@@ -684,6 +709,7 @@ struct BudgetView: View {
             }
             HStack { Text("Ingreso mensual"); Spacer(); Button(planning.monthlyIncome.map(planningMoney) ?? "Configurar") { showIncome = true } }
             LabeledContent("Fijos previstos", value: planningMoney(snapshot.fixed))
+            if snapshot.fixedOverrun > 0 { LabeledContent("Exceso en gastos fijos", value: planningMoney(snapshot.fixedOverrun)) }
             if snapshot.hasData { LabeledContent("Fuera del presupuesto personal", value: planningMoney(planning.total(store, period: snapshot.period) - planning.personalTotal(store, period: snapshot.period))) }
             LabeledContent("Mensualidades MSI", value: snapshot.hasUnknownCommitments ? "Falta detalle MSI" : planningMoney(snapshot.msi))
             if !monthIsCovered(store, period: snapshot.period, through: min(.now, snapshot.period.end.addingTimeInterval(-1))) { Text("Plan provisional · faltan movimientos por actualizar").font(.caption).foregroundStyle(Color.marcelitoAmber) }
@@ -921,33 +947,6 @@ struct AffordabilityView: View {
                 }
             }.navigationTitle("¿Me alcanza?").toolbar { Button("Cerrar") { dismiss() } }
         }
-    }
-}
-struct RecurringChargesView: View {
-    @Environment(FinancialPlanningStore.self) private var planning
-    @Environment(FinanceStore.self) private var store
-    var body: some View {
-        let candidates = planning.recurring(store.realExpenseMovements.filter { !planning.isInstallmentRow($0, store: store) })
-        List {
-            Section {
-                Text("Cargos con importe similar y periodicidad mensual o quincenal. Confirma cuáles son fijos.").font(.caption)
-                if candidates.isEmpty { Text("Necesitamos al menos tres cargos comparables para detectar recurrentes.") }
-            }
-            ForEach(candidates) { item in
-                VStack(alignment: .leading, spacing: 8) {
-                    Text(item.name).font(.headline)
-                    Text("\(planningMoney(item.amount)) · \(item.cadence) · ~\(planningMoney(item.annualCost)) al año").font(.subheadline)
-                    Button("Confirmar como gasto fijo") {
-                        let key = store.categoryRuleKey(for: item.movement)
-                        planning.state.fixedMerchantRules[planning.merchantKey(item.movement)] = true
-                        for movement in store.netExpenseMovements where store.categoryRuleKey(for: movement) == key {
-                            var label = planning.label(for: movement); label.fixed = true; planning.setLabel(label, for: movement)
-                        }
-                    }
-                    CalculationHelp(explanation: "Mediana del importe de al menos tres cargos, separados entre 12–17 o 25–35 días, con variación máxima del 10%. Costo anual = importe × 24 o × 12. Es una sugerencia para revisar, no prueba de una suscripción.")
-                }
-            }
-        }.navigationTitle("Recurrentes")
     }
 }
 struct SavingsGoalsView: View {
