@@ -47,3 +47,11 @@ Fecha límite y tasa ordinaria anual se leen solo con etiquetas explícitas; el 
 El libro, las categorías y las decisiones de conciliación permanecen como fuente financiera. Los nuevos cálculos son proyecciones; ningún flujo ejecuta pagos, cobros o transferencias reales.
 
 La inspección visual interactiva del simulador requiere la Mac desbloqueada. Las pruebas nativas de cálculo y persistencia se ejecutan independientemente de ese acceso.
+
+## Multiple income sources and statement freshness
+
+- Confirmed income has named sources with monthly or twice-monthly frequency and an optional bank label. The monthly plan sums each source; actual deposits still come only from the canonical ledger.
+- An old single total remains an editable `Ingreso habitual` source with a stable identity. The optional source array decodes old v1 data without loss. Every save preserves the prior backup and writes an equivalent monthly aggregate for older builds. Removing all sources means unconfigured income, not a fabricated zero or restoration of the old total.
+- Recurring payroll suggestions normalize changing numeric folios and explicit pay-period labels only when the descriptor identifies payroll. Banks remain separate, own transfers remain excluded, and every suggestion requires confirmation. Confirmed suggestion identities prevent adding the same suggestion twice.
+- Gastos initially opens the latest month with eligible expense or income evidence (or the current month for an empty book). A deliberate user date selection is preserved during imports. Month selection keeps the current month available and labels partial coverage. No historical value is presented as the current month's actual spend.
+- Inicio keeps the current budget separate from a historical summary, identifies the latest loaded date, and links directly to the latest month's movements. When the current month is empty, remaining and pace are withheld; the interface explains the statement/capture update model once instead of repeating error-like empty states.

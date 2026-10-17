@@ -29,41 +29,103 @@ struct PlanningIncomeView: View {
     @Environment(FinancialPlanningStore.self) private var planning
     @Environment(FinanceStore.self) private var store
     @Environment(\.dismiss) private var dismiss
-    @State private var amount = ""
-    @State private var cadence = "Mensual"
+    @State private var editing: PlanningIncomeSource?
+    @State private var deleting: PlanningIncomeSource?
     @State private var error: String?
     var body: some View {
         NavigationStack {
             Form {
-                Section("Tu ingreso habitual total") {
-                    TextField("Importe MXN", text: $amount).keyboardType(.decimalPad)
-                    Picker("Frecuencia", selection: $cadence) { Text("Mensual").tag("Mensual"); Text("Quincenal").tag("Quincenal") }
-                    Text("El ingreso quincenal se convierte a mensual multiplicando por dos. Si tienes fuentes con distintas frecuencias, registra su total mensual. Puedes cambiarlo cuando quieras.").font(.caption).foregroundStyle(.secondary)
-                    if let monthly = parsePlanningAmount(amount) { LabeledContent("Ingreso mensual", value: planningMoney(cadence == "Quincenal" ? monthly * 2 : monthly)) }
+                Section {
+                    LabeledContent("Total habitual al mes", value: planning.monthlyIncome.map(planningMoney) ?? "Sin configurar")
+                        .font(.headline)
+                } footer: { Text("Se usa para planear tu presupuesto. Los depósitos realmente recibidos se muestran por separado.") }
+                Section("Tus fuentes de ingreso") {
+                    ForEach(planning.incomeSources) { source in
+                        HStack {
+                            Button { editing = source } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(source.name).foregroundStyle(Color.marcelitoNavy)
+                                    Text("\(planningMoney(source.amount)) · \(source.cadence)" + (source.account.isEmpty ? "" : " · " + source.account)).font(.caption).foregroundStyle(.secondary)
+                                    Text("\(planningMoney(source.monthlyAmount)) al mes").font(.caption).foregroundStyle(Color.marcelitoNavyMid)
+                                }.frame(maxWidth: .infinity, alignment: .leading)
+                            }.buttonStyle(.plain)
+                            Button { deleting = source } label: { Image(systemName: "trash").foregroundStyle(.secondary) }.buttonStyle(.borderless).accessibilityLabel("Eliminar \(source.name)")
+                        }
+                    }
+                    Button { editing = PlanningIncomeSource(name: "", amount: 0, cadence: "Mensual") } label: { Label("Agregar ingreso", systemImage: "plus.circle") }
+                } footer: {
+                    if planning.state.incomeSources == nil, planning.state.incomeAmount != nil {
+                        Text("Conservamos tu total anterior como Ingreso habitual. Si incluía varias fuentes, edítalo antes de agregarlas por separado para no sumarlas dos veces.")
+                    }
                 }
-                let recurring = planning.recurring(store.realIncomeMovements, income: true)
+                let recurring = planning.incomeSuggestions(store)
                 if !recurring.isEmpty {
-                    Section("Depósitos recurrentes detectados · confirma el ingreso") {
+                    Section("Sugerencias · confirma cada fuente") {
                         ForEach(recurring) { item in
                             Button {
-                                amount = NSDecimalNumber(decimal: item.amount).stringValue; cadence = item.cadence
-                            } label: { VStack(alignment: .leading) { Text(item.name); Text("\(planningMoney(item.amount)) · \(item.cadence)").font(.caption) } }
+                                editing = PlanningIncomeSource(name: item.name, amount: item.amount, cadence: item.cadence, account: item.movement.account, detectedKey: item.id)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text(item.name)
+                                    Text("\(item.movement.account) · \(planningMoney(item.amount)) · \(item.cadence)").font(.caption)
+                                    Text("Agregar como fuente").font(.caption.weight(.semibold))
+                                }
+                            }
                         }
-                        Text("Son sugerencias; no sustituyen tu ingreso confirmado ni incluyen transferencias propias.").font(.caption)
+                        Text("No se agregan automáticamente ni incluyen transferencias propias. Si falta una fuente, puedes agregarla manualmente.").font(.caption).foregroundStyle(.secondary)
                     }
                 }
                 if let error { Text(error).foregroundStyle(Color.marcelitoDanger) }
-                Button("Guardar ingreso") {
-                    guard let number = parsePlanningAmount(amount), number >= 0 else { error = "Escribe un importe válido."; return }
-                    planning.state.incomeAmount = number; planning.state.incomeCadence = cadence
-                    planning.state.incomeOnboardingCompleted = true
-                    if planning.save() { dismiss() }
-                }.buttonStyle(.marcelitoPrimary)
                 if !planning.state.incomeOnboardingCompleted {
-                    Button("Configurar después") { planning.state.incomeOnboardingCompleted = true; planning.save(); dismiss() }
+                    Button("Configurar después") { planning.state.incomeOnboardingCompleted = true; if planning.save() { dismiss() } }
                 }
-            }.navigationTitle("Ingresos").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Cerrar") { dismiss() } } }
-        }.onAppear { amount = planning.state.incomeAmount.map { NSDecimalNumber(decimal: $0).stringValue } ?? ""; cadence = planning.state.incomeCadence }
+            }.navigationTitle("Ingresos").toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Listo") { dismiss() } } }
+                .sheet(item: $editing) { source in PlanningIncomeSourceEditor(source: source) }
+                .confirmationDialog("¿Eliminar esta fuente de ingreso?", isPresented: Binding(get: { deleting != nil }, set: { if !$0 { deleting = nil } }), titleVisibility: .visible, presenting: deleting) { source in
+                    Button("Eliminar fuente", role: .destructive) {
+                        if !planning.setIncomeSources(planning.incomeSources.filter { $0.id != source.id }) { error = "No se pudo guardar el cambio. Tu información se conserva." }
+                        deleting = nil
+                    }
+                    Button("Cancelar", role: .cancel) { deleting = nil }
+                } message: { _ in Text("Solo cambia tu ingreso habitual para presupuestar. Los depósitos y movimientos se conservan.") }
+        }
+    }
+}
+struct PlanningIncomeSourceEditor: View {
+    @Environment(FinancialPlanningStore.self) private var planning
+    @Environment(FinanceStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    let source: PlanningIncomeSource
+    @State private var name = ""
+    @State private var amount = ""
+    @State private var cadence = "Mensual"
+    @State private var account = ""
+    @State private var error: String?
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Fuente de ingreso") {
+                    TextField("Nombre, por ejemplo Nómina Santander", text: $name)
+                    TextField("Importe MXN", text: $amount).keyboardType(.decimalPad)
+                    Picker("Frecuencia", selection: $cadence) { Text("Mensual").tag("Mensual"); Text("Quincenal").tag("Quincenal") }
+                    Picker("Cuenta", selection: $account) {
+                        Text("Sin asociar").tag("")
+                        ForEach(Array(Set(store.movements.map(\.account) + store.statements.map(\.source) + [source.account])).filter { !$0.isEmpty }.sorted(), id: \.self) { Text($0).tag($0) }
+                    }
+                    if let value = parsePlanningAmount(amount) { LabeledContent("Equivalente mensual", value: planningMoney(cadence == "Quincenal" ? value * 2 : value)) }
+                } footer: { Text("Quincenal equivale a dos pagos al mes. Registrar una fuente no crea depósitos ni cambia tus movimientos.") }
+                if let error { Text(error).foregroundStyle(Color.marcelitoDanger) }
+                Button("Guardar fuente") {
+                    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !trimmed.isEmpty, let number = parsePlanningAmount(amount) else { error = "Escribe un nombre y un importe válido."; return }
+                    var updated = source; updated.name = trimmed; updated.amount = number; updated.cadence = cadence; updated.account = account
+                    var sources = planning.incomeSources
+                    if let index = sources.firstIndex(where: { $0.id == source.id }) { sources[index] = updated } else { sources.append(updated) }
+                    if planning.setIncomeSources(sources) { dismiss() } else { error = "No se pudo guardar. Tu información anterior se conserva." }
+                }.buttonStyle(.marcelitoPrimary)
+            }.navigationTitle("Fuente de ingreso").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Cancelar") { dismiss() } } }
+        }.onAppear { name = source.name; amount = source.name.isEmpty && source.amount == 0 ? "" : NSDecimalNumber(decimal: source.amount).stringValue; cadence = source.cadence; account = source.account }
     }
 }
 func parsePlanningAmount(_ text: String, precision: Int = 2) -> Decimal? {
@@ -78,26 +140,36 @@ struct HomeMonthlyPlanCard: View {
     @Environment(FinancialPlanningStore.self) private var planning
     @State private var incomeSheet = false
     let upload: () -> Void
+    let showLatest: (Date) -> Void
     var body: some View {
         let month = FinancePeriod.month(.now)
         let snapshot = planning.snapshot(store, month: .now)
         VStack(alignment: .leading, spacing: 12) {
-            HStack { Text("Te queda este mes"); Spacer(); CalculationHelp(explanation: "Ingreso confirmado − gastos fijos presupuestados − meta de ahorro − mensualidades MSI − gasto variable personal. Las cifras son provisionales cuando faltan estados o capturas.") }
+            HStack {
+                Text(snapshot.hasData ? "Te queda este mes" : "\(month.label) · Presupuesto del mes")
+                Spacer()
+                CalculationHelp(explanation: "Ingreso confirmado − gastos fijos presupuestados − meta de ahorro − mensualidades MSI − gasto variable personal. Sin movimientos del mes todavía no se conoce el restante real. Las cifras son provisionales cuando faltan estados o capturas.")
+            }
             if store.operationalMetricsBlocked {
                 Text("Revisa tus estados para calcular el disponible").font(.headline)
-            } else if let remaining = snapshot.remaining, snapshot.hasData {
+            } else if !snapshot.hasData {
+                Text(planning.monthlyIncome == nil ? "Prepara tu presupuesto del mes" : "Tu presupuesto está preparado").font(.title3.bold())
+                if let income = planning.monthlyIncome { Text("Ingreso habitual: \(planningMoney(income)) al mes").font(.subheadline) }
+                Text("Los gastos de \(monthName(.now)) aparecerán al cargar movimientos.").font(.subheadline)
+                if let latest = planning.latestMovementDate(store), !month.contains(latest) {
+                    Button("Ver último mes con datos: \(monthName(latest)) →") { showLatest(latest) }.font(.subheadline.weight(.semibold)).tint(.white)
+                }
+                if planning.monthlyIncome == nil { Button("Configurar ingresos") { incomeSheet = true }.buttonStyle(.bordered).tint(.white) }
+            } else if let remaining = snapshot.remaining {
                 Text("\(planningMoney(remaining)) este mes · \(snapshot.daily.map(planningMoney) ?? "—") por día").font(.title2.bold()).monospacedDigit()
                 if !monthIsCovered(store, period: month, through: .now) { Text("Disponible provisional · faltan movimientos por actualizar").font(.caption) }
             } else if snapshot.hasUnknownCommitments {
                 Text("Completa el detalle de tus mensualidades MSI para calcular el disponible").font(.headline)
-            } else if planning.monthlyIncome == nil {
-                Text("Define tu ingreso para planear el mes").font(.headline)
-                Button("Configurar ingreso") { incomeSheet = true }.buttonStyle(.bordered).tint(.white)
             } else {
-                Text("Aún no hay movimientos de \(monthName(.now))").font(.headline)
-                Button("Subir capturas o estado", action: upload).buttonStyle(.bordered).tint(.white)
+                Text("Define tus ingresos para planear el mes").font(.headline)
+                Button("Configurar ingresos") { incomeSheet = true }.buttonStyle(.bordered).tint(.white)
             }
-            Text(month.label).font(.caption)
+            if snapshot.hasData { Text(month.label).font(.caption) }
             let observed = planning.observedIncome(store, period: month)
             if observed > 0, snapshot.hasData {
                 let rate = (observed - planning.total(store, period: month)) / observed
@@ -106,6 +178,25 @@ struct HomeMonthlyPlanCard: View {
         }.foregroundStyle(.white).marcelitoCard(fill: Color.marcelitoNavyMid, radius: 20, padding: 18)
             .sheet(isPresented: $incomeSheet) { PlanningIncomeView() }
     }
+}
+struct PlanningDataFreshness: View {
+    @Environment(FinanceStore.self) private var store
+    @Environment(FinancialPlanningStore.self) private var planning
+    let update: () -> Void
+    var body: some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 3) {
+                if let latest = planning.latestDataDate(store) { Text("Último dato: " + planningDayLabel(latest)) }
+                else { Text("Sin fecha de actualización confirmada") }
+                Text("Por estados y capturas · sin conexión en tiempo real").font(.caption2)
+            }.font(.caption).foregroundStyle(.secondary)
+            Spacer()
+            Button("Actualizar", action: update).font(.caption.weight(.semibold))
+        }
+    }
+}
+func planningDayLabel(_ date: Date) -> String {
+    let f = DateFormatter(); f.locale = Locale(identifier: "es_MX"); f.dateFormat = "d MMM yyyy"; return f.string(from: date)
 }
 func monthName(_ date: Date) -> String { let f = DateFormatter(); f.locale = Locale(identifier: "es_MX"); f.dateFormat = "MMMM"; return f.string(from: date) }
 func monthIsCovered(_ store: FinanceStore, period: FinancePeriod, through date: Date, account: String? = nil) -> Bool {
@@ -119,6 +210,11 @@ func monthIsCovered(_ store: FinanceStore, period: FinancePeriod, through date: 
 struct ExpensesView: View {
     @Environment(FinanceStore.self) private var store
     @Environment(FinancialPlanningStore.self) private var planning
+    var initialDate: Date? = nil
+    var isPresentedAsSheet = false
+    @Environment(\.dismiss) private var dismiss
+    @State private var initializedPeriod = false
+    @State private var userSelectedPeriod = false
     @State private var mode: FinancePeriodMode = .month
     @State private var selectedDate = Date.now
     @State private var from = FinancePeriod.month(.now).start
@@ -143,8 +239,7 @@ struct ExpensesView: View {
                 LazyVStack(alignment: .leading, spacing: 18) {
                     if store.operationalMetricsBlocked { HistoricalDashboardBlockedCard(store: store) }
                     else if rows.isEmpty {
-                        ContentUnavailableView("Aún no hay movimientos", systemImage: "calendar", description: Text(period.label))
-                        Button("Subir capturas o estado") { showImport = true }.buttonStyle(.marcelitoPrimary)
+                        emptyPeriodSection
                     } else {
                         totalsSection
                         comparisonSection
@@ -170,16 +265,60 @@ struct ExpensesView: View {
             .sheet(isPresented: $showPending) { PendingClassificationView(period: period, accountFilter: account) }
             .sheet(isPresented: $showCategories) { NavigationStack { PersonalMovementList(title: selectedCategory ?? "Movimientos", rows: selectedRows, period: period) } }
             .sheet(isPresented: $showImport) { AccountsView() }
+            .toolbar { if isPresentedAsSheet { ToolbarItem(placement: .topBarTrailing) { Button("Cerrar") { dismiss() } } } }
+            .onAppear { initializePeriod() }
+            .onChange(of: store.ledgerVersion) { _, _ in
+                // Imports may finish after the view first opens. Follow the
+                // newest data only until the user explicitly picks a period.
+                if !userSelectedPeriod, initialDate == nil {
+                    selectedDate = planning.initialExpenseDate(store)
+                    from = FinancePeriod.month(selectedDate).start
+                    through = min(.now, FinancePeriod.month(selectedDate).end.addingTimeInterval(-1))
+                }
+            }
         }
+    }
+    private func initializePeriod() {
+        guard !initializedPeriod else { return }
+        selectedDate = initialDate ?? planning.initialExpenseDate(store)
+        from = FinancePeriod.month(selectedDate).start
+        through = min(.now, FinancePeriod.month(selectedDate).end.addingTimeInterval(-1))
+        initializedPeriod = true
+    }
+    private func selectLatest(_ date: Date) {
+        userSelectedPeriod = true; mode = .month; selectedDate = date; selectedCategory = nil
+        from = FinancePeriod.month(date).start
+        through = min(.now, FinancePeriod.month(date).end.addingTimeInterval(-1))
+    }
+    private var emptyPeriodSection: some View {
+        let latest = planning.latestMovementDate(store, account: account == "Todas" ? nil : account)
+        let currentMonth = mode == .month && Calendar.current.isDate(selectedDate, equalTo: .now, toGranularity: .month)
+        return VStack(alignment: .leading, spacing: 14) {
+            Label(currentMonth ? "\(period.label) aún no tiene gastos cargados" : "Sin gastos cargados en este periodo", systemImage: "calendar").font(.title3.bold())
+            if let latest, !period.contains(latest) {
+                Text("El último mes con movimientos es \(FinancePeriod.month(latest).label.lowercased()).").foregroundStyle(.secondary)
+                Button("Ver \(FinancePeriod.month(latest).label.lowercased())") { selectLatest(latest) }.buttonStyle(.marcelitoPrimary)
+            } else if latest != nil {
+                Text("Hay movimientos de cuenta, pero no cargos de consumo en este periodo.").font(.subheadline).foregroundStyle(.secondary)
+            } else { Text("Los gastos aparecerán al subir un estado o capturas.").foregroundStyle(.secondary) }
+            Text("La app se actualiza con tus estados y capturas, sin conexión en tiempo real.").font(.caption).foregroundStyle(.secondary)
+            Button("Subir estado o capturas") { showImport = true }.buttonStyle(.bordered)
+        }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 16)
     }
     private var periodSelector: some View {
         VStack(spacing: 7) {
-            Picker("Periodo", selection: $mode) { ForEach(FinancePeriodMode.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
+            Picker("Periodo", selection: Binding(get: { mode }, set: { mode = $0; userSelectedPeriod = true })) { ForEach(FinancePeriodMode.allCases) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
             HStack {
                 if mode == .range {
-                    DatePicker("Desde", selection: $from, displayedComponents: .date).labelsHidden()
-                    DatePicker("Hasta", selection: $through, displayedComponents: .date).labelsHidden()
-                } else { DatePicker("Fecha", selection: $selectedDate, displayedComponents: .date).labelsHidden() }
+                    DatePicker("Desde", selection: Binding(get: { from }, set: { from = $0; userSelectedPeriod = true }), displayedComponents: .date).labelsHidden()
+                    DatePicker("Hasta", selection: Binding(get: { through }, set: { through = $0; userSelectedPeriod = true }), displayedComponents: .date).labelsHidden()
+                } else if mode == .month {
+                    Menu {
+                        Button("Este mes · \(FinancePeriod.month(.now).label)") { selectLatest(.now) }
+                        ForEach(availableMonths, id: \.self) { month in Button(FinancePeriod.month(month).label) { selectLatest(month) } }
+                        DatePicker("Elegir otra fecha", selection: Binding(get: { selectedDate }, set: { selectedDate = $0; userSelectedPeriod = true }), displayedComponents: .date)
+                    } label: { Label(period.label, systemImage: "chevron.down").font(.subheadline.weight(.semibold)) }
+                } else { DatePicker("Fecha", selection: Binding(get: { selectedDate }, set: { selectedDate = $0; userSelectedPeriod = true }), displayedComponents: .date).labelsHidden() }
                 Spacer()
                 Menu {
                     Button("Todas") { account = "Todas" }
@@ -187,7 +326,20 @@ struct ExpensesView: View {
                 } label: { Text(account).font(.caption).lineLimit(1) }
             }
             Text(period.label + " · por fecha del cargo").font(.caption2).foregroundStyle(.secondary)
+            if let latest = planning.latestDataDate(store, account: account == "Todas" ? nil : account) {
+                HStack {
+                    Text("Último dato: " + planningDayLabel(latest)).font(.caption2).foregroundStyle(.secondary)
+                    if !rows.isEmpty, !monthIsCovered(store, period: period, through: min(.now, period.end.addingTimeInterval(-1)), account: account == "Todas" ? nil : account) {
+                        Text("Cobertura parcial").font(.caption2).foregroundStyle(Color.marcelitoAmber)
+                    }
+                }
+            }
         }
+    }
+    private var availableMonths: [Date] {
+        let dates = planning.expenseRows(store, period: FinancePeriod(start: .distantPast, end: .now)).filter { account == "Todas" || $0.account == account }.map(\.date)
+            + store.realIncomeMovements.filter { $0.date <= .now && (account == "Todas" || $0.account == account) }.map(\.date)
+        return Array(Set(dates.map { FinancePeriod.month($0).start })).filter { $0 != FinancePeriod.month(.now).start }.sorted(by: >)
     }
     private var totalsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -522,8 +674,11 @@ struct IncomeOverviewView: View {
         let rows = store.realIncomeMovements.filter { range.contains($0.date) }
         List {
             Section(range.label) {
-                LabeledContent("Ingreso habitual confirmado", value: planning.monthlyIncome.map(planningMoney) ?? "Sin configurar")
-                Button("Editar ingreso habitual") { edit = true }
+                LabeledContent("Ingreso habitual mensual", value: planning.monthlyIncome.map(planningMoney) ?? "Sin configurar")
+                ForEach(planning.incomeSources) { source in
+                    LabeledContent(source.name, value: "\(planningMoney(source.amount)) · \(source.cadence)")
+                }
+                Button("Editar fuentes de ingreso") { edit = true }
                 if rows.isEmpty { Text("No hay depósitos de este periodo.") }
                 else { LabeledContent("Recibido", value: planningMoney(planning.observedIncome(store, period: range))) }
             }
@@ -840,6 +995,27 @@ struct CardTermsEditor: View {
     }
 }
 
+struct LastRecordedMonthSummary: View {
+    @Environment(FinanceStore.self) private var store
+    @Environment(FinancialPlanningStore.self) private var planning
+    let date: Date
+    let showMovements: () -> Void
+    var body: some View {
+        let period = FinancePeriod.month(date)
+        VStack(alignment: .leading, spacing: 12) {
+            Text("Último mes con datos · \(period.label)").font(.headline)
+            HStack(alignment: .top, spacing: 12) {
+                PlanningMetric(title: "Gasto personal registrado", value: planning.expenseRows(store, period: period).isEmpty ? "Sin cargos" : planningMoney(planning.personalTotal(store, period: period)), period: period.label, explanation: "Gasto personal ordinario por fecha del cargo en este mes histórico. No representa el gasto del mes actual ni incluye transferencias propias o pagos de tarjeta.")
+                PlanningMetric(title: "Ingreso recibido", value: store.realIncomeMovements.contains(where: { period.contains($0.date) }) ? planningMoney(planning.observedIncome(store, period: period)) : "Sin depósitos", period: period.label, explanation: "Depósitos reales de este mes histórico. El ingreso habitual de tus fuentes se utiliza por separado para planear.")
+            }
+            if !monthIsCovered(store, period: period, through: period.end.addingTimeInterval(-1)) {
+                Text("Cobertura parcial · falta actualizar algunas cuentas").font(.caption).foregroundStyle(.secondary)
+            }
+            Button("Ver movimientos", action: showMovements).font(.subheadline.weight(.semibold))
+        }.padding(.vertical, 6)
+    }
+}
+
 struct HomePersonalMetrics: View {
     @Environment(FinanceStore.self) private var store
     @Environment(FinancialPlanningStore.self) private var planning
@@ -858,9 +1034,6 @@ struct HomePersonalMetrics: View {
                     PlanningMetric(title: "Ingreso recibido", value: store.realIncomeMovements.contains(where: { period.contains($0.date) }) ? planningMoney(planning.observedIncome(store, period: period)) : "Sin depósitos", period: period.label, explanation: "Depósitos de ingreso real en débito, excluyendo traspasos propios, devoluciones y pagos de tarjetas. Puede ser parcial si falta actualizar cuentas.")
                 }
                 Button("Ver ingresos") { showIncome = true }.font(.caption)
-            } else {
-                Text("Aún no hay movimientos de \(monthName(.now))").font(.subheadline)
-                Button("Subir capturas") { showAccounts = true }.font(.subheadline.weight(.semibold))
             }
         }.sheet(isPresented: $showIncome) { NavigationStack { IncomeOverviewView(month: .now) } }
             .sheet(isPresented: $showAccounts) { AccountsView() }

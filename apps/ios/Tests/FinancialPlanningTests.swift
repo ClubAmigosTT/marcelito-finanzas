@@ -64,6 +64,107 @@ import XCTest
             p.state.incomeAmount = 0; XCTAssertEqual(p.monthlyIncome, 0)
         }
     }
+    func testMultipleIncomeSourcesPersistAndNeverCreateDeposits() {
+        withStores { store, planning, defaults in
+            let salary = PlanningIncomeSource(name: "Nómina Santander", amount: 16500, cadence: "Quincenal", account: "Santander")
+            let other = PlanningIncomeSource(name: "BBVA", amount: 15000, cadence: "Mensual", account: "BBVA")
+            XCTAssertTrue(planning.setIncomeSources([salary, other]))
+            XCTAssertEqual(planning.monthlyIncome, 48000)
+            XCTAssertEqual(planning.state.incomeAmount, 48000) // older-version aggregate
+            XCTAssertEqual(planning.state.incomeCadence, "Mensual")
+            XCTAssertTrue(store.movements.isEmpty)
+            let loaded = FinancialPlanningStore(defaults: defaults)
+            XCTAssertEqual(loaded.incomeSources, [salary, other])
+            XCTAssertEqual(loaded.monthlyIncome, 48000)
+            XCTAssertEqual(loaded.snapshot(store, month: date(10, 1), now: date(10, 16)).income, 48000)
+            XCTAssertEqual(loaded.observedIncome(store, period: .month(date(10, 1))), 0)
+        }
+    }
+    func testLegacyIncomeMigrationPreservesAmountAndPlanningMetadata() throws {
+        withStores { _, planning, defaults in
+            planning.state.incomeAmount = 16500; planning.state.incomeCadence = "Quincenal"
+            planning.state.goals = [SavingsGoal(name: "Fondo", target: 10000, saved: 200, monthlyContribution: 500)]
+            planning.save()
+            // Genuine old JSON does not contain the new optional key.
+            var json = try! JSONSerialization.jsonObject(with: defaults.data(forKey: "marcelito.planning.v1")!) as! [String: Any]
+            json.removeValue(forKey: "incomeSources")
+            defaults.set(try! JSONSerialization.data(withJSONObject: json), forKey: "marcelito.planning.v1")
+            let old = FinancialPlanningStore(defaults: defaults)
+            XCTAssertNil(old.loadError)
+            XCTAssertEqual(old.monthlyIncome, 33000)
+            XCTAssertEqual(old.incomeSources.first?.name, "Ingreso habitual")
+            XCTAssertEqual(old.incomeSources.first?.id, old.incomeSources.first?.id)
+            let additional = PlanningIncomeSource(name: "Otro ingreso", amount: 15000, cadence: "Mensual")
+            XCTAssertTrue(old.setIncomeSources(old.incomeSources + [additional]))
+            XCTAssertEqual(old.monthlyIncome, 48000)
+            XCTAssertEqual(old.state.goals.first?.saved, 200)
+            XCTAssertNotNil(defaults.data(forKey: "marcelito.planning.v1.backup"))
+        }
+    }
+    func testEditingAndDeletingAnIncomeSourceDoesNotRestoreLegacyTotal() {
+        withStores { _, p, defaults in
+            var source = PlanningIncomeSource(name: "Nómina", amount: 100, cadence: "Quincenal")
+            XCTAssertTrue(p.setIncomeSources([source]))
+            source.amount = 200
+            XCTAssertTrue(p.setIncomeSources([source])); XCTAssertEqual(p.monthlyIncome, 400)
+            XCTAssertTrue(p.setIncomeSources([])); XCTAssertNil(p.monthlyIncome)
+            let reloaded = FinancialPlanningStore(defaults: defaults)
+            XCTAssertTrue(reloaded.incomeSources.isEmpty); XCTAssertNil(reloaded.monthlyIncome)
+            XCTAssertTrue(p.setIncomeSources([PlanningIncomeSource(name: "Sin ingreso temporal", amount: 0, cadence: "Mensual")]))
+            XCTAssertEqual(p.monthlyIncome, 0)
+        }
+    }
+    func testInvalidIncomeChangesPreserveSavedSources() {
+        withStores { _, p, _ in
+            let source = PlanningIncomeSource(name: "Nómina", amount: 100, cadence: "Mensual")
+            XCTAssertTrue(p.setIncomeSources([source]))
+            XCTAssertFalse(p.setIncomeSources([source, source]))
+            XCTAssertFalse(p.setIncomeSources([PlanningIncomeSource(name: "  ", amount: 100, cadence: "Mensual")]))
+            XCTAssertFalse(p.setIncomeSources([PlanningIncomeSource(name: "Inválido", amount: -1, cadence: "Mensual")]))
+            XCTAssertEqual(p.incomeSources, [source])
+        }
+    }
+    func testSantanderPayrollWithChangingFoliosAndSeparateBBVAIncome() {
+        withStores { store, p, _ in
+            var payroll: [Movement] = []
+            for (month, day, reference) in [(7, 15, "123"), (7, 31, "456"), (8, 14, "789"), (8, 31, "987")] {
+                var value = row(month, day, 16500, kind: .income)
+                value.account = "Santander"; value.title = "ABONO NOMINA EMPRESA REF \(reference)"
+                payroll.append(value)
+            }
+            let deposits = [row(6, 27, 15000, kind: .income), row(7, 27, 15000, kind: .income), row(8, 27, 15000, kind: .income)].map { value in
+                var result = value; result.title = "SPEI RECIBIDONVIO"; return result
+            }
+            var transfer = row(9, 27, 15000, kind: .bankTransfer); transfer.title = "SPEI RECIBIDONVIO"
+            store.movements = payroll + deposits + [transfer]
+            let found = p.incomeSuggestions(store)
+            XCTAssertEqual(found.count, 2)
+            XCTAssertEqual(found.first(where: { $0.movement.account == "Santander" })?.cadence, "Quincenal")
+            XCTAssertEqual(found.first(where: { $0.movement.account == "BBVA" })?.cadence, "Mensual")
+            let bbva = found.first(where: { $0.movement.account == "BBVA" })!
+            XCTAssertTrue(p.setIncomeSources([PlanningIncomeSource(name: bbva.name, amount: bbva.amount, cadence: bbva.cadence, detectedKey: bbva.id)]))
+            XCTAssertEqual(p.incomeSuggestions(store).count, 1)
+            XCTAssertEqual(p.incomeSuggestions(store).first?.movement.account, "Santander")
+            XCTAssertEqual(store.movements.count, 8)
+        }
+    }
+    func testLatestAvailablePeriodUsesActualDataAndKeepsAccountScope() {
+        withStores { store, p, _ in
+            var bbva = row(9, 14, -100); bbva.account = "BBVA"
+            var santander = row(8, 15, -200); santander.account = "Santander"
+            let future = row(11, 1, -300)
+            let transfer = row(10, 15, 1000, kind: .bankTransfer)
+            store.movements = [bbva, santander, future, transfer]
+            let now = date(10, 16)
+            XCTAssertEqual(p.initialExpenseDate(store, now: now), bbva.date)
+            XCTAssertEqual(p.latestMovementDate(store, account: "Santander", now: now), santander.date)
+            XCTAssertFalse(p.hasData(store, period: .month(now)))
+            XCTAssertEqual(p.latestDataDate(store, now: now), bbva.date)
+            store.movements = []
+            XCTAssertEqual(p.initialExpenseDate(store, now: now), now)
+            XCTAssertNil(p.latestDataDate(store, now: now))
+        }
+    }
     func testTransfersAndCardPaymentsRemainExcludedWithRealIncome() {
         withStores { s, p, _ in
             s.movements = [row(6, 12, -100), row(6, 13, -500, kind: .cardPayment), row(6, 14, -200, kind: .bankTransfer), row(6, 15, 200, kind: .bankTransfer), row(6, 16, 15000, kind: .income)]

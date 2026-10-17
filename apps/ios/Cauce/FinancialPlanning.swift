@@ -107,10 +107,23 @@ struct MonthBudgetPlan: Codable {
     var carryIn: Decimal = 0
     var closed = false
 }
+struct PlanningIncomeSource: Identifiable, Codable, Equatable {
+    var id = UUID()
+    var name: String
+    var amount: Decimal
+    var cadence: String
+    var account: String = ""
+    var detectedKey: String? = nil
+    var monthlyAmount: Decimal { cadence == "Quincenal" ? amount * 2 : amount }
+}
+
 struct PlanningState: Codable {
     var schema = 1
     var incomeAmount: Decimal? = nil
     var incomeCadence = "Mensual"
+    // nil means a v1 total has not yet been split into sources. An explicit
+    // empty array means the user removed every source, not a zero income.
+    var incomeSources: [PlanningIncomeSource]? = nil
     var incomeOnboardingCompleted = false
     var labels: [String: PersonalExpenseLabel] = [:]
     var installments: [InstallmentCommitment] = []
@@ -156,8 +169,43 @@ struct PlanningState: Codable {
         defaults.removeObject(forKey: key); defaults.removeObject(forKey: key + ".backup")
         proposalCache.removeAll(); fixedCache.removeAll(); revision = UUID()
     }
+    var incomeSources: [PlanningIncomeSource] {
+        if let sources = state.incomeSources { return sources }
+        guard let amount = state.incomeAmount else { return [] }
+        return [PlanningIncomeSource(id: UUID(uuidString: "00000000-0000-0000-0000-000000000001")!, name: "Ingreso habitual", amount: amount, cadence: state.incomeCadence)]
+    }
     var monthlyIncome: Decimal? {
-        state.incomeAmount.map { state.incomeCadence == "Quincenal" ? $0 * 2 : $0 }
+        guard !incomeSources.isEmpty else { return nil }
+        return incomeSources.reduce(0) { $0 + $1.monthlyAmount }
+    }
+    @discardableResult func setIncomeSources(_ sources: [PlanningIncomeSource]) -> Bool {
+        guard sources.allSatisfy({ !$0.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.amount >= 0 && ["Mensual", "Quincenal"].contains($0.cadence) }), Set(sources.map(\.id)).count == sources.count else { return false }
+        let previous = state
+        state.incomeSources = sources
+        // Preserve an equivalent aggregate for older app versions. This never
+        // creates a deposit in the audited ledger.
+        state.incomeAmount = sources.isEmpty ? nil : sources.reduce(0) { $0 + $1.monthlyAmount }
+        state.incomeCadence = "Mensual"
+        state.incomeOnboardingCompleted = true
+        if save() { return true }
+        state = previous
+        return false
+    }
+    func latestMovementDate(_ store: FinanceStore, account: String? = nil, now: Date = .now) -> Date? {
+        let dates = (store.netExpenseMovements + store.realIncomeMovements).filter { (account == nil || $0.account == account) && $0.date <= now }.map(\.date)
+        let purchases = state.installments.filter { (account == nil || $0.account == account) && $0.purchaseDate <= now }.map(\.purchaseDate)
+        return (dates + purchases).max()
+    }
+    func initialExpenseDate(_ store: FinanceStore, now: Date = .now) -> Date {
+        latestMovementDate(store, now: now) ?? now
+    }
+    func latestDataDate(_ store: FinanceStore, account: String? = nil, now: Date = .now) -> Date? {
+        let cutoffs = store.periodMetrics.filter { account == nil || $0.source == account || $0.accountKey == account }.compactMap { store.statementCutoffDate(for: $0.id) }.filter { $0 <= now }
+        return (cutoffs + [latestMovementDate(store, account: account, now: now)].compactMap { $0 }).max()
+    }
+    func incomeSuggestions(_ store: FinanceStore) -> [RecurringFinancialItem] {
+        let confirmedKeys = Set(incomeSources.compactMap(\.detectedKey))
+        return recurring(store.realIncomeMovements, income: true).filter { !confirmedKeys.contains($0.id) }
     }
     func monthKey(_ date: Date) -> String {
         let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "yyyy-MM"; return f.string(from: date)
@@ -356,8 +404,23 @@ struct PlanningState: Codable {
         else { return false }
         plan.closed = true; setPlan(plan, for: month); return true
     }
+    private func recurrenceKey(_ row: Movement, income: Bool) -> String {
+        let descriptor = row.transferRecipient ?? row.normalizedMerchant ?? row.title
+        guard income else { return (row.account + "|" + descriptor).lowercased() }
+        var normalized = descriptor.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX")).lowercased()
+        // Payroll descriptions often change folios and pay-period dates. Only
+        // normalize these on explicit payroll evidence; never group every SPEI
+        // from the same intermediary into a purported salary.
+        if normalized.range(of: #"\b(nomina|sueldo|salario|payroll)\b"#, options: .regularExpression) != nil {
+            normalized = normalized.replacingOccurrences(of: #"\b(ref(?:erencia)?|folio)\b.*$"#, with: "", options: .regularExpression)
+            normalized = normalized.replacingOccurrences(of: #"\b\w*\d\w*\b|\b(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre)\b"#, with: " ", options: .regularExpression)
+            normalized = normalized.replacingOccurrences(of: #"[^a-z ]"#, with: " ", options: .regularExpression)
+        }
+        normalized = normalized.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression).trimmingCharacters(in: .whitespacesAndNewlines)
+        return row.account.lowercased() + "|" + normalized
+    }
     func recurring(_ rows: [Movement], income: Bool = false) -> [RecurringFinancialItem] {
-        let grouped = Dictionary(grouping: rows) { ($0.account + "|" + ($0.transferRecipient ?? $0.normalizedMerchant ?? $0.title)).lowercased() }
+        let grouped = Dictionary(grouping: rows) { recurrenceKey($0, income: income) }
         return grouped.compactMap { key, rows in
             let sorted = rows.sorted { $0.date < $1.date }
             guard sorted.count >= 3, Set(sorted.map { monthKey($0.date) }).count >= 2 else { return nil }
@@ -365,8 +428,10 @@ struct PlanningState: Codable {
             guard median > 0, amounts.allSatisfy({ abs($0 - median) / median <= Decimal(string: "0.1")! }) else { return nil }
             let gaps = zip(sorted, sorted.dropFirst()).map { Calendar.current.dateComponents([.day], from: $0.date, to: $1.date).day ?? 0 }.sorted()
             let gap = gaps[gaps.count / 2]
-            guard (12...17).contains(gap) || (25...35).contains(gap) else { return nil }
-            return RecurringFinancialItem(id: key, name: sorted.last!.displayMerchant ?? sorted.last!.title, amount: median, cadence: (12...17).contains(gap) ? "Quincenal" : "Mensual", isIncome: income, movement: sorted.last!)
+            guard (12...18).contains(gap) || (25...35).contains(gap) else { return nil }
+            let validGaps = gaps.filter { (12...18).contains(gap) ? (12...18).contains($0) : (25...35).contains($0) }
+            guard validGaps.count * 4 >= gaps.count * 3 else { return nil }
+            return RecurringFinancialItem(id: key, name: sorted.last!.displayMerchant ?? sorted.last!.title, amount: median, cadence: (12...18).contains(gap) ? "Quincenal" : "Mensual", isIncome: income, movement: sorted.last!)
         }.sorted { $0.amount > $1.amount }
     }
 }

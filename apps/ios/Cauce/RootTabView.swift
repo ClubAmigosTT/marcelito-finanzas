@@ -83,6 +83,8 @@ struct HomeView: View {
     @State private var importStatus = "Preparando…"
     @State private var isDiagnosticsPresented = false
     @State private var isSettingsPresented = false
+    @State private var showLatestExpenses = false
+    @State private var latestExpenseDate = Date.now
 
     private var hasData: Bool { !store.movements.isEmpty || !store.statements.isEmpty }
 
@@ -98,13 +100,20 @@ struct HomeView: View {
                 }
             }
             if hasData {
-                HomeMonthlyPlanCard { isImporterPresented = true }
+                HomeMonthlyPlanCard(upload: { isImporterPresented = true }, showLatest: { date in
+                    latestExpenseDate = date; showLatestExpenses = true
+                })
+                PlanningDataFreshness { isImporterPresented = true }
                 LedgerQualityBanner(store: store)
                 HomePersonalMetrics()
                 if store.dashboardIsBlocked || store.operationalMetricsBlocked {
                     HistoricalDashboardBlockedCard(store: store)
-                } else {
+                } else if planning.hasData(store, period: .month(.now)) {
                     SpendingPaceSection(store: store)
+                } else if let latest = planning.latestMovementDate(store) {
+                    LastRecordedMonthSummary(date: latest) {
+                        latestExpenseDate = latest; showLatestExpenses = true
+                    }
                 }
             } else {
                 EmptyDataCard { isImporterPresented = true }
@@ -196,6 +205,9 @@ struct HomeView: View {
             }
             .sheet(isPresented: $isSettingsPresented) {
                 SettingsView()
+            }
+            .sheet(isPresented: $showLatestExpenses) {
+                ExpensesView(initialDate: latestExpenseDate, isPresentedAsSheet: true)
             }
             .confirmationDialog(
                 "Borrar datos del dispositivo",
