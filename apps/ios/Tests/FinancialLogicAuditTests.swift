@@ -1068,4 +1068,232 @@ final class FinancialLogicAuditTests: XCTestCase {
         XCTAssertEqual(merged.movements.map(\.id), [reimportedRow.id])
     }
 
+    // MARK: - Auditoría B
+
+    func testCardWithFavorBalanceDoesNotFailTheCreditControl() {
+        withStore { store in
+            store.statements = [
+                statement("Amex", key: "amex:0001", kind: .card, summary: StatementSummaryRecord(creditLimit: 10_000, creditAvailable: 10_500)),
+                statement("Amex", key: "amex:0002", kind: .card, summary: StatementSummaryRecord(creditLimit: 20_000, creditAvailable: 15_000))
+            ]
+            XCTAssertEqual(store.creditUsed, 5_000)
+            let credit = store.consistencyChecks.first { $0.id == "credit" }
+            XCTAssertEqual(credit?.expected, 5_000)
+            XCTAssertEqual(credit?.passed, true)
+            XCTAssertEqual(store.ledgerQuality.failedConsistencyCheckCount, 0)
+        }
+    }
+
+    private func unclassified(_ amount: Decimal, _ title: String, on record: StatementRecord) -> Movement {
+        var movement = row(amount, date: calendarDate(2026, 8, 15), title: title)
+        movement.kind = nil
+        movement.account = record.source
+        movement.statementId = record.id
+        return movement
+    }
+
+    func testKeywordClassificationRespectsTheSignOfTheMovement() {
+        withStore { store in
+            let bank = statement("BBVA", key: "bbva:1111", kind: .bank)
+            let card = statement("Amex", key: "amex:1003", kind: .card)
+            store.statements = [bank, card]
+            store.movements = [
+                unclassified(-3_000, "LIVERPOOL INSURGENTES", on: card),
+                unclassified(1_500, "BONIFICACION COMISION", on: card),
+                unclassified(200, "DEVOLUCION COMISION", on: bank),
+                unclassified(5_000, "PAGO RECIBIDO CLIENTE SA", on: bank),
+                unclassified(-4_000, "PAGO CREDITO AUTOMOTRIZ", on: bank)
+            ]
+            // 3,000 + 4,000 of real spend, minus the 1,500 bonificación and
+            // the 200 commission refund.
+            XCTAssertEqual(store.consolidatedRealSpend, 5_300)
+            XCTAssertEqual(store.realIncome, 5_000)
+        }
+    }
+
+    func testBBVATextChargeColumnIsNeverARefundOrACardPaymentForALoan() {
+        let text = """
+        BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE
+        Periodo DEL 15/03/2026 AL 14/04/2026
+        No. de Cuenta 1575694922
+        Saldo Anterior 5,000.00
+        Depósitos / Abonos (+) 0 0.00
+        Retiros / Cargos (-) 2 4,300.00
+        Saldo Final 700.00
+        Detalle de Movimientos Realizados
+        27/MAR 27/MAR DEVOLUCION SPEI CLIENTE 300.00 4,700.00 4,700.00
+        28/MAR 28/MAR PAGO CREDITO AUTOMOTRIZ 4,000.00 700.00 700.00
+        Total de Movimientos
+        TOTAL IMPORTE CARGOS 4,300.00 TOTAL MOVIMIENTOS CARGOS 2
+        TOTAL IMPORTE ABONOS 0.00 TOTAL MOVIMIENTOS ABONOS 0
+        """
+
+        let rows = FinanceStore.readerParseSnapshotForTesting(text: text, fileName: "Abril BBVA.pdf", sourceHint: "BBVA").movements
+
+        XCTAssertEqual(rows.map(\.amount), [-300, -4_000])
+        XCTAssertNotEqual(rows.first?.kind, .refund)
+        XCTAssertNotEqual(rows.last?.kind, .cardPayment)
+        XCTAssertEqual(rows.last?.flow, .expense)
+    }
+
+    func testBBVAOCRChargeColumnWinsOverDepositWordsInTheConcept() {
+        let fixtures = [
+            OCRObservationFixture(text: "Detalle de Movimientos Realizados", x: 0.02, y: 0.98, width: 0.52),
+            OCRObservationFixture(text: "FECHA", x: 0.04, y: 0.94, width: 0.06),
+            OCRObservationFixture(text: "DESCRIPCION", x: 0.20, y: 0.94, width: 0.14),
+            OCRObservationFixture(text: "CARGOS", x: 0.60, y: 0.94, width: 0.08),
+            OCRObservationFixture(text: "ABONOS", x: 0.72, y: 0.94, width: 0.08),
+            OCRObservationFixture(text: "SALDO", x: 0.84, y: 0.94, width: 0.08),
+
+            OCRObservationFixture(text: "23/JUL", x: 0.02, y: 0.82, width: 0.10),
+            OCRObservationFixture(text: "DEPOSITO A TERCERO ABONO", x: 0.13, y: 0.82, width: 0.40),
+            OCRObservationFixture(text: "500.00", x: 0.60, y: 0.82, width: 0.08),
+            OCRObservationFixture(text: "3,000.00", x: 0.84, y: 0.82, width: 0.08),
+
+            OCRObservationFixture(text: "24/JUL", x: 0.02, y: 0.72, width: 0.10),
+            OCRObservationFixture(text: "DEVOLUCION SPEI CLIENTE", x: 0.13, y: 0.72, width: 0.40),
+            OCRObservationFixture(text: "100.00", x: 0.60, y: 0.72, width: 0.08),
+            OCRObservationFixture(text: "2,900.00", x: 0.84, y: 0.72, width: 0.08),
+        ]
+
+        let rows = FinanceStore.bbvaOCRRowsForTesting(fixtures, fileName: "BBVA-agosto-2026.pdf")
+
+        XCTAssertEqual(rows.map(\.amount), [-500, -100])
+        XCTAssertTrue(rows.allSatisfy { $0.flow != .income })
+        XCTAssertFalse(rows.contains { $0.kind == .refund })
+    }
+
+    func testAmexOCRBonificacionDeComisionIsARefundNotAFee() {
+        let rows = FinanceStore.amexOCRRowsForTesting([
+            OCRObservationFixture(page: 1, text: "Fecha y Detalle de las operaciones", x: 0.05, y: 0.92, width: 0.40),
+            OCRObservationFixture(page: 1, text: "5 de Agosto", x: 0.05, y: 0.82, width: 0.16),
+            OCRObservationFixture(page: 1, text: "BONIFICACION COMISION", x: 0.18, y: 0.82, width: 0.28),
+            OCRObservationFixture(page: 1, text: "1,500.00 CR", x: 0.86, y: 0.82, width: 0.10),
+        ], fileName: "28_jul_2026_-_27_ago_2026.pdf")
+
+        XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?.amount, 1_500)
+        XCTAssertEqual(rows.first?.kind, .refund)
+    }
+
+    func testRealMerchantsAreNotDiscardedAsAdministrativeText() {
+        for merchant in ["TOTAL PLAY", "TOTAL PASS", "RECARGA SALDO TELCEL", "UBER EATS CIUDAD DE MEXICO", "ANUALIDAD DE LA TARJETA"] {
+            XCTAssertFalse(FinanceStore.isAdministrativeTitleForTesting(merchant), merchant)
+        }
+        for label in ["TOTAL IMPORTE CARGOS", "TOTAL DE MOVIMIENTOS", "SALDO ANTERIOR", "CIUDAD DE MEXICO CP 06600", "PAGINA 2 DE 5", "Pago mínimo"] {
+            XCTAssertTrue(FinanceStore.isAdministrativeTitleForTesting(label), label)
+        }
+    }
+
+    func testAmexOCRKeepsTheDatedAnnualFeeRow() {
+        let rows = FinanceStore.amexOCRRowsForTesting([
+            OCRObservationFixture(page: 1, text: "Fecha y Detalle de las operaciones", x: 0.05, y: 0.92, width: 0.40),
+            OCRObservationFixture(page: 1, text: "5 de Agosto", x: 0.05, y: 0.82, width: 0.16),
+            OCRObservationFixture(page: 1, text: "ANUALIDAD DE LA TARJETA", x: 0.18, y: 0.82, width: 0.28),
+            OCRObservationFixture(page: 1, text: "1,800.00", x: 0.86, y: 0.82, width: 0.08),
+            OCRObservationFixture(page: 1, text: "6 de Agosto", x: 0.05, y: 0.70, width: 0.16),
+            OCRObservationFixture(page: 1, text: "TOTAL PLAY", x: 0.18, y: 0.70, width: 0.28),
+            OCRObservationFixture(page: 1, text: "649.00", x: 0.86, y: 0.70, width: 0.08),
+        ], fileName: "28_jul_2026_-_27_ago_2026.pdf")
+
+        XCTAssertEqual(rows.map(\.amount), [-1_800, -649])
+        XCTAssertEqual(rows.first?.kind, .fee)
+    }
+
+    func testSummaryReadsMinimumAndInterestFromTheirOwnLabels() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            American Express
+            The Platinum Credit Card
+            Pago mínimo más meses sin intereses 1,957.97
+            Pago para no generar intereses 3,996.62
+            Pago mínimo 1,200.00
+            Intereses 150.00
+            """,
+            fileName: "sample-card-period-3.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.minimumPlusMsi, Decimal(string: "1957.97"))
+        XCTAssertEqual(snapshot.summary?.minimumPayment, 1_200)
+        XCTAssertEqual(snapshot.summary?.interest, 150)
+    }
+
+    func testSummaryKeepsACreditBalanceMarkedCRAsFavorNotDebt() {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            American Express
+            The Platinum Credit Card
+            Saldo anterior 300.00
+            Saldo al corte 1,250.00 CR
+            """,
+            fileName: "sample-card-period-3.pdf"
+        )
+
+        XCTAssertEqual(snapshot.summary?.previousBalance, 300)
+        XCTAssertEqual(snapshot.summary?.statementBalance, -1_250)
+        XCTAssertEqual(snapshot.summary?.debtBalance, -1_250)
+    }
+
+    func testReaderSeamUsesTheProductionTextParsers() {
+        // Production has no selectable-text parser for Santander: it reads the
+        // fixed Vision columns. The seam must not invent rows with a generic
+        // scan that a real import would never keep.
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            Banco Santander México
+            PERIODO 01-JUL-2026 AL 31-JUL-2026
+            FECHA FOLIO DESCRIPCION DEPOSITO RETIRO SALDO
+            01-JUL-2026 1234567 CONSUMO LOCAL TIENDA 30.00 1000.00
+            """,
+            fileName: "santander-julio-2026.pdf",
+            sourceHint: "Santander"
+        )
+
+        XCTAssertTrue(snapshot.movements.isEmpty)
+    }
+
+    func testWithoutCardsOrLoansDebtIsZeroAndPatrimonyIsKnown() {
+        withStore { store in
+            store.statements = [statement("BBVA", key: "bbva:4922", kind: .bank, summary: .init(cashBalance: 1_000))]
+            XCTAssertEqual(store.debtTotal, 0)
+            XCTAssertEqual(store.liquidPatrimony, 1_000)
+            XCTAssertEqual(store.balanceHistory.last?.patrimony, 1_000)
+        }
+    }
+
+    func testCardPaymentAfterTheBankCutoffIsNotCountedTwiceInPatrimony() {
+        withStore { store in
+            let bank = statement("BBVA", key: "bbva:4922", kind: .bank,
+                period: "16/07/2026 - 15/08/2026", summary: .init(cashBalance: 10_000))
+            let card = statement("Amex", key: "amex:1003", kind: .card,
+                period: "28/07/2026 - 27/08/2026", summary: .init(debtBalance: 2_000))
+            store.statements = [bank, card]
+            var payment = row(3_000, kind: .cardPayment, date: calendarDate(2026, 8, 20), title: "GRACIAS POR SU PAGO")
+            payment.account = "Amex"; payment.flow = .transfer; payment.statementId = card.id
+            store.movements = [payment]
+
+            XCTAssertEqual(store.cashAvailable, 10_000)
+            XCTAssertEqual(store.cardPaymentsAfterBankCutoff, 3_000)
+            XCTAssertEqual(store.liquidPatrimony, 5_000)
+            XCTAssertEqual(store.consistencyChecks.first { $0.id == "patrimony" }?.passed, true)
+        }
+    }
+
+    func testSavingsRateComparesIncomeAndSpendOfTheSameMonths() {
+        withStore { store in
+            let july = statement("BBVA", key: "bbva:4922", kind: .bank, period: "01/07/2026 - 31/07/2026", summary: .init(cashBalance: 10_000))
+            let august = statement("BBVA", key: "bbva:4922", kind: .bank, period: "01/08/2026 - 31/08/2026", summary: .init(cashBalance: 15_000))
+            let card = statement("Amex", key: "amex:1003", kind: .card, period: "01/08/2026 - 31/08/2026", summary: .init(debtBalance: 5_000))
+            store.statements = [july, august, card]
+            var julyIncome = row(10_000, kind: .income, date: calendarDate(2026, 7, 15), title: "NOMINA")
+            julyIncome.statementId = july.id
+            var augustIncome = row(10_000, kind: .income, date: calendarDate(2026, 8, 15), title: "NOMINA")
+            augustIncome.statementId = august.id
+            var purchase = row(-5_000, date: calendarDate(2026, 8, 20))
+            purchase.account = "Amex"; purchase.statementId = card.id
+            store.movements = [julyIncome, augustIncome, purchase]
+
+            XCTAssertEqual(store.savingsRate, Decimal(string: "0.5"))
+        }
+    }
 }

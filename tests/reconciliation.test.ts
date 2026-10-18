@@ -2005,3 +2005,78 @@ test("la auditoría conserva el conteo de filas PDF heredadas en cuarentena", ()
   assert.equal(audit.quarantinedMovementCount, 3);
   assert.equal(audit.trigger, "startup");
 });
+
+test("B1: una tarjeta con saldo a favor no rompe el control de crédito", () => {
+  const statements: Statement[] = [
+    { ...card("amex-ago", "Amex", "agosto 2026"), summary: { creditLimit: 10_000, creditAvailable: 10_500 } },
+    { ...card("bbva-ago", "BBVA", "agosto 2026"), accountKey: "bbva-card:0002", summary: { creditLimit: 20_000, creditAvailable: 15_000 } },
+    { ...card("rappi-ago", "Rappi", "agosto 2026"), summary: { creditLimit: 50_000 } },
+  ];
+  const metrics = buildFinanceMetrics([], statements);
+  const check = metrics.consistencyChecks.find((item) => item.id === "credit");
+  assert.equal(metrics.creditLimit, 30_000);
+  assert.equal(metrics.creditUsed, 5_000);
+  assert.equal(check?.expected, 5_000);
+  assert.equal(check?.passed, true);
+});
+
+test("B2: las palabras del concepto no invierten el signo del movimiento", () => {
+  const bankStatement = bank("bbva-ago", "BBVA", "agosto 2026");
+  const cardStatement = card("amex-ago", "Amex", "agosto 2026");
+  const row = (id: string, description: string, amount: number, statement: Statement) => movement({
+    id, date: "15 ago 2026", description, account: statement.source, amount,
+    flow: amount > 0 ? "income" : "expense", statementId: statement.id,
+  });
+  const result = runTransactionPipeline([
+    row("fee", "COMISION POR DEPOSITO", -15, bankStatement),
+    row("spei-back", "DEVOLUCION SPEI CLIENTE", -300, bankStatement),
+    row("client", "PAGO RECIBIDO CLIENTE SA", 5_000, bankStatement),
+    row("car-loan", "PAGO CREDITO AUTOMOTRIZ", -4_000, bankStatement),
+    row("card-payment", "PAGO RECIBIDO GRACIAS", 2_000, cardStatement),
+    row("bonus", "BONIFICACION COMISION", 1_500, cardStatement),
+  ], [bankStatement, cardStatement]);
+  const byId = new Map(result.transactions.map((transaction) => [transaction.id, transaction]));
+  assert.equal(byId.get("fee")?.flow, "expense");
+  assert.notEqual(byId.get("spei-back")?.kind, "refund");
+  assert.equal(byId.get("spei-back")?.flow, "expense");
+  assert.equal(byId.get("client")?.kind, "income");
+  assert.equal(byId.get("car-loan")?.flow, "expense");
+  assert.notEqual(byId.get("car-loan")?.kind, "cardPayment");
+  assert.equal(byId.get("card-payment")?.kind, "cardPayment");
+  assert.equal(byId.get("bonus")?.kind, "refund");
+});
+
+test("B3: comercios reales no se descartan como texto administrativo", async () => {
+  const { isAdministrativeDescription } = await import("../src/reconciliation.ts");
+  for (const merchant of ["TOTAL PLAY", "TOTAL PASS", "RECARGA SALDO TELCEL", "UBER EATS CIUDAD DE MEXICO", "ANUALIDAD DE LA TARJETA"]) {
+    assert.equal(isAdministrativeDescription(merchant), false, merchant);
+  }
+  for (const label of ["TOTAL IMPORTE CARGOS", "TOTAL DE MOVIMIENTOS", "SALDO ANTERIOR", "CIUDAD DE MEXICO CP 06600", "PAGINA 2 DE 5", "Pago mínimo"]) {
+    assert.equal(isAdministrativeDescription(label), true, label);
+  }
+});
+
+test("B6: un duplicado en revisión no borra la copia válida", () => {
+  const blocked: Statement = { ...card("amex-ago-review", "Amex", "agosto 2026"), status: "review", reconciliationStatus: "pending", reconciliation: { status: "pending", tolerance: 0.05 } };
+  const valid = card("amex-ago", "Amex", "agosto 2026");
+  const purchase = (id: string, statementId: string) => movement({
+    id, date: "10 ago 2026", description: "LIVERPOOL INSURGENTES", account: "Amex", amount: -1_200, flow: "expense", statementId, category: "Compras",
+  });
+  const rows = [purchase("blocked-copy", blocked.id), purchase("valid-copy", valid.id)];
+  const result = runTransactionPipeline(rows, [blocked, valid]);
+  assert.deepEqual(result.duplicateTransactions.map((row) => row.id), ["blocked-copy"]);
+  assert.equal(buildFinanceMetrics(rows, [blocked, valid], result).consolidatedRealSpend, 1_200);
+});
+
+test("B7: un pago de banco no convierte en pago una compra de tarjeta del mismo importe", () => {
+  const statements = [bank("santander", "Santander", "agosto 2026"), card("amex", "Amex", "agosto 2026")];
+  const rows = [
+    movement({ id: "bank-pay", date: "20 ago 2026", description: "PAGO TARJETA AMEX", account: "Santander", amount: -5_000, flow: "expense", statementId: "santander" }),
+    movement({ id: "liverpool", date: "21 ago 2026", description: "LIVERPOOL PERISUR", account: "Amex", amount: -5_000, flow: "expense", statementId: "amex", category: "Compras" }),
+  ];
+  const result = runTransactionPipeline(rows, statements);
+  const purchase = result.transactions.find((row) => row.id === "liverpool");
+  assert.equal(result.audit.cardPaymentCount, 0);
+  assert.notEqual(purchase?.kind, "cardPayment");
+  assert.equal(purchase?.flow, "expense");
+});

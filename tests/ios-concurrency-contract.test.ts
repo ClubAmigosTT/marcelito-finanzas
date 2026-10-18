@@ -357,13 +357,15 @@ test("Amex conserva PDFKit y cae a Vision cuando la capa de texto falla", async 
   assert.match(source, /let ocrObservations = shouldAttemptOCR\s*\?/);
   assert.match(source, /else if usedOCR, source\.localizedCaseInsensitiveContains\("Amex"\)/);
   assert.match(source, /let initial = Self\.parseAmexOCRResult\(ocrObservations, fileName: fileName\)/);
-  assert.match(source, /parsedCandidates = Self\.parseAmexText\(text, fileName: fileName, diagnosticSink:/);
+  assert.match(source, /parsedCandidates = Self\.selectableTextCandidates\(\s*text: text,/);
+  assert.match(source, /return parseAmexText\(text, fileName: fileName, diagnosticSink: diagnosticSink\)/);
 });
 
 test("RappiCard usa tabla dedicada y concilia abonos además de cargos", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /if header.contains\("rappicard"\) && header.contains\("tarjeta de credito"\) \{ return "Rappi" \}/);
-  assert.match(source, /parsedCandidates = Self\.parseRappiText\(text(?:,\s*fileName: fileName)?\)/);
+  assert.match(source, /parsedCandidates = Self\.selectableTextCandidates\(\s*text: text,/);
+  assert.match(source, /return parseRappiText\(text, fileName: fileName, evidenceMethod: rappiEvidenceMethod\)/);
   assert.match(source, /compare\("pagos y abonos", extracted: payments \+ credits/);
   assert.match(source, /opening \+ charges - payments - credits/);
   assert.match(source, /result\.msiMonthlyLoad == 0, result\.msiPending == 0/);
