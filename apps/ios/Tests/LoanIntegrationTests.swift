@@ -71,7 +71,9 @@ import XCTest
             store.statements.append(card)
             XCTAssertEqual(store.cardDebtTotal, 2000); XCTAssertEqual(store.debtTotal, 3400)
             XCTAssertEqual(store.liquidPatrimony, 1600); XCTAssertEqual(store.creditUtilizationRate, Decimal(string: "0.2"))
-            XCTAssertNil(store.balanceHistory.first?.patrimony)
+            // The 30 Jun cutoff predates the 10 Jul loan statement; its debt is
+            // rebuilt from that statement's dated payments (none in between).
+            XCTAssertEqual(store.balanceHistory.first?.patrimony, 1600)
             XCTAssertEqual(store.balanceHistory.last?.debt, 3400)
         }
     }

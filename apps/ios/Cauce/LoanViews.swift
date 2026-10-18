@@ -252,23 +252,59 @@ struct LoanPositionSection: View {
     @Environment(FinanceStore.self) private var store
     var body: some View {
         if !store.loanLedger.state.accounts.isEmpty || store.loanLedger.loadError != nil {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Préstamos").font(.headline)
+            VStack(alignment: .leading, spacing: 10) {
                 ForEach(store.loanLedger.state.accounts) { account in
                     if let statement = account.latest {
                         NavigationLink { LoanAccountDetailView(accountID: account.id) } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(account.name + " · " + loanUDIS(statement.principalRemaining)).font(.subheadline.weight(.semibold))
-                                Text("Capital al \(planningDayLabel(statement.asOf)) · intereses vencidos: \(loanUDIS(statement.accruedUnpaidInterest))").font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
+                            LoanProgressCard(name: account.name, statement: statement, quote: store.loanLedger.quote())
+                        }.buttonStyle(.plain)
                     }
                 }
-                if let quote = store.loanLedger.quote() {
-                    Text("Deuda total con préstamos: conversión con UDI del \(planningDayLabel(quote.date)). No incluye intereses futuros ni moratorios no informados.").font(.caption).foregroundStyle(.secondary)
-                } else { NavigationLink("Completar valor de UDI para calcular tu posición") { LoanQuoteView() }.font(.subheadline) }
+                if store.loanLedger.quote() == nil {
+                    NavigationLink("Completar valor de UDI para calcular tu posición") { LoanQuoteView() }.font(.subheadline)
+                }
                 if let error = store.loanLedger.loadError { Text(error).font(.caption).foregroundStyle(Color.marcelitoDanger) }
             }
         }
+    }
+}
+
+/// Same shape as the credit card summary: what has been paid, what is owed
+/// today and what is still scheduled, with progress measured on principal.
+private struct LoanProgressCard: View {
+    let name: String
+    let statement: LoanStatement
+    let quote: LoanUDIQuote?
+
+    private func mxn(_ udis: Decimal) -> String {
+        quote.map { planningMoney(LoanMath.rounded(udis * $0.value)) } ?? loanUDIS(udis)
+    }
+
+    var body: some View {
+        let principalPaid = statement.allocations.reduce(Decimal(0)) { $0 + $1.principalUDIS }
+        let paidMXN = statement.allocations.reduce(Decimal(0)) { $0 + $1.mxn }
+        let originalPrincipal = principalPaid + statement.principalRemaining
+        let fraction = originalPrincipal > 0 ? NSDecimalNumber(decimal: principalPaid / originalPrincipal).doubleValue : 0
+        let pendingInstallments = statement.installments.filter { statement.remaining($0) > Decimal(string: "0.05")! }.count
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(name).font(.headline)
+                Spacer()
+                Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary)
+            }
+            .padding(.bottom, 2)
+            PositionMetricRow(title: "Llevas pagado", value: planningMoney(paidMXN))
+            PositionMetricRow(title: "Debes hoy", value: mxn(statement.recognizedDebt))
+            PositionMetricRow(title: "Te falta por pagar", value: mxn(statement.scheduledTotalRemaining))
+            PositionUtilizationBar(fraction: fraction, accessibilityName: "Capital pagado")
+            Text("\(Int((fraction * 100).rounded()))% del capital pagado · \(pendingInstallments) cuotas por pagar")
+                .font(.caption).foregroundStyle(.secondary)
+            Text(quote.map { "Al \(planningDayLabel(statement.asOf)) · UDI del \(planningDayLabel($0.date)). \"Te falta\" incluye intereses programados; no moratorios." }
+                 ?? "Al \(planningDayLabel(statement.asOf)) · en UDIS hasta tener el valor de la UDI.")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .marcelitoCard(fill: Color.marcelitoCreamSoft.opacity(0.75), radius: 16, padding: 14)
     }
 }

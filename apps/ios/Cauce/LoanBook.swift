@@ -63,8 +63,16 @@ final class LoanBook {
         if state.accounts.isEmpty { return 0 }
         var native: Decimal = 0
         for account in state.accounts {
-            guard let snapshot = account.statements.filter({ $0.asOf <= date }).max(by: { $0.asOf < $1.asOf }) else { return nil }
-            native += snapshot.recognizedDebt
+            if let snapshot = account.statements.filter({ $0.asOf <= date }).max(by: { $0.asOf < $1.asOf }) {
+                native += snapshot.recognizedDebt
+            } else if let earliest = account.statements.min(by: { $0.asOf < $1.asOf }),
+                      let rebuilt = earliest.recognizedDebt(asOf: date) {
+                // Before the first imported statement, rebuild from its history
+                // so the position chart has earlier months.
+                native += rebuilt
+            } else {
+                return nil
+            }
         }
         if native == 0 { return 0 }
         guard let quote = quote(asOf: date) else { return nil }

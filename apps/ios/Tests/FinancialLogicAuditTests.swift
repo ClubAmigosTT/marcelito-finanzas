@@ -1317,6 +1317,17 @@ final class FinancialLogicAuditTests: XCTestCase {
         }
     }
 
+    func testPositionHistoryKeepsPointsBeforeACardWasFirstLoaded() {
+        withStore { store in
+            let julyBank = statement("BBVA", key: "bbva:4922", kind: .bank, period: "01/07/2026 - 31/07/2026", summary: .init(cashBalance: 9_000))
+            let augustBank = statement("BBVA", key: "bbva:4922", kind: .bank, period: "01/08/2026 - 31/08/2026", summary: .init(cashBalance: 10_000))
+            let augustCard = statement("Amex", key: "amex:1003", kind: .card, period: "01/08/2026 - 31/08/2026", summary: .init(debtBalance: 2_000))
+            store.statements = [julyBank, augustBank, augustCard]
+
+            XCTAssertEqual(store.balanceHistory.map(\.patrimony), [9_000, 8_000])
+        }
+    }
+
     func testClosedAccountLeavesCurrentTotalsButKeepsItsHistory() {
         withStore { store in
             let open = statement("BBVA", key: "bbva:4922", kind: .bank, period: "01/08/2026 - 31/08/2026", summary: .init(cashBalance: 10_000))

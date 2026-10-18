@@ -488,6 +488,21 @@ struct PlanningState: Codable {
         if budgetCategoryCache.count >= 96 { budgetCategoryCache.removeAll() }
         budgetCategoryCache[key] = result; return result
     }
+    /// Average monthly spend of one category over the last three calendar
+    /// months that have movements, as a reference while setting a budget.
+    /// Months without data are skipped instead of counted as zero.
+    func categoryAverage(_ store: FinanceStore, category: String, before month: Date, fixed: Bool) -> Decimal? {
+        let calendar = Calendar.current
+        let start = FinancePeriod.month(month).start
+        let totals: [Decimal] = (1...3).compactMap { offset in
+            guard let previous = calendar.date(byAdding: .month, value: -offset, to: start) else { return nil }
+            let period = FinancePeriod.month(previous)
+            guard hasData(store, period: period) else { return nil }
+            return budgetCategoryTotals(store, period: period, fixed: fixed)[category] ?? 0
+        }
+        guard !totals.isEmpty else { return nil }
+        return totals.reduce(0, +) / Decimal(totals.count)
+    }
     func commitmentTotal(in month: Date) -> Decimal { state.installments.reduce(0) { $0 + $1.due(in: month) } }
     /// Aggregate issuer load is used only when that account has no itemized plan;
     /// never count the itemized and printed monthly load twice.

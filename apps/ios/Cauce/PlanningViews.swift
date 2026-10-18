@@ -620,6 +620,12 @@ struct PersonalMovementRows: View {
     }
 }
 
+struct BudgetAmountEdit {
+    let category: String
+    let fixed: Bool
+    let average: Decimal?
+}
+
 struct BudgetView: View {
     @Environment(FinanceStore.self) private var store
     @Environment(FinancialPlanningStore.self) private var planning
@@ -632,6 +638,8 @@ struct BudgetView: View {
     @State private var closeMessage: String?
     @State private var selectedGoalID: UUID?
     @State private var reopenConfirmation = false
+    @State private var amountEdit: BudgetAmountEdit?
+    @State private var amountText = ""
     private var snapshot: BudgetSnapshot { planning.snapshot(store, month: month) }
     private var limits: [String: Decimal] { planning.limits(store, month: month) }
     private var fixed: [String: Decimal] { planning.fixedLimits(store, month: month) }
@@ -666,6 +674,13 @@ struct BudgetView: View {
                 .onChange(of: section) { _, _ in planning.savePendingPlanChanges() }
                 .onChange(of: month) { _, _ in planning.savePendingPlanChanges() }
                 .alert("Cierre mensual", isPresented: Binding(get: { closeMessage != nil }, set: { if !$0 { closeMessage = nil } })) { Button("Aceptar") { closeMessage = nil } } message: { Text(closeMessage ?? "") }
+                .alert(amountEdit.map { "Monto para \($0.category)" } ?? "Monto", isPresented: Binding(get: { amountEdit != nil }, set: { if !$0 { amountEdit = nil } })) {
+                    TextField("Monto mensual", text: $amountText).keyboardType(.numberPad)
+                    Button("Guardar") { saveTypedAmount() }
+                    Button("Cancelar", role: .cancel) { amountEdit = nil }
+                } message: {
+                    Text(amountEdit?.average.map { "Promedio de tus últimos 3 meses: \(planningMoney($0))" } ?? "Escribe el monto exacto en pesos.")
+                }
         }
     }
     private var planContent: some View {
@@ -792,15 +807,77 @@ struct BudgetView: View {
         } else {
             color = .marcelitoSuccess
         }
+        let average = planning.categoryAverage(store, category: category, before: month, fixed: fixed)
+        let averageValue = average.map { NSDecimalNumber(decimal: $0).doubleValue } ?? 0
+        // The slider range depends on the reference, never on the value being
+        // dragged, so it does not rescale mid-gesture. Exact amounts beyond it
+        // are typed by tapping the amount.
+        let rawUpper = max(2000, averageValue * 3)
+        let upper = max((rawUpper / 500).rounded(.up) * 500, NSDecimalNumber(decimal: limit).doubleValue)
+        let step: Double = upper > 20000 ? 250 : upper > 5000 ? 100 : 50
+        let closed = planning.plan(for: month).closed
         return VStack(alignment: .leading, spacing: 6) {
-            HStack { Text(category).font(.subheadline.weight(.semibold)); Spacer(); Text(planningMoney(limit)).monospacedDigit() }
+            HStack {
+                Text(category).font(.subheadline.weight(.semibold))
+                Spacer()
+                Button {
+                    amountText = limit > 0 ? NSDecimalNumber(decimal: limit).stringValue : ""
+                    amountEdit = BudgetAmountEdit(category: category, fixed: fixed, average: average)
+                } label: {
+                    HStack(spacing: 4) {
+                        Text(planningMoney(limit)).monospacedDigit()
+                        Image(systemName: "pencil").font(.caption2)
+                    }
+                }
+                .buttonStyle(.plain)
+                .disabled(closed)
+                .accessibilityLabel("Escribir monto para \(category)")
+            }
             Slider(value: Binding(get: { NSDecimalNumber(decimal: fixed ? self.fixed[category] ?? 0 : limits[category] ?? 0).doubleValue }, set: { value in
-                var plan = planning.plan(for: month); if fixed { plan.fixedLimits[category] = Decimal(Int(value)) } else { plan.limits[category] = Decimal(Int(value)) }; planning.setPlan(plan, for: month, persist: false)
-            }), in: 0...max(5000, NSDecimalNumber(decimal: max(limit, planning.monthlyIncome(for: month) ?? 0)).doubleValue), step: 50, onEditingChanged: { editing in if !editing { planning.savePendingPlanChanges() } }).tint(Color.marcelitoNavy).disabled(planning.plan(for: month).closed)
+                setBudget(category, fixed: fixed, amount: Decimal(Int(value)), persist: false)
+            }), in: 0...upper, step: step, onEditingChanged: { editing in if !editing { planning.savePendingPlanChanges() } })
+            .tint(Color.marcelitoNavy)
+            .disabled(closed)
+            .background {
+                // Ghost bar: the last three months' average, drawn translucent
+                // under the track as a reference point for the budget.
+                if averageValue > 0 {
+                    GeometryReader { geometry in
+                        let inset: CGFloat = 14
+                        let width = max(0, geometry.size.width - inset * 2)
+                        let fraction = CGFloat(min(1, averageValue / upper))
+                        Capsule()
+                            .fill(Color.marcelitoNavy.opacity(0.16))
+                            .frame(width: max(8, width * fraction), height: 10)
+                            .position(x: inset + max(8, width * fraction) / 2, y: geometry.size.height / 2)
+                    }
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                }
+            }
             ProgressView(value: min(1, max(0, ratio))).tint(color)
-            Text("\(snapshot.hasData && actual[category] != nil ? planningMoney(spent) + " usados" : "Sin cargos registrados") · \(snapshot.period.label) · \(fixed ? "fijo" : "variable")").font(.caption2).foregroundStyle(.secondary)
+            HStack {
+                Text(average.map { "Promedio 3 meses: \(planningMoney($0))" } ?? "Sin historial de 3 meses")
+                Spacer()
+                Text(snapshot.hasData && actual[category] != nil ? "\(planningMoney(spent)) usados" : "Sin cargos")
+            }
+            .font(.caption2).foregroundStyle(.secondary)
             if ratio >= 0.8, elapsed < 20, c.isDate(month, equalTo: .now, toGranularity: .month), limit > 0 { Text("Ya usaste al menos 80% antes del día 20").font(.caption).foregroundStyle(Color.marcelitoAmber) }
         }
+    }
+    private func setBudget(_ category: String, fixed: Bool, amount: Decimal, persist: Bool) {
+        var plan = planning.plan(for: month)
+        if fixed { plan.fixedLimits[category] = amount } else { plan.limits[category] = amount }
+        planning.setPlan(plan, for: month, persist: persist)
+    }
+    private func saveTypedAmount() {
+        guard let edit = amountEdit else { return }
+        let digits = amountText.filter { $0.isNumber }
+        if let amount = Decimal(string: digits), amount >= 0 {
+            setBudget(edit.category, fixed: edit.fixed, amount: amount, persist: false)
+            planning.savePendingPlanChanges()
+        }
+        amountEdit = nil
     }
     private var installmentSection: some View {
         VStack(alignment: .leading, spacing: 8) {
