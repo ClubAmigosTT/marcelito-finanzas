@@ -11,7 +11,7 @@ const settingsPath = new URL("../apps/ios/Cauce/Settings.swift", import.meta.url
 test("el lector nativo separa diagnóstico de libro operativo", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /var rowDiagnostics: \[OCRRowDiagnostic\]\? = nil/);
-  assert.match(source, /static let readerVersion = "ios-reader-recovery-2026\.09\.27\.17"/);
+  assert.match(source, /static let readerVersion = "ios-reader-recovery-2026\.09\.28\.18"/);
   assert.match(source, /let canonicalFresh = Self\.shouldPersistCanonicalRowsForTesting/);
   assert.match(source, /let ocrQualityNeedsReview = usedOCR/);
   assert.doesNotMatch(source, /let ocrQualityNeedsReview = false/);
@@ -42,9 +42,9 @@ test("el dashboard separa estados conciliados, filas bloqueadas y enriquecimient
     readFile(new URL("../apps/ios/Cauce/Diagnostics.swift", import.meta.url), "utf8"),
     readFile(modelsPath, "utf8"),
   ]);
-  assert.match(rootTab, /Conciliación financiera:/);
-  assert.match(rootTab, /Movimientos bloqueados por fila:/);
-  assert.match(rootTab, /por enriquecer:/);
+  assert.match(rootTab, /movimientos por revisar/);
+  assert.match(rootTab, /Button\("Revisar"\)/);
+  assert.match(diagnostics, /Por enriquecer/);
   assert.match(diagnostics, /audit\.blockedRows/);
   assert.match(diagnostics, /Por enriquecer/);
   assert.match(models, /let blockedRows: Int/);

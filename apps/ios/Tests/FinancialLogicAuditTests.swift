@@ -34,6 +34,138 @@ final class FinancialLogicAuditTests: XCTestCase {
         Calendar(identifier: .gregorian).date(from: DateComponents(year: year, month: month, day: day))!
     }
 
+    private func date(_ calendar: Calendar, _ year: Int, _ month: Int, _ day: Int, hour: Int = 12) -> Date {
+        calendar.date(from: DateComponents(year: year, month: month, day: day, hour: hour))!
+    }
+
+    private func coveredDays(_ calendar: Calendar, year: Int, month: Int, through day: Int) -> Set<Date> {
+        Set((1...day).map { calendar.startOfDay(for: date(calendar, year, month, $0, hour: 0)) })
+    }
+
+    private func balance(_ calendar: Calendar, _ year: Int, _ month: Int, _ day: Int, cash: Decimal?, debt: Decimal?) -> FinanceStore.BalanceSnapshot {
+        FinanceStore.BalanceSnapshot(date: date(calendar, year, month, day), cash: cash, debt: debt)
+    }
+
+    func testSpendingPaceUsesEquivalentPartialPeriodsAndWeeklyRealSpend() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = date(calendar, 2026, 9, 17)
+        let movements = [
+            row(-4_200, date: date(calendar, 2026, 9, 2)),
+            row(-3_100, date: date(calendar, 2026, 9, 10)),
+            row(-6_797, date: date(calendar, 2026, 9, 17)),
+            row(-16_000, date: date(calendar, 2026, 8, 4))
+        ]
+        let coverage = coveredDays(calendar, year: 2026, month: 8, through: 17)
+            .union(coveredDays(calendar, year: 2026, month: 9, through: 17))
+
+        let metrics = SpendingPaceMetrics.calculate(movements: movements, coveredDays: coverage, now: now, calendar: calendar)
+
+        XCTAssertEqual(metrics?.accumulatedSpend, 14_097)
+        XCTAssertEqual(metrics?.dailyAverage, Decimal(14_097) / Decimal(17))
+        XCTAssertEqual(metrics?.projectedMonth, (Decimal(14_097) / Decimal(17)) * Decimal(30))
+        XCTAssertEqual(metrics?.weeklySpend.map(\.amount), [Decimal(4_200), Decimal(3_100), Decimal(6_797)])
+        XCTAssertEqual(metrics?.comparisonPercentChange, (Decimal(14_097) - Decimal(16_000)) / Decimal(16_000))
+    }
+
+    func testSpendingPaceDoesNotProjectWithIncompleteCoverageOrInventEmptyData() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = date(calendar, 2026, 9, 17)
+        let oneObservedPurchase = [row(-100, date: date(calendar, 2026, 9, 4))]
+
+        let incomplete = SpendingPaceMetrics.calculate(movements: oneObservedPurchase, coveredDays: [], now: now, calendar: calendar)
+        XCTAssertEqual(incomplete?.accumulatedSpend, 100)
+        XCTAssertNil(incomplete?.dailyAverage)
+        XCTAssertNil(incomplete?.projectedMonth)
+        XCTAssertEqual(incomplete?.weeklySpend, [SpendingPaceWeek(number: 1, amount: 100)])
+        XCTAssertNil(incomplete?.comparisonPercentChange)
+        XCTAssertNil(SpendingPaceMetrics.calculate(movements: [], coveredDays: [], now: now, calendar: calendar))
+    }
+
+    func testSpendingPaceShowsObservedWeeksWithoutAssumingUncoveredWeeksAreZero() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = date(calendar, 2026, 9, 17)
+        let movements = [
+            row(-100, date: date(calendar, 2026, 9, 2)),
+            row(-250, date: date(calendar, 2026, 9, 16))
+        ]
+
+        let metrics = SpendingPaceMetrics.calculate(movements: movements, coveredDays: [], now: now, calendar: calendar)
+
+        XCTAssertEqual(metrics?.accumulatedSpend, 350)
+        XCTAssertEqual(metrics?.weeklySpend, [
+            SpendingPaceWeek(number: 1, amount: 100),
+            SpendingPaceWeek(number: 3, amount: 250)
+        ])
+        XCTAssertNil(metrics?.dailyAverage)
+        XCTAssertNil(metrics?.projectedMonth)
+    }
+
+    func testSpendingPaceHandlesZeroNetSpendAndExcludesOwnTransfersAndCardPayments() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let now = date(calendar, 2026, 9, 17)
+        let coverage = coveredDays(calendar, year: 2026, month: 9, through: 17)
+
+        let zeroSpend = SpendingPaceMetrics.calculate(movements: [], coveredDays: coverage, now: now, calendar: calendar)
+        XCTAssertEqual(zeroSpend?.accumulatedSpend, 0)
+        XCTAssertEqual(zeroSpend?.dailyAverage, 0)
+        XCTAssertEqual(zeroSpend?.projectedMonth, 0)
+        XCTAssertTrue(zeroSpend?.weeklySpend.allSatisfy { $0.amount == 0 } == true)
+
+        withStore { store in
+            store.movements = [
+                row(-120, kind: .purchase, date: now),
+                row(-500, kind: .cardPayment, date: now),
+                row(-200, kind: .bankTransfer, date: now),
+                row(50, kind: .refund, date: now)
+            ]
+            let metrics = SpendingPaceMetrics.calculate(
+                movements: store.netExpenseMovements,
+                coveredDays: coverage,
+                now: now,
+                calendar: calendar
+            )
+            XCTAssertEqual(metrics?.accumulatedSpend, 70)
+        }
+    }
+
+    func testPositionHistoryUsesCompleteCutsAndOnlyAdjacentMonthsForVariation() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let snapshots = [
+            balance(calendar, 2026, 5, 31, cash: 100, debt: 20),
+            balance(calendar, 2026, 6, 30, cash: 110, debt: 20),
+            balance(calendar, 2026, 7, 15, cash: 125, debt: 30),
+            balance(calendar, 2026, 7, 31, cash: nil, debt: 30),
+            balance(calendar, 2026, 8, 31, cash: 140, debt: 40)
+        ]
+
+        let points = PositionHistoryBuilder.monthlyPoints(from: snapshots, calendar: calendar)
+        XCTAssertEqual(points.map(\.value), [Decimal(80), Decimal(90), Decimal(95), Decimal(100)])
+        XCTAssertEqual(PositionHistoryBuilder.contiguousSuffix(points, limit: 3, calendar: calendar).map(\.value), [Decimal(90), Decimal(95), Decimal(100)])
+        let change = PositionHistoryBuilder.monthOverMonthChange(in: points, calendar: calendar)
+        XCTAssertEqual(change?.amount, 5)
+        XCTAssertEqual(change?.percent, Decimal(5) / Decimal(95))
+
+        let gap = [points[0], points[2]]
+        XCTAssertEqual(PositionHistoryBuilder.contiguousSuffix(gap, limit: 6, calendar: calendar).map(\.value), [Decimal(95)])
+        XCTAssertNil(PositionHistoryBuilder.monthOverMonthChange(in: gap, calendar: calendar))
+    }
+
+    func testPositionCoverageRatioAndSharedScaleHandleZeroDebtAndZeroBalances() {
+        XCTAssertEqual(PositionFinancialCalculations.debtCoverageRatio(cash: 55_520, debt: 52_960), Decimal(55_520) / Decimal(52_960))
+        XCTAssertNil(PositionFinancialCalculations.debtCoverageRatio(cash: 55_520, debt: 0))
+        XCTAssertNil(PositionFinancialCalculations.debtCoverageRatio(cash: -1, debt: 100))
+
+        let scale = PositionBalanceScale(cash: 55_520, debt: 52_960)
+        XCTAssertEqual(scale.fraction(for: 55_520), 1)
+        XCTAssertEqual(scale.fraction(for: 52_960), NSDecimalNumber(decimal: Decimal(52_960) / Decimal(55_520)).doubleValue)
+        XCTAssertEqual(PositionBalanceScale(cash: 0, debt: 0).fraction(for: 0), 0)
+    }
+
     func testAccountStatementStatusTracksMonthlyCutoffAndDueDate() {
         withStore { store in
             store.statements = [
@@ -340,7 +472,7 @@ final class FinancialLogicAuditTests: XCTestCase {
             store.statements = [original]
             store.movements = [movement]
             store.updateClassification(for: movement, kind: .purchase, travelRelated: true)
-            store.updateCategory(for: movement, to: "Salud")
+            store.updateCategory(for: movement, to: "Salud", applyToMerchant: false)
 
             let replacement = statement("Rappi", key: "rappi:1234", kind: .card)
             var reread = row(-100, date: date, title: "COMERCIO EJEMPLO")
@@ -363,6 +495,75 @@ final class FinancialLogicAuditTests: XCTestCase {
             pending: false, confidence: 0.99, imageFingerprint: fingerprint, evidence: evidence)
         return BankScreenshotImportResult(source: source, accountKey: key, importedAt: .now,
             inputs: [BankScreenshotInput(data: Data([1]), fileName: "synthetic.image")], imageFingerprints: [fingerprint], movements: [movement], warnings: [])
+    }
+
+    private func capture(_ source: BankScreenshotSource, key: String?, rows: [(String, Decimal)], fingerprint: String) -> BankScreenshotImportResult {
+        let movements = rows.map { title, amount in
+            BankScreenshotMovement(date: .now, title: title, displayedAmount: amount, normalizedAmount: amount,
+                pending: false, confidence: 0.99, imageFingerprint: fingerprint,
+                evidence: MovementExtractionEvidence(method: "screenshot-vision", page: 1, confidence: 0.99,
+                    sourceText: "\(title) \(amount)", selectedAmount: amount))
+        }
+        return BankScreenshotImportResult(source: source, accountKey: key, importedAt: .now,
+            inputs: [BankScreenshotInput(data: Data([1]), fileName: "synthetic.image")], imageFingerprints: [fingerprint], movements: movements, warnings: [])
+    }
+
+    func testTwoIdenticalScreenshotRowsLinkToTwoIdenticalOfficialRows() throws {
+        try withStore { store in
+            let bank = statement("BBVA", key: "bbva:1111", kind: .bank)
+            store.statements = [bank]
+            var first = row(-85, title: "UBER TRIP"); first.statementId = bank.id
+            var second = row(-85, title: "UBER TRIP"); second.statementId = bank.id
+            store.movements = [first, second]
+            let receipt = try store.saveBankScreenshotImport(capture(.bbva, key: "bbva:1111",
+                rows: [("UBER TRIP", -85), ("UBER TRIP", -85)], fingerprint: "audit-tie"))
+            XCTAssertEqual(receipt.confirmedCount, 2)
+            XCTAssertEqual(store.consolidatedRealSpend, 170)
+        }
+    }
+
+    func testRappiScreenshotLinksDespiteCardVersusAccountDigits() throws {
+        try withStore { store in
+            let card = statement("Rappi", key: "rappi:4321", kind: .card)
+            store.statements = [card]
+            var official = row(-250, title: "RESTAURANTE EJEMPLO")
+            official.account = "Rappi"
+            official.statementId = card.id
+            store.movements = [official]
+            let receipt = try store.saveBankScreenshotImport(capture(.rappi, key: "rappi:9876",
+                title: "RESTAURANTE EJEMPLO", amount: -250, fingerprint: "audit-rappi"))
+            XCTAssertEqual(receipt.confirmedCount, 1)
+            XCTAssertEqual(receipt.provisionalCount, 0)
+        }
+    }
+
+    func testDeletingTheOriginalCaptureReleasesItsConfirmedDuplicate() throws {
+        try withStore { store in
+            let original = try store.saveBankScreenshotImport(capture(.bbva, key: nil, title: "TIENDA EJEMPLO", amount: -100, fingerprint: "audit-a"))
+            let copy = try store.saveBankScreenshotImport(capture(.bbva, key: nil, title: "TIENDA EJEMPLO", amount: -100, fingerprint: "audit-b"))
+            store.resolveScreenshotDuplicates(captureID: copy.captureID, keepBoth: [])
+            XCTAssertEqual(store.consolidatedRealSpend, 100)
+            let deleted = try XCTUnwrap(store.screenshotCaptures.first { $0.id == original.captureID })
+            store.deleteBankScreenshotCapture(deleted)
+            XCTAssertEqual(store.consolidatedRealSpend, 100)
+        }
+    }
+
+    func testStatementWithOneRowResolvesAnUndecidedScreenshotCopy() throws {
+        try withStore { store in
+            _ = try store.saveBankScreenshotImport(capture(.bbva, key: nil, title: "TIENDA EJEMPLO", amount: -100, fingerprint: "audit-a"))
+            let copy = try store.saveBankScreenshotImport(capture(.bbva, key: nil, title: "TIENDA EJEMPLO", amount: -100, fingerprint: "audit-b"))
+            XCTAssertEqual(copy.duplicateCount, 1)
+            XCTAssertEqual(store.consolidatedRealSpend, 200)
+
+            let bank = statement("BBVA", key: "bbva:1111", kind: .bank)
+            var official = row(-100, title: "TIENDA EJEMPLO")
+            official.statementId = bank.id
+            store.statements = [bank]
+            store.movements.append(official)
+            store.reconcileBankScreenshotsAgainstOfficialLedger()
+            XCTAssertEqual(store.consolidatedRealSpend, 100)
+        }
     }
 
     func testScreenshotsInDifferentAccountsStaySeparate() throws {
@@ -408,4 +609,463 @@ final class FinancialLogicAuditTests: XCTestCase {
             XCTAssertEqual(store.totalTransfers, 100)
         }
     }
+    private func seedTransfer(_ store: FinanceStore, sharedReference: Bool = true) {
+        let bank = statement("BBVA", key: "bbva:1111", kind: .bank)
+        let destination = statement("Santander", key: "santander:2222", kind: .bank)
+        store.statements = [bank, destination]
+        var outgoing = row(-3000, date: calendarDate(2026, 8, 31), title: sharedReference ? "SPEI ENVIADO REF ABC123" : "SPEI ENVIADO")
+        outgoing.statementId = bank.id
+        var incoming = row(3000, kind: .income, date: calendarDate(2026, 9, 1), title: sharedReference ? "SPEI RECIBIDO REF ABC123" : "SPEI RECIBIDO")
+        incoming.account = "Santander"
+        incoming.statementId = destination.id
+        store.movements = [outgoing, incoming]
+    }
+
+    private func assertTransferPair(_ store: FinanceStore, file: StaticString = #filePath, line: UInt = #line) {
+        XCTAssertEqual(store.movements.count, 2, file: file, line: line)
+        guard store.movements.count == 2 else { return }
+        XCTAssertEqual(store.movements[0].matchedMovementId, store.movements[1].id, file: file, line: line)
+        XCTAssertEqual(store.movements[1].matchedMovementId, store.movements[0].id, file: file, line: line)
+        XCTAssertTrue(store.movements.allSatisfy { $0.kind == .bankTransfer && $0.flow == .transfer }, file: file, line: line)
+        XCTAssertEqual(store.consolidatedRealSpend, 0, file: file, line: line)
+        XCTAssertEqual(store.realIncome, 0, file: file, line: line)
+    }
+
+    func testCategoryBeforePairingDoesNotLockAccounting() {
+        withStore { store in
+            seedTransfer(store)
+            _ = store.updateCategory(for: store.movements[0], to: "Itam", applyToMerchant: false)
+            XCTAssertEqual(store.movements[0].manuallyAccountingReviewed, false)
+            store.normalizeFinanceForTesting()
+            assertTransferPair(store)
+            XCTAssertEqual(store.movements[0].category, "Itam")
+        }
+    }
+
+    func testCategoryAfterPairingPreservesReciprocityAcrossNormalizationAndReload() {
+        withStore { store in
+            seedTransfer(store)
+            store.normalizeFinanceForTesting()
+            _ = store.updateCategory(for: store.movements[0], to: "Entrenamiento", applyToMerchant: false)
+            store.normalizeFinanceForTesting()
+            assertTransferPair(store)
+            let reopened = FinanceStore()
+            assertTransferPair(reopened)
+            XCTAssertEqual(reopened.movements[0].category, "Entrenamiento")
+        }
+    }
+
+    func testManualTransferMatchesBothSidesWithIndependentEvidence() {
+        withStore { store in
+            seedTransfer(store)
+            store.updateClassification(for: store.movements[0], kind: .bankTransfer, travelRelated: false)
+            assertTransferPair(store)
+        }
+    }
+
+    func testConfirmedPairSurvivesNewRowIDsAndPreservesCategories() {
+        withStore { store in
+            seedTransfer(store, sharedReference: false)
+            _ = store.updateCategory(for: store.movements[0], to: "Itam", applyToMerchant: false)
+            XCTAssertTrue(store.confirmOwnTransfer(store.movements[0], counterpart: store.movements[1]))
+            var reread = store.movements
+            for index in reread.indices {
+                reread[index].id = UUID()
+                reread[index].matchedMovementId = nil
+                reread[index].manuallyReviewed = false
+                reread[index].manuallyAccountingReviewed = nil
+                reread[index].confirmedCounterpartKey = nil
+                reread[index].kind = reread[index].amount < 0 ? .purchase : .income
+                reread[index].flow = reread[index].amount < 0 ? .expense : .income
+            }
+            store.movements = reread
+            store.normalizeFinanceForTesting()
+            assertTransferPair(store)
+            XCTAssertEqual(store.movements[0].category, "Itam")
+        }
+    }
+
+    func testLegacyManualAccountingDecisionAndCodableStayProtected() throws {
+        try withStore { store in
+            seedTransfer(store)
+            store.movements[0].manuallyReviewed = true
+            store.movements[0].category = "Salud"
+            let data = try JSONEncoder().encode(store.movements[0])
+            let decoded = try JSONDecoder().decode(Movement.self, from: data)
+            XCTAssertNil(decoded.manuallyAccountingReviewed)
+            XCTAssertTrue(decoded.accountingReviewLocked)
+            store.normalizeFinanceForTesting()
+            XCTAssertEqual(store.movements[0].category, "Salud")
+            XCTAssertEqual(store.movements[0].kind, .purchase)
+            XCTAssertNil(store.movements[0].matchedMovementId)
+        }
+    }
+
+    func testOneCentDifferenceCannotBeAutomaticallyReconciled() {
+        withStore { store in
+            seedTransfer(store)
+            store.movements[1].amount = Decimal(string: "3000.01")!
+            store.normalizeFinanceForTesting()
+            XCTAssertTrue(store.movements.allSatisfy { $0.matchedMovementId == nil })
+        }
+    }
+
+    private func seedNvioSalaryAndUnrelatedWithdrawal(_ store: FinanceStore, stalePair: Bool = false) {
+        let bbva = statement("BBVA", key: "bbva:4922", kind: .bank)
+        let santander = statement("Santander", key: "santander:1111", kind: .bank)
+        store.statements = [bbva, santander]
+        var salary = row(15000, kind: .income, date: calendarDate(2026, 6, 27), title: "SPEI RECIBIDONVIO")
+        salary.statementId = bbva.id
+        var withdrawal = row(-15000, date: calendarDate(2026, 6, 30), title: "TRANSFERENCIA A MARCELO ANDRES DIAZ SANC")
+        withdrawal.account = "Santander"
+        withdrawal.statementId = santander.id
+        if stalePair {
+            salary.kind = .bankTransfer; salary.flow = .transfer
+            withdrawal.kind = .bankTransfer; withdrawal.flow = .transfer
+            salary.matchedMovementId = withdrawal.id; withdrawal.matchedMovementId = salary.id
+            salary.reconciliationReason = "importe exacto · dirección explícita"
+            withdrawal.reconciliationReason = salary.reconciliationReason
+            salary.reconciliationConfidence = 100; withdrawal.reconciliationConfidence = 100
+            salary.category = "Binance (salarios)"
+            salary.manuallyReviewed = true; salary.manuallyAccountingReviewed = false
+        }
+        store.movements = [salary, withdrawal]
+    }
+
+    func testNvioIncomeCannotMatchSantanderByOwnerAmountAndThreeDays() {
+        withStore { store in
+            seedNvioSalaryAndUnrelatedWithdrawal(store)
+            store.normalizeFinanceForTesting()
+            XCTAssertTrue(store.movements.allSatisfy { $0.matchedMovementId == nil })
+            XCTAssertEqual(store.realIncome, 15000)
+            XCTAssertEqual(store.consolidatedRealSpend, 15000)
+        }
+    }
+
+    func testStaleAutomaticNvioPairIsRevalidatedWithoutLosingCategory() {
+        withStore { store in
+            seedNvioSalaryAndUnrelatedWithdrawal(store, stalePair: true)
+            store.normalizeFinanceForTesting()
+            XCTAssertTrue(store.movements.allSatisfy { $0.matchedMovementId == nil })
+            XCTAssertEqual(store.realIncome, 15000)
+            XCTAssertEqual(store.movements[0].category, "Binance (salarios)")
+            XCTAssertTrue(store.movements[0].manuallyReviewed)
+            _ = store.updateCategory(for: store.movements[0], to: "Binance (salarios)", applyToMerchant: false)
+            FinanceStore.recordCanonicalRebuildCompletion(in: .standard)
+            let reopened = FinanceStore()
+            XCTAssertEqual(reopened.realIncome, 15000)
+            XCTAssertEqual(reopened.movements[0].category, "Binance (salarios)")
+        }
+    }
+
+    func testActualSantanderOwnTransferKeepsIndependentBankLink() {
+        withStore { store in
+            seedTransfer(store, sharedReference: false)
+            store.movements[0].title = "SPEI ENVIADO SANTANDER MARCELO ANDRES DIAZ SANC"
+            store.movements[1].title = "SPEI RECIBIDOBBVA"
+            store.normalizeFinanceForTesting()
+            assertTransferPair(store)
+            store.normalizeFinanceForTesting()
+            assertTransferPair(store)
+        }
+    }
+
+    func testHumanConfirmedPairWithoutPrintedReferenceRemainsProtected() {
+        withStore { store in
+            seedTransfer(store, sharedReference: false)
+            XCTAssertTrue(store.confirmOwnTransfer(store.movements[0], counterpart: store.movements[1]))
+            store.normalizeFinanceForTesting()
+            assertTransferPair(store)
+        }
+    }
+
+    func testUserConfirmedRappiPaymentExcludesSpendAndKeepsCategoryAfterReload() {
+        withStore { store in
+            let bbva = statement("BBVA", key: "bbva:4922", kind: .bank)
+            store.statements = [bbva]
+            var payment = row(-10000, date: calendarDate(2026, 6, 30), title: "SPEI ENVIADO STP")
+            payment.statementId = bbva.id
+            store.movements = [payment]
+            _ = store.updateCategory(for: payment, to: "Transporte", applyToMerchant: false)
+            store.updateClassification(for: store.movements[0], kind: .cardPayment, travelRelated: false)
+            XCTAssertEqual(store.consolidatedRealSpend, 0)
+            XCTAssertEqual(store.movements[0].category, "Transporte")
+            FinanceStore.recordCanonicalRebuildCompletion(in: .standard)
+            let reopened = FinanceStore()
+            XCTAssertEqual(reopened.consolidatedRealSpend, 0)
+            XCTAssertEqual(reopened.movements[0].kind, .cardPayment)
+            XCTAssertEqual(reopened.movements[0].category, "Transporte")
+        }
+    }
+
+    private func seedMonthlyAudit(_ store: FinanceStore, cashEnd: Decimal = 800) {
+        let bankBefore = statement("BBVA", key: "bbva:4922", kind: .bank,
+            period: "01/05/2026 - 31/05/2026", summary: .init(cashBalance: 1000))
+        let bankAfter = statement("BBVA", key: "bbva:4922", kind: .bank,
+            period: "01/06/2026 - 30/06/2026", summary: .init(cashBalance: cashEnd))
+        let cardBefore = statement("Amex", key: "amex:1003", kind: .card,
+            period: "01/05/2026 - 31/05/2026", summary: .init(debtBalance: 500))
+        let cardAfter = statement("Amex", key: "amex:1003", kind: .card,
+            period: "01/06/2026 - 30/06/2026", summary: .init(debtBalance: 650))
+        store.statements = [bankBefore, bankAfter, cardBefore, cardAfter]
+        var income = row(100, kind: .income, date: calendarDate(2026, 6, 15))
+        income.statementId = bankAfter.id
+        var purchase = row(-500, date: calendarDate(2026, 6, 15))
+        purchase.account = "Amex"; purchase.statementId = cardAfter.id
+        var refund = row(50, kind: .refund, date: calendarDate(2026, 6, 16))
+        refund.account = "Amex"; refund.statementId = cardAfter.id
+        var payment = row(-300, kind: .cardPayment, date: calendarDate(2026, 6, 17))
+        payment.flow = .transfer; payment.statementId = bankAfter.id
+        var receipt = row(300, kind: .cardPayment, date: calendarDate(2026, 6, 17))
+        receipt.account = "Amex"; receipt.flow = .transfer; receipt.statementId = cardAfter.id
+        store.movements = [income, purchase, refund, payment, receipt]
+    }
+
+    func testMonthlyAuditSeparatesExternalIncomeSpendRefundsAndFundingPayments() {
+        withStore { store in
+            seedMonthlyAudit(store)
+            let report = store.monthlyFinancialAudit(for: calendarDate(2026, 6, 1))
+            XCTAssertEqual(report.total(.income), 100)
+            XCTAssertEqual(report.total(.spending), 500)
+            XCTAssertEqual(report.total(.refunds), 50)
+            XCTAssertEqual(report.netSpending, 450)
+            XCTAssertEqual(report.total(.cardPayment), 300)
+            XCTAssertEqual(report.rows[.cardPayment]?.count, 1)
+            XCTAssertTrue(report.hasCompleteCoverage)
+            XCTAssertTrue(report.bridge?.reconciles == true)
+            XCTAssertEqual(report.bridge?.difference, 0)
+        }
+    }
+
+    func testMonthlyFundingDifferenceIsVisibleRatherThanForcedToZero() {
+        withStore { store in
+            seedMonthlyAudit(store, cashEnd: 900)
+            let report = store.monthlyFinancialAudit(for: calendarDate(2026, 6, 1))
+            XCTAssertEqual(report.bridge?.difference, 100)
+            XCTAssertFalse(report.bridge?.reconciles ?? true)
+        }
+    }
+
+    func testPartialCoverageAndDifferentCutoffsDoNotInventMonthlyBalances() {
+        withStore { store in
+            seedMonthlyAudit(store)
+            store.statements[1].period = "15/06/2026 - 14/07/2026"
+            let report = store.monthlyFinancialAudit(for: calendarDate(2026, 6, 1))
+            XCTAssertFalse(report.hasCompleteCoverage)
+            XCTAssertNil(report.bridge)
+            XCTAssertFalse(report.canUseForBudget)
+        }
+    }
+
+    func testRejectedPairPersistsWithoutChangingTypesOrCategoriesAndCanBeReset() {
+        withStore { store in
+            seedTransfer(store, sharedReference: false)
+            let pair = store.pendingTransferReviewPairs[0]
+            let priorCategory = store.movements[0].category
+            store.rejectTransferPair(pair)
+            XCTAssertEqual(store.pendingTransferReviewPairs.count, 0)
+            XCTAssertEqual(store.movements[0].kind, .purchase)
+            XCTAssertEqual(store.movements[0].category, priorCategory)
+            FinanceStore.recordCanonicalRebuildCompletion(in: .standard)
+            let reopened = FinanceStore()
+            XCTAssertEqual(reopened.pendingTransferReviewPairs.count, 0)
+            reopened.resetRejectedTransferPairs()
+            XCTAssertEqual(reopened.pendingTransferReviewPairs.count, 1)
+        }
+    }
+
+    func testConfirmedIncomeIsNotSuggestedAsOwnTransferAgain() {
+        withStore { store in
+            seedTransfer(store, sharedReference: false)
+            store.updateClassification(for: store.movements[1], kind: .income, travelRelated: false)
+            XCTAssertEqual(store.pendingTransferReviewPairs.count, 0)
+            XCTAssertEqual(store.realIncome, 3000)
+        }
+    }
+
+    func testMonthlyBridgeUsesFullCreditUsageIncludingDeferredDebt() {
+        withStore { store in
+            seedMonthlyAudit(store)
+            store.statements[2].summary?.creditLimit = 1000
+            store.statements[2].summary?.creditAvailable = 500
+            store.statements[3].summary?.creditLimit = 1000
+            store.statements[3].summary?.creditAvailable = 100
+            let report = store.monthlyFinancialAudit(for: calendarDate(2026, 6, 1))
+            XCTAssertEqual(report.bridge?.debtChange, 400)
+            XCTAssertEqual(report.bridge?.difference, -250)
+        }
+    }
+
+    func testUnpairedOwnTransferKeepsItsKindAcrossRepeatedReconciliation() {
+        withStore { store in
+            _ = store.updateTransferOwnerAliases(["Marcelo Diaz"])
+            let bank = statement("BBVA", key: "bbva:1111", kind: .bank)
+            store.statements = [bank]
+            var outgoing = row(-5000, kind: .bankTransfer, date: calendarDate(2026, 8, 20),
+                title: "TRASPASO A CUENTA PROPIA MARCELO DIAZ")
+            outgoing.flow = .transfer
+            outgoing.statementId = bank.id
+            store.movements = [outgoing]
+
+            store.normalizeFinanceForTesting()
+            let firstSpend = store.consolidatedRealSpend
+            let firstFlow = store.movements.first?.flow
+            store.normalizeFinanceForTesting()
+            store.normalizeFinanceForTesting()
+
+            XCTAssertEqual(store.movements.first?.flow, firstFlow)
+            XCTAssertEqual(store.movements.first?.kind, .bankTransfer)
+            XCTAssertEqual(store.consolidatedRealSpend, firstSpend)
+        }
+    }
+
+    func testBankDepositLabelledAbonoIsIncomeNotAccountingCredit() {
+        withStore { store in
+            let bank = statement("BBVA", key: "bbva:1111", kind: .bank)
+            store.statements = [bank]
+            var payroll = row(25000, date: calendarDate(2026, 8, 15), title: "ABONO NOMINA EMPRESA SA")
+            payroll.kind = nil
+            payroll.statementId = bank.id
+            store.movements = [payroll]
+            XCTAssertEqual(store.realIncome, 25000)
+        }
+    }
+
+    func testRowsWithoutYearAreAnchoredToACycleThatCrossesNewYear() {
+        let cycle = "16/12/2025 - 15/01/2026"
+        let december = row(-4000, date: calendarDate(2026, 12, 20))   // "20 de Diciembre" read with 2026
+        let januaryEarly = row(-100, date: calendarDate(2025, 1, 5))  // "05/ENE" read with 2025
+        let alreadyRight = row(-50, date: calendarDate(2026, 1, 10))
+        let msiOriginalPurchase = row(-1200, date: calendarDate(2025, 6, 3))
+
+        let anchored = FinanceStore.movementsAnchoredToStatementPeriod(
+            [december, januaryEarly, alreadyRight, msiOriginalPurchase], period: cycle)
+
+        XCTAssertEqual(anchored.map(\.date), [
+            calendarDate(2025, 12, 20), calendarDate(2026, 1, 5),
+            calendarDate(2026, 1, 10), calendarDate(2025, 6, 3),
+        ])
+    }
+
+    func testRowsInsideASingleYearCycleAreNotShifted() {
+        let rows = [row(-10, date: calendarDate(2026, 8, 1)), row(-20, date: calendarDate(2026, 8, 31))]
+        let anchored = FinanceStore.movementsAnchoredToStatementPeriod(rows, period: "01/08/2026 - 31/08/2026")
+        XCTAssertEqual(anchored.map(\.date), rows.map(\.date))
+    }
+
+    func testTwoDigitYearIsReadInsteadOfTheDefaultYear() {
+        XCTAssertEqual(FinanceStore.parseDateForTesting("28/12/25", defaultYear: 2026), calendarDate(2025, 12, 28))
+        XCTAssertEqual(FinanceStore.parseDateForTesting("05 de ene de 2026"), calendarDate(2026, 1, 5))
+        XCTAssertEqual(FinanceStore.parseDateForTesting("05/ENE", defaultYear: 2026), calendarDate(2026, 1, 5))
+    }
+
+    func testOCRAmountWithRepeatedSeparatorsIsNotTruncated() {
+        XCTAssertEqual(FinanceStore.parseAmountForTesting("54.977.93"), Decimal(string: "54977.93"))
+        XCTAssertEqual(FinanceStore.parseAmountForTesting("54,977,93"), Decimal(string: "54977.93"))
+        XCTAssertEqual(FinanceStore.parseAmountForTesting("1.234.567"), 1234567)
+        XCTAssertEqual(FinanceStore.parseAmountForTesting("1,234.56-"), Decimal(string: "-1234.56"))
+        XCTAssertEqual(FinanceStore.parseAmountForTesting("$1,234.56"), Decimal(string: "1234.56"))
+        XCTAssertEqual(FinanceStore.parseAmountForTesting("1.234,56"), Decimal(string: "1234.56"))
+        XCTAssertNil(FinanceStore.parseAmountForTesting("1,234.56CR"))
+    }
+
+    func testReusedFileNameDoesNotReplaceAnotherMonth() {
+        var march = statement("BBVA", key: "bbva:1111", kind: .bank, period: "01/03/2026 - 31/03/2026")
+        march.fileName = "EstadoCuenta.pdf"
+        march.sourceFingerprint = nil
+
+        XCTAssertNil(FinanceStore.legacyStatementForReimport(
+            in: [march], fileName: "EstadoCuenta.pdf", source: "BBVA", period: "01/04/2026 - 30/04/2026"))
+        XCTAssertEqual(FinanceStore.legacyStatementForReimport(
+            in: [march], fileName: "EstadoCuenta.pdf", source: "BBVA", period: "01/03/2026 - 31/03/2026")?.id, march.id)
+        XCTAssertNil(FinanceStore.legacyStatementForReimport(
+            in: [march], fileName: "EstadoCuenta.pdf", source: "Santander", period: "01/03/2026 - 31/03/2026"))
+    }
+
+    func testManualKindCannotContradictTheAmountSign() {
+        withStore { store in
+            store.addMovement(title: "Intereses ganados", account: "BBVA", category: "Ingresos",
+                amount: 1200, flow: .income, date: calendarDate(2026, 8, 10))
+            let deposit = store.movements[0]
+
+            XCTAssertFalse(store.updateClassification(for: deposit, kind: .interest, travelRelated: false))
+            XCTAssertFalse(store.updateClassification(for: deposit, kind: .purchase, travelRelated: false))
+            XCTAssertEqual(store.movements.first(where: { $0.id == deposit.id })?.flow, .income)
+
+            XCTAssertTrue(store.updateClassification(for: deposit, kind: .income, travelRelated: false))
+            XCTAssertEqual(store.movements.first(where: { $0.id == deposit.id })?.flow, .income)
+            XCTAssertFalse(FinanceStore.selectableKinds(forAmount: 1200).contains(.purchase))
+            XCTAssertFalse(FinanceStore.selectableKinds(forAmount: -1200).contains(.refund))
+        }
+    }
+
+    func testTravelToggleDoesNotTurnAnIncomeIntoSpend() {
+        withStore { store in
+            store.addMovement(title: "Pago cliente", account: "BBVA", category: "Ingresos",
+                amount: 20000, flow: .income, date: calendarDate(2026, 8, 10))
+            var deposit = store.movements[0]
+            deposit.kind = nil
+            XCTAssertEqual(FinanceStore.displayKind(for: deposit), .income)
+
+            store.updateTravelRelated(for: deposit, travelRelated: true)
+            let updated = store.movements.first(where: { $0.id == deposit.id })
+            XCTAssertEqual(updated?.flow, .income)
+            XCTAssertEqual(updated?.amount, 20000)
+            XCTAssertEqual(updated?.travelRelated, true)
+        }
+    }
+
+    func testRebuildCommitKeepsChangesMadeWhileItWasRunning() {
+        var kept = statement("BBVA", key: "bbva:1234", kind: .bank)
+        kept.sourceFingerprint = "kept"
+        var deleted = statement("Amex", key: "amex:1111", kind: .card)
+        deleted.sourceFingerprint = "deleted"
+        let baseline = [kept, deleted]
+
+        // The rebuild re-read both PDFs into fresh statement ids.
+        var rebuiltKept = kept; rebuiltKept.id = UUID()
+        var rebuiltDeleted = deleted; rebuiltDeleted.id = UUID()
+        var keptRow = row(-100); keptRow.statementId = rebuiltKept.id
+        var deletedRow = row(-200); deletedRow.statementId = rebuiltDeleted.id
+        let seededManual = row(-50, title: "Manual previo")
+
+        // Meanwhile the user added a manual row, imported a new PDF and
+        // deleted the Amex statement.
+        var imported = statement("Santander", key: "santander:9999", kind: .bank)
+        imported.sourceFingerprint = "imported"
+        var importedRow = row(-300); importedRow.statementId = imported.id
+        let addedManual = row(-75, title: "Manual durante la reconstrucción")
+
+        let merged = FinanceStore.mergeConcurrentLedgerChanges(
+            rebuiltMovements: [seededManual, keptRow, deletedRow],
+            rebuiltStatements: [rebuiltKept, rebuiltDeleted],
+            liveMovements: [addedManual, seededManual, importedRow],
+            liveStatements: [kept, imported],
+            baselineStatements: baseline
+        )
+
+        XCTAssertEqual(Set(merged.statements.map(\.id)), [rebuiltKept.id, imported.id])
+        XCTAssertEqual(Set(merged.movements.map(\.id)), [addedManual.id, seededManual.id, keptRow.id, importedRow.id])
+    }
+
+    func testRebuildCommitPrefersAStatementReimportedWhileRunning() {
+        var original = statement("BBVA", key: "bbva:1234", kind: .bank)
+        original.sourceFingerprint = "same-pdf"
+        var rebuilt = original; rebuilt.id = UUID()
+        var reimported = original; reimported.id = UUID()
+        var rebuiltRow = row(-100); rebuiltRow.statementId = rebuilt.id
+        var reimportedRow = row(-100); reimportedRow.statementId = reimported.id
+
+        let merged = FinanceStore.mergeConcurrentLedgerChanges(
+            rebuiltMovements: [rebuiltRow],
+            rebuiltStatements: [rebuilt],
+            liveMovements: [reimportedRow],
+            liveStatements: [original, reimported],
+            baselineStatements: [original]
+        )
+
+        XCTAssertEqual(merged.statements.map(\.id), [reimported.id])
+        XCTAssertEqual(merged.movements.map(\.id), [reimportedRow.id])
+    }
+
 }

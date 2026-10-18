@@ -6,11 +6,12 @@ import { URL } from "node:url";
 const calendarPath = new URL("../apps/ios/Cauce/SpendingCalendar.swift", import.meta.url);
 const rootPath = new URL("../apps/ios/Cauce/RootTabView.swift", import.meta.url);
 
-test("Calendario es la quinta herramienta principal", async () => {
+test("Gastos integra calendario y Presupuesto ocupa la tercera pestaña", async () => {
   const root = await readFile(rootPath, "utf8");
-  assert.match(root, /case calendar/);
-  assert.match(root, /SpendingCalendarView\(\)/);
-  assert.match(root, /Label\("Calendario", systemImage: "calendar"\)/);
+  assert.match(root, /case budget/);
+  assert.match(root, /BudgetView\(\)/);
+  assert.doesNotMatch(root, /SpendingCalendarView\(\)/);
+  assert.match(root, /Label\("Presupuesto", systemImage: "chart.bar.fill"\)/);
   assert.equal((root.match(/\.tabItem/g) ?? []).length, 5);
 });
 

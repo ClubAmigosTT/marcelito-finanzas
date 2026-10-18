@@ -300,7 +300,7 @@ final class ReaderContractTests: XCTestCase {
         )
         store.movements = [movement]
 
-        XCTAssertTrue(store.updateCategory(for: movement, to: "Restaurantes y bares"))
+        XCTAssertTrue(store.updateCategory(for: movement, to: "Restaurantes y bares", applyToMerchant: true))
         XCTAssertEqual(store.movements.first?.category, "Restaurantes y bares")
         let futureMovement = Movement(
             date: .now,
@@ -318,6 +318,313 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertTrue(store.movements.first?.classificationTags.contains("personal") == true)
     }
 
+    func testSingleMovementCategorySaveIsIdempotentAndKeepsPendingTotalsConsistent() {
+        let store = FinanceStore()
+        store.clearLocalData()
+        defer { store.clearLocalData() }
+
+        let merchant = "COMERCIO PRUEBA"
+        let selected = Movement(
+            date: .now,
+            title: merchant,
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -125,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant,
+            displayMerchant: merchant
+        )
+        let peer = Movement(
+            date: .now.addingTimeInterval(-86_400),
+            title: merchant,
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -240,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant,
+            displayMerchant: merchant
+        )
+        var previouslyReviewed = Movement(
+            date: .now.addingTimeInterval(-172_800),
+            title: merchant,
+            account: "Amex",
+            category: "Viajes",
+            amount: -360,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant,
+            displayMerchant: merchant
+        )
+        previouslyReviewed.manuallyReviewed = true
+        store.movements = [selected, peer, previouslyReviewed]
+
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.count, 2)
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.reduce(Decimal.zero) { $0 + $1.expenseContribution }, 365)
+        XCTAssertEqual(store.categoryRulePeerCount(for: selected), 1)
+        XCTAssertTrue(store.canApplyCategoryRule(for: selected, to: "Salud"))
+
+        XCTAssertTrue(store.updateCategory(for: selected, to: "Salud", applyToMerchant: false))
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.category, "Salud")
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.manuallyReviewed, true)
+        XCTAssertEqual(store.movements.first(where: { $0.id == peer.id })?.category, "Otros / Por revisar")
+        XCTAssertEqual(store.movements.first(where: { $0.id == previouslyReviewed.id })?.category, "Viajes")
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.count, 1)
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.reduce(Decimal.zero) { $0 + $1.expenseContribution }, 240)
+
+        store.normalizeFinanceForTesting()
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.category, "Salud")
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.manuallyReviewed, true)
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.count, 1)
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.reduce(Decimal.zero) { $0 + $1.expenseContribution }, 240)
+
+        let savedMovement = try! XCTUnwrap(store.movements.first(where: { $0.id == selected.id }))
+        XCTAssertTrue(store.updateCategory(for: savedMovement, to: "Salud", applyToMerchant: false))
+        XCTAssertEqual(store.pendingExpenseCategoryMovements.count, 1, "Saving the same choice must not resurrect the row")
+        XCTAssertEqual(
+            store.pendingExpenseCategoryMovements.reduce(Decimal.zero) { $0 + $1.expenseContribution },
+            240,
+            "The pending total and count must use the same rows"
+        )
+
+        _ = store.applyDeterministicCategoryRules()
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.category, "Salud")
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.amount, -125)
+        XCTAssertEqual(store.movements.first(where: { $0.id == selected.id })?.flow, .expense)
+    }
+
+    func testMerchantRuleRequiresExplicitActionAndPreservesReviewedPeers() {
+        let store = FinanceStore()
+        store.clearLocalData()
+        defer { store.clearLocalData() }
+
+        let merchant = "COMERCIO REGLA"
+        let selected = Movement(
+            date: .now,
+            title: merchant,
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -125,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant
+        )
+        let peer = Movement(
+            date: .now.addingTimeInterval(-86_400),
+            title: merchant,
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -240,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant
+        )
+        var protectedPeer = Movement(
+            date: .now.addingTimeInterval(-172_800),
+            title: merchant,
+            account: "Amex",
+            category: "Viajes",
+            amount: -360,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant
+        )
+        protectedPeer.manuallyReviewed = true
+        store.movements = [selected, peer, protectedPeer]
+
+        XCTAssertTrue(store.updateCategory(for: selected, to: "Salud", applyToMerchant: false))
+        let individuallySaved = try! XCTUnwrap(store.movements.first(where: { $0.id == selected.id }))
+        XCTAssertEqual(store.categoryRulePeerCount(for: individuallySaved), 1)
+        XCTAssertTrue(store.updateCategory(for: individuallySaved, to: "Salud", applyToMerchant: true))
+        XCTAssertEqual(store.movements.first(where: { $0.id == peer.id })?.category, "Salud")
+        XCTAssertEqual(store.movements.first(where: { $0.id == protectedPeer.id })?.category, "Viajes")
+        XCTAssertEqual(store.movements.first(where: { $0.id == peer.id })?.amount, -240)
+
+        let future = Movement(
+            date: .now,
+            title: merchant,
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -80,
+            flow: .expense,
+            kind: .purchase,
+            normalizedMerchant: merchant
+        )
+        store.movements.append(future)
+        _ = store.applyDeterministicCategoryRules()
+        XCTAssertEqual(store.movements.first(where: { $0.id == future.id })?.category, "Salud")
+        XCTAssertEqual(store.movements.first(where: { $0.id == protectedPeer.id })?.category, "Viajes")
+    }
+
+    func testNewExpenseCategoriesClassifyOnlyExplicitMerchantEvidence() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let rows = [
+            Movement(date: .now, title: "INSTITUTO TECNOLOGICO AUTONOMO DE MEXICO", account: "BBVA", category: "Otros / Por revisar", amount: -2_000, flow: .expense, kind: .purchase),
+            Movement(date: .now, title: "ENTRENAMIENTO PERSONAL", account: "Amex", category: "Otros / Por revisar", amount: -800, flow: .expense, kind: .purchase),
+            Movement(date: .now, title: "BINANCE PAYROLL", account: "BBVA", category: "Otros / Por revisar", amount: -5_000, flow: .expense, kind: .purchase),
+            Movement(date: .now, title: "BINANCE", account: "BBVA", category: "Otros / Por revisar", amount: -500, flow: .expense, kind: .purchase),
+            Movement(date: .now, title: "SPEI TRANSFERENCIA A MARCELO DIAZ", account: "BBVA", category: "Transferencia", amount: -1_000, flow: .transfer, kind: .bankTransfer)
+        ]
+        store.movements = rows
+
+        XCTAssertEqual(store.applyDeterministicCategoryRules(), 4)
+        XCTAssertEqual(store.movements[0].category, "Educación")
+        XCTAssertEqual(store.movements[1].category, "Entrenamiento")
+        XCTAssertEqual(store.movements[2].category, "Binance (salarios)")
+        XCTAssertEqual(store.movements[3].category, "Otros / Por revisar")
+        XCTAssertEqual(store.movements[4].category, "Transferencia")
+        XCTAssertEqual(store.movements[4].amount, rows[4].amount)
+        XCTAssertEqual(store.movements[4].flow, rows[4].flow)
+    }
+
+    func testTransferRecipientIsShownOnlyWhenNamedInTheDescriptor() {
+        let movement = Movement(
+            date: .now,
+            title: "PAGO TRANSF RAPIDA SPEI TRANSFERENCIA A ARACELI CASTILLO IVA REF 858573",
+            account: "Santander",
+            category: "Transferencia",
+            amount: -114,
+            flow: .transfer,
+            kind: .bankTransfer
+        )
+        XCTAssertEqual(movement.transferRecipient, "Araceli Castillo")
+        XCTAssertEqual(movement.summaryDisplayTitle, "SPEI a Araceli Castillo")
+
+        let ocrOnlyRecipient = Movement(
+            date: .now,
+            title: "SPEI ENVIADO",
+            account: "Santander",
+            category: "Otros / Por revisar",
+            amount: -250,
+            flow: .expense,
+            extractionEvidence: MovementExtractionEvidence(
+                method: "vision-ocr",
+                page: 2,
+                confidence: 0.9,
+                sourceText: "SPEI ENVIADO A MARIA LOPEZ CONCEPTO RENTA",
+                selectedAmount: -250
+            )
+        )
+        XCTAssertEqual(ocrOnlyRecipient.transferRecipient, "Maria Lopez")
+        XCTAssertEqual(ocrOnlyRecipient.originalBankDescription, "SPEI ENVIADO A MARIA LOPEZ CONCEPTO RENTA")
+
+        let intermediaryOnly = Movement(
+            date: .now,
+            title: "SPEI ENVIADO STP",
+            account: "BBVA",
+            category: "Transferencia",
+            amount: -500,
+            flow: .transfer,
+            kind: .bankTransfer
+        )
+        XCTAssertNil(intermediaryOnly.transferRecipient)
+        XCTAssertEqual(intermediaryOnly.summaryDisplayTitle, intermediaryOnly.title)
+        XCTAssertTrue(intermediaryOnly.hasTransferOrSpeiDescriptor)
+        XCTAssertEqual(intermediaryOnly.originalBankDescription, "SPEI ENVIADO STP")
+
+        let genericBankDescriptor = Movement(
+            date: .now,
+            title: "SPEI ENVIADO SANTANDER",
+            account: "BBVA",
+            category: "Otros / Por revisar",
+            amount: -3000,
+            flow: .expense,
+            rawDescription: "08/MAR 09/MAR SPEI ENVIADO SANTANDER 3,000.00 807.70 807.70"
+        )
+        XCTAssertNil(genericBankDescriptor.transferRecipient)
+        XCTAssertTrue(genericBankDescriptor.hasTransferOrSpeiDescriptor)
+        XCTAssertEqual(
+            genericBankDescriptor.originalBankDescription,
+            "08/MAR 09/MAR SPEI ENVIADO SANTANDER 3,000.00 807.70 807.70"
+        )
+    }
+
+    func testManuallyCategorizingATransferDoesNotCreateAnExpenseRule() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let transfer = Movement(
+            date: .now,
+            title: "COMERCIO TRANSFER TEST",
+            account: "BBVA",
+            category: "Transferencia",
+            amount: -100,
+            flow: .transfer,
+            kind: .bankTransfer
+        )
+        store.movements = [transfer]
+        XCTAssertTrue(store.updateCategory(for: transfer, to: "ITAM", applyToMerchant: false))
+
+        let futureExpense = Movement(
+            date: .now,
+            title: transfer.title,
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -200,
+            flow: .expense,
+            kind: .purchase
+        )
+        store.movements = [futureExpense]
+        _ = store.applyDeterministicCategoryRules()
+        XCTAssertEqual(store.movements.first?.category, "Otros / Por revisar")
+    }
+
+    func testManualMerchantCategoryUpdatesPeersWithoutChangingTheirFinancialFields() {
+        let store = FinanceStore()
+        defer { store.clearLocalData() }
+        let date = Date(timeIntervalSince1970: 1_780_000_000)
+        var selected = Movement(
+            date: date,
+            title: "CAFE EJEMPLO REF 12345",
+            account: "Amex",
+            category: "Otros / Por revisar",
+            amount: -125,
+            flow: .expense,
+            kind: .purchase
+        )
+        selected.normalizedMerchant = "CAFE EJEMPLO"
+        var peer = selected
+        peer.id = UUID()
+        peer.date = date.addingTimeInterval(-86_400)
+        peer.amount = -240
+        peer.manuallyReviewed = false
+        var protectedPeer = peer
+        protectedPeer.id = UUID()
+        protectedPeer.amount = -60
+        protectedPeer.manuallyReviewed = true
+        var unrelated = peer
+        unrelated.id = UUID()
+        unrelated.normalizedMerchant = "OTRA TIENDA"
+        unrelated.title = "OTRA TIENDA"
+        // Match the size of the real pending queue so this exercises the
+        // category-change path with hundreds of ledger rows, not just a toy
+        // three-row example.
+        let otherPendingRows = (0..<513).map { index -> Movement in
+            Movement(
+                date: date.addingTimeInterval(-Double(index * 86_400)),
+                title: "COMERCIO PENDIENTE \(index)",
+                account: "Amex",
+                category: "Otros / Por revisar",
+                amount: -Decimal(index + 1),
+                flow: .expense,
+                kind: .purchase
+            )
+        }
+        store.movements = [selected, peer, protectedPeer, unrelated] + otherPendingRows
+
+        XCTAssertTrue(store.updateCategory(for: selected, to: "Restaurantes y bares", applyToMerchant: true))
+
+        let updated = Dictionary(uniqueKeysWithValues: store.movements.map { ($0.id, $0) })
+        XCTAssertEqual(updated[selected.id]?.category, "Restaurantes y bares")
+        XCTAssertEqual(updated[peer.id]?.category, "Restaurantes y bares")
+        XCTAssertEqual(updated[peer.id]?.amount, peer.amount)
+        XCTAssertEqual(updated[peer.id]?.flow, peer.flow)
+        XCTAssertEqual(updated[peer.id]?.kind, peer.kind)
+        XCTAssertEqual(updated[protectedPeer.id]?.category, "Otros / Por revisar")
+        XCTAssertEqual(updated[unrelated.id]?.category, "Otros / Por revisar")
+    }
+
     func testManualTravelCategoryUpdatesItsSecondaryDimensions() {
         let store = FinanceStore()
         defer { store.clearLocalData() }
@@ -332,7 +639,7 @@ final class ReaderContractTests: XCTestCase {
         )
         store.movements = [movement]
 
-        XCTAssertTrue(store.updateCategory(for: movement, to: "Viajes"))
+        XCTAssertTrue(store.updateCategory(for: movement, to: "Viajes", applyToMerchant: true))
         XCTAssertEqual(store.movements.first?.category, "Viajes")
         XCTAssertTrue(store.movements.first?.travelRelated == true)
         XCTAssertTrue(store.movements.first?.classificationTags.contains("viaje") == true)
@@ -352,7 +659,7 @@ final class ReaderContractTests: XCTestCase {
         )
         store.movements = [movement]
 
-        XCTAssertTrue(store.updateCategory(for: movement, to: "Otros / Por revisar"))
+        XCTAssertTrue(store.updateCategory(for: movement, to: "Otros / Por revisar", applyToMerchant: false))
         XCTAssertEqual(store.applyDeterministicCategoryRules(), 1)
         XCTAssertEqual(store.movements.first?.category, "Tiendita")
     }
@@ -395,6 +702,41 @@ final class ReaderContractTests: XCTestCase {
             completedReaderVersion: nil,
             currentReaderVersion: FinanceStore.readerVersion,
             hasSources: false
+        ))
+    }
+
+    func testCompletedCanonicalRebuildKeepsNormalizedReaderMarkerAcrossLaunches() throws {
+        let suiteName = "marcelito.reader-rebuild-marker-test.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        XCTAssertTrue(FinanceStore.needsReaderNormalization(
+            loadedAtomicEnvelope: true,
+            storedReaderVersion: nil,
+            currentReaderVersion: FinanceStore.readerVersion
+        ))
+
+        FinanceStore.recordCanonicalRebuildCompletion(in: defaults)
+
+        XCTAssertEqual(
+            defaults.string(forKey: "marcelito.ledger.normalizedReaderVersion.v1"),
+            FinanceStore.readerVersion,
+            "A successful replay must persist the marker checked during the next launch"
+        )
+        XCTAssertNotNil(
+            defaults.string(forKey: "marcelito.extractionReplayVersion.v1"),
+            "The extraction replay generation must be committed with the rebuild"
+        )
+        XCTAssertFalse(FinanceStore.needsReaderNormalization(
+            loadedAtomicEnvelope: true,
+            storedReaderVersion: defaults.string(forKey: "marcelito.ledger.normalizedReaderVersion.v1"),
+            currentReaderVersion: FinanceStore.readerVersion
+        ))
+        XCTAssertFalse(FinanceStore.needsCanonicalRebuild(
+            completed: defaults.bool(forKey: "marcelito.canonicalRebuild.v1"),
+            completedReaderVersion: defaults.string(forKey: "marcelito.canonicalRebuild.readerVersion.v1"),
+            currentReaderVersion: FinanceStore.readerVersion,
+            hasSources: true
         ))
     }
 
@@ -622,7 +964,7 @@ final class ReaderContractTests: XCTestCase {
             The Platinum Credit Card
             Límite de Crédito Límite Disponible
             a Agosto 27,2026 10,000.00 MN 9,000.00 MN
-            23,150.88 - 32,744.61 + 950.00 = 950.00 300.00
+            23,150.88 - 100.00 + 950.00 = 24,000.88 300.00
             Nuevas transacciones: 900.00
             Total Nuevos Cargos: 950.00
             MARCELO ANDRES DIAZ SANCHEZ 27-Ago-2026 27-Sep-2026
@@ -671,6 +1013,72 @@ final class ReaderContractTests: XCTestCase {
         XCTAssertEqual(reconciliation.status, .valid, reconciliation.reason ?? "")
     }
 
+    func testAmexSplitDatesAndFinancialAdjustmentsReconcile() throws {
+        let text = """
+        American Express
+        Período de Facturación Del 28 de Agosto al 27 de Septiembre de 2026
+        1,000.00 - 110.00 + 260.00 = 1,150.00 50.00
+        Nuevas transacciones: 250.00
+        Interés Financiero: 5.00
+        Comisiones: 5.00
+        Fecha y Detalle de las operaciones Importe en MN.
+        1 de
+        Septiembre
+        GRACIAS POR SU PAGO EN LINEA 100.00
+        CR
+        4 de Septiembre METROTAPAMEX 5.00 REST PUERTO GETARIA 45.00
+        2 de
+        Septiembre
+        MERCADO UNO 100.00
+        Total de las transacciones en $ de MARCELO ANDRES DIAZ SANCHEZ 150.00
+        Transacciones financieras aplicables a la Cuenta Básica
+        3 de
+        Septiembre
+        SALDO PENDIENTE POR CANCELACIÓN DE PLAN 100.00
+        3 de
+        Septiembre
+        INTERÉS FINANCIERO 5.00
+        3 de
+        Septiembre
+        IVA APLICABLE 5.00
+        3 de
+        Septiembre
+        BONO POR OFERTA DE ADQUISICIÓN 10.00
+        CR
+        Total de las transacciones y comisiones 10.00 CR
+        """
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: text,
+            fileName: "amex-septiembre.pdf",
+            sourceHint: "Amex"
+        )
+        let reconciliation = FinanceStore.reconcileStatementForTesting(
+            kind: .card,
+            summary: snapshot.summary,
+            movements: snapshot.movements
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 8)
+        XCTAssertEqual(snapshot.summary?.paymentsAndCredits, Decimal(string: "110.00"))
+        XCTAssertEqual(snapshot.summary?.newTransactions, Decimal(string: "250.00"))
+        XCTAssertEqual(snapshot.summary?.interest, Decimal(string: "5.00"))
+        XCTAssertNil(snapshot.summary?.payments)
+        XCTAssertNil(snapshot.summary?.credits)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .cardPayment }.count, 1)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .credit }.count, 1)
+        XCTAssertEqual(snapshot.movements.filter { $0.kind == .msi }.count, 1)
+        let sharedDateRows = snapshot.movements.filter {
+            $0.title.contains("METROTAPAMEX") || $0.title.contains("REST PUERTO GETARIA")
+        }.sorted { $0.amount > $1.amount }
+        XCTAssertEqual(sharedDateRows.count, 2)
+        XCTAssertEqual(sharedDateRows.map(\.amount), [-5, -45])
+        XCTAssertEqual(sharedDateRows[0].date, sharedDateRows[1].date)
+        let planCancellation = try XCTUnwrap(snapshot.movements.first { $0.kind == .msi })
+        XCTAssertEqual(planCancellation.extractionEvidence?.selectedColumn, "FINANCIAL_ADJUSTMENT")
+        XCTAssertFalse(planCancellation.foreignCurrency)
+        XCTAssertEqual(reconciliation.status, .valid, reconciliation.reason ?? "")
+    }
+
     func testBBVAStatementRebuildsAllMovementRowsAndExcludesBalances() {
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
             text: """
@@ -716,6 +1124,45 @@ final class ReaderContractTests: XCTestCase {
         )
         XCTAssertEqual(deposits, Decimal(string: "19500.00")!)
         XCTAssertFalse(snapshot.movements.contains { $0.title.localizedCaseInsensitiveContains("saldo") })
+    }
+
+    func testBBVAKeepsSPEICounterpartyOnContinuationLines() throws {
+        let snapshot = FinanceStore.readerParseSnapshotForTesting(
+            text: """
+            BBVA MEXICO, S.A., INSTITUCION DE BANCA MULTIPLE, GRUPO FINANCIERO BBVA MEXICO
+            Periodo DEL 15/02/2026 AL 14/03/2026
+            Saldo Anterior 3,807.70
+            Depósitos / Abonos (+) 1 990.00
+            Retiros / Cargos (-) 1 3,000.00
+            Saldo Final 1,797.70
+            Detalle de Movimientos Realizados
+            FECHA SALDO OPER LIQ DESCRIPCION REFERENCIA CARGOS ABONOS OPERACION LIQUIDACION
+            08/MAR 09/MAR SPEI ENVIADO SANTANDER 3,000.00 807.70 807.70
+            2901260Clinica
+            00001234567890123456
+            MBAN0100260309000000000000
+            clio Barcenas
+            10/MAR 10/MAR SPEI RECIBIDO SANTANDER 990.00 1,797.70 1,797.70
+            2684043TDMGCMARZ026
+            00001458060588056495
+            CLAVE0100320260310000000
+            GUILLERMO CONTRERAS DAVILA
+            TOTAL IMPORTE CARGOS 3,000.00 TOTAL MOVIMIENTOS CARGOS 1
+            TOTAL IMPORTE ABONOS 990.00 TOTAL MOVIMIENTOS ABONOS 1
+            """,
+            fileName: "BBVA-marzo-2026.pdf"
+        )
+
+        XCTAssertEqual(snapshot.movements.count, 2)
+        let sent = try XCTUnwrap(snapshot.movements.first { $0.amount < 0 })
+        XCTAssertEqual(sent.title, "SPEI ENVIADO SANTANDER")
+        XCTAssertEqual(sent.transferRecipient, "Clio Barcenas")
+        XCTAssertEqual(sent.summaryDisplayTitle, "SPEI a Clio Barcenas")
+        XCTAssertTrue(sent.extractionEvidence?.sourceText?.contains("clio Barcenas") == true)
+
+        let received = try XCTUnwrap(snapshot.movements.first { $0.amount > 0 })
+        XCTAssertEqual(received.transferRecipient, "Guillermo Contreras Davila")
+        XCTAssertEqual(received.summaryDisplayTitle, "SPEI de Guillermo Contreras Davila")
     }
 
     func testBBVASplitSummaryLinesUseTheDecimalTotalAndCount() {
@@ -1237,7 +1684,7 @@ final class ReaderContractTests: XCTestCase {
         The Platinum Credit Card
         Límite de Crédito Límite Disponible
         a Agosto 27,2026 10,000.00 MN 9,000.00 MN
-        23,150.88 - 32,744.61 + 950.00 = 950.00 300.00
+        23,150.88 - 100.00 + 950.00 = 24,000.88 300.00
         Nuevas transacciones: 900.00
         Total Nuevos Cargos: 950.00
         Fecha y Detalle de las operaciones Importe en MN.
@@ -2330,8 +2777,9 @@ final class ReaderContractTests: XCTestCase {
                 fileName: "santander-julio.pdf",
                 importedAt: .now,
                 transactionCount: 1,
-                requiresReview: true,
+                requiresReview: false,
                 kind: .bank,
+                reconciliation: StatementReconciliationRecord(status: .valid, tolerance: 0),
                 sourceDetection: bankEvidence,
                 readerVersion: FinanceStore.readerVersion
             ),
@@ -2343,8 +2791,9 @@ final class ReaderContractTests: XCTestCase {
                 fileName: "amex-julio.pdf",
                 importedAt: .now,
                 transactionCount: 1,
-                requiresReview: true,
+                requiresReview: false,
                 kind: .card,
+                reconciliation: StatementReconciliationRecord(status: .valid, tolerance: 0),
                 sourceDetection: cardEvidence,
                 readerVersion: FinanceStore.readerVersion
             )

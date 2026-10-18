@@ -58,6 +58,9 @@ enum StatementKind: String, Codable, Hashable, CaseIterable, Sendable {
 }
 
 struct StatementSummaryRecord: Codable {
+    var paymentDueDate: Date? = nil
+    /// Nominal annual ordinary interest rate as a fraction, never the CAT.
+    var annualInterestRate: Decimal? = nil
     var previousBalance: Decimal? = nil
     var statementBalance: Decimal? = nil
     var debtBalance: Decimal? = nil
@@ -282,6 +285,10 @@ struct Movement: Identifiable, Codable {
     var reconciliationConfidence: Int?
     var reconciliationReason: String?
     var manuallyReviewed: Bool = false
+    /// Nil preserves the accounting decision of legacy manual reviews.
+    var manuallyAccountingReviewed: Bool? = nil
+    var confirmedCounterpartKey: String? = nil
+    var accountingReviewLocked: Bool { manuallyAccountingReviewed ?? manuallyReviewed }
     /// Original merchant text retained as evidence; never replaced by cleanup.
     var rawDescription: String?
     /// Stable merchant key for rules and deduplication.
@@ -292,6 +299,104 @@ struct Movement: Identifiable, Codable {
     var merchantConfidence: Double?
     /// Non-blocking merchant issue shown as “comercio por confirmar”.
     var merchantReviewReason: String?
+
+    /// Recipient or sender printed explicitly in a transfer/SPEI descriptor.
+    /// Returns nil when the row only identifies an intermediary such as STP.
+    var transferRecipient: String? {
+        let sourceTexts = [rawDescription, title, extractionEvidence?.sourceText].compactMap { $0 }
+        let genericCounterparties: Set<String> = [
+            "tercero", "terceros", "otro banco", "stp", "santander", "bbva", "banorte",
+            "banamex", "citibanamex", "mercado pago", "mercadopago", "bancoppel", "spei",
+            "banco santander", "banco stp", "banco bbva"
+        ]
+        let patterns = [
+            #"(?i)\bal\s+cliente\s+(.+?)(?=\s*\(\s*1\s*\)|\s+\b(?:dato|iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b|\n|$)"#,
+            #"(?i)\btransferencia\s+a\s+(.+?)(?=\s+\b(?:iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b|\s+[-+]?\s*\$?\s*\d[\d, ]*(?:[.,]\d{2})|$)"#,
+            #"(?i)\b(?:a\s+favor\s+de|beneficiari[oa]|destinatari[oa])\s*[:#-]?\s*(.+?)(?=\s+\b(?:iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b|\s+[-+]?\s*\$?\s*\d[\d, ]*(?:[.,]\d{2})|$)"#,
+            #"(?i)\bspei\s+enviado\s+(?:a\s+)?(.+?)(?=\s+\b(?:iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b|\s+[-+]?\s*\$?\s*\d[\d, ]*(?:[.,]\d{2})|$)"#
+        ]
+        for source in sourceTexts {
+            for pattern in patterns {
+                guard let regex = try? NSRegularExpression(pattern: pattern),
+                      let match = regex.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)),
+                      match.numberOfRanges > 1,
+                      let range = Range(match.range(at: 1), in: source) else { continue }
+                var candidate = String(source[range])
+                    .replacingOccurrences(of: #"(?i)\b(?:iva|rfc|ref(?:erencia)?|clave\s+de\s+rastreo|rastreo|folio|cuenta|clabe|concepto)\b.*$"#, with: "", options: .regularExpression)
+                    .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                    .trimmingCharacters(in: CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters))
+                if candidate.lowercased().hasPrefix("a ") { candidate = String(candidate.dropFirst(2)).trimmingCharacters(in: .whitespacesAndNewlines) }
+                guard !candidate.isEmpty, candidate.count <= 80,
+                      !genericCounterparties.contains(candidate.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()) else { continue }
+                return candidate.capitalized
+            }
+            if let continuationCounterparty = bbvaCounterpartyFromContinuationLines(in: source) {
+                return continuationCounterparty
+            }
+        }
+        return nil
+    }
+
+    /// BBVA prints SPEI counterparties on continuation lines after the amount
+    /// and balances (for example, a line containing only the beneficiary's
+    /// name). These lines are not part of the title, so read only a trailing
+    /// name-shaped line from the retained row evidence.
+    private func bbvaCounterpartyFromContinuationLines(in source: String) -> String? {
+        let normalized = source.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        guard normalized.contains("spei enviado") || normalized.contains("spei recibido")
+                || normalized.contains("transferencia enviada") || normalized.contains("transferencia recibida") else {
+            return nil
+        }
+        let lines = source.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard lines.count > 1 else { return nil }
+        let namePattern = #"^[\p{L}]+(?:[ '\-][\p{L}]+){1,5}$"#
+        for line in lines.dropFirst().reversed() {
+            guard line.range(of: namePattern, options: .regularExpression) != nil else { continue }
+            let candidate = line
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let folded = candidate.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+            let generic: Set<String> = ["santander", "bbva", "banorte", "banamex", "stp", "spei", "mercado pago", "mercadopago"]
+            guard !generic.contains(folded) else { continue }
+            return candidate.capitalized
+        }
+        return nil
+    }
+
+    /// Original bank descriptor, preferring the retained raw row and falling
+    /// back to the OCR evidence fragment when that is the only source.
+    var originalBankDescription: String {
+        let candidates = [rawDescription, extractionEvidence?.sourceText, title]
+            .compactMap { $0 }
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        return candidates.first(where: { !$0.isEmpty }) ?? title
+    }
+
+    /// True when the movement is a transfer/SPEI, even if the statement only
+    /// names an intermediary bank and does not print the beneficiary.
+    var hasTransferOrSpeiDescriptor: Bool {
+        if kind == .bankTransfer || flow == .transfer { return true }
+        let source = [title, rawDescription, extractionEvidence?.sourceText]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        return source.range(of: #"\b(?:spei|transfer(?:encia)?|transf)\b"#, options: .regularExpression) != nil
+    }
+
+    /// Concise list label that surfaces the person/company on outbound and
+    /// inbound SPEI rows without replacing the original descriptor. When the
+    /// bank omits the counterparty, callers can still show the original text.
+    var summaryDisplayTitle: String {
+        guard let transferRecipient else { return displayMerchant ?? title }
+        let source = [title, rawDescription, extractionEvidence?.sourceText]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        let rail = source.contains("spei") ? "SPEI" : "Transferencia"
+        return "\(rail) \(amount < 0 ? "a" : "de") \(transferRecipient)"
+    }
 
     /// Signed contribution to net spending. Refunds reduce spend on their
     /// posting date; neither their identity nor their original amount changes.
@@ -345,7 +450,7 @@ struct Movement: Identifiable, Codable {
 
     private enum CodingKeys: String, CodingKey {
         case id, date, title, account, category, amount, flow, statementId, kind, travelRelated, foreignCurrency, classificationTags, extractionEvidence
-        case matchedMovementId, reconciliationConfidence, reconciliationReason, manuallyReviewed
+        case matchedMovementId, reconciliationConfidence, reconciliationReason, manuallyReviewed, manuallyAccountingReviewed, confirmedCounterpartKey
         case rawDescription, normalizedMerchant, displayMerchant, merchantConfidence, merchantReviewReason
     }
 
@@ -368,6 +473,8 @@ struct Movement: Identifiable, Codable {
         reconciliationConfidence = try container.decodeIfPresent(Int.self, forKey: .reconciliationConfidence)
         reconciliationReason = try container.decodeIfPresent(String.self, forKey: .reconciliationReason)
         manuallyReviewed = try container.decodeIfPresent(Bool.self, forKey: .manuallyReviewed) ?? false
+        manuallyAccountingReviewed = try container.decodeIfPresent(Bool.self, forKey: .manuallyAccountingReviewed)
+        confirmedCounterpartKey = try container.decodeIfPresent(String.self, forKey: .confirmedCounterpartKey)
         rawDescription = try container.decodeIfPresent(String.self, forKey: .rawDescription)
         normalizedMerchant = try container.decodeIfPresent(String.self, forKey: .normalizedMerchant)
         displayMerchant = try container.decodeIfPresent(String.self, forKey: .displayMerchant)
@@ -394,6 +501,8 @@ struct Movement: Identifiable, Codable {
         try container.encodeIfPresent(reconciliationConfidence, forKey: .reconciliationConfidence)
         try container.encodeIfPresent(reconciliationReason, forKey: .reconciliationReason)
         try container.encode(manuallyReviewed, forKey: .manuallyReviewed)
+        try container.encodeIfPresent(manuallyAccountingReviewed, forKey: .manuallyAccountingReviewed)
+        try container.encodeIfPresent(confirmedCounterpartKey, forKey: .confirmedCounterpartKey)
         try container.encodeIfPresent(rawDescription, forKey: .rawDescription)
         try container.encodeIfPresent(normalizedMerchant, forKey: .normalizedMerchant)
         try container.encodeIfPresent(displayMerchant, forKey: .displayMerchant)
@@ -408,6 +517,10 @@ struct StatementRecord: Identifiable, Codable {
     /// Issuer plus masked last four digits when the administrative header
     /// exposes an account number. The full number is never persisted.
     var accountKey: String? = nil
+    /// Local-only SHA-256 identity for an Amex billing account prefix. It lets
+    /// adjacent statements remain one account when Amex reissues the card and
+    /// changes its last four digits; the full account number is never stored.
+    var accountFamilyFingerprint: String? = nil
     var period: String
     var fileName: String
     /// Nombre relativo del PDF que guardamos en Application Support para poder
@@ -565,6 +678,8 @@ struct ReaderPDFDiagnosticSnapshot {
 struct OCRTextBoxFixture {
     let text: String
     let boundingBox: CGRect
+    var descriptorDateY: CGFloat? = nil
+    var precedesDate = false
 }
 
 struct OCRObservationFixture {
@@ -578,6 +693,7 @@ struct OCRObservationFixture {
     let dateEvidenceText: String?
     let dateEvidenceBounds: CGRect?
     let amountEvidenceBoxes: [OCRTextBoxFixture]
+    let wordEvidenceBoxes: [OCRTextBoxFixture]
 
     init(
         page: Int = 0,
@@ -589,7 +705,8 @@ struct OCRObservationFixture {
         confidence: Double = 0.99,
         dateEvidenceText: String? = nil,
         dateEvidenceBounds: CGRect? = nil,
-        amountEvidenceBoxes: [OCRTextBoxFixture] = []
+        amountEvidenceBoxes: [OCRTextBoxFixture] = [],
+        wordEvidenceBoxes: [OCRTextBoxFixture] = []
     ) {
         self.page = page
         self.text = text
@@ -601,6 +718,7 @@ struct OCRObservationFixture {
         self.dateEvidenceText = dateEvidenceText
         self.dateEvidenceBounds = dateEvidenceBounds
         self.amountEvidenceBoxes = amountEvidenceBoxes
+        self.wordEvidenceBoxes = wordEvidenceBoxes
     }
 }
 
@@ -873,6 +991,7 @@ private struct PDFImportExtraction: Codable, @unchecked Sendable {
     let sourceDetection: SourceDetectionEvidence
     let source: String
     let accountKey: String?
+    let accountFamilyFingerprint: String?
     let kind: StatementKind
     let candidates: [Movement]
     let period: String
@@ -931,7 +1050,7 @@ struct LedgerAuditRun: Codable, Identifiable {
 /// Single-key envelope used as the active ledger pointer. Keeping movements
 /// and statements in one value prevents a crash between two UserDefaults
 /// writes from producing a mixed-generation ledger.
-private struct LedgerEnvelope: Codable {
+struct LedgerEnvelope: Codable {
     let schemaVersion: Int
     let version: UUID
     let savedAt: Date
@@ -941,19 +1060,22 @@ private struct LedgerEnvelope: Codable {
 
 @Observable
 final class FinanceStore {
+    let loanLedger: LoanLedger
+    @ObservationIgnored var loanProjectionCache: LoanSpendingProjection?
+
     /// Bump when native extraction, OCR or reconciliation rules change, or
     /// when saved PDF results need a deliberate replay. This release forces
     /// older persisted snapshots through the current reader; the refresh stays
     /// explicit so a full Vision pass never blocks app launch.
-    static let readerVersion = "ios-reader-recovery-2026.09.27.17"
+    static let readerVersion = "ios-reader-recovery-2026.09.28.18"
     /// Advances when only administrative account identity changes. Keeping
     /// this separate avoids forcing a full ledger rebuild for a cache fix.
-    private static let accountIdentityParserVersion = "masked-header-v3"
+    private static let accountIdentityParserVersion = "masked-header-v4"
     /// Extraction fixes must be replayed against PDFs that are already on the
     /// device. Keep this token separate from `readerVersion`: the public
     /// corpus certificate describes the reader contract, while this token is
     /// an operational cache/replay invalidation for a shipped build.
-    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.26.3"
+    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.28.3"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -965,18 +1087,18 @@ final class FinanceStore {
     /// survive a PDF re-import, whose row UUID is intentionally new.
     private let manualCategoryOverridesKey = "marcelito.categoryOverrides.v1"
     private let categoryTaxonomyVersionKey = "marcelito.categoryTaxonomyVersion.v1"
-    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.5"
+    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.6"
     private static let pendingCategoryNames: Set<String> = [
         "Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos",
         "Alimentos", "Comidas", "Servicios", "Compras", "Finanzas",
-        "Educación", "Hogar", "Mascotas"
+        "Hogar", "Mascotas"
     ]
     private let numericRepairKey = "marcelito.numericRepair.v1"
-    private let canonicalRebuildKey = "marcelito.canonicalRebuild.v1"
-    private let canonicalRebuildReaderVersionKey = "marcelito.canonicalRebuild.readerVersion.v1"
+    private static let canonicalRebuildKey = "marcelito.canonicalRebuild.v1"
+    private static let canonicalRebuildReaderVersionKey = "marcelito.canonicalRebuild.readerVersion.v1"
     private let canonicalRebuildExpectedCountKey = "marcelito.canonicalRebuild.expectedCount.v1"
-    private let extractionReplayVersionKey = "marcelito.extractionReplayVersion.v1"
-    private let normalizedLedgerReaderVersionKey = "marcelito.ledger.normalizedReaderVersion.v1"
+    private static let extractionReplayVersionKey = "marcelito.extractionReplayVersion.v1"
+    private static let normalizedLedgerReaderVersionKey = "marcelito.ledger.normalizedReaderVersion.v1"
     private let ledgerEnvelopeKey = "marcelito.ledger.active.v1"
     private let ledgerBackupKey = "marcelito.ledger.backup.v1"
     private let rebuildStateKey = "marcelito.ledger.rebuildState.v1"
@@ -984,11 +1106,13 @@ final class FinanceStore {
     private let manualDashboardUnlockKey = "marcelito.dashboard.manualUnlock.v1"
     private let transferOwnerAliasesKey = "marcelito.transfer.ownerAliases.v1"
     private let transferMatcherVersionKey = "marcelito.transfer.matcherVersion.v1"
-    private static let transferMatcherVersion = "scored-owner-pairing-v1"
+    private static let transferMatcherVersion = "issuer-card-payments-v4"
     private static let defaultTransferOwnerAliases = [
         "Marcelo Díaz",
         "Marcelo A. Díaz",
-        "Díaz Marcelo"
+        "Díaz Marcelo",
+        "Marcelo Andrés Díaz Sanc",
+        "Marcelo Andrés Díaz Sánchez"
     ]
     private let ledgerSchemaVersion = 1
     private let statementFilesDirectoryName = "ImportedStatements"
@@ -998,6 +1122,9 @@ final class FinanceStore {
     private let isReconciliationOnly: Bool
     private var repairInProgress = false
     private var activeRebuildTask: Task<CanonicalRebuildResult, Never>? = nil
+    /// Bumped by `clearLocalData` so an in-flight rebuild never commits a
+    /// ledger the user erased while it was running.
+    @ObservationIgnored private var ledgerResetGeneration = 0
     private(set) var ledgerRefreshState: LedgerRefreshState = .ready
     private(set) var canonicalRebuildPending = false
 
@@ -1022,6 +1149,22 @@ final class FinanceStore {
     @ObservationIgnored private var eligibleMovementsCache: DerivedProjectionCache<[Movement]>?
     @ObservationIgnored private var periodMetricsCache: DerivedProjectionCache<[StatementMetric]>?
     @ObservationIgnored private var ledgerQualityCache: DerivedProjectionCache<LedgerQuality>?
+    @ObservationIgnored private var netExpenseCache: DerivedProjectionCache<[Movement]>?
+    @ObservationIgnored private var incomeProjectionCache: DerivedProjectionCache<[Movement]>?
+    @ObservationIgnored private var balanceHistoryCache: DerivedProjectionCache<[BalanceSnapshot]>?
+    private struct CoverageCacheKey: Hashable { let account: String?; let day: Date }
+    @ObservationIgnored private var spendingCoverageCache: [CoverageCacheKey: DerivedProjectionCache<Set<Date>>] = [:]
+    /// Changes for in-memory edits as well as durable ledger commits.
+    private(set) var analyticsGeneration = UUID()
+
+    private func cachedProjection<Value>(_ cache: DerivedProjectionCache<Value>?) -> Value? {
+        _ = analyticsGeneration // keep cache hits observable after in-memory edits
+        guard let cache, cache.matches(ledgerVersion: ledgerVersion, manualDashboardUnlockEnabled: manualDashboardUnlockEnabled, canonicalRebuildPending: canonicalRebuildPending) else { return nil }
+        return cache.value
+    }
+    private func projectionEntry<Value>(_ value: Value) -> DerivedProjectionCache<Value> {
+        DerivedProjectionCache(ledgerVersion: ledgerVersion, manualDashboardUnlockEnabled: manualDashboardUnlockEnabled, canonicalRebuildPending: canonicalRebuildPending, value: value)
+    }
 
     var transferOwnerAliases: [String] {
         let stored = UserDefaults.standard.stringArray(forKey: transferOwnerAliasesKey) ?? []
@@ -1123,6 +1266,15 @@ final class FinanceStore {
         source: String
     ) -> String? {
         accountKey(preferredText: primaryText, administrativeText: administrativeText, source: source)
+    }
+
+    static func amexGroupedAccountKeysForTesting(_ records: [StatementRecord]) -> [UUID: String] {
+        let store = FinanceStore(reconciliationOnly: true)
+        store.statements = records
+        _ = store.repairStatementAccountIdentitiesAndDuplicatePeriods()
+        return Dictionary(uniqueKeysWithValues: store.statements.compactMap { statement in
+            statement.accountKey.map { (statement.id, $0) }
+        })
     }
 #endif
 
@@ -1359,6 +1511,10 @@ final class FinanceStore {
                 } ?? [],
                 amountBoxes: fixture.amountEvidenceBoxes.map {
                     OCRTextBox(text: $0.text, boundingBox: $0.boundingBox)
+                },
+                wordBoxes: fixture.wordEvidenceBoxes.map {
+                    OCRTextBox(text: $0.text, boundingBox: $0.boundingBox,
+                        descriptorDateY: $0.descriptorDateY, precedesDate: $0.precedesDate)
                 }
             )
         }
@@ -1652,6 +1808,25 @@ final class FinanceStore {
     ) -> Bool {
         guard hasSources else { return false }
         return !completed || completedReaderVersion != currentReaderVersion
+    }
+
+    /// A rebuild is only durable once the normalized-reader marker is saved
+    /// alongside the canonical and extraction replay markers. The launch
+    /// migration check uses this marker to avoid invalidating a completed
+    /// rebuild after the next process restart.
+    static func recordCanonicalRebuildCompletion(in defaults: UserDefaults) {
+        defaults.set(true, forKey: canonicalRebuildKey)
+        defaults.set(readerVersion, forKey: canonicalRebuildReaderVersionKey)
+        defaults.set(extractionReplayVersion, forKey: extractionReplayVersionKey)
+        defaults.set(readerVersion, forKey: normalizedLedgerReaderVersionKey)
+    }
+
+    static func needsReaderNormalization(
+        loadedAtomicEnvelope: Bool,
+        storedReaderVersion: String?,
+        currentReaderVersion: String
+    ) -> Bool {
+        !loadedAtomicEnvelope || storedReaderVersion != currentReaderVersion
     }
 
     /// Accounting acceptance is intentionally independent from expense
@@ -1962,10 +2137,11 @@ final class FinanceStore {
             raw: rawExpectedRebuildCount,
             statementCount: statementCount
         )
-        let missingRebuiltStatements = UserDefaults.standard.bool(forKey: canonicalRebuildKey)
+        let missingRebuiltStatements = UserDefaults.standard.bool(forKey: Self.canonicalRebuildKey)
             && expectedRebuildCount > 0
             && reconstructedStatementCount < expectedRebuildCount
         let canonicalGross = eligibleMovements.filter(isSpend).reduce(Decimal(0)) { $0 + absolute($1.amount) }
+            + loanSpendingProjection.interestRows.reduce(0) { $0 + absolute($1.amount) }
         let canonicalRefunds = eligibleMovements.filter { movementKind($0) == .refund }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let canonicalNetSpend = max(Decimal(0), canonicalGross - canonicalRefunds)
         let onePercent = Decimal(string: "0.01", locale: Locale(identifier: "en_US_POSIX")) ?? Decimal(0.01)
@@ -2755,7 +2931,7 @@ final class FinanceStore {
                 }
                 let review = canonical.filter { ["Por revisar", "Sin categoría", "Otros / Por revisar"].contains($0.category) }
                 let income = canonical.filter(isRealIncome)
-                let expenses = canonical.filter(isSpend)
+                let expenses = canonical.filter(isSpend) + loanSpendingProjection.interestRows.filter { $0.statementId == statement.id }
                 let transfers = canonical.filter { movementKind($0) == .bankTransfer }
                 let cardPayments = canonical.filter { movementKind($0) == .cardPayment }
                 let refunds = canonical.filter { movementKind($0) == .refund }
@@ -2814,6 +2990,11 @@ final class FinanceStore {
 
     /// Returns the newest statement for an account, independent of the order
     /// in which PDFs were imported.
+    func statementCutoffDate(for id: UUID) -> Date? {
+        guard let statement = statements.first(where: { $0.id == id }) else { return nil }
+        return statementRange(from: statement.period)?.upperBound ?? statementEndDate(for: id)
+    }
+
     func latestStatement(for source: String, kind: StatementKind? = nil, accountKey: String? = nil) -> StatementRecord? {
         statements
             .filter { statement in
@@ -2951,11 +3132,7 @@ final class FinanceStore {
             .reduce(0) { $0 + absolute($1.amount) }
     }
     var directBankSpend: Decimal {
-        eligibleMovements.filter { movement in
-            guard isSpend(movement), let statementId = movement.statementId,
-                  let statement = statements.first(where: { $0.id == statementId }) else { return false }
-            return statementKind(statement) != .card
-        }.reduce(0) { $0 + absolute($1.amount) }
+        netExpenseMovements.filter { $0.kind != .refund && isBankMovement($0) }.reduce(0) { $0 + absolute($1.amount) }
     }
     var rawExpense: Decimal { eligibleMovements.filter { $0.flow == .expense }.reduce(0) { $0 + absolute($1.amount) } }
     var excludedCardPayments: Decimal { eligibleMovements.filter { movementKind($0) == .cardPayment && isBankMovement($0) }.reduce(0) { $0 + absolute($1.amount) } }
@@ -2966,17 +3143,33 @@ final class FinanceStore {
     var totalIncome: Decimal { realIncome }
     var totalTransfers: Decimal { eligibleMovements.filter { $0.flow == .transfer && $0.amount < 0 }.reduce(0) { $0 + absolute($1.amount) } }
     var totalExpenses: Decimal { consolidatedRealSpend }
-    var realExpenseMovements: [Movement] { eligibleMovements.filter(isSpend) }
+    var loanEligibleBankMovements: [Movement] {
+        let bankIDs = Set(statements.filter { statementKind($0) == .bank }.map(\.id))
+        return eligibleMovements.filter { $0.statementId.map(bankIDs.contains) == true }
+    }
+    var realExpenseMovements: [Movement] { netExpenseMovements.filter { $0.kind != .refund } }
     /// Shared net-spend population for every analytical screen and drilldown.
     var netExpenseMovements: [Movement] {
-        eligibleMovements.filter { isSpend($0) || (movementKind($0) == .refund && $0.amount > 0) }
+        if let value = cachedProjection(netExpenseCache) { return value }
+        let value: [Movement] = {
+        (eligibleMovements.filter { isSpend($0) || (movementKind($0) == .refund && $0.amount > 0) }
             .map { row in
                 var result = row
                 result.kind = movementKind(row)
                 return result
-            }
+            } + loanSpendingProjection.interestRows)
+
+        }()
+        netExpenseCache = projectionEntry(value)
+        return value
     }
-    var realIncomeMovements: [Movement] { eligibleMovements.filter(isRealIncome) }
+    var realIncomeMovements: [Movement] {
+        if let value = cachedProjection(incomeProjectionCache) { return value }
+        let value: [Movement] = { eligibleMovements.filter(isRealIncome)
+        }()
+        incomeProjectionCache = projectionEntry(value)
+        return value
+    }
 
     /// Expenses shown in the dashboard are scoped to the newest available
     /// statement period. Keeping the complete ledger above is useful for
@@ -3001,8 +3194,13 @@ final class FinanceStore {
     var cashAvailable: Decimal? {
         completeSum(latestCompleteMetrics(.bank).map(\.cashBalance))
     }
+    var cardDebtTotal: Decimal? { completeSum(latestCompleteMetrics(.card).map(\.debtBalance)) }
     var debtTotal: Decimal? {
-        completeSum(latestCompleteMetrics(.card).map(\.debtBalance))
+        guard loanLedger.loadError == nil else { return nil }
+        if loanLedger.state.accounts.isEmpty { return cardDebtTotal }
+        let hasCards = statements.contains { statementKind($0) == .card }
+        guard let cards = hasCards ? cardDebtTotal : Decimal(0), let loans = loanLedger.debt() else { return nil }
+        return cards + loans
     }
     var liquidPatrimony: Decimal? {
         guard let cashAvailable, let debtTotal else { return nil }
@@ -3026,21 +3224,31 @@ final class FinanceStore {
     /// Common account universe, last official balance carried forward at each
     /// cutoff. Never group bank/card balances by their human-readable labels.
     var balanceHistory: [BalanceSnapshot] {
+        if let value = cachedProjection(balanceHistoryCache) { return value }
+        let value: [BalanceSnapshot] = {
         let metrics = periodMetrics
         let keys = Set(statements.map { $0.accountKey ?? "\($0.source)|\(statementKind($0))" })
         let dated = metrics.compactMap { metric -> (StatementMetric, Date)? in
             guard let date = periodDate(from: metric.period) else { return nil }
             return (metric, date)
         }
-        return Set(dated.map { $0.1 }).sorted().map { date in
+        let loanDates = loanLedger.state.accounts.flatMap { $0.statements.map(\.asOf) }
+        return Set(dated.map { $0.1 } + loanDates).sorted().map { date in
             let latest = latestMetricsBySource(dated.filter { $0.1 <= date }.map { $0.0 })
             guard Set(latest.map { $0.accountKey ?? "\($0.source)|\($0.kind)" }) == keys else {
                 return BalanceSnapshot(date: date, cash: nil, debt: nil)
             }
+            let cardDebt = completeSum(latest.filter { $0.kind == .card }.map(\.debtBalance))
+            let hasCards = latest.contains { $0.kind == .card }
+            let loans = loanLedger.debt(asOf: date)
+            let debt: Decimal? = loanLedger.loadError != nil ? nil : (loanLedger.state.accounts.isEmpty ? cardDebt : (hasCards ? cardDebt : Decimal(0)).flatMap { cards in loans.map { cards + $0 } })
             return BalanceSnapshot(date: date,
-                cash: completeSum(latest.filter { $0.kind == .bank }.map(\.cashBalance)),
-                debt: completeSum(latest.filter { $0.kind == .card }.map(\.debtBalance)))
+                cash: completeSum(latest.filter { $0.kind == .bank }.map(\.cashBalance)), debt: debt)
         }
+
+        }()
+        balanceHistoryCache = projectionEntry(value)
+        return value
     }
 
     var balanceEvidenceDescription: String {
@@ -3097,7 +3305,7 @@ final class FinanceStore {
         var expenseByDay: [Date: Decimal] = [:]
         let calendar = Calendar.current
 
-        for movement in eligibleMovements {
+        for movement in eligibleMovements + loanSpendingProjection.interestRows {
             let day = calendar.startOfDay(for: movement.date)
             if isRealIncome(movement) {
                 incomeByDay[day, default: 0] += absolute(movement.amount)
@@ -3340,7 +3548,12 @@ final class FinanceStore {
         if (value.contains("pago") && (value.contains("tarjeta") || value.contains("amex") || value.contains("credito") || value.contains("recibido")))
             || (value.contains("abono") && (value.contains("tarjeta") || value.contains("credito") || value.contains("recibido"))) { return .cardPayment }
         if movement.flow == .transfer { return value.contains("transfer") || value.contains("traspaso") ? .bankTransfer : .cardPayment }
-        if movement.flow == .income { return value.contains("credito") || value.contains("abono") ? .credit : .income }
+        if movement.flow == .income {
+            // On a bank account "ABONO" is just a deposit (ABONO NOMINA,
+            // ABONO SPEI); only card statements use it for accounting credits.
+            let creditWording = value.contains("credito") || (value.contains("abono") && !isBankMovement(movement))
+            return creditWording ? .credit : .income
+        }
         return movement.flow == .expense ? .purchase : .other
     }
 
@@ -3363,7 +3576,7 @@ final class FinanceStore {
     }
 
     private func isSpend(_ movement: Movement) -> Bool {
-        guard movement.flow == .expense else { return false }
+        guard movement.flow == .expense, loanSpendingProjection.payments[movement.id] == nil else { return false }
         // An MSI plan is a debt schedule, not a second real purchase. Keep it
         // in card reconciliation/new-cargo controls, but exclude it from
         // Gasto real, cash flow and savings-rate aggregates.
@@ -3424,7 +3637,9 @@ final class FinanceStore {
 
     /// Resolves the end/cutoff date encoded in a period label. It accepts
     /// numeric and Spanish month-name dates, plus month/year-only labels.
-    private func periodDate(from value: String) -> Date? {
+    private func periodDate(from value: String) -> Date? { Self.periodDate(from: value) }
+
+    private static func periodDate(from value: String) -> Date? {
         let normalized = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
         let patterns = [
@@ -3471,9 +3686,30 @@ final class FinanceStore {
             && rightRange.lowerBound <= leftRange.upperBound
     }
 
-    private func statementRange(from value: String) -> ClosedRange<Date>? {
+    private func statementRange(from value: String) -> ClosedRange<Date>? { Self.statementRange(from: value) }
+
+    private static func statementRange(from value: String) -> ClosedRange<Date>? {
         let normalized = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
+        let spanishCyclePattern = #"(?i)\b(\d{1,2})\s+(?:de\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\s+al\s+(\d{1,2})\s+(?:de\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\s+(?:de\s+)?(20\d{2})\b"#
+        if let regex = try? NSRegularExpression(pattern: spanishCyclePattern),
+           let match = regex.firstMatch(in: normalized, range: range), match.numberOfRanges == 6,
+           let startDayRange = Range(match.range(at: 1), in: normalized),
+           let startMonthRange = Range(match.range(at: 2), in: normalized),
+           let endDayRange = Range(match.range(at: 3), in: normalized),
+           let endMonthRange = Range(match.range(at: 4), in: normalized),
+           let yearRange = Range(match.range(at: 5), in: normalized),
+           let startDay = Int(normalized[startDayRange]),
+           let endDay = Int(normalized[endDayRange]),
+           let endYear = Int(normalized[yearRange]),
+           let startMonth = Self.monthNumber(String(normalized[startMonthRange])),
+           let endMonth = Self.monthNumber(String(normalized[endMonthRange])) {
+            let startYear = startMonth > endMonth ? endYear - 1 : endYear
+            let calendar = Calendar(identifier: .gregorian)
+            guard let start = calendar.date(from: DateComponents(year: startYear, month: startMonth, day: startDay)),
+                  let end = calendar.date(from: DateComponents(year: endYear, month: endMonth, day: endDay)) else { return nil }
+            return start...end
+        }
         let patterns = [
             #"(?i)\b\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2}\b"#,
             #"(?i)\b\d{1,2}[\/.\-](?:\d{1,2}|ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)[\/.\-]\d{2,4}\b"#,
@@ -3619,8 +3855,21 @@ final class FinanceStore {
     }
 #endif
 
+    private func transferDescriptor(_ movement: Movement) -> String {
+        if let raw = movement.rawDescription, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return raw }
+        return [movement.title, movement.extractionEvidence?.sourceText].compactMap { $0 }.joined(separator: " ")
+    }
+
+    private func exactTransferAmountsMatch(_ left: Decimal, _ right: Decimal) -> Bool {
+        absolute(left) == absolute(right)
+    }
+
+    private func canAutomaticallyMatch(_ movement: Movement, kind: MovementKind) -> Bool {
+        !movement.accountingReviewLocked || movement.kind == kind
+    }
+
     private func hasTransferHint(_ movement: Movement) -> Bool {
-        let value = normalizedConcept(movement.title)
+        let value = normalizedConcept(transferDescriptor(movement))
         return ["transfer", "traspaso", "spei", "entre cuentas", "cuenta propia", "clabe"].contains { value.contains($0) }
     }
 
@@ -3658,8 +3907,11 @@ final class FinanceStore {
     /// Only days explicitly covered by every selected account may contribute
     /// zero to an average. Missing statements never fabricate zero-spend days.
     func spendingCoveredDays(account: String? = nil) -> Set<Date> {
+        let key = CoverageCacheKey(account: account, day: Calendar.current.startOfDay(for: .now))
+        if let value = cachedProjection(spendingCoverageCache[key]) { return value }
+        let value: Set<Date> = {
         let calendar = Calendar.current
-        let selected = statements.filter { account == nil || $0.source == account }
+        let selected = statements.filter { account == nil || $0.source == account || $0.accountKey == account }
         let groups = Dictionary(grouping: selected) { $0.accountKey ?? $0.source }
         var common: Set<Date>?
         for records in groups.values {
@@ -3680,6 +3932,11 @@ final class FinanceStore {
             common = common.map { $0.intersection(days) } ?? days
         }
         return common ?? []
+
+        }()
+        if spendingCoverageCache.count > 32 { spendingCoverageCache.removeAll() }
+        spendingCoverageCache[key] = projectionEntry(value)
+        return value
     }
 
     private func financialAccountKey(_ movement: Movement) -> String? {
@@ -3699,8 +3956,32 @@ final class FinanceStore {
         return outKey != inKey
     }
 
+    /// Generic SPEI wording, matching amounts and one owner's name cannot
+    /// establish that a deposit was funded by this particular withdrawal.
+    private func hasIndependentTransferLink(_ outflow: Movement, _ inflow: Movement) -> Bool {
+        let outText = normalizedConcept(transferDescriptor(outflow))
+        let inText = normalizedConcept(transferDescriptor(inflow))
+        let shared = !transferReferenceTokens(transferDescriptor(outflow))
+            .intersection(transferReferenceTokens(transferDescriptor(inflow))).isEmpty
+        if shared { return true }
+        let outBank = normalizedConcept(statementForMovement(outflow)?.source ?? outflow.account)
+        let inBank = normalizedConcept(statementForMovement(inflow)?.source ?? inflow.account)
+        let bankNames = Set(statements.filter { statementKind($0) == .bank }.map { normalizedConcept($0.source) })
+            .union(["nvio", "stp", "bbva", "santander", "banorte", "banamex", "citibanamex", "hsbc", "scotiabank", "inbursa", "azteca"])
+        // Some BBVA titles concatenate RECIBIDO and the sender bank (NVIO).
+        // An explicit third-bank sender contradicts a Santander/BBVA pair.
+        for bank in bankNames where bank != outBank && !bank.isEmpty {
+            let pattern = #"spei\s*recibid[oa]\s*"# + NSRegularExpression.escapedPattern(for: bank) + #"(?:\b|(?=\d))"#
+            if inText.range(of: pattern, options: .regularExpression) != nil { return false }
+        }
+        let namedBank = (inBank.count >= 3 && outText.contains(inBank))
+            || (outBank.count >= 3 && inText.contains(outBank))
+        let ownIdentity = ownerAliasMentioned(in: "\(transferDescriptor(outflow)) \(transferDescriptor(inflow))")
+        return namedBank && ownIdentity
+    }
+
     private func transferPairEvidence(_ outflow: Movement, _ inflow: Movement) -> (score: Int, reason: String) {
-        let combined = normalizedConcept("\(outflow.title) \(inflow.title)")
+        let combined = normalizedConcept("\(transferDescriptor(outflow)) \(transferDescriptor(inflow))")
         var score = 50 // importe exacto, direcciones opuestas y cuentas distintas
         var reasons = ["importe exacto", "egreso ↔ ingreso"]
 
@@ -3717,7 +3998,7 @@ final class FinanceStore {
             score += 25
             reasons.append("texto de cuenta propia")
         }
-        if ownerAliasMentioned(in: "\(outflow.title) \(inflow.title)") {
+        if ownerAliasMentioned(in: "\(transferDescriptor(outflow)) \(transferDescriptor(inflow))") {
             score += 20
             reasons.append("titular propio")
         }
@@ -3735,8 +4016,8 @@ final class FinanceStore {
             .filter { statementKind($0) == .bank }
             .map { normalizedConcept($0.source) }
             .filter { $0.count >= 3 })
-        let outText = normalizedConcept(outflow.title)
-        let inText = normalizedConcept(inflow.title)
+        let outText = normalizedConcept(transferDescriptor(outflow))
+        let inText = normalizedConcept(transferDescriptor(inflow))
         let namedCounterpart = (knownBankLabels.contains(outAccount) && inAccount.count >= 3 && outText.contains(inAccount))
             || (knownBankLabels.contains(inAccount) && outAccount.count >= 3 && inText.contains(outAccount))
         if namedCounterpart {
@@ -3749,20 +4030,15 @@ final class FinanceStore {
             reasons.append("cuentas propias distintas")
         }
 
-        let sharedReferences = transferReferenceTokens(outflow.title)
-            .intersection(transferReferenceTokens(inflow.title))
+        let sharedReferences = transferReferenceTokens(transferDescriptor(outflow))
+            .intersection(transferReferenceTokens(transferDescriptor(inflow)))
         if !sharedReferences.isEmpty {
             score += 25
             reasons.append("referencia coincidente")
         }
 
-        // BBVA/Santander often omit the counterpart bank from the first line
-        // of the row (it appears in a continuation line that PDFKit does not
-        // keep in the short title). When both imported statements are known
-        // bank accounts and the rows explicitly say SENT/RECEIVED, the exact
-        // amount and ±2-day match is sufficient evidence of an own-account
-        // transfer. Salary/merchant deposits do not contain the opposite
-        // directional pair and therefore remain income or spend.
+        // Direction wording is supporting evidence only; acceptance separately
+        // requires a bank route plus owner identity, or a shared reference.
         let outgoingSignal = outText.contains("enviado")
             || outText.contains("transferencia")
             || outText.contains("traspaso")
@@ -3773,10 +4049,6 @@ final class FinanceStore {
             || inText.contains("deposito")
             || inText.contains("entrada")
         if outgoingSignal && incomingSignal {
-            // With exact opposite amounts across two distinct imported bank
-            // accounts, explicit SENT/RECEIVED semantics must reach the
-            // acceptance threshold even when neither bank names the other in
-            // the shortened PDF row title. Keep ±3-day pairs below the gate.
             score += 18
             reasons.append("dirección explícita")
         }
@@ -3856,18 +4128,84 @@ final class FinanceStore {
         }
     }
 
-    private func hasCardPaymentHint(_ movement: Movement) -> Bool {
-        let value = normalizedConcept(movement.title)
-        return value.contains("pago de tarjeta")
-            || value.contains("pago amex")
-            || value.contains("gracias por su pago")
-            || value.contains("pago credito")
-            // Santander's direct-debit row names the issuer legally rather
-            // than using the short `Amex` label (for example
-            // `DOMICILIACION PAGO SERVICIO ... AMERICAN EXPRESS CO`). This is
-            // still an unambiguous card-payment signal, not a generic
-            // merchant mention, because it is paired with `pago` below.
-            || (value.contains("pago") && (value.contains("american express") || value.contains("americanexpress")))
+    private func namedCardPaymentIssuer(_ movement: Movement) -> String? {
+        let text = normalizedConcept(transferDescriptor(movement))
+        if text.contains("pago") && (text.contains("american express") || text.contains("americanexpress")
+            || containsWholePhrase("amex", in: text)) { return "Amex" }
+        // A named destination is a payment hint, not permission to exclude.
+        // Automatic matching still requires owner identity, a card receipt,
+        // exact cents, bounded dates and uniqueness in BOTH directions.
+        if text.contains("transferencia a mads rappi")
+            || (text.contains("pago") && text.contains("rappicard")) { return "Rappi" }
+        return nil
+    }
+
+    private func paymentDestinationAccounts(_ movement: Movement) -> Set<String> {
+        let text = transferDescriptor(movement)
+        let pattern = #"(?im)(?:a la cuenta|cuenta destino|clabe)\s*[: ]*([0-9]{17,18})(?![0-9])|^\s*(?:00)?([0-9]{18})\s*$"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
+        return Set(regex.matches(in: text, range: NSRange(text.startIndex..., in: text)).compactMap { match in
+            for i in 1..<match.numberOfRanges {
+                if let range = Range(match.range(at: i), in: text) {
+                    let value = String(text[range])
+                    return value.count == 17 ? "0" + value : value
+                }
+            }
+            return nil
+        })
+    }
+
+    private func hasOwnCardPaymentRecipient(_ movement: Movement) -> Bool {
+        guard let recipient = movement.transferRecipient else { return false }
+        let name = normalizedConcept(recipient)
+        return transferOwnerAliases.map(normalizedConcept).contains(name)
+    }
+
+    private func paymentDestinationIssuers() -> [String: Set<String>] {
+        var result: [String: Set<String>] = [:]
+        for other in movements where other.amount < 0 && isBankMovement(other) {
+            guard let issuer = namedCardPaymentIssuer(other), hasOwnCardPaymentRecipient(other),
+                  isEligibleMovement(other) else { continue }
+            for account in paymentDestinationAccounts(other) { result[account, default: []].insert(issuer) }
+        }
+        return result
+    }
+
+    private func cardPaymentIssuer(_ bank: Movement, destinations: [String: Set<String>]) -> String? {
+        if let named = namedCardPaymentIssuer(bank) { return named }
+        let accounts = paymentDestinationAccounts(bank)
+        guard !accounts.isEmpty, hasTransferHint(bank), ownerAliasMentioned(in: transferDescriptor(bank)) else { return nil }
+        let issuers = accounts.reduce(into: Set<String>()) { $0.formUnion(destinations[$1, default: []]) }
+        return issuers.count == 1 ? issuers.first : nil
+    }
+
+    private func hasCardPaymentHint(_ movement: Movement, destinations: [String: Set<String>]) -> Bool {
+        let value = normalizedConcept(transferDescriptor(movement))
+        return cardPaymentIssuer(movement, destinations: destinations) != nil || value.contains("pago de tarjeta")
+            || value.contains("pago amex") || value.contains("gracias por su pago") || value.contains("pago credito")
+    }
+
+    private func compatibleCardPayment(_ bank: Movement, _ card: Movement, destinations: [String: Set<String>], requireOwnRecipient: Bool = true) -> Bool {
+        // Discard impossible pairs before the expensive statement/OCR proof.
+        // Eligibility is still mandatory for every actual candidate.
+        guard bank.amount < 0, card.amount != 0,
+              exactTransferAmountsMatch(bank.amount, card.amount),
+              abs(bank.date.timeIntervalSince(card.date)) <= 5 * 86400,
+              isBankMovement(bank), isCardMovement(card) else { return false }
+        guard isEligibleMovement(bank), isEligibleMovement(card),
+              !rejectedTransferPairKeys.contains(transferPairReviewKey(bank, card)) else { return false }
+        let cardText = normalizedConcept(transferDescriptor(card))
+        let receipt = movementKind(card) == .cardPayment
+            || (cardText.contains("pago") && (cardText.contains("spei") || cardText.contains("gracias") || cardText.contains("recib")))
+        guard receipt, hasCardPaymentHint(bank, destinations: destinations) else { return false }
+        if let issuer = cardPaymentIssuer(bank, destinations: destinations) {
+            guard statementForMovement(card)?.source == issuer || card.account == issuer else { return false }
+            if issuer == "Rappi" { return !requireOwnRecipient || hasOwnCardPaymentRecipient(bank) }
+            return true
+        }
+        // A generic payment label alone never proves which owned card
+        // received it. It remains an explicit review proposal.
+        return !requireOwnRecipient
     }
 
     private func isOutflow(_ movement: Movement) -> Bool {
@@ -3981,6 +4319,65 @@ final class FinanceStore {
         // accounts from the same issuer can share a cutoff period; a verified
         // masked key from this PDF is required before replacement is safe.
         var changed = false
+
+        // Amex can replace the plastic while keeping the same billing
+        // account prefix. Join different masked endings only when their
+        // verified PDF family fingerprint matches and the statement ranges
+        // form a continuous, non-overlapping chain. Concurrent card accounts
+        // therefore remain separate.
+        let amexFamilyGroups = Dictionary(grouping: statements.indices.filter { index in
+            let statement = statements[index]
+            let issuer = statement.source.localizedCaseInsensitiveCompare("Amex") == .orderedSame
+                || statement.source.localizedCaseInsensitiveCompare("American Express") == .orderedSame
+            return issuer && statementKind(statement) == .card
+                && statement.accountKey != nil
+                && statement.accountFamilyFingerprint != nil
+        }, by: { statements[$0].accountFamilyFingerprint! })
+        let calendar = Calendar(identifier: .gregorian)
+        func adjacentStatementPeriods(_ left: StatementRecord, _ right: StatementRecord) -> Bool {
+            guard !statementsOverlap(left, right),
+                  let leftRange = statementRange(from: left.period),
+                  let rightRange = statementRange(from: right.period) else { return false }
+            if leftRange.upperBound < rightRange.lowerBound {
+                guard let nextDay = calendar.date(byAdding: .day, value: 1, to: leftRange.upperBound) else { return false }
+                return calendar.isDate(nextDay, inSameDayAs: rightRange.lowerBound)
+            }
+            guard let nextDay = calendar.date(byAdding: .day, value: 1, to: rightRange.upperBound) else { return false }
+            return calendar.isDate(nextDay, inSameDayAs: leftRange.lowerBound)
+        }
+        for familyIndexes in amexFamilyGroups.values {
+            var visited = Set<Int>()
+            for seed in familyIndexes where !visited.contains(seed) {
+                var component = [seed]
+                visited.insert(seed)
+                var cursor = 0
+                while cursor < component.count {
+                    let currentIndex = component[cursor]
+                    cursor += 1
+                    for candidateIndex in familyIndexes where !visited.contains(candidateIndex) {
+                        let current = statements[currentIndex]
+                        let candidate = statements[candidateIndex]
+                        let sameKnownNumber = current.accountKey == candidate.accountKey
+                        guard sameKnownNumber || adjacentStatementPeriods(current, candidate) else { continue }
+                        visited.insert(candidateIndex)
+                        component.append(candidateIndex)
+                    }
+                }
+                let accountKeys = Set(component.compactMap { statements[$0].accountKey })
+                guard accountKeys.count > 1,
+                      let canonicalIndex = component.min(by: { leftIndex, rightIndex in
+                          let leftStart = statementRange(from: statements[leftIndex].period)?.lowerBound ?? .distantFuture
+                          let rightStart = statementRange(from: statements[rightIndex].period)?.lowerBound ?? .distantFuture
+                          return leftStart < rightStart
+                      }),
+                      let canonicalKey = statements[canonicalIndex].accountKey else { continue }
+                for index in component where statements[index].accountKey != canonicalKey {
+                    statements[index].accountKey = canonicalKey
+                    changed = true
+                }
+            }
+        }
+
         let identified = statements.filter { $0.accountKey != nil }
         let groups = Dictionary(grouping: identified) { statement in
             "\(sourceScope(statement))|\(statement.accountKey!)|\(statementPeriodIdentity(statement.period))"
@@ -4037,6 +4434,12 @@ final class FinanceStore {
         for index in nextMovements.indices {
             let movement = nextMovements[index]
             guard movement.flow == .expense else { continue }
+            // A confirmed manual category is the user's decision. Preserve it
+            // during taxonomy refreshes, even when it was saved for only one
+            // movement and has no merchant-wide rule.
+            if movement.manuallyReviewed, !Self.pendingCategoryNames.contains(movement.category) {
+                continue
+            }
             if [.cardPayment, .bankTransfer, .income, .credit, .refund, .msi].contains(movementKind(movement)) {
                 continue
             }
@@ -4110,12 +4513,22 @@ final class FinanceStore {
         let hasReadableConcept = movement.title.rangeOfCharacter(from: .letters) != nil
         let hasEvidenceBackedRappiReviewConcept = Self.isEvidenceBackedRappiReviewConcept(movement)
         let isKnownSantanderMerchant = Self.isEvidenceBackedSantanderMerchant(movement)
+        let normalizedTitle = movement.title.folding(
+            options: [.diacriticInsensitive, .caseInsensitive],
+            locale: Locale(identifier: "es_MX")
+        )
+        let isAmexPlanCancellation = movement.account.localizedCaseInsensitiveCompare("Amex") == .orderedSame
+            && movement.kind == .msi
+            && normalizedTitle.contains("saldo pendiente por cancelacion de plan")
+            && movement.extractionEvidence?.method == "pdf-text"
+            && movement.extractionEvidence?.selectedColumn == "FINANCIAL_ADJUSTMENT"
         guard movement.amount != 0,
               movement.title.trimmingCharacters(in: .whitespacesAndNewlines).count >= 3,
               (hasReadableConcept || hasEvidenceBackedRappiReviewConcept),
               (!Self.isAdministrativeTitle(movement.title)
                || Self.isSupportedScreenshotDescriptor(movement)
-               || isKnownSantanderMerchant) else { return false }
+               || isKnownSantanderMerchant
+               || isAmexPlanCancellation) else { return false }
         switch movement.flow {
         case .income:
             guard movement.amount > 0 else { return false }
@@ -4186,50 +4599,122 @@ final class FinanceStore {
     }
 
     private func reconcileStoredMovements() {
-        for index in movements.indices where !movements[index].manuallyReviewed && movements[index].reconciliationReason != nil {
+        var consumed = Set<UUID>()
+        let destinations = paymentDestinationIssuers()
+        // Rebind human-confirmed pairs after a replay assigns new row UUIDs.
+        let rowsByReviewKey = Dictionary(grouping: movements.indices) { manualReviewKey(movements[$0]) }
+        for index in movements.indices {
+            guard let key = movements[index].confirmedCounterpartKey,
+                  rowsByReviewKey[manualReviewKey(movements[index])]?.count == 1,
+                  let candidates = rowsByReviewKey[key], candidates.count == 1,
+                  let peer = candidates.first, peer != index,
+                  movements[peer].confirmedCounterpartKey == manualReviewKey(movements[index]),
+                  movements[index].kind == movements[peer].kind,
+                  exactTransferAmountsMatch(movements[index].amount, movements[peer].amount) else { continue }
+            let bankPair = movements[index].kind == .bankTransfer
+                && movements[index].amount * movements[peer].amount < 0
+                && distinctImportedBankAccounts(movements[index], movements[peer])
+                && abs(movements[index].date.timeIntervalSince(movements[peer].date)) <= 3 * 86400
+            let cardPair = movements[index].kind == .cardPayment
+                && ((isBankMovement(movements[index]) && isCardMovement(movements[peer]))
+                    || (isCardMovement(movements[index]) && isBankMovement(movements[peer])))
+                && (isBankMovement(movements[index]) ? movements[index].amount < 0 : movements[peer].amount < 0)
+                && abs(movements[index].date.timeIntervalSince(movements[peer].date)) <= 5 * 86400
+            guard bankPair || cardPair else { continue }
+            movements[index].matchedMovementId = movements[peer].id
+            movements[peer].matchedMovementId = movements[index].id
+            for target in [index, peer] {
+                movements[target].flow = .transfer
+                movements[target].reconciliationConfidence = 100
+                movements[target].reconciliationReason = cardPair ? "Pago de tarjeta · pareja confirmada manualmente" : "Traspaso propio · pareja confirmada manualmente"
+            }
+        }
+        // Preserve verified reciprocal pairs before clearing automatic guesses.
+        // A category edit must not orphan the other account's movement.
+        for index in movements.indices {
+            let row = movements[index]
+            guard let peerID = row.matchedMovementId,
+                  let peer = movements.first(where: { $0.id == peerID }),
+                  peer.id != row.id, peer.matchedMovementId == row.id,
+                  row.kind == peer.kind, row.flow == .transfer, peer.flow == .transfer,
+                  exactTransferAmountsMatch(row.amount, peer.amount) else { continue }
+            let validBankPair = row.kind == .bankTransfer && distinctImportedBankAccounts(row, peer)
+                && row.amount * peer.amount < 0 && abs(row.date.timeIntervalSince(peer.date)) <= 3 * 86400
+            let validCardPair = row.kind == .cardPayment && ((isBankMovement(row) && isCardMovement(peer)) || (isCardMovement(row) && isBankMovement(peer)))
+                && (isBankMovement(row) ? row.amount < 0 : peer.amount < 0)
+                && abs(row.date.timeIntervalSince(peer.date)) <= 5 * 86400
+            let humanConfirmed = row.confirmedCounterpartKey != nil && peer.confirmedCounterpartKey != nil
+            let independentBankLink = isOutflow(row)
+                ? hasIndependentTransferLink(row, peer) : hasIndependentTransferLink(peer, row)
+            let independentCardLink = isBankMovement(row) ? compatibleCardPayment(row, peer, destinations: destinations) : compatibleCardPayment(peer, row, destinations: destinations)
+            let bank = isBankMovement(row) ? row : peer
+            let card = isCardMovement(row) ? row : peer
+            let uniqueCardPair = validCardPair && independentCardLink
+                && movements.filter { compatibleCardPayment(bank, $0, destinations: destinations) }.count == 1
+                && movements.filter { compatibleCardPayment($0, card, destinations: destinations) }.count == 1
+            if (validBankPair && (humanConfirmed || independentBankLink)) || (validCardPair && (humanConfirmed || uniqueCardPair)) {
+                consumed.insert(row.id); consumed.insert(peer.id)
+            }
+        }
+        for index in movements.indices where !consumed.contains(movements[index].id) && (movements[index].reconciliationReason != nil || movements[index].matchedMovementId != nil) {
+            // Only a former pair rewrote flow/kind. An advisory reason (no
+            // counterpart, ambiguous amount/date) left the parser's
+            // classification untouched, so resetting it here made a second
+            // pass count an own transfer as spend and income.
+            let wasLinked = movements[index].matchedMovementId != nil
             movements[index].matchedMovementId = nil
             movements[index].reconciliationConfidence = nil
             movements[index].reconciliationReason = nil
-            movements[index].flow = movements[index].amount > 0 ? .income : .expense
-            movements[index].kind = nil
-            movements[index].category = Self.category(for: movements[index].title, flow: movements[index].flow)
+            guard wasLinked else { continue }
+            if !movements[index].accountingReviewLocked {
+                let cardText = normalizedConcept(transferDescriptor(movements[index]))
+                let independentlyPrintedReceipt = isCardMovement(movements[index])
+                    && (cardText.contains("gracias por su pago") || cardText.contains("pago por spei") || cardText.contains("pago recibido"))
+                if independentlyPrintedReceipt {
+                    // Amex credits are negative, Rappi credits positive. An
+                    // uncertain funding pair cannot turn either into a purchase.
+                    movements[index].flow = .transfer
+                    movements[index].kind = .cardPayment
+                } else {
+                    movements[index].flow = movements[index].amount > 0 ? .income : .expense
+                    movements[index].kind = nil
+                }
+            }
+            if !movements[index].manuallyReviewed {
+                movements[index].category = Self.category(for: movements[index].title, flow: movements[index].flow)
+            }
         }
-        var consumed = Set<UUID>()
         let threeDays: TimeInterval = 3 * 24 * 60 * 60
         // A bank direct debit can be posted a few days before the card issuer
         // reflects the payment (the real Santander/Amex corpus has a
         // three-day posting gap). Keep a strict ±3-day rule for own-bank
         // transfers, but allow a bounded five-day window when both sides have
         // an explicit card-payment signal and the amount is exact to cents.
-        let cardPaymentWindow: TimeInterval = 5 * 24 * 60 * 60
 
         for index in movements.indices {
             let bank = movements[index]
-            guard !bank.manuallyReviewed, !consumed.contains(bank.id), isBankMovement(bank), isOutflow(bank) else { continue }
+            guard canAutomaticallyMatch(bank, kind: .cardPayment), !consumed.contains(bank.id), isBankMovement(bank), isOutflow(bank) else { continue }
 
             let cardCandidates = movements.indices.filter { candidateIndex in
                 let card = movements[candidateIndex]
-                guard !card.manuallyReviewed, !consumed.contains(card.id), candidateIndex != index, isCardMovement(card), amountsMatch(bank.amount, card.amount), abs(bank.date.timeIntervalSince(card.date)) <= cardPaymentWindow else { return false }
-                let cardText = normalizedConcept(card.title)
-                let cardSignal = movementKind(card) == .cardPayment
-                    || hasCardPaymentHint(card)
-                    || (card.flow == .debt && (cardText.contains("pago") || cardText.contains("abono") || cardText.contains("recib")))
-                // Require both the funding bank and the card statement to
-                // describe a payment. Matching an arbitrary purchase merely
-                // because a bank row happened to contain `pago` could hide a
-                // real expense from the consolidated ledger.
-                return hasCardPaymentHint(bank) && cardSignal
+                return !consumed.contains(card.id) && compatibleCardPayment(bank, card, destinations: destinations)
             }
-            if cardCandidates.count == 1, let cardIndex = cardCandidates.first {
+            if cardCandidates.count == 1, let cardIndex = cardCandidates.first,
+               canAutomaticallyMatch(movements[cardIndex], kind: .cardPayment) {
+                let card = movements[cardIndex]
+                let fundingCandidates = movements.filter { other in
+                    !consumed.contains(other.id) && compatibleCardPayment(other, card, destinations: destinations)
+                }
+                guard fundingCandidates.count == 1 else { continue }
                 movements[index].flow = .transfer
                 movements[index].kind = .cardPayment
-                movements[index].category = "Transferencia"
+                if !movements[index].manuallyReviewed { movements[index].category = "Transferencia" }
                 movements[index].matchedMovementId = movements[cardIndex].id
                 movements[index].reconciliationConfidence = 100
                 movements[index].reconciliationReason = "Pago de tarjeta · importe exacto · fechas compatibles"
                 movements[cardIndex].flow = .transfer
                 movements[cardIndex].kind = .cardPayment
-                movements[cardIndex].category = "Transferencia"
+                if !movements[cardIndex].manuallyReviewed { movements[cardIndex].category = "Transferencia" }
                 movements[cardIndex].matchedMovementId = bank.id
                 movements[cardIndex].reconciliationConfidence = 100
                 movements[cardIndex].reconciliationReason = "Pago de tarjeta · importe exacto · fechas compatibles"
@@ -4243,21 +4728,22 @@ final class FinanceStore {
         var ambiguousRows = Set<UUID>()
         for outflowIndex in movements.indices {
             let outflow = movements[outflowIndex]
-            guard !outflow.manuallyReviewed, !consumed.contains(outflow.id), isBankMovement(outflow), isOutflow(outflow) else { continue }
+            guard canAutomaticallyMatch(outflow, kind: .bankTransfer), !consumed.contains(outflow.id), isBankMovement(outflow), isOutflow(outflow) else { continue }
             for inflowIndex in movements.indices {
                 let inflow = movements[inflowIndex]
-                guard !inflow.manuallyReviewed, inflowIndex != outflowIndex,
+                guard canAutomaticallyMatch(inflow, kind: .bankTransfer), inflowIndex != outflowIndex,
                       !consumed.contains(inflow.id),
                       isBankMovement(inflow),
                       isInflow(inflow),
                       distinctImportedBankAccounts(outflow, inflow),
-                      amountsMatch(outflow.amount, inflow.amount) else { continue }
+                      exactTransferAmountsMatch(outflow.amount, inflow.amount) else { continue }
                 let dateDistance = abs(outflow.date.timeIntervalSince(inflow.date))
-                guard dateDistance <= threeDays else { continue }
+                guard dateDistance <= threeDays,
+                      !rejectedTransferPairKeys.contains(transferPairReviewKey(outflow, inflow)) else { continue }
                 let evidence = transferPairEvidence(outflow, inflow)
-                let sharedReference = !transferReferenceTokens(outflow.title).intersection(transferReferenceTokens(inflow.title)).isEmpty
-                let ownEvidence = ownerAliasMentioned(in: "\(outflow.title) \(inflow.title)") || sharedReference
-                if ownEvidence && evidence.score >= 90 {
+                let sharedReference = !transferReferenceTokens(transferDescriptor(outflow)).intersection(transferReferenceTokens(transferDescriptor(inflow))).isEmpty
+                let ownEvidence = ownerAliasMentioned(in: "\(transferDescriptor(outflow)) \(transferDescriptor(inflow))") || sharedReference
+                if ownEvidence && evidence.score >= 90 && hasIndependentTransferLink(outflow, inflow) {
                     let cents = NSDecimalNumber(decimal: absolute(outflow.amount) * 100).int64Value
                     scoredCandidates.append(ScoredTransferCandidate(
                         outflowIndex: outflowIndex,
@@ -4292,13 +4778,13 @@ final class FinanceStore {
             guard !consumed.contains(outflow.id), !consumed.contains(inflow.id) else { continue }
             movements[candidate.outflowIndex].flow = .transfer
             movements[candidate.outflowIndex].kind = .bankTransfer
-            movements[candidate.outflowIndex].category = "Transferencia"
+            if !movements[candidate.outflowIndex].manuallyReviewed { movements[candidate.outflowIndex].category = "Transferencia" }
             movements[candidate.outflowIndex].matchedMovementId = inflow.id
             movements[candidate.outflowIndex].reconciliationConfidence = min(candidate.score, 100)
             movements[candidate.outflowIndex].reconciliationReason = candidate.reason
             movements[candidate.inflowIndex].flow = .transfer
             movements[candidate.inflowIndex].kind = .bankTransfer
-            movements[candidate.inflowIndex].category = "Transferencia"
+            if !movements[candidate.inflowIndex].manuallyReviewed { movements[candidate.inflowIndex].category = "Transferencia" }
             movements[candidate.inflowIndex].matchedMovementId = outflow.id
             movements[candidate.inflowIndex].reconciliationConfidence = min(candidate.score, 100)
             movements[candidate.inflowIndex].reconciliationReason = candidate.reason
@@ -4314,10 +4800,10 @@ final class FinanceStore {
         // deliberately left as ordinary income/spend.
         for index in movements.indices {
             let movement = movements[index]
-            guard !movement.manuallyReviewed, !consumed.contains(movement.id),
+            guard !movement.accountingReviewLocked, !consumed.contains(movement.id),
                   isBankMovement(movement),
                   hasTransferHint(movement),
-                  ownerAliasMentioned(in: movement.title) else { continue }
+                  ownerAliasMentioned(in: transferDescriptor(movement)) else { continue }
             movements[index].reconciliationConfidence = 60
             movements[index].reconciliationReason = "Posible transferencia propia: falta contraparte. Confirma el tipo manualmente; permanece en métricas."
             ambiguousRows.insert(movement.id)
@@ -4402,7 +4888,7 @@ final class FinanceStore {
             debt = creditLimit - creditAvailable
         } else {
             debt = statement.summary?.debtBalance
-                ?? (kind == .card ? statement.summary?.statementBalance : nil)
+                ?? (kind == .card ? statement.summary?.statementBalance.map { $0 + (statement.summary?.msiPending.map(abs) ?? 0) } : nil)
         }
         let msiPending = statement.summary?.msiPending.map(absolute)
         let revolvingBalance = statement.summary?.revolvingBalance.map(absolute)
@@ -4444,6 +4930,7 @@ final class FinanceStore {
 
     init() {
         let defaults = UserDefaults.standard
+        loanLedger = LoanLedger(defaults: defaults)
         isReconciliationOnly = false
         manualDashboardUnlockEnabled = false
         defaults.removeObject(forKey: manualDashboardUnlockKey)
@@ -4477,6 +4964,28 @@ final class FinanceStore {
             ?? []
         lastAuditRun = defaults.data(forKey: auditRunKey).flatMap { try? JSONDecoder().decode(LedgerAuditRun.self, from: $0) }
         lastImportedFile = defaults.string(forKey: importKey)
+        // Keep a recoverable snapshot before any new matcher/normalization runs.
+        let transferBackupKey = "marcelito.ledger.beforeTransferV2.v1"
+        if !movements.isEmpty, defaults.data(forKey: transferBackupKey) == nil,
+           let backup = try? JSONEncoder().encode(currentEnvelope()) {
+            defaults.set(backup, forKey: transferBackupKey)
+            defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeTransferV2.v1")
+        }
+
+        let independentLinkBackupKey = "marcelito.ledger.beforeTransferV3.v1"
+        if !movements.isEmpty, defaults.data(forKey: independentLinkBackupKey) == nil,
+           let backup = try? JSONEncoder().encode(currentEnvelope()) {
+            defaults.set(backup, forKey: independentLinkBackupKey)
+            defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeTransferV3.v1")
+        }
+
+        let paymentBackupKey = "marcelito.ledger.beforeCardPaymentsV4.v1"
+        if !movements.isEmpty, defaults.data(forKey: paymentBackupKey) == nil,
+           let backup = try? JSONEncoder().encode(currentEnvelope()) {
+            defaults.set(backup, forKey: paymentBackupKey)
+            defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeCardPaymentsV4.v1")
+        }
+
         // A prior reader could miss the masked account number when BBVA put
         // its administrative header on page two. Repair that split eagerly so
         // the Accounts carousel and every aggregate see one canonical account
@@ -4497,7 +5006,7 @@ final class FinanceStore {
         // Upgrade the former broad taxonomy in memory without changing any
         // amount, date, account or movement identity. The next canonical
         // persist writes the new primary category names.
-        let legacyExpenseCategories = Set(["Alimentos", "Comidas", "Servicios", "Compras", "Finanzas", "Educación", "Hogar", "Mascotas", "Otros gastos"])
+        let legacyExpenseCategories = Set(["Alimentos", "Comidas", "Servicios", "Compras", "Finanzas", "Hogar", "Mascotas", "Otros gastos"])
         movements = movements.map { movement in
             guard movement.flow == .expense, legacyExpenseCategories.contains(movement.category) else { return movement }
             var migrated = movement
@@ -4552,17 +5061,21 @@ final class FinanceStore {
         // on every cold start made opening the app compete with SwiftUI for
         // the main thread. Keep a one-time migration marker for old builds,
         // then defer any expensive repair to the explicit refresh action.
-        let normalizedReaderVersion = defaults.string(forKey: normalizedLedgerReaderVersionKey)
+        let normalizedReaderVersion = defaults.string(forKey: Self.normalizedLedgerReaderVersionKey)
         let hasStoredSources = !statements.isEmpty || !storedPDFURLs.isEmpty
-        if !loadedAtomicEnvelope || normalizedReaderVersion != Self.readerVersion {
+        if Self.needsReaderNormalization(
+            loadedAtomicEnvelope: loadedAtomicEnvelope,
+            storedReaderVersion: normalizedReaderVersion,
+            currentReaderVersion: Self.readerVersion
+        ) {
             if hasStoredSources {
                 // Older builds may have persisted administrative PDF text as
                 // movements. Quarantine that snapshot immediately, but leave
                 // the expensive parse/dedupe/matching pass to the explicit
                 // rebuild so cold launch can render its first frame quickly.
-                defaults.set(false, forKey: canonicalRebuildKey)
-                defaults.removeObject(forKey: canonicalRebuildReaderVersionKey)
-                defaults.removeObject(forKey: normalizedLedgerReaderVersionKey)
+                defaults.set(false, forKey: Self.canonicalRebuildKey)
+                defaults.removeObject(forKey: Self.canonicalRebuildReaderVersionKey)
+                defaults.removeObject(forKey: Self.normalizedLedgerReaderVersionKey)
                 DiagnosticsRecorder.record(
                     stage: "store.migration.pending",
                     message: "Se detectó un libro de una versión anterior; la reconstrucción canónica quedó pendiente."
@@ -4570,7 +5083,7 @@ final class FinanceStore {
             } else {
                 // A fresh/empty install has nothing to migrate. Persist only
                 // this tiny marker; never serialize a large ledger here.
-                defaults.set(Self.readerVersion, forKey: normalizedLedgerReaderVersionKey)
+                defaults.set(Self.readerVersion, forKey: Self.normalizedLedgerReaderVersionKey)
             }
         }
         // A reader fix can be shipped with the same certified reader contract
@@ -4578,19 +5091,20 @@ final class FinanceStore {
         // on the device.  The old build had no replay marker, so this is the
         // migration that turns the stale cards into a real extraction pass;
         // no upload is required from the user.
-        let storedExtractionReplayVersion = defaults.string(forKey: extractionReplayVersionKey)
+        let storedExtractionReplayVersion = defaults.string(forKey: Self.extractionReplayVersionKey)
         if hasStoredSources && storedExtractionReplayVersion != Self.extractionReplayVersion {
-            defaults.set(false, forKey: canonicalRebuildKey)
-            defaults.removeObject(forKey: canonicalRebuildReaderVersionKey)
-            defaults.removeObject(forKey: normalizedLedgerReaderVersionKey)
+            defaults.set(false, forKey: Self.canonicalRebuildKey)
+            defaults.removeObject(forKey: Self.canonicalRebuildReaderVersionKey)
+            defaults.removeObject(forKey: Self.normalizedLedgerReaderVersionKey)
             DiagnosticsRecorder.record(
                 stage: "extraction.replay.pending",
                 message: "Se invalidó la extracción guardada para repetirla con la revisión \(Self.extractionReplayVersion)."
             )
         } else if !hasStoredSources {
-            defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
+            defaults.set(Self.extractionReplayVersion, forKey: Self.extractionReplayVersionKey)
         }
         refreshCanonicalRebuildStatus()
+        loanLedger.onChange = { [weak self] in self?.invalidateDerivedProjections() }
         DiagnosticsRecorder.record(
             stage: "store.init",
             message: "Libro \(ledgerVersion.uuidString.prefix(8)) cargado: \(statements.count) estado(s), \(movements.count) movimiento(s)."
@@ -4600,7 +5114,10 @@ final class FinanceStore {
     /// Creates an isolated, empty store for parser-only probes. It must never
     /// read or write UserDefaults: PDF extraction can call this from a detached
     /// background task while the live store is committing a ledger snapshot.
+    static func blockedRecoveryStore() -> FinanceStore { FinanceStore(reconciliationOnly: true) }
+
     private init(reconciliationOnly: Bool) {
+        loanLedger = LoanLedger(defaults: nil)
         isReconciliationOnly = reconciliationOnly
         movements = []
         statements = []
@@ -4611,14 +5128,64 @@ final class FinanceStore {
         manualDashboardUnlockEnabled = false
     }
 
+    @ObservationIgnored private var categoryUndoCache: CategoryUndoRecord?
+    var categoryUndoCount: Int {
+        _ = ledgerVersion
+        if categoryUndoCache == nil, let data = UserDefaults.standard.data(forKey: "marcelito.categoryUndo.v1") {
+            categoryUndoCache = try? JSONDecoder().decode(CategoryUndoRecord.self, from: data)
+        }
+        guard let record = categoryUndoCache, record.version == ledgerVersion else { return 0 }
+        return record.rows.count
+    }
+    @discardableResult func undoLastCategoryChange() -> Bool {
+        guard categoryUndoCount > 0, let record = categoryUndoCache else { return false }
+        let defaults = UserDefaults.standard
+        guard (defaults.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]) == record.expectedRules,
+              (defaults.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]) == record.expectedOverrides,
+              defaults.data(forKey: "marcelito.manualReviews.v1") == record.expectedReviews else { return false }
+        let current = Dictionary(movements.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for expected in record.expectedRows {
+            guard let row = current[expected.id], row.category == expected.category,
+                  row.classificationTags == expected.classificationTags, row.travelRelated == expected.travelRelated,
+                  row.manuallyReviewed == expected.manuallyReviewed,
+                  row.manuallyAccountingReviewed == expected.manuallyAccountingReviewed else { return false }
+        }
+        let originals = Dictionary(record.rows.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        movements = movements.map { current in
+            guard let previous = originals[current.id] else { return current }
+            // Undo only the category metadata. Never restore an old amount,
+            // date, movement kind, transfer pairing or extraction evidence.
+            var restored = current
+            restored.category = previous.category; restored.classificationTags = previous.classificationTags
+            restored.travelRelated = previous.travelRelated; restored.manuallyReviewed = previous.manuallyReviewed
+            restored.manuallyAccountingReviewed = previous.manuallyAccountingReviewed
+            return restored
+        }
+        defaults.set(record.rules, forKey: categoryRulesKey)
+        defaults.set(record.overrides, forKey: manualCategoryOverridesKey)
+        if let reviews = record.reviews { defaults.set(reviews, forKey: "marcelito.manualReviews.v1") }
+        else { defaults.removeObject(forKey: "marcelito.manualReviews.v1") }
+        persist(markingChange: true)
+        categoryUndoCache = nil; defaults.removeObject(forKey: "marcelito.categoryUndo.v1")
+        return true
+    }
     @discardableResult
-    func updateCategory(for movement: Movement, to category: String) -> Bool {
+    func updateCategory(for movement: Movement, to category: String, applyToMerchant: Bool) -> Bool {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return false }
+        let beforeRows = movements
+        let beforeRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
+        let beforeOverrides = UserDefaults.standard.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
+        let beforeReviews = UserDefaults.standard.data(forKey: "marcelito.manualReviews.v1")
         let key = categoryRuleKey(for: movements[index])
         func apply(_ targetIndex: Int, manuallyReviewed: Bool) {
             let title = movements[targetIndex].normalizedMerchant ?? movements[targetIndex].displayMerchant ?? movements[targetIndex].title
             movements[targetIndex].category = category
-            if manuallyReviewed { movements[targetIndex].manuallyReviewed = true }
+            if manuallyReviewed {
+                if !movements[targetIndex].manuallyReviewed {
+                    movements[targetIndex].manuallyAccountingReviewed = false
+                }
+                movements[targetIndex].manuallyReviewed = true
+            }
             var tags = Self.categoryTags(for: title, category: category)
             if movements[targetIndex].travelRelated, !tags.contains("viaje") {
                 tags.append("viaje")
@@ -4632,7 +5199,7 @@ final class FinanceStore {
         // Very short keys are shown as individual review rows in Gastos and
         // must not become broad merchant rules (for example, two unrelated
         // two-character OCR fragments).
-        if key.count >= 3 {
+        if applyToMerchant, key.count >= 3, isClassifiableExpenseForCategory(movements[index]) {
             var rules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
             var overrides = UserDefaults.standard.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
             // The review bucket must remain temporary. Persist final manual
@@ -4657,10 +5224,15 @@ final class FinanceStore {
             // one step. Existing manual choices remain protected, and the
             // rule changes only category metadata, never amount, flow or kind.
             if isExpenseCategory, !Self.pendingCategoryNames.contains(category) {
+                // Materialize this once. `reconciledMovements` validates every
+                // ledger row, so evaluating it from inside this loop made one
+                // tap repeat the full ledger/statement validation for every
+                // possible peer (quadratic work on a large pending queue).
+                let reconciledIDs = Set(reconciledMovements.map(\.id))
                 for peerIndex in movements.indices where peerIndex != index {
                     let peer = movements[peerIndex]
                     guard !peer.manuallyReviewed,
-                          reconciledMovements.contains(where: { $0.id == peer.id }),
+                          reconciledIDs.contains(peer.id),
                           isClassifiableExpenseForCategory(peer),
                           categoryRuleKey(for: peer) == key else { continue }
                     apply(peerIndex, manuallyReviewed: false)
@@ -4668,6 +5240,16 @@ final class FinanceStore {
             }
         }
         persist(markingChange: true)
+        let changed = zip(beforeRows, movements).filter { old, new in old.category != new.category || old.manuallyReviewed != new.manuallyReviewed || old.manuallyAccountingReviewed != new.manuallyAccountingReviewed || old.classificationTags != new.classificationTags || old.travelRelated != new.travelRelated }.map { $0.0 }
+        if !changed.isEmpty || beforeRules != (UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]) {
+            let changedIDs = Set(changed.isEmpty ? [beforeRows[index].id] : changed.map(\.id))
+            let record = CategoryUndoRecord(version: ledgerVersion, rows: changed.isEmpty ? [beforeRows[index]] : changed, rules: beforeRules, overrides: beforeOverrides, reviews: beforeReviews,
+                expectedRows: movements.filter { changedIDs.contains($0.id) },
+                expectedRules: UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:],
+                expectedOverrides: UserDefaults.standard.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:],
+                expectedReviews: UserDefaults.standard.data(forKey: "marcelito.manualReviews.v1"))
+            if let data = try? JSONEncoder().encode(record) { UserDefaults.standard.set(data, forKey: "marcelito.categoryUndo.v1"); categoryUndoCache = record }
+        }
         DiagnosticsRecorder.record(
             stage: "categories.manual",
             message: "Categoría manual actualizada a \(category)."
@@ -4733,22 +5315,347 @@ final class FinanceStore {
         return changed
     }
 
-    func updateClassification(for movement: Movement, kind: MovementKind, travelRelated: Bool) {
+    private var rejectedTransferPairKeys: Set<String> {
+        Set(UserDefaults.standard.stringArray(forKey: "marcelito.transfer.rejectedPairs.v1") ?? [])
+    }
+
+    private func transferPairReviewKey(_ left: Movement, _ right: Movement) -> String {
+        [manualReviewKey(left), manualReviewKey(right)].sorted().joined(separator: "||")
+    }
+
+    func rejectTransferPair(_ pair: TransferReviewPair) {
+        guard movements.contains(where: { $0.id == pair.outgoing.id }),
+              movements.contains(where: { $0.id == pair.incoming.id }) else { return }
+        var rejected = rejectedTransferPairKeys
+        rejected.insert(transferPairReviewKey(pair.outgoing, pair.incoming))
+        UserDefaults.standard.set(Array(rejected), forKey: "marcelito.transfer.rejectedPairs.v1")
+        persist(markingChange: true)
+    }
+
+    func resetRejectedTransferPairs() {
+        UserDefaults.standard.removeObject(forKey: "marcelito.transfer.rejectedPairs.v1")
+        persist(markingChange: true)
+    }
+
+    var isRepairingPaymentDescriptions = false
+    var paymentDescriptionRepairProgress: String?
+
+    /// Recover descriptors only. UUIDs, dates, amounts, source evidence keys,
+    /// categories and explicit accounting decisions are never replaced.
+    @MainActor
+    func recoverPaymentDescriptions() async -> (updated: Int, skipped: Int) {
+        guard !isRepairingPaymentDescriptions else { return (0, 0) }
+        isRepairingPaymentDescriptions = true
+        defer { isRepairingPaymentDescriptions = false; paymentDescriptionRepairProgress = nil }
+        let defaults = UserDefaults.standard
+        if defaults.data(forKey: "marcelito.ledger.beforeDescriptorRepair.v1") == nil,
+           let backup = try? JSONEncoder().encode(currentEnvelope()) {
+            defaults.set(backup, forKey: "marcelito.ledger.beforeDescriptorRepair.v1")
+            defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeDescriptorRepair.v1")
+        }
+        let sources = statements.filter { isEligibleStatement($0) && ["BBVA", "Santander"].contains($0.source) }
+        var descriptors: [UUID: (text: String, date: Date, amount: Decimal, page: Int?, statementID: UUID?, fingerprint: String?)] = [:]
+        var skipped = 0
+        for (position, statement) in sources.enumerated() {
+            paymentDescriptionRepairProgress = "\(position + 1) de \(sources.count) · \(statement.source)"
+            guard !Task.isCancelled, let url = statementFileURL(for: statement) else { skipped += 1; continue }
+            do {
+                let extraction = try await PDFExtractionCoordinator.shared.perform {
+                    let data = try Self.readPDFData(from: url)
+                    return try autoreleasepool {
+                        try Self.extractPDFUsingCache(data: data, fileName: statement.fileName, allowOCR: true,
+                            sourceOverride: nil, kindOverride: nil, learnedRules: [:])
+                    }
+                }
+                guard !Task.isCancelled, extraction.source == statement.source,
+                      extraction.sourceFingerprint == statement.sourceFingerprint,
+                      reconcileStatement(kind: extraction.kind, summary: extraction.summary,
+                        movements: extraction.candidates).status == .valid else { skipped += 1; continue }
+                let original = movements.filter { $0.statementId == statement.id }
+                func key(_ row: Movement) -> String {
+                    "\(normalizedDate(row.date))|\(row.amount)|\(row.extractionEvidence?.page ?? 0)"
+                }
+                let oldGroups = Dictionary(grouping: original, by: key)
+                let newGroups = Dictionary(grouping: extraction.candidates, by: key)
+                guard oldGroups.mapValues(\.count) == newGroups.mapValues(\.count) else { skipped += 1; continue }
+                for (identity, group) in oldGroups where group.count == 1 {
+                    guard let current = group.first, let replacement = newGroups[identity]?.first,
+                          let raw = replacement.rawDescription, !raw.isEmpty else { continue }
+                    descriptors[current.id] = (raw, current.date, current.amount, current.extractionEvidence?.page,
+                        current.statementId, statement.sourceFingerprint)
+                }
+            } catch { skipped += 1 }
+        }
+        guard !Task.isCancelled else { return (0, skipped) }
+        var updated = 0
+        for index in movements.indices {
+            if let descriptor = descriptors[movements[index].id],
+               movements[index].date == descriptor.date, movements[index].amount == descriptor.amount,
+               movements[index].extractionEvidence?.page == descriptor.page,
+               movements[index].statementId == descriptor.statementID,
+               statementForMovement(movements[index])?.sourceFingerprint == descriptor.fingerprint,
+               movements[index].rawDescription != descriptor.text {
+                movements[index].rawDescription = descriptor.text; updated += 1
+            }
+        }
+        if updated > 0 {
+            // Classification review remains protected by accountingReviewLocked.
+            reconcileStoredMovements()
+            persist(markingChange: true)
+        }
+        DiagnosticsRecorder.record(stage: "payments.descriptors.repair",
+            message: "Descripciones recuperadas: \(updated); estados omitidos: \(skipped). Categorías conservadas.")
+        return (updated, skipped)
+    }
+
+    var pendingTransferReviewPairs: [TransferReviewPair] {
+        let rows = eligibleMovements.filter { $0.matchedMovementId == nil }
+        let incoming = Dictionary(grouping: rows.filter {
+            ($0.amount > 0 || (isCardMovement($0) && movementKind($0) == .cardPayment))
+                && !($0.manuallyAccountingReviewed == true && $0.kind == .income)
+        }) {
+            NSDecimalNumber(decimal: abs($0.amount)).stringValue
+        }
+        let rejected = rejectedTransferPairKeys
+        let destinations = paymentDestinationIssuers()
+        return rows.filter { isBankMovement($0) && $0.amount < 0 }.flatMap { outgoing in
+            incoming[NSDecimalNumber(decimal: abs(outgoing.amount)).stringValue, default: []].filter { peer in
+                let bankPair = distinctImportedBankAccounts(outgoing, peer)
+                    && movementKind(outgoing) != .cardPayment
+                    && abs(outgoing.date.timeIntervalSince(peer.date)) <= 3 * 86400
+                return (bankPair || compatibleCardPayment(outgoing, peer, destinations: destinations, requireOwnRecipient: false))
+                    && !rejected.contains(transferPairReviewKey(outgoing, peer))
+            }.map { TransferReviewPair(outgoing: outgoing, incoming: $0,
+                isCardPayment: isCardMovement($0)) }
+        }.sorted { $0.outgoing.date > $1.outgoing.date }
+    }
+
+    @discardableResult
+    func confirmPaymentPair(_ pair: TransferReviewPair) -> Bool {
+        guard pair.isCardPayment,
+              let bankIndex = movements.firstIndex(where: { $0.id == pair.outgoing.id }),
+              let cardIndex = movements.firstIndex(where: { $0.id == pair.incoming.id }),
+              movements[bankIndex].matchedMovementId == nil, movements[cardIndex].matchedMovementId == nil,
+              pendingTransferReviewPairs.contains(where: { $0.id == pair.id }) else { return false }
+        for (target, peer) in [(bankIndex, cardIndex), (cardIndex, bankIndex)] {
+            movements[target].kind = .cardPayment
+            movements[target].flow = .transfer
+            movements[target].matchedMovementId = movements[peer].id
+            movements[target].confirmedCounterpartKey = manualReviewKey(movements[peer])
+            movements[target].reconciliationConfidence = 100
+            movements[target].reconciliationReason = "Pago de tarjeta · pareja confirmada manualmente"
+            movements[target].manuallyAccountingReviewed = true
+            movements[target].manuallyReviewed = true
+        }
+        persist(markingChange: true)
+        return true
+    }
+
+    /// Full account coverage uses printed date ranges, not a month label.
+    private func monthlyAuditCoveredDays(calendar: Calendar) -> Set<Date> {
+        let groups = Dictionary(grouping: statements) { "\($0.source)|\($0.accountKey ?? "unknown")" }
+        guard !groups.isEmpty else { return [] }
+        var common: Set<Date>?
+        let printedDate = #"\d{4}-\d{1,2}-\d{1,2}|\b\d{1,2}(?:[/-](?:\d{1,2}|[a-záéíóú]{3,})[/-]\d{4}|\s+(?:de\s+)?[a-záéíóú]{3,})"#
+        for records in groups.values {
+            var days = Set<Date>()
+            for record in records where isEligibleStatement(record) {
+                let count = (try? NSRegularExpression(pattern: printedDate, options: .caseInsensitive))?
+                    .numberOfMatches(in: record.period, range: NSRange(record.period.startIndex..., in: record.period)) ?? 0
+                guard count >= 2, let range = statementRange(from: record.period) else { continue }
+                var day = calendar.startOfDay(for: range.lowerBound)
+                let end = calendar.startOfDay(for: range.upperBound)
+                while day <= end {
+                    days.insert(day)
+                    guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+                    day = next
+                }
+            }
+            common = common.map { $0.intersection(days) } ?? days
+        }
+        return common ?? []
+    }
+
+    func monthlyFinancialAudit(for date: Date, now: Date = .now) -> MonthlyFinancialAudit {
+        let calendar = Calendar(identifier: .gregorian)
+        let interval = calendar.dateInterval(of: .month, for: date)!
+        let rows = eligibleMovements.filter { $0.date >= interval.start && $0.date < interval.end }
+        let grouped: [MonthlyAuditBucket: [Movement]] = [
+            .income: rows.filter(isRealIncome),
+            .spending: rows.filter(isSpend) + loanSpendingProjection.interestRows.filter { $0.date >= interval.start && $0.date < interval.end },
+            .refunds: rows.filter { movementKind($0) == .refund && $0.amount > 0 },
+            .transferOut: rows.filter { movementKind($0) == .bankTransfer && $0.amount < 0 },
+            .transferIn: rows.filter { movementKind($0) == .bankTransfer && $0.amount > 0 },
+            .cardPayment: rows.filter { movementKind($0) == .cardPayment && isBankMovement($0) && $0.amount < 0 }
+        ]
+        let pending = pendingTransferReviewPairs.filter {
+            ($0.outgoing.date >= interval.start && $0.outgoing.date < interval.end)
+                || ($0.incoming.date >= interval.start && $0.incoming.date < interval.end)
+        }.count
+        let excluded = statements.filter { record in
+            guard !isEligibleStatement(record), let range = statementRange(from: record.period) else { return false }
+            return range.lowerBound < interval.end && range.upperBound >= interval.start
+        }.count
+        let covered = monthlyAuditCoveredDays(calendar: calendar)
+        let observedEnd = min(interval.end, calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now))!)
+        var cursor = interval.start
+        var complete = observedEnd > interval.start && !statements.isEmpty && statements.allSatisfy { $0.accountKey != nil }
+        while cursor < observedEnd {
+            if !covered.contains(cursor) { complete = false; break }
+            cursor = calendar.date(byAdding: .day, value: 1, to: cursor)!
+        }
+        let income = grouped[.income, default: []].reduce(Decimal(0)) { $0 + abs($1.amount) }
+        let spend = grouped[.spending, default: []].reduce(Decimal(0)) { $0 + abs($1.amount) }
+            - grouped[.refunds, default: []].reduce(Decimal(0)) { $0 + abs($1.amount) }
+        let bridge = complete && pending == 0 && excluded == 0 && interval.end <= now
+            ? monthlyFundingBridge(interval: interval, incomeLessSpending: income - spend, calendar: calendar) : nil
+        return MonthlyFinancialAudit(month: interval.start, rows: grouped, hasCompleteCoverage: complete,
+            unresolvedPairCount: pending, excludedStatementCount: excluded, bridge: bridge)
+    }
+
+    private func monthlyFundingBridge(interval: DateInterval, incomeLessSpending: Decimal, calendar: Calendar) -> MonthlyFundingBridge? {
+        // A loan with dated UDI valuations needs exact month-end principal/FX evidence.
+        // Bank/card cuts alone cannot prove that bridge after adding a loan.
+        guard loanLedger.state.accounts.isEmpty, loanLedger.loadError == nil else { return nil }
+        // Never carry different account cutoffs forward to fabricate a month-end balance.
+        guard statements.allSatisfy({ $0.accountKey != nil }) else { return nil }
+        let groups = Dictionary(grouping: statements) { "\($0.source)|\($0.accountKey!)" }
+        guard !groups.isEmpty,
+              let startDay = calendar.date(byAdding: .day, value: -1, to: interval.start),
+              let endDay = calendar.date(byAdding: .day, value: -1, to: interval.end) else { return nil }
+        func totals(at day: Date) -> (cash: Decimal, debt: Decimal)? {
+            var cash: Decimal = 0, debt: Decimal = 0
+            for records in groups.values {
+                let exact = records.filter { record in
+                    guard isEligibleStatement(record), let range = statementRange(from: record.period) else { return false }
+                    return calendar.isDate(range.upperBound, inSameDayAs: day)
+                }
+                guard exact.count == 1, let record = exact.first else { return nil }
+                if statementKind(record) == .bank {
+                    guard let balance = record.summary?.cashBalance else { return nil }
+                    cash += balance
+                } else {
+                    guard let balance = calculateMetric(for: record).debtBalance else { return nil }
+                    debt += balance
+                }
+            }
+            return (cash, debt)
+        }
+        guard let before = totals(at: startDay), let after = totals(at: endDay) else { return nil }
+        return MonthlyFundingBridge(cashChange: after.cash - before.cash, debtChange: after.debt - before.debt,
+            incomeLessSpending: incomeLessSpending)
+    }
+
+    /// Candidates are suggestions only: equal amounts never authorize exclusion.
+    func transferCounterparts(for movement: Movement) -> [Movement] {
+        guard isBankMovement(movement), isEligibleMovement(movement) else { return [] }
+        return movements.filter { peer in
+            peer.id != movement.id && isEligibleMovement(peer)
+                && !rejectedTransferPairKeys.contains(transferPairReviewKey(movement, peer))
+                && distinctImportedBankAccounts(movement, peer)
+                && movement.amount * peer.amount < 0
+                && exactTransferAmountsMatch(movement.amount, peer.amount)
+                && abs(movement.date.timeIntervalSince(peer.date)) <= 3 * 86400
+                && (peer.matchedMovementId == nil || peer.matchedMovementId == movement.id)
+        }.sorted { $0.date < $1.date }
+    }
+
+    @discardableResult
+    func confirmOwnTransfer(_ movement: Movement, counterpart: Movement) -> Bool {
+        guard let index = movements.firstIndex(where: { $0.id == movement.id }),
+              let peerIndex = movements.firstIndex(where: { $0.id == counterpart.id }),
+              movements[index].matchedMovementId == nil || movements[index].matchedMovementId == counterpart.id,
+              transferCounterparts(for: movements[index]).contains(where: { $0.id == counterpart.id }) else { return false }
+        for (target, peer) in [(index, peerIndex), (peerIndex, index)] {
+            movements[target].kind = .bankTransfer
+            movements[target].flow = .transfer
+            movements[target].matchedMovementId = movements[peer].id
+            movements[target].confirmedCounterpartKey = manualReviewKey(movements[peer])
+            movements[target].reconciliationConfidence = 100
+            movements[target].reconciliationReason = "Traspaso propio · pareja confirmada manualmente"
+            movements[target].manuallyAccountingReviewed = true
+            if !movements[target].manuallyReviewed { movements[target].category = "Transferencia" }
+            movements[target].manuallyReviewed = true
+        }
+        persist(markingChange: true)
+        return true
+    }
+
+    /// Kinds a user may assign without contradicting the signed amount. A
+    /// positive row can never become a purchase/fee/interest (that would be an
+    /// expense with money coming in) and a negative row can never become
+    /// income, credit or a refund. Transfers and card payments accept both.
+    static func selectableKinds(forAmount amount: Decimal) -> [MovementKind] {
+        MovementKind.allCases.filter { flow(for: $0, amount: amount) != nil }
+    }
+
+    /// The flow implied by a manual kind for a signed amount, or nil when the
+    /// pair is contradictory and would invalidate the stored row.
+    static func flow(for kind: MovementKind, amount: Decimal) -> FlowKind? {
+        switch kind {
+        case .cardPayment, .bankTransfer:
+            return .transfer
+        case .income, .credit, .refund:
+            return amount > 0 ? .income : nil
+        case .purchase, .msi, .interest, .fee, .other:
+            return amount < 0 ? .expense : nil
+        }
+    }
+
+    /// Kind shown in the detail picker. Rows reset by reconciliation carry
+    /// `kind == nil`; defaulting those to `.purchase` made an untouched income
+    /// look like a purchase and a single toggle would turn it into spend.
+    static func displayKind(for movement: Movement) -> MovementKind {
+        if let kind = movement.kind, flow(for: kind, amount: movement.amount) != nil { return kind }
+        switch movement.flow {
+        case .transfer: return .bankTransfer
+        case .income: return .income
+        case .expense, .debt: return movement.amount > 0 ? .income : .purchase
+        }
+    }
+
+    /// Marks a row as travel-related without touching its accounting kind.
+    func updateTravelRelated(for movement: Movement, travelRelated: Bool) {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return }
-        movements[index].kind = kind
         movements[index].manuallyReviewed = true
         movements[index].travelRelated = travelRelated
         movements[index].classificationTags.removeAll { $0 == "viaje" }
         if travelRelated { movements[index].classificationTags.append("viaje") }
-        switch kind {
-        case .cardPayment, .bankTransfer:
-            movements[index].flow = .transfer
-        case .income, .credit, .refund:
-            movements[index].flow = .income
-        default:
-            movements[index].flow = .expense
+        persist(markingChange: true)
+    }
+
+    @discardableResult
+    func updateClassification(for movement: Movement, kind: MovementKind, travelRelated: Bool) -> Bool {
+        guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return false }
+        guard let flow = Self.flow(for: kind, amount: movements[index].amount) else {
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "movement.classification.rejected",
+                message: "No se aplicó \(kind.rawValue) a un importe de \(movements[index].amount): contradice el signo del movimiento."
+            )
+            return false
+        }
+        if kind != movements[index].kind {
+            if let peerID = movements[index].matchedMovementId,
+               let peerIndex = movements.firstIndex(where: { $0.id == peerID }) {
+                movements[peerIndex].confirmedCounterpartKey = nil
+            }
+            movements[index].confirmedCounterpartKey = nil
+        }
+        movements[index].kind = kind
+        movements[index].manuallyReviewed = true
+        movements[index].manuallyAccountingReviewed = true
+        movements[index].travelRelated = travelRelated
+        movements[index].classificationTags.removeAll { $0 == "viaje" }
+        if travelRelated { movements[index].classificationTags.append("viaje") }
+        movements[index].flow = flow
+        reconcileStoredMovements()
+        if kind == .bankTransfer, let current = movements.firstIndex(where: { $0.id == movement.id }),
+           movements[current].matchedMovementId == nil {
+            movements[current].reconciliationReason = "Traspaso propio confirmado · contraparte pendiente"
         }
         persist(markingChange: true)
+        return true
     }
 
     private func manualReviewKey(_ movement: Movement) -> String {
@@ -4761,12 +5668,42 @@ final class FinanceStore {
               let data = UserDefaults.standard.data(forKey: "marcelito.manualReviews.v1"),
               let saved = try? JSONDecoder().decode([String: Movement].self, from: data) else { return }
         let counts = Dictionary(grouping: movements, by: manualReviewKey).mapValues(\.count)
+        func financialKey(_ movement: Movement) -> String {
+            let identity = financialAccountKey(movement) ?? movement.statementId?.uuidString ?? movement.id.uuidString
+            return "\(identity)|\(normalizedDate(movement.date))|\(movement.amount)|\(movement.extractionEvidence?.page ?? 0)"
+        }
+        let financialCounts = Dictionary(grouping: movements, by: financialKey).mapValues(\.count)
+        let savedFinancial = Dictionary(grouping: Array(saved), by: { entry in
+            // Saved keys retain the bank/account identity even if replay has
+            // replaced the old statement UUID before this restoration runs.
+            entry.key.components(separatedBy: "|").prefix(5).joined(separator: "|")
+        })
+        var restorations: [(index: Int, prior: Movement)] = []
+        var keyTranslations: [String: String] = [:]
         for index in movements.indices {
-            guard counts[manualReviewKey(movements[index])] == 1 else { continue }
-            guard let prior = saved[manualReviewKey(movements[index])] else { continue }
+            let key = manualReviewKey(movements[index])
+            guard counts[key] == 1 else { continue }
+            let priorEntry: (key: String, value: Movement)?
+            if let prior = saved[key] { priorEntry = (key, prior) }
+            else {
+                // Descriptor recovery changes source text. Rebind only when
+                // account/day/signed cents/page are unique on BOTH sides.
+                let financial = financialKey(movements[index])
+                let alternatives = savedFinancial[financial, default: []]
+                priorEntry = financialCounts[financial] == 1 && alternatives.count == 1 ? alternatives.first : nil
+            }
+            guard let priorEntry else { continue }
+            keyTranslations[priorEntry.key] = key
+            restorations.append((index, priorEntry.value))
+        }
+        for (index, prior) in restorations {
             movements[index].category = prior.category
-            movements[index].kind = prior.kind
-            movements[index].flow = prior.flow
+            movements[index].confirmedCounterpartKey = prior.confirmedCounterpartKey.map { keyTranslations[$0] ?? $0 }
+            movements[index].manuallyAccountingReviewed = prior.manuallyAccountingReviewed
+            if prior.accountingReviewLocked {
+                movements[index].kind = prior.kind
+                movements[index].flow = prior.flow
+            }
             movements[index].travelRelated = prior.travelRelated
             movements[index].classificationTags = prior.classificationTags
             movements[index].manuallyReviewed = true
@@ -4875,6 +5812,8 @@ final class FinanceStore {
     }
 
     func clearLocalData() {
+        ledgerResetGeneration += 1
+        loanLedger.clear()
         UserDefaults.standard.removeObject(forKey: "marcelito.manualReviews.v1")
         movements = []
         statements = []
@@ -4886,6 +5825,8 @@ final class FinanceStore {
         canonicalRebuildPending = false
         ledgerRefreshState = .ready
         persist()
+        categoryUndoCache = nil
+        UserDefaults.standard.removeObject(forKey: "marcelito.categoryUndo.v1")
         let defaults = UserDefaults.standard
         defaults.removeObject(forKey: movementKey)
         defaults.removeObject(forKey: statementKey)
@@ -4893,14 +5834,23 @@ final class FinanceStore {
         defaults.removeObject(forKey: categoryRulesKey)
         defaults.removeObject(forKey: transferOwnerAliasesKey)
         defaults.removeObject(forKey: transferMatcherVersionKey)
+        defaults.removeObject(forKey: "marcelito.transfer.rejectedPairs.v1")
+        defaults.removeObject(forKey: "marcelito.ledger.beforeTransferV2.v1")
+        defaults.removeObject(forKey: "marcelito.manualReviews.beforeTransferV2.v1")
+        defaults.removeObject(forKey: "marcelito.ledger.beforeDescriptorRepair.v1")
+        defaults.removeObject(forKey: "marcelito.manualReviews.beforeDescriptorRepair.v1")
+        defaults.removeObject(forKey: "marcelito.ledger.beforeCardPaymentsV4.v1")
+        defaults.removeObject(forKey: "marcelito.manualReviews.beforeCardPaymentsV4.v1")
+        defaults.removeObject(forKey: "marcelito.ledger.beforeTransferV3.v1")
+        defaults.removeObject(forKey: "marcelito.manualReviews.beforeTransferV3.v1")
         defaults.removeObject(forKey: manualCategoryOverridesKey)
         defaults.removeObject(forKey: categoryTaxonomyVersionKey)
         defaults.removeObject(forKey: numericRepairKey)
-        defaults.removeObject(forKey: canonicalRebuildKey)
-        defaults.removeObject(forKey: canonicalRebuildReaderVersionKey)
+        defaults.removeObject(forKey: Self.canonicalRebuildKey)
+        defaults.removeObject(forKey: Self.canonicalRebuildReaderVersionKey)
         defaults.removeObject(forKey: canonicalRebuildExpectedCountKey)
-        defaults.removeObject(forKey: extractionReplayVersionKey)
-        defaults.removeObject(forKey: normalizedLedgerReaderVersionKey)
+        defaults.removeObject(forKey: Self.extractionReplayVersionKey)
+        defaults.removeObject(forKey: Self.normalizedLedgerReaderVersionKey)
         defaults.removeObject(forKey: ledgerEnvelopeKey)
         defaults.removeObject(forKey: ledgerBackupKey)
         defaults.removeObject(forKey: rebuildStateKey)
@@ -4909,6 +5859,7 @@ final class FinanceStore {
         defaults.removeObject(forKey: bankScreenshotCaptureStorageKey)
         try? FileManager.default.removeItem(at: statementFilesDirectoryURL)
         try? FileManager.default.removeItem(at: bankScreenshotFilesDirectoryURL)
+        if let directory = try? LoanPDFReader.directory() { try? FileManager.default.removeItem(at: directory) }
     }
 
     /// Devuelve la URL local del PDF importado. Solo se aceptan nombres de
@@ -4948,7 +5899,7 @@ final class FinanceStore {
         let defaults = UserDefaults.standard
         let hasSources = !statements.isEmpty || !storedPDFURLs.isEmpty
         let extractionReplayPending = hasSources
-            && defaults.string(forKey: extractionReplayVersionKey) != Self.extractionReplayVersion
+            && defaults.string(forKey: Self.extractionReplayVersionKey) != Self.extractionReplayVersion
         // A statement imported after the last rebuild can still carry an
         // older reader revision. Treat that as a rebuild trigger even when
         // the previous rebuild was marked complete.
@@ -4960,8 +5911,8 @@ final class FinanceStore {
             pending = true
         } else {
             pending = Self.needsCanonicalRebuild(
-            completed: defaults.bool(forKey: canonicalRebuildKey),
-            completedReaderVersion: defaults.string(forKey: canonicalRebuildReaderVersionKey),
+            completed: defaults.bool(forKey: Self.canonicalRebuildKey),
+            completedReaderVersion: defaults.string(forKey: Self.canonicalRebuildReaderVersionKey),
             currentReaderVersion: Self.readerVersion,
             hasSources: hasSources
             )
@@ -4995,7 +5946,7 @@ final class FinanceStore {
         movements = backup.movements
         statements = backup.statements
         ledgerVersion = backup.version
-        defaults.set(false, forKey: canonicalRebuildKey)
+        defaults.set(false, forKey: Self.canonicalRebuildKey)
         defaults.removeObject(forKey: rebuildStateKey)
         defaults.removeObject(forKey: ledgerBackupKey)
         DiagnosticsRecorder.record(
@@ -5061,9 +6012,7 @@ final class FinanceStore {
         persist()
 
         guard !candidates.isEmpty else {
-            defaults.set(true, forKey: canonicalRebuildKey)
-            defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
-            defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
+            Self.recordCanonicalRebuildCompletion(in: defaults)
             defaults.set(true, forKey: numericRepairKey)
             defaults.set("complete", forKey: rebuildStateKey)
             defaults.removeObject(forKey: ledgerBackupKey)
@@ -5130,13 +6079,11 @@ final class FinanceStore {
         // logical statement count after normalization.
         normalizeStoredLedger()
         defaults.set(statements.count, forKey: canonicalRebuildExpectedCountKey)
-        defaults.set(true, forKey: canonicalRebuildKey)
-        defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
-        defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
+        persist()
+        Self.recordCanonicalRebuildCompletion(in: defaults)
         defaults.set(true, forKey: numericRepairKey)
         defaults.set("complete", forKey: rebuildStateKey)
         defaults.removeObject(forKey: ledgerBackupKey)
-        persist()
         refreshCanonicalRebuildStatus()
         DiagnosticsRecorder.record(
             stage: "rebuild.done",
@@ -5206,6 +6153,7 @@ final class FinanceStore {
 
         let storedURLs = storedPDFURLs
         let knownStatements = statements
+        let resetGenerationAtStart = ledgerResetGeneration
         let candidates: [URL]
         do {
             candidates = try await PDFExtractionCoordinator.shared.perform {
@@ -5351,29 +6299,91 @@ final class FinanceStore {
             return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount + failedCount)
         }
 
+        // "Borrar datos" while the PDFs were being read must win: committing
+        // the scratch ledger would resurrect everything the user just erased.
+        guard ledgerResetGeneration == resetGenerationAtStart else {
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "rebuild.discarded",
+                message: "Reconstrucción descartada porque los datos locales se borraron mientras corría."
+            )
+            return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: 0, invalidCount: 0)
+        }
+
         // One atomic in-memory commit followed by one envelope write. Invalid
         // statements still remain available for diagnostics, but no partial
-        // candidate state is ever rendered by the dashboard.
-        movements = scratch.movements
-        statements = scratch.statements
+        // candidate state is ever rendered by the dashboard. The OCR pass can
+        // take minutes, so fold in what the user did meanwhile (manual rows,
+        // screenshots, PDF imports or deletions) instead of overwriting it.
+        let merged = Self.mergeConcurrentLedgerChanges(
+            rebuiltMovements: scratch.movements,
+            rebuiltStatements: scratch.statements,
+            liveMovements: movements,
+            liveStatements: statements,
+            baselineStatements: knownStatements
+        )
+        movements = merged.movements
+        statements = merged.statements
         lastImportedFile = scratch.lastImportedFile ?? lastImportedFile
         ledgerVersion = UUID()
         normalizeStoredLedger()
         defaults.set(statements.count, forKey: canonicalRebuildExpectedCountKey)
         persist()
-        defaults.set(true, forKey: canonicalRebuildKey)
-        defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
-        defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
+        Self.recordCanonicalRebuildCompletion(in: defaults)
         defaults.set(true, forKey: numericRepairKey)
         defaults.set("complete", forKey: rebuildStateKey)
         defaults.removeObject(forKey: ledgerBackupKey)
         refreshCanonicalRebuildStatus()
+        // Screenshot links were cleared while the rebuild was pending (no
+        // statement was eligible then). Re-link them against the new official
+        // rows so a provisional copy never counts beside its PDF movement.
+        reconcileBankScreenshotsAgainstOfficialLedger()
         ledgerRefreshState = .ready
         DiagnosticsRecorder.record(
             stage: "rebuild.done",
             message: "Reconstrucción asíncrona terminada: \(importedCount) válido(s), \(invalidCount) bloqueado(s), \(movements.count) movimiento(s) canónicos."
         )
         return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount)
+    }
+
+    /// Combines a rebuilt ledger with changes the user made while the rebuild
+    /// was reading PDFs. `baselineStatements` is the live ledger when the
+    /// rebuild started.
+    /// - Rows without a statement (manual rows, provisional screenshots) are
+    ///   always taken from the live ledger, the rebuild only re-reads PDFs.
+    /// - A statement imported meanwhile is kept with its rows, and replaces a
+    ///   rebuilt copy of the same PDF.
+    /// - A statement deleted meanwhile is not resurrected by the rebuild.
+    static func mergeConcurrentLedgerChanges(
+        rebuiltMovements: [Movement],
+        rebuiltStatements: [StatementRecord],
+        liveMovements: [Movement],
+        liveStatements: [StatementRecord],
+        baselineStatements: [StatementRecord]
+    ) -> (movements: [Movement], statements: [StatementRecord]) {
+        let baselineIDs = Set(baselineStatements.map(\.id))
+        let liveIDs = Set(liveStatements.map(\.id))
+        let addedStatements = liveStatements.filter { !baselineIDs.contains($0.id) }
+        let addedIDs = Set(addedStatements.map(\.id))
+        let removedFingerprints = Set(baselineStatements
+            .filter { !liveIDs.contains($0.id) }
+            .compactMap(\.sourceFingerprint))
+        let addedFingerprints = Set(addedStatements.compactMap(\.sourceFingerprint))
+        let keptRebuilt = rebuiltStatements.filter { statement in
+            guard let fingerprint = statement.sourceFingerprint else { return true }
+            return !removedFingerprints.contains(fingerprint) && !addedFingerprints.contains(fingerprint)
+        }
+        let keptRebuiltIDs = Set(keptRebuilt.map(\.id))
+        let unattached = liveMovements.filter { $0.statementId == nil }
+        let rebuiltRows = rebuiltMovements.filter { movement in
+            guard let statementId = movement.statementId else { return false }
+            return keptRebuiltIDs.contains(statementId)
+        }
+        let addedRows = liveMovements.filter { movement in
+            guard let statementId = movement.statementId else { return false }
+            return addedIDs.contains(statementId)
+        }
+        return (unattached + rebuiltRows + addedRows, keptRebuilt + addedStatements)
     }
 
     /// Older TestFlight builds persisted rows produced by the former parser.
@@ -5492,7 +6502,8 @@ final class FinanceStore {
         // sections. Keep those rows in `charges` so “Total Nuevos Cargos” can
         // still reconcile, but never let them distort the section subtotals.
         let sectionRows = validRows.filter { movement in
-            ![.msi, .interest, .fee, .cardPayment, .bankTransfer].contains(movementKind(movement))
+            movement.extractionEvidence?.selectedColumn != "FINANCIAL_ADJUSTMENT"
+                && ![.msi, .interest, .fee, .cardPayment, .bankTransfer].contains(movementKind(movement))
         }
         let domesticCharges = sectionRows.filter { isSpend($0) && !$0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
         let foreignCharges = sectionRows.filter { isSpend($0) && $0.foreignCurrency }.reduce(Decimal(0)) { $0 + absolute($1.amount) }
@@ -5639,12 +6650,17 @@ final class FinanceStore {
             // perfectly reconciled PDF whenever the MSI schedule is present.
             if let expectedNewTransactions = summary.newTransactions {
                 // `Nuevas transacciones` is the current-period purchase
-                // subtotal.  Keep MSI, interest, fees and payments out of this
-                // comparison so the statement's separate sections cannot
-                // inflate the subtotal (and avoid relying on a scope-local
-                // `regular` collection that is not available here).
+                // subtotal. Keep future MSI schedules, interest, fees and
+                // payments out, but include Amex plan-cancellation balances:
+                // those are explicitly included in the issuer's new-
+                // transactions figure while remaining outside the domestic
+                // purchase subtotal and real-spend aggregates.
                 let regularTransactions = validRows
-                    .filter { movementKind($0) == .purchase }
+                    .filter { movement in
+                        movementKind(movement) == .purchase
+                            || (movementKind(movement) == .msi
+                                && movement.extractionEvidence?.selectedColumn == "FINANCIAL_ADJUSTMENT")
+                    }
                     .reduce(Decimal(0)) { $0 + absolute($1.amount) }
                 if absolute(regularTransactions - absolute(expectedNewTransactions)) > tolerance {
                     mismatches.append("nuevas transacciones: extraído \(regularTransactions) vs declarado \(absolute(expectedNewTransactions))")
@@ -5756,13 +6772,69 @@ final class FinanceStore {
         ).status == .valid
     }
 
+    /// Statements print most rows without a year ("05/ENE", "20 de
+    /// Diciembre"), so every reader assumes one year for the whole document.
+    /// A cycle from 16-dic-2025 to 15-ene-2026 then dated January rows a year
+    /// early or December rows a year in the future. Re-anchor a row by one
+    /// year only when that moves it inside the printed cycle; rows that
+    /// already fit (or carry an older original purchase date) are untouched.
+    /// Records saved before fingerprints existed can only be recognised by
+    /// file name. Banks reuse names such as "EstadoCuenta.pdf" every month,
+    /// so the name alone would let April's import replace March's rows. Reuse
+    /// the legacy record only when issuer and printed period also match.
+    static func legacyStatementForReimport(
+        in statements: [StatementRecord], fileName: String, source: String, period: String
+    ) -> StatementRecord? {
+        func samePeriod(_ left: String, _ right: String) -> Bool {
+            if let leftRange = statementRange(from: left), let rightRange = statementRange(from: right) {
+                return leftRange == rightRange
+            }
+            let fold = { (value: String) in
+                value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                    .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+            }
+            return fold(left) == fold(right)
+        }
+        return statements.first { statement in
+            statement.sourceFingerprint == nil
+                && statement.fileName == fileName
+                && statement.source.caseInsensitiveCompare(source) == .orderedSame
+                && samePeriod(statement.period, period)
+        }
+    }
+
+    static func parseDateForTesting(_ value: String, defaultYear: Int? = nil) -> Date? {
+        parseDate(value, defaultYear: defaultYear)
+    }
+
+    static func movementsAnchoredToStatementPeriod(_ movements: [Movement], period: String) -> [Movement] {
+        guard let range = statementRange(from: period) else { return movements }
+        let calendar = Calendar(identifier: .gregorian)
+        guard let latestPlausible = calendar.date(byAdding: .day, value: 10, to: range.upperBound) else { return movements }
+        let crossesYear = calendar.component(.year, from: range.lowerBound) != calendar.component(.year, from: range.upperBound)
+        return movements.map { movement in
+            var anchored = movement
+            if movement.date > latestPlausible,
+               let earlier = calendar.date(byAdding: .year, value: -1, to: movement.date),
+               earlier <= latestPlausible {
+                anchored.date = earlier
+            } else if crossesYear, movement.date < range.lowerBound,
+                      let later = calendar.date(byAdding: .year, value: 1, to: movement.date),
+                      later >= range.lowerBound, later <= latestPlausible {
+                anchored.date = later
+            }
+            return anchored
+        }
+    }
+
     private static func extractPDF(
         data: Data,
         fileName: String,
         allowOCR: Bool,
         sourceOverride: String?,
         kindOverride: StatementKind?,
-        learnedRules: [String: String]
+        learnedRules: [String: String],
+        progress: (@Sendable (Double, String) -> Void)? = nil
     ) throws -> PDFImportExtraction {
         guard data.count <= 50 * 1024 * 1024 else {
             throw FinanceImportError.documentTooLarge
@@ -5783,11 +6855,15 @@ final class FinanceStore {
         var pageTexts: [String] = []
         for index in 0..<document.pageCount {
             try Task.checkCancellation()
+            progress?(0.05 + 0.25 * Double(index + 1) / Double(max(1, document.pageCount)), "Texto · página \(index + 1) de \(document.pageCount)")
             guard let pageText = document.page(at: index)?.string,
                   !pageText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
             pageTexts.append("__PDF_PAGE_\(index + 1)__\n\(pageText)")
         }
         var extractedText = pageTexts.joined(separator: "\n")
+        if ITAMLoanReader.recognizes(extractedText) {
+            throw LoanError.invalid("Este es un préstamo ITAM. Agrégalo desde Cuentas → Préstamos para conservar cuotas y abonos sin contarlos como compras.")
+        }
         let cleanedSourceOverride = sourceOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // A PDF can expose a text layer even when its line breaks are unusual
@@ -5809,7 +6885,10 @@ final class FinanceStore {
         var rappiSupplementalLayoutText = ""
         var rappiPageWiseSelectableText = ""
         var recoveryAttempts = ["pdf-text"]
-        if !textLayerReconciles {
+        if !textLayerReconciles || Self.sourceDetection(from: extractedText, fileName: fileName).source == "BBVA" {
+            // BBVA content-stream order can reconcile amounts while placing
+            // beneficiary lines before the dated row. Prefer visual ordering
+            // only when the same issuer controls also certify that stream.
             let isRappi = Self.sourceDetection(from: extractedText, fileName: fileName).source == "Rappi"
             if isRappi {
                 // Preserve page boundaries before any OCR is attempted. This
@@ -5857,7 +6936,8 @@ final class FinanceStore {
                 from: document,
                 pageIndexes: rappiPages,
                 prioritizeNumericEvidence: selectableSource == "Rappi",
-                issuerHint: selectableSource
+                issuerHint: selectableSource,
+                progress: progress
             )
             : []
         try Task.checkCancellation()
@@ -5999,7 +7079,8 @@ final class FinanceStore {
                 from: document,
                 pageIndexes: administrativePageIndexes,
                 prioritizeNumericEvidence: true,
-                issuerHint: source
+                issuerHint: source,
+                progress: progress
             )
             let administrativeText = Self.ocrText(from: administrativeObservations)
             accountKey = Self.maskedAccountKey(from: administrativeText, source: source)
@@ -6073,7 +7154,8 @@ final class FinanceStore {
                     pageIndexes: nil,
                     prioritizeNumericEvidence: false,
                     forceRegionRecovery: true,
-                    issuerHint: source
+                    issuerHint: source,
+                progress: progress
                 )
                 try Task.checkCancellation()
                 let retryResult = Self.parseSantanderTable(
@@ -6667,8 +7749,13 @@ final class FinanceStore {
             sourceDetection: sourceDetection,
             source: source,
             accountKey: accountKey,
+            accountFamilyFingerprint: Self.amexAccountFamilyFingerprint(
+                preferredText: text,
+                administrativeText: extractedText,
+                source: source
+            ),
             kind: kind,
-            candidates: candidates,
+            candidates: Self.movementsAnchoredToStatementPeriod(candidates, period: period),
             period: period,
             summary: summary,
             usedOCR: usedOCR,
@@ -6696,6 +7783,7 @@ final class FinanceStore {
         let sourceDetection = extraction.sourceDetection
         let source = extraction.source
         let accountKey = extraction.accountKey
+        let accountFamilyFingerprint = extraction.accountFamilyFingerprint
         let detectedKind = extraction.kind
         let candidates = extraction.candidates
         let period = extraction.period
@@ -6709,7 +7797,7 @@ final class FinanceStore {
         // fall back to a legacy filename-only record once for older builds
         // that did not persist fingerprints.
         let existingStatement = statements.first(where: { $0.sourceFingerprint == sourceFingerprint })
-            ?? statements.first(where: { $0.sourceFingerprint == nil && $0.fileName == url.lastPathComponent })
+            ?? Self.legacyStatementForReimport(in: statements, fileName: url.lastPathComponent, source: source, period: period)
         let statementId = existingStatement?.id ?? UUID()
         let fresh = candidates.map { candidate -> Movement in
             var imported = candidate
@@ -6813,6 +7901,7 @@ final class FinanceStore {
             id: statementId,
             source: source,
             accountKey: accountKey,
+            accountFamilyFingerprint: accountFamilyFingerprint,
             period: period,
             fileName: url.lastPathComponent,
             localFileName: storedFileName,
@@ -6854,11 +7943,8 @@ final class FinanceStore {
             // otherwise the first import on a clean install would immediately
             // ask the user to rebuild the same PDF a second time.
             if !canonicalRebuildPending && !statements.contains(where: { !isCurrentReader($0) }) {
-                defaults.set(true, forKey: canonicalRebuildKey)
-                defaults.set(Self.readerVersion, forKey: canonicalRebuildReaderVersionKey)
-                defaults.set(Self.extractionReplayVersion, forKey: extractionReplayVersionKey)
+                Self.recordCanonicalRebuildCompletion(in: defaults)
                 defaults.set(true, forKey: numericRepairKey)
-                defaults.set(Self.readerVersion, forKey: normalizedLedgerReaderVersionKey)
             }
             refreshCanonicalRebuildStatus()
         }
@@ -6901,11 +7987,13 @@ final class FinanceStore {
     private static func extractPDFUsingCache(
         data: Data, fileName: String, allowOCR: Bool,
         sourceOverride: String?, kindOverride: StatementKind?, learnedRules: [String: String],
-        forceFresh: Bool = false
+        forceFresh: Bool = false,
+        progress: (@Sendable (Double, String) -> Void)? = nil
     ) throws -> PDFImportExtraction {
         let fingerprint = pdfFingerprint(data)
         let keyData = try JSONSerialization.data(withJSONObject: [
             "reader": readerVersion, "replay": extractionReplayVersion,
+            "descriptors": "date-owned-continuations-v4",
             "fingerprint": fingerprint, "fileName": fileName,
             "accountIdentity": accountIdentityParserVersion,
             "allowOCR": allowOCR, "source": sourceOverride ?? "",
@@ -6917,6 +8005,7 @@ final class FinanceStore {
            var cached = cache?.load(PDFImportExtraction.self, key: key),
            cached.sourceFingerprint == fingerprint {
             cached.documentData = data
+            progress?(0.85, "Lectura guardada · validando estado…")
             return cached
         }
         if forceFresh {
@@ -6927,7 +8016,7 @@ final class FinanceStore {
         }
         let result = try extractPDF(data: data, fileName: fileName, allowOCR: allowOCR,
                                     sourceOverride: sourceOverride, kindOverride: kindOverride,
-                                    learnedRules: learnedRules)
+                                    learnedRules: learnedRules, progress: progress)
         // Keep uncertain readings out of the cache so an explicit retry always
         // performs fresh extraction. Certification also bypasses this helper.
         let reconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
@@ -7012,8 +8101,10 @@ final class FinanceStore {
     }
 
     /// Asynchronous import path used by the UI. PDFKit parsing and Vision OCR
-    /// run off the main actor; only the small ledger commit returns to the
-    /// store's isolation context after extraction completes.
+    /// run off the main actor. Resume progress callbacks and the observed
+    /// ledger commit on MainActor: a nonisolated async method otherwise resumes
+    /// on the generic executor and races SwiftUI's live ledger/cache reads.
+    @MainActor
     func importPDFAsync(
         from url: URL,
         allowOCR: Bool = true,
@@ -7023,7 +8114,8 @@ final class FinanceStore {
         kindOverride: StatementKind? = nil,
         normalizeAfterImport: Bool = true,
         forceFresh: Bool = false,
-        stage: ((String) -> Void)? = nil
+        stage: ((String) -> Void)? = nil,
+        progress: (@MainActor @Sendable (Double, String) -> Void)? = nil
     ) async throws -> ImportSummary {
         let didStartAccessing = url.startAccessingSecurityScopedResource()
         defer {
@@ -7035,6 +8127,7 @@ final class FinanceStore {
         let fileName = url.lastPathComponent
         let learnedRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
         try Task.checkCancellation()
+        DiagnosticsRecorder.record(stage: "import.extract.start", message: "Lectura iniciada: \(fileName).")
         let localExtraction = try await PDFExtractionCoordinator.shared.perform {
             let documentData = try Self.readPDFData(from: url)
             return try autoreleasepool {
@@ -7045,27 +8138,35 @@ final class FinanceStore {
                     sourceOverride: sourceOverride,
                     kindOverride: kindOverride,
                     learnedRules: learnedRules,
-                    forceFresh: forceFresh
+                    forceFresh: forceFresh,
+                    progress: { fraction, message in Task { @MainActor in progress?(fraction, message) } }
                 )
             }
         }
         try Task.checkCancellation()
+        DiagnosticsRecorder.record(stage: "import.extract.done", message: "\(localExtraction.source): \(localExtraction.pageCount) página(s), \(localExtraction.candidates.count) fila(s); incorporando al libro en la interfaz.")
         stage?("\(Self.localExtractionStage(for: localExtraction.recoveryAttempts)); conciliando contra los totales…")
+        progress?(0.92, "Conciliando y guardando…")
         let extraction = localExtraction
         try Task.checkCancellation()
-        return try applyPDFExtraction(
+        let result = try applyPDFExtraction(
             extraction,
             url: url,
             preserveExistingOnEmpty: preserveExistingOnEmpty,
             requireValidReconciliation: requireValidReconciliation,
             normalizeAfterImport: normalizeAfterImport
         )
+        DiagnosticsRecorder.record(stage: "import.commit.done", message: "\(result.source): \(result.imported) movimiento(s) guardado(s).")
+        progress?(1, "Estado guardado")
+        return result
     }
 
     /// Inspects a PDF with the production reader without writing anything to
     /// the canonical ledger. This is the device-side path used by the native
     /// corpus certifier: Vision, reconciliation and quality gates are exactly
     /// the same as a normal import, but the temporary result is discarded.
+    /// Its progress callback also updates SwiftUI state after worker extraction.
+    @MainActor
     func inspectPDFAsync(
         from url: URL,
         allowOCR: Bool = true,
@@ -7194,6 +8295,9 @@ final class FinanceStore {
         eligibleMovementsCache = nil
         periodMetricsCache = nil
         ledgerQualityCache = nil
+        netExpenseCache = nil; incomeProjectionCache = nil; balanceHistoryCache = nil
+        spendingCoverageCache.removeAll()
+        analyticsGeneration = UUID()
     }
 
     private func persist(markingChange: Bool = false) {
@@ -7264,11 +8368,16 @@ final class FinanceStore {
         /// financial fields without treating merchant quality as accounting
         /// uncertainty.
         let confidence: Double?
+        let descriptorDateY: CGFloat?
+        let precedesDate: Bool
 
-        init(text: String, boundingBox: CGRect, confidence: Double? = nil) {
+        init(text: String, boundingBox: CGRect, confidence: Double? = nil,
+             descriptorDateY: CGFloat? = nil, precedesDate: Bool = false) {
             self.text = text
             self.boundingBox = boundingBox
             self.confidence = confidence
+            self.descriptorDateY = descriptorDateY
+            self.precedesDate = precedesDate
         }
 
         var centerX: CGFloat { boundingBox.midX }
@@ -7291,6 +8400,8 @@ final class FinanceStore {
         /// recognizes the full printed row as one observation.
         let dateBoxes: [OCRTextBox]
         let amountBoxes: [OCRTextBox]
+        /// Bounded substring fragments split at printed Santander dates.
+        let wordBoxes: [OCRTextBox]
         let isolatedRappiRow: Bool
 
         init(
@@ -7300,6 +8411,7 @@ final class FinanceStore {
             confidence: Double,
             dateBoxes: [OCRTextBox] = [],
             amountBoxes: [OCRTextBox] = [],
+            wordBoxes: [OCRTextBox] = [],
             isolatedRappiRow: Bool = false,
             financialConfidence: Double? = nil
         ) {
@@ -7310,6 +8422,7 @@ final class FinanceStore {
             self.financialConfidence = financialConfidence
             self.dateBoxes = dateBoxes
             self.amountBoxes = amountBoxes
+            self.wordBoxes = wordBoxes
             self.isolatedRappiRow = isolatedRappiRow
         }
 
@@ -7937,7 +9050,7 @@ final class FinanceStore {
             pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
         )
         let signedMoneyRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9.,])[+-−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+            pattern: #"(?<![A-Za-z0-9.,])[-+−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         )
         let unsignedMoneyRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9.,])\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
@@ -8036,7 +9149,7 @@ final class FinanceStore {
             pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
         )
         let signedMoneyRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9.,])[+-−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+            pattern: #"(?<![A-Za-z0-9.,])[-+−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         )
 
         let unsignedMoneyRegex = try? NSRegularExpression(
@@ -8365,7 +9478,8 @@ final class FinanceStore {
         pageIndexes: Set<Int>? = nil,
         prioritizeNumericEvidence: Bool = false,
         forceRegionRecovery: Bool = false,
-        issuerHint: String? = nil
+        issuerHint: String? = nil,
+        progress: (@Sendable (Double, String) -> Void)? = nil
     ) -> [OCRObservation] {
         var observations: [OCRObservation] = []
         let ciContext = CIContext(options: [.useSoftwareRenderer: false])
@@ -8490,6 +9604,28 @@ final class FinanceStore {
                     }
                 }
 
+                func descriptorFragments(in candidate: VNRecognizedText, text: String) -> [OCRTextBox] {
+                    guard issuerHint == "Santander", let dates = substringPatterns.date else { return [] }
+                    let fullRange = NSRange(text.startIndex..., in: text)
+                    let physicalDates = dates.matches(in: text, range: fullRange).compactMap { match -> (range: NSRange, box: CGRect)? in
+                        guard let range = Range(match.range, in: text),
+                              let rectangle = try? candidate.boundingBox(for: range) else { return nil }
+                        return rectangle.boundingBox.midX <= 0.14 ? (match.range, rectangle.boundingBox) : nil
+                    }
+                    guard physicalDates.count > 1 || (physicalDates.first?.range.location ?? 0) > 0 else { return [] }
+                    let cuts = Array(Set([0, fullRange.length] + physicalDates.map { $0.range.location })).sorted()
+                    return zip(cuts, cuts.dropFirst()).compactMap { start, end in
+                        let nsRange = NSRange(location: start, length: end - start)
+                        guard let range = Range(nsRange, in: text),
+                              !text[range].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                              let rectangle = try? candidate.boundingBox(for: range) else { return nil }
+                        let following = physicalDates.first(where: { $0.range.location >= start }) ?? physicalDates.last!
+                        return OCRTextBox(text: String(text[range]), boundingBox: rectangle.boundingBox,
+                            confidence: Double(candidate.confidence), descriptorDateY: following.box.midY,
+                            precedesDate: start < following.range.location)
+                    }
+                }
+
                 return (request.results ?? []).compactMap { result -> OCRObservation? in
                     guard let candidate = result.topCandidates(1).first,
                           !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -8508,6 +9644,7 @@ final class FinanceStore {
                         confidence: Double(candidate.confidence),
                         dateBoxes: dateBoxes,
                         amountBoxes: amountBoxes,
+                        wordBoxes: result.boundingBox.height > 0.014 ? descriptorFragments(in: candidate, text: text) : [],
                         financialConfidence: financialConfidence
                     )
                 }
@@ -8790,6 +9927,7 @@ final class FinanceStore {
 
         for pageIndex in 0..<document.pageCount {
             if Task.isCancelled { break }
+            progress?(0.3 + 0.55 * Double(pageIndex + 1) / Double(max(1, document.pageCount)), "OCR · página \(pageIndex + 1) de \(document.pageCount)")
             if let pageIndexes, !pageIndexes.contains(pageIndex) { continue }
             autoreleasepool {
                 guard !Task.isCancelled else { return }
@@ -9639,6 +10777,20 @@ final class FinanceStore {
             .replacingOccurrences(of: "\r", with: "\n")
             .replacingOccurrences(of: "\u{00A0}", with: " ")
 
+        // Some Amex statement versions place the day and month in separate
+        // PDF text objects (`2 de` followed by `Septiembre`). Rejoin only
+        // this known date shape before identifying transaction boundaries;
+        // otherwise every following row can be absorbed into the preceding
+        // operation and the selectable-text reader falls back to partial OCR.
+        let splitSpanishDate = #"(?im)(?<![A-Za-z0-9])(\d{1,2}\s+de)[ \t]*\n[ \t]*(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\b"#
+        if let regex = try? NSRegularExpression(pattern: splitSpanishDate) {
+            value = regex.stringByReplacingMatches(
+                in: value,
+                range: NSRange(location: 0, length: (value as NSString).length),
+                withTemplate: "$1 $2"
+            )
+        }
+
         // Match complete markers/tokens and record their start positions. A
         // previous zero-width replacement implementation could make Swift's
         // regex engine revisit an already separated line and change valid
@@ -9931,11 +11083,14 @@ final class FinanceStore {
             // Spanish month name so merchant text cannot become a row date.
             pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})(?:\s+|(?=(?:ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)))(?:de\s*)?(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)(?:\s+(?:de\s+)?\d{4})?(?![A-Za-z])"#
         ), let amountRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+            // BBVA's text layer groups thousands with commas. A plain space is
+            // not a separator here: "OXXO SUC 845 150.00" is branch 845 and
+            // 150.00, never 845,150.00.
+            pattern: #"(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         ) else { return [] }
 
         let defaultYear: Int = {
-            guard let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#) else {
+            guard let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#) else {
                 return Calendar.current.component(.year, from: .now)
             }
             return firstMatch(in: fileName, regex: yearRegex).flatMap { Int($0.text) }
@@ -9972,6 +11127,13 @@ final class FinanceStore {
         var pendingHasAmount = false
         var currentPage: Int?
         var inMovementSection = false
+
+        func pendingHasTransferDescriptor() -> Bool {
+            let normalized = pending.joined(separator: " ")
+                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            return normalized.contains("spei enviado") || normalized.contains("spei recibido")
+                || normalized.contains("transferencia enviada") || normalized.contains("transferencia recibida")
+        }
 
         func flush() {
             guard !pending.isEmpty else { return }
@@ -10011,13 +11173,13 @@ final class FinanceStore {
             if let pageMarkerRegex,
                let marker = firstMatch(in: normalized, regex: pageMarkerRegex),
                let page = Int(marker.text.filter(\.isNumber)) {
-                flush()
+                if !pendingHasTransferDescriptor() || (pendingPage.map { page > $0 + 1 } ?? false) { flush() }
                 currentPage = page
                 continue
             }
 
             if normalized.contains("detalle de movimientos realizados") {
-                flush()
+                if !pendingHasTransferDescriptor() { flush() }
                 inMovementSection = true
                 continue
             }
@@ -10027,6 +11189,11 @@ final class FinanceStore {
                 continue
             }
             guard inMovementSection else { continue }
+            // Repeated header/footer text is not a transfer continuation. Keep
+            // the pending transfer alive for the top of the following page.
+            let furniture = ["estado de cuenta", "libreton", "pagina ", "no. de cuenta", "no. de cliente",
+                "bbva mexico", "av. paseo", "la gat real", "fecha saldo", "oper liq"]
+            if furniture.contains(where: { normalized.hasPrefix($0) }) { continue }
 
             let boundary = normalized.contains("total importe cargos")
                 || normalized.contains("total importe abonos")
@@ -10070,7 +11237,13 @@ final class FinanceStore {
                 let foreignAuthorization = normalized.contains("usd")
                     && compact.contains("tc")
                     && compact.contains("aut")
-                if hasAmount || foreignAuthorization { pending.append(line) } else { flush() }
+                let transferDetailLine = pendingHasTransferDescriptor()
+                    && line.count <= 160
+                if hasAmount || foreignAuthorization || transferDetailLine {
+                    pending.append(line)
+                } else {
+                    flush()
+                }
             } else {
                 pending.append(line)
                 pendingHasAmount = hasAmount
@@ -10089,7 +11262,21 @@ final class FinanceStore {
 
         var calculatedBalance = openingBalance
         return rows.compactMap { rawRow -> Movement? in
-            let original = rawRow.lines.joined(separator: " ")
+            let originalEvidence = rawRow.lines.joined(separator: "\n")
+            // A continuation may contain references resembling money. Numeric
+            // parsing stays on the dated financial baseline; descriptor text
+            // is retained independently and never provides a balance/amount.
+            var financialLines = rawRow.lines
+            let transferRow = rawRow.lines.joined(separator: " ").lowercased().contains("spei")
+            if transferRow, let moneyLine = rawRow.lines.firstIndex(where: { !allMatches(in: $0, regex: amountRegex).isEmpty }) {
+                financialLines = Array(rawRow.lines.prefix(moneyLine + 1))
+                for line in rawRow.lines.dropFirst(moneyLine + 1) {
+                    guard line.rangeOfCharacter(from: .letters) == nil,
+                          !allMatches(in: line, regex: amountRegex).isEmpty else { break }
+                    financialLines.append(line)
+                }
+            }
+            let original = financialLines.joined(separator: " ")
             guard let dateMatch = leadingDate(in: original),
                   let date = parseDate(dateMatch.text, defaultYear: defaultYear),
                   let dateRange = Range(dateMatch.range, in: original) else { return nil }
@@ -10216,11 +11403,12 @@ final class FinanceStore {
                     method: "pdf-text-bbva",
                     page: rawRow.page,
                     confidence: 0.97,
-                    sourceText: String(original.prefix(240)),
+                    sourceText: String(originalEvidence.prefix(640)),
                     selectedColumn: selectedColumn,
                     selectedAmount: abs(parsedAmount),
                     selectionReason: reason
-                )
+                ),
+                rawDescription: originalEvidence
             )
             if let printedRunningBalance, directionFromBalance != nil {
                 calculatedBalance = printedRunningBalance
@@ -10257,8 +11445,65 @@ final class FinanceStore {
         func flush() {
             guard !pending.isEmpty else { return }
             let original = pending
+            let originalPage = rowPage
             pending = ""
-            let label = [1: "NACIONALES_PAGOS_CREDITOS", 2: "MONEDA_EXTRANJERA", 3: "MSI"][section] ?? "FUERA_DE_SECCION"
+
+            // Amex can vertically merge the date cell for adjacent operations.
+            // PDFKit then returns `merchant A amount merchant B amount` under
+            // one date. Split only when a complete amount is followed by a
+            // second merchant-like description and another amount; both rows
+            // inherit the date that the PDF visibly shares across that cell.
+            if let dateMatch = firstMatch(in: original, regex: dateRegex) {
+                let originalNSString = original as NSString
+                let bodyStart = dateMatch.range.upperBound
+                let bodyRange = NSRange(location: bodyStart, length: originalNSString.length - bodyStart)
+                let amounts = moneyRegex.matches(in: original, range: bodyRange)
+                if amounts.count > 1 {
+                    for index in 0..<(amounts.count - 1) {
+                        // Amex merchant descriptions can contain an advertised
+                        // price (for example `$1.50 FRESH PIZZA NEW YORK`) before
+                        // the actual MXN cell. Keep that in the description;
+                        // only split on a plain amount that can close the first
+                        // transaction in the statement's native text layout.
+                        let firstAmount = originalNSString.substring(with: amounts[index].range)
+                        guard !firstAmount.hasPrefix("$") else { continue }
+                        let amountEnd = amounts[index].range.upperBound
+                        let nextAmountStart = amounts[index + 1].range.location
+                        guard amountEnd < nextAmountStart else { continue }
+                        let gap = originalNSString.substring(
+                            with: NSRange(location: amountEnd, length: nextAmountStart - amountEnd)
+                        )
+                        let creditPrefix = try? NSRegularExpression(pattern: #"(?i)^\s*CR\b\s*"#)
+                        let creditRange = creditPrefix?.firstMatch(
+                            in: gap,
+                            range: NSRange(location: 0, length: (gap as NSString).length)
+                        )?.range
+                        let descriptionStart = amountEnd + (creditRange?.length ?? 0)
+                        guard descriptionStart < nextAmountStart else { continue }
+                        let descriptor = originalNSString.substring(
+                            with: NSRange(location: descriptionStart, length: nextAmountStart - descriptionStart)
+                        ).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let descriptorWords = descriptor.split(whereSeparator: \.isWhitespace)
+                            .filter { $0.contains(where: \.isLetter) }
+                        guard descriptorWords.count >= 2 else { continue }
+
+                        let datePrefix = originalNSString.substring(to: dateMatch.range.upperBound)
+                        let firstRow = originalNSString.substring(to: descriptionStart)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        let continuedRow = datePrefix + " " + originalNSString.substring(from: descriptionStart)
+                            .trimmingCharacters(in: .whitespacesAndNewlines)
+                        pending = firstRow
+                        rowPage = originalPage
+                        flush()
+                        pending = continuedRow
+                        rowPage = originalPage
+                        flush()
+                        rowPage = originalPage
+                        return
+                    }
+                }
+            }
+            let label = [1: "NACIONALES_PAGOS_CREDITOS", 2: "MONEDA_EXTRANJERA", 3: "MSI", 4: "FINANCIAL_ADJUSTMENT"][section] ?? "FUERA_DE_SECCION"
             var reason = "amex.date-invalid"
             var selected: Decimal?
             var tokens: [String] = []
@@ -10307,16 +11552,29 @@ final class FinanceStore {
             let payment = lower.hasPrefix("gracias por su pago")
             reason = "amex.payment-without-credit-marker"
             guard !payment || credit else { return }
-            let kind: MovementKind = payment ? .cardPayment : credit ? .credit : section == 3 ? .msi : .purchase
+            let planCancellation = section == 4 && lower.contains("saldo pendiente por cancelacion de plan")
+            let financialFee = section == 4 && (lower.contains("iva aplicable") || lower.contains("servicios de facturacion"))
+            let kind: MovementKind = payment ? .cardPayment
+                : credit ? .credit
+                : lower.contains("interes financiero") ? .interest
+                : financialFee ? .fee
+                : section == 3 || planCancellation ? .msi
+                : .purchase
             let flow: FlowKind = payment ? .debt : credit ? .income : .expense
             let signed = credit && !payment ? amount : -amount
             reason = "amex.mxn-cell-verified; kind=\(kind.rawValue)"
             result.append(Movement(date: date, title: title, account: "Amex",
                 category: category(for: lower, flow: flow), amount: signed, flow: flow,
-                kind: kind, foreignCurrency: section == 2 || Self.hasForeignCurrency(in: original.lowercased()),
+                kind: kind,
+                foreignCurrency: section == 2 || (section != 4 && Self.hasForeignCurrency(in: original.lowercased())),
                 extractionEvidence: MovementExtractionEvidence(method: "pdf-text", page: rowPage,
                     confidence: 1, sourceText: String(original.prefix(500)), selectedColumn: label,
-                    selectedAmount: amount, selectionReason: reason)))
+                    selectedAmount: amount,
+                    selectionReason: planCancellation
+                        ? "ajuste financiero Amex: saldo de plan cancelado, separado de compras nacionales y de gasto real"
+                        : financialFee
+                            ? "ajuste financiero Amex: IVA/comisión identificado por descripción"
+                            : reason)))
             accepted = true
         }
         for raw in structured.components(separatedBy: .newlines) {
@@ -10328,8 +11586,15 @@ final class FinanceStore {
             if lower.contains("fecha y detalle de las operaciones") {
                 flush(); if section == 0 { section = 1 }; tableOpen = true; continue
             }
-            if lower.contains("total de las transacciones en") { flush(); section = 2; continue }
-            if lower.contains("total de transacciones en moneda extranjera") { flush(); section = 0; continue }
+            if lower.contains("transacciones financieras aplicables a la cuenta") {
+                flush(); section = 4; tableOpen = true; continue
+            }
+            if lower.contains("total de las transacciones en") { flush(); section = 2; tableOpen = true; continue }
+            if lower.contains("total de transacciones en moneda extranjera") { flush(); section = 0; tableOpen = false; continue }
+            if lower.contains("total de las transacciones y comisiones")
+                || lower.contains("total de iva sobre transacciones y comisiones") {
+                flush(); section = 0; tableOpen = false; continue
+            }
             if lower.contains("transacciones de meses sin intereses") { flush(); section = 3; tableOpen = true; continue }
             if lower.contains("total de meses sin intereses") || lower.contains("resumen de meses sin intereses")
                 || lower.contains("consolidado de compras") || lower.contains("total de plan de meses") {
@@ -10369,7 +11634,7 @@ final class FinanceStore {
         let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?\s*(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)(?:[.,]\d{1,2})?(?![A-Za-z0-9])"#
         )
-        let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#)
+        let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#)
         func inferredYear(in value: String) -> Int? {
             guard let yearRegex,
                   let match = firstMatch(in: value, regex: yearRegex) else { return nil }
@@ -10840,7 +12105,7 @@ final class FinanceStore {
         }
 
         let defaultYear: Int = {
-            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+            if let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#),
                let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
                 return year
             }
@@ -11336,7 +12601,7 @@ final class FinanceStore {
         }
 
         let defaultYear: Int = {
-            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+            if let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#),
                let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
                 return year
             }
@@ -11858,8 +13123,16 @@ final class FinanceStore {
     ) -> StatementReconciliationRecord {
         // Amex's independent text parser must not hide a rejected row just
         // because other mistakes happen to compensate in aggregate totals.
+        // A date/description fragment with no parsed monetary cells is not a
+        // financial candidate (Amex's text layer emits some of these from
+        // page furniture and foreign-currency annotations). Keep it in the
+        // diagnostic trace, but do not let it invalidate otherwise exact
+        // statement controls. Any rejected row with amount evidence remains
+        // a hard blocker.
         if source == "Amex", let rejected = diagnostics.first(where: {
-            !$0.accepted && $0.reason.hasPrefix("amex.")
+            !$0.accepted
+                && $0.reason.hasPrefix("amex.")
+                && ($0.cellTexts == nil || !($0.cellTexts?.isEmpty ?? true))
         }) {
             var result = reconciliation
             result.status = .invalid
@@ -11991,7 +13264,7 @@ final class FinanceStore {
         }
 
         let defaultYear: Int = {
-            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+            if let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#),
                let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
                 return year
             }
@@ -12236,6 +13509,7 @@ final class FinanceStore {
         }
         struct PhysicalRow {
             let observations: [OCRObservation]
+            let descriptorObservations: [OCRObservation]
             let band: CGRect
             var cells: [[OCRObservation]]
             var movement: Movement?
@@ -12345,6 +13619,24 @@ final class FinanceStore {
                 failureReason: { parseFailureReason = $0 })?.movement
             if physical.movement == nil {
                 physical.problem = parseFailureReason ?? "santander.date-description-or-amount-invalid"
+            } else {
+                let descriptorMetadata = physical.descriptorObservations.map { observation in
+                    OCRObservation(page: observation.page,
+                        text: amountRegex.stringByReplacingMatches(in: observation.text,
+                            range: NSRange(observation.text.startIndex..., in: observation.text), withTemplate: " "),
+                        boundingBox: observation.boundingBox, confidence: observation.confidence,
+                        dateBoxes: observation.dateBoxes)
+                }
+                let recovered = parseSantanderRow(descriptorMetadata + normalizedCells.flatMap { $0 },
+                    dateRegex: dateRegex, amountRegex: amountRegex, defaultYear: defaultYear,
+                    previousRunningBalance: nil, columns: columns, dateMaxX: dateMaxX,
+                    titleBounds: titleBounds, requireFixedMovementColumn: true)?.movement
+                if let recovered, var movement = physical.movement,
+                   recovered.date == movement.date, recovered.amount == movement.amount {
+                    movement.title = recovered.title
+                    movement.rawDescription = physical.descriptorObservations.map(\.text).joined(separator: " ")
+                    physical.movement = movement
+                }
             }
         }
 
@@ -12597,18 +13889,64 @@ final class FinanceStore {
                     anchors.sort { $0.box.midY > $1.box.midY }
                 }
             }
+            // The bank's money cells sit on the transaction baseline. A
+            // merged/tall date glyph can extend into a preceding concept line;
+            // use the independently located balance cell to own that text.
+            var numericBaselines: [CGFloat] = []
+            for (candidateIndex, candidate) in anchors.enumerated() {
+                let top = min(candidate.box.maxY + 0.004, 1)
+                let next = candidateIndex + 1 < anchors.count ? anchors[candidateIndex + 1].box.maxY + 0.004 : 0
+                let bottom = max(next, candidate.box.minY - 0.006)
+                let numericBand = CGRect(x: tableLeft, y: bottom, width: tableSpan, height: top - bottom)
+                let found = extractCells(pageObservations, band: numericBand, anchorIndex: candidateIndex, anchors: anchors)
+                numericBaselines.append(found[2].first?.centerY ?? candidate.box.midY)
+            }
             for (index, dateAnchor) in anchors.enumerated() {
                 let anchor = dateAnchor.box
                 let upper = min(anchor.maxY + 0.004, 1)
                 let lower = index + 1 < anchors.count ? anchors[index + 1].box.maxY + 0.004 : 0
+                var descriptorRow: [OCRObservation] = []
+                for observation in pageObservations {
+                    if observation.wordBoxes.isEmpty {
+                        let description = observation.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                        let isTransferConcept = description.hasPrefix("concepto") && description.contains("transfer")
+                            && !observation.dateBoxes.contains(where: { $0.centerX <= dateMaxX })
+                        if isTransferConcept {
+                            // CONCEPTO is a continuation printed below its
+                            // transfer. A tall next-date glyph must not steal
+                            // this line merely because their boxes overlap.
+                            let owner = anchors.indices.last(where: { numericBaselines[$0] >= observation.centerY })
+                            if owner == index {
+                                descriptorRow.append(observation)
+                            }
+                        } else if observation.centerY <= upper && observation.centerY > lower {
+                            descriptorRow.append(observation)
+                        }
+                        continue
+                    }
+                    for fragment in observation.wordBoxes {
+                        var belongsHere = fragment.centerY <= upper && fragment.centerY > lower
+                        if let relatedDate = fragment.descriptorDateY {
+                            var nearestIndex: Int?
+                            var nearestDistance = CGFloat.greatestFiniteMagnitude
+                            for candidateIndex in anchors.indices {
+                                let distance = abs(anchors[candidateIndex].box.midY - relatedDate)
+                                if distance < nearestDistance { nearestIndex = candidateIndex; nearestDistance = distance }
+                            }
+                            if let nearestIndex, nearestDistance <= 0.006 {
+                                belongsHere = index == (fragment.precedesDate ? nearestIndex - 1 : nearestIndex)
+                            }
+                        }
+                        if belongsHere {
+                            descriptorRow.append(OCRObservation(page: page, text: fragment.text,
+                                boundingBox: fragment.boundingBox, confidence: observation.confidence))
+                        }
+                    }
+                }
+                descriptorRow.sort { $0.centerY == $1.centerY ? $0.centerX < $1.centerX : $0.centerY > $1.centerY }
                 let row = pageObservations.filter { $0.centerY <= upper && $0.centerY > lower }
                     .sorted { $0.centerY == $1.centerY ? $0.centerX < $1.centerX : $0.centerY > $1.centerY }
                 var rowWithDate = row
-                // A Vision observation may contain several baselines: its
-                // substring date box can delimit this row while the parent's
-                // center falls just outside the selected band. Carry the
-                // exact date-bearing observation into the row so its own
-                // description text stays linked to that date.
                 if !rowWithDate.contains(where: {
                     $0.page == dateAnchor.sourceObservation.page
                         && $0.boundingBox == dateAnchor.sourceObservation.boundingBox
@@ -12625,7 +13963,8 @@ final class FinanceStore {
                 // one parent observation.
                 let numericBottom = max(lower, anchor.minY - 0.006)
                 let band = CGRect(x: tableLeft, y: numericBottom, width: tableSpan, height: upper - numericBottom)
-                var physical = PhysicalRow(observations: rowWithDate, band: band,
+                var physical = PhysicalRow(observations: rowWithDate,
+                    descriptorObservations: [dateEvidence] + descriptorRow, band: band,
                     cells: extractCells(pageObservations, band: band, anchorIndex: index, anchors: anchors))
                 decode(&physical)
                 if physical.problem != nil { retryCells(&physical) }
@@ -12761,7 +14100,7 @@ final class FinanceStore {
         }
 
         let defaultYear: Int = {
-            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+            if let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#),
                let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
                 return year
             }
@@ -13546,7 +14885,8 @@ final class FinanceStore {
                 selectedColumn: selectedColumn,
                 selectedAmount: selectedValue,
                 selectionReason: selectionReason
-            )
+            ),
+            rawDescription: fullText
         )
         return SantanderRowResult(movement: movement, runningBalance: runningBalance)
     }
@@ -13585,7 +14925,7 @@ final class FinanceStore {
         }
 
         let defaultYear: Int = {
-            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+            if let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#),
                let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
                 return year
             }
@@ -14189,6 +15529,22 @@ final class FinanceStore {
             .replacingOccurrences(of: "$", with: "")
             .replacingOccurrences(of: " ", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Trailing-minus credit notation ("1,234.56-") is a negative amount.
+        if cleaned.count > 1, cleaned.hasSuffix("-"), !cleaned.hasPrefix("-") {
+            cleaned = "-" + cleaned.dropLast()
+        }
+        // OCR often reads a thousands comma as a dot ("54.977.93"). With the
+        // same separator repeated and two final digits, only the last one is
+        // decimal; Decimal(string:) would otherwise stop at the second dot
+        // and silently return 54.977.
+        for separator in [Character("."), Character(",")] {
+            let other: Character = separator == "." ? "," : "."
+            guard cleaned.filter({ $0 == separator }).count > 1, !cleaned.contains(other),
+                  let last = cleaned.lastIndex(of: separator) else { continue }
+            let fraction = cleaned[cleaned.index(after: last)...]
+            let integer = cleaned[..<last].filter { $0 != separator }
+            cleaned = fraction.count == 2 ? integer + "." + fraction : cleaned.filter { $0 != separator }
+        }
 
         let commaIndex = cleaned.lastIndex(of: ",")
         let dotIndex = cleaned.lastIndex(of: ".")
@@ -14206,7 +15562,14 @@ final class FinanceStore {
             cleaned = cleaned.replacingOccurrences(of: ",", with: "")
         }
 
+        // Decimal(string:) accepts a numeric prefix ("1CR" → 1). Reject
+        // anything that is not a complete amount instead of truncating it.
+        guard cleaned.range(of: #"^[-+]?\d+(?:\.\d+)?$"#, options: .regularExpression) != nil else { return nil }
         return Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX"))
+    }
+
+    static func parseAmountForTesting(_ value: String) -> Decimal? {
+        parseAmount(value)
     }
 
     /// Rappi's OCR sometimes changes a thousands comma into a decimal point,
@@ -14495,14 +15858,17 @@ final class FinanceStore {
             month = parsedMonth
             day = parsedDay
         } else {
-            guard let monthToken = parts.dropFirst().first(where: {
-                numericToken($0) != nil || monthNumber(String($0)) != nil
+            guard let monthIndex = parts.indices.dropFirst().first(where: {
+                numericToken(parts[$0]) != nil || monthNumber(String(parts[$0])) != nil
             }) else { return nil }
+            let monthToken = parts[monthIndex]
             day = first
             month = numericToken(monthToken) ?? monthNumber(String(monthToken))!
-            year = parts.dropFirst()
+            // Only tokens after the month can be a year. Two-digit years
+            // ("28/12/25") used to be discarded and replaced by the default.
+            year = parts[(monthIndex + 1)...]
                 .compactMap { numericToken($0) }
-                .last(where: { $0 >= 100 })
+                .last(where: { (0...99).contains($0) || (1_900...2_200).contains($0) })
                 ?? defaultYear
                 ?? Calendar.current.component(.year, from: .now)
         }
@@ -15490,7 +16856,12 @@ final class FinanceStore {
     }
 
     private static func summary(from text: String, source: String) -> StatementSummaryRecord? {
-        if source == "Rappi" { return rappiSummary(text) }
+        if source == "Rappi" {
+            var result = rappiSummary(text)
+            let metadata = CardDocumentMetadata.parse(text)
+            result?.paymentDueDate = metadata.dueDate; result?.annualInterestRate = metadata.annualRate
+            return result
+        }
         let normalized = text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
         func normalizeBareBankAmount(_ raw: String, _ parsed: Decimal) -> Decimal {
@@ -15697,6 +17068,8 @@ final class FinanceStore {
         }
 
         var summary = StatementSummaryRecord()
+        let metadata = CardDocumentMetadata.parse(text)
+        summary.paymentDueDate = metadata.dueDate; summary.annualInterestRate = metadata.annualRate
         var hasValue = false
         func assign(_ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>, _ value: Decimal?) {
             guard let value else { return }
@@ -15742,10 +17115,33 @@ final class FinanceStore {
                 return parseAmount(String(normalized[valueRange]))
             }
             summary.previousBalance = equationValue(1)
+            summary.paymentsAndCredits = equationValue(2)
             summary.newCharges = equationValue(3)
             summary.statementBalance = equationValue(4)
             summary.paymentForNoInterest = equationValue(4)
             summary.minimumPayment = equationValue(5)
+
+            // The equation is the issuer's combined payments-and-credits
+            // control. Generic nearby-label matching can mistake its opening
+            // balance for both payments and interest; keep only separately
+            // labelled amounts for those fields.
+            summary.payments = nil
+            summary.credits = nil
+            func amexLineAmount(_ label: String) -> Decimal? {
+                let labelPattern = label
+                    .split(separator: " ")
+                    .map { NSRegularExpression.escapedPattern(for: String($0)) }
+                    .joined(separator: #"\s+"#)
+                let amountPattern = #"(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}"#
+                guard let regex = try? NSRegularExpression(
+                    pattern: #"(?im)^\s*"# + labelPattern + #"\s*:\s*\$?\s*("# + amountPattern + #")(?!\d)"#
+                ), let match = regex.firstMatch(in: normalized, range: range),
+                   let amountRange = Range(match.range(at: 1), in: normalized) else { return nil }
+                return parseAmount(String(normalized[amountRange]))
+            }
+            summary.newTransactions = amexLineAmount("nuevas transacciones") ?? summary.newTransactions
+            summary.interest = amexLineAmount("interes financiero")
+            summary.fees = amexLineAmount("comisiones") ?? summary.fees
             hasValue = true
         }
         // Prefer the issuer's explicit total rows, which may appear after
@@ -16231,10 +17627,22 @@ final class FinanceStore {
     /// the last four digits; references or account-like numbers in rows never
     /// become an identity.
     private static func maskedAccountKey(from text: String, source: String) -> String? {
-        if source == "Rappi",
+        guard let digits = accountNumberDigits(from: text, source: source) else { return nil }
+        let issuer = source
+            .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.inverted)
+            .joined()
+        guard !issuer.isEmpty else { return nil }
+        return "\(issuer):\(String(digits.suffix(4)))"
+    }
+
+    private static func accountNumberDigits(from text: String, source: String) -> String? {
+        let normalizedIssuer = source.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        if normalizedIssuer.localizedCaseInsensitiveCompare("Rappi") == .orderedSame,
            let raw = rappiCapture(#"numero\s*de\s*cuenta\s*:?\s*([0-9][0-9\s-]{18,30})"#, in: text) {
             let digits = raw.filter(\.isNumber)
-            if digits.count == 20 { return "rappi:\(digits.suffix(4))" }
+            if digits.count == 20 { return digits }
         }
         let normalized = text.folding(
             options: [.diacriticInsensitive, .caseInsensitive],
@@ -16263,15 +17671,28 @@ final class FinanceStore {
                   let valueRange = Range(match.range(at: 1), in: header) else { continue }
             let digits = String(header[valueRange]).filter { $0.isNumber }
             guard (4...18).contains(digits.count) else { continue }
-            let issuer = source
-                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-                .lowercased()
-                .components(separatedBy: CharacterSet.alphanumerics.inverted)
-                .joined()
-            guard !issuer.isEmpty else { continue }
-            return "\(issuer):\(String(digits.suffix(4)))"
+            return digits
         }
         return nil
+    }
+
+    /// Amex may reissue the plastic while the billing account stays the same.
+    /// Hash only the stable first 11 digits from the administrative account
+    /// number; never store or report the full number.
+    private static func amexAccountFamilyFingerprint(
+        preferredText: String,
+        administrativeText: String,
+        source: String
+    ) -> String? {
+        let normalizedIssuer = source.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+        guard normalizedIssuer.localizedCaseInsensitiveCompare("Amex") == .orderedSame
+                || normalizedIssuer.localizedCaseInsensitiveCompare("American Express") == .orderedSame else { return nil }
+        let digits = accountNumberDigits(from: preferredText, source: source)
+            ?? accountNumberDigits(from: administrativeText, source: source)
+        guard let digits, digits.count == 15 else { return nil }
+        let familyPrefix = String(digits.prefix(11))
+        let digest = SHA256.hash(data: Data(("amex-account-family-v1|" + familyPrefix).utf8))
+        return digest.map { String(format: "%02x", $0) }.joined()
     }
 
     /// Resolve the account identity from administrative evidence before
@@ -16300,6 +17721,28 @@ final class FinanceStore {
 
     func categoryRuleKey(for movement: Movement) -> String {
         Self.categoryRuleKey(movement.normalizedMerchant ?? movement.displayMerchant ?? movement.title)
+    }
+
+    /// Number of canonical, unreviewed same-merchant expenses that can be
+    /// included in an explicitly requested merchant-wide category rule.
+    func categoryRulePeerCount(for movement: Movement) -> Int {
+        let key = categoryRuleKey(for: movement)
+        guard key.count >= 3 else { return 0 }
+        let canonicalIDs = Set(reconciledMovements.map(\.id))
+        return movements.filter { peer in
+            peer.id != movement.id
+                && !peer.manuallyReviewed
+                && canonicalIDs.contains(peer.id)
+                && isClassifiableExpenseForCategory(peer)
+                && categoryRuleKey(for: peer) == key
+        }.count
+    }
+
+    func canApplyCategoryRule(for movement: Movement, to category: String) -> Bool {
+        isClassifiableExpenseForCategory(movement)
+            && categoryRuleKey(for: movement).count >= 3
+            && ExpenseAIClassifier.allowedCategories.contains(category)
+            && !Self.pendingCategoryNames.contains(category)
     }
 
     /// Uses the same token normalization for every issuer. OCR and PDF text
@@ -16352,6 +17795,9 @@ final class FinanceStore {
 
         let rules: [(String, [String])] = [
             // Project identity is always evaluated first and is handled below.
+            ("Educación", ["itam", "instituto tecnologico autonomo de mexico"]),
+            ("Entrenamiento", ["entrenamiento", "personal training", "entrenador", "trainer"]),
+            ("Binance (salarios)", ["binance salarios", "binance salario", "binance nomina", "binance nominas", "binance payroll"]),
             ("Comisiones y finanzas", ["comision", "interés", "iva com", "cajero", "anualidad", "cargo bancario", "seguro financiero", "financiera", "finanzas"]),
             ("Software y suscripciones", ["canva", "cursor", "google one", "google cloud", "google storage", "youtube premium", "apple music", "adobe", "microsoft 365", "microsoft office", "suscripcion", "suscripción", "saas", "software", "icloud", "dropbox", "apple.com/bill"]),
             // A destination alone is only a secondary travel tag. Otherwise

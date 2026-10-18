@@ -47,3 +47,16 @@ test('manual classification survives normalization and excludes AI rewrites', ()
   assert.match(models, /encode\(manuallyReviewed/);
   assert.match(nativeTests, /testManualReviewSurvivesNormalization/);
 });
+
+test('signed-amount character classes never form an accidental range', () => {
+  // `[+-−]` is the range U+002B…U+2212 and matches digits and letters.
+  assert.doesNotMatch(models, /\[\+-−/);
+  assert.match(models, /\[-\+−–—\]/);
+});
+
+test('access relies on Face ID and the iPhone passcode, never a stored password', () => {
+  const auth = readFileSync(new URL('../apps/ios/Cauce/Authentication.swift', import.meta.url), 'utf8');
+  assert.match(auth, /\.deviceOwnerAuthentication\b/);
+  assert.doesNotMatch(auth, /defaultFallback|configureFallback|passwordHash\(/);
+  assert.doesNotMatch(auth, /SecItemAdd/);
+});

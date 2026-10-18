@@ -4,7 +4,7 @@ import type { ExpenseTag, Transaction, TransactionKind } from "./types.ts";
 
 /** Versiona únicamente el contrato de enriquecimiento, no el lector de PDFs. */
 export const TRANSACTION_CLASSIFIER_VERSION = "transaction-classifier-2026.09.08.1";
-export const TRANSACTION_CLASSIFIER_PROMPT_VERSION = "expense-taxonomy-v2";
+export const TRANSACTION_CLASSIFIER_PROMPT_VERSION = "expense-taxonomy-v3";
 export const TRANSACTION_CLASSIFIER_MAX_ROWS = 500;
 
 export type TransactionClassificationInput = {

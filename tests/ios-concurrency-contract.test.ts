@@ -42,6 +42,11 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
   assert.doesNotMatch(sections, /try store\.importPDF\(/);
 
   assert.match(models, /func importPDFAsync\(/);
+  // Nonisolated async methods resume on the generic executor even when their
+  // caller is MainActor. The worker reads PDFs; UI progress and the mutable
+  // observable ledger must resume on MainActor after that await.
+  assert.match(models, /@MainActor\s+func importPDFAsync\(/);
+  assert.match(models, /@MainActor\s+func inspectPDFAsync\(/);
   assert.match(pdfCache, /actor PDFExtractionCoordinator/);
   assert.match(models, /PDFExtractionCoordinator\.shared\.perform/);
   const importBlock = models.match(/func importPDFAsync\([\s\S]*?func inspectPDFAsync/)?.[0];
@@ -69,7 +74,8 @@ test("la interfaz iOS usa importación y reconstrucción asíncronas", async () 
   assert.ok(migrationBlock, "la migración de lector debe dejar una señal explícita");
   assert.doesNotMatch(migrationBlock, /normalizeStoredLedger\(\)/);
   assert.doesNotMatch(migrationBlock, /\bpersist\(/);
-  assert.match(migrationBlock, /defaults\.set\(false, forKey: canonicalRebuildKey\)/);
+  assert.match(migrationBlock, /defaults\.set\(false, forKey: (?:Self\.)?canonicalRebuildKey\)/);
+  assert.match(models, /static func recordCanonicalRebuildCompletion\(in defaults: UserDefaults\)[\s\S]*normalizedLedgerReaderVersionKey/);
   assert.match(models, /guard !canonicalRebuildPending else \{ return false \}/);
   assert.match(app, /phase == \.active/);
   assert.doesNotMatch(app, /phase == \.active[\s\S]*?runAutomaticAuditIfNeeded/);
@@ -118,7 +124,7 @@ test("la auditoría iOS separa revisión canónica de cuarentena", async () => {
   assert.match(diagnostics, /Movimientos por enriquecer/);
   assert.match(diagnostics, /Movimientos bloqueados/);
   assert.match(diagnostics, /audit\.quarantinedRows/);
-  assert.match(rootTab, /Por enriquecer en el libro/);
+  assert.match(rootTab, /movimientos por revisar/);
 });
 
 test("Vision tiene fallback de idiomas cuando el dispositivo no expone etiquetas regionales", async () => {

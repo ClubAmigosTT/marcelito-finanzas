@@ -69,6 +69,10 @@ struct SettingsView: View {
                     }
                 }
 
+                Section("Tu información") {
+                    NavigationLink("Respaldo y restauración") { FinanceBackupView() }
+                    CategoryUndoButton()
+                }
                 Section("Privacidad") {
                     Text("Los PDF y sus filas permanecen en este iPhone. Un archivo rechazado conserva su diagnóstico, pero no sus filas dentro del libro canónico.")
                         .font(.caption)

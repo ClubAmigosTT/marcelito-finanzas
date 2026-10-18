@@ -7,38 +7,42 @@ struct RootTabView: View {
     private enum Tab: Hashable {
         case summary
         case expenses
-        case calendar
+        case budget
         case accounts
         case patrimony
     }
 
+    @Environment(\.scenePhase) private var scenePhase
     @State private var selectedTab: Tab = .summary
     @Environment(FinanceStore.self) private var store
+    @Environment(FinancialPlanningStore.self) private var planning
+    @State private var showIncomeOnboarding = false
     @State private var automaticReplayStarted = false
+    @State private var showPayments = false
 
     var body: some View {
         TabView(selection: $selectedTab) {
-            DeferredTab {
+            DeferredTab(isActive: selectedTab == .summary) {
                 HomeView()
             }
-                .tabItem { Label("Resumen", systemImage: "house.fill") }
+                .tabItem { Label("Inicio", systemImage: "house.fill") }
                 .tag(Tab.summary)
-            DeferredTab {
+            DeferredTab(isActive: selectedTab == .expenses) {
                 ExpensesView()
             }
                 .tabItem { Label("Gastos", systemImage: "chart.pie.fill") }
                 .tag(Tab.expenses)
-            DeferredTab {
-                SpendingCalendarView()
+            DeferredTab(isActive: selectedTab == .budget) {
+                BudgetView()
             }
-                .tabItem { Label("Calendario", systemImage: "calendar") }
-                .tag(Tab.calendar)
-            DeferredTab {
+                .tabItem { Label("Presupuesto", systemImage: "chart.bar.fill") }
+                .tag(Tab.budget)
+            DeferredTab(isActive: selectedTab == .accounts) {
                 AccountsView()
             }
                 .tabItem { Label("Cuentas", systemImage: "creditcard.fill") }
                 .tag(Tab.accounts)
-            DeferredTab {
+            DeferredTab(isActive: selectedTab == .patrimony) {
                 NetWorthView()
             }
                 .tabItem { Label("Patrimonio", systemImage: "chart.line.uptrend.xyaxis") }
@@ -51,32 +55,62 @@ struct RootTabView: View {
         // A reader update must actually touch the PDFs already on the device.
         // Start the pending replay once after authentication; the existing
         // single-flight rebuild keeps a simultaneous manual tap harmless.
+        .sheet(isPresented: $showIncomeOnboarding) { PlanningIncomeView() }
+        .sheet(isPresented: $showPayments) { NavigationStack { PaymentAgendaView().toolbar { Button("Cerrar") { showPayments = false } } } }
+        .onReceive(NotificationCenter.default.publisher(for: Notification.Name("marcelito.notification.route"))) { _ in routeNotification() }
         .task {
+            routeNotification()
+            showIncomeOnboarding = !planning.state.incomeOnboardingCompleted && !showPayments
+            await PlanningNotifications.refresh(store: store, planning: planning)
             guard !automaticReplayStarted else { return }
             automaticReplayStarted = true
             guard store.hasCanonicalRebuildPending else { return }
             _ = await store.rebuildCanonicalLedgerIfNeededAsync()
         }
+        .onChange(of: scenePhase) { _, phase in if phase != .active { planning.savePendingPlanChanges() } }
+        .task(id: store.ledgerVersion) { await PlanningNotifications.refresh(store: store, planning: planning) }
+        .task(id: planning.revision) {
+            try? await Task.sleep(for: .milliseconds(400))
+            guard !Task.isCancelled else { return }
+            await PlanningNotifications.refresh(store: store, planning: planning)
+        }
     }
+    private func routeNotification() {
+        guard let destination = UserDefaults.standard.string(forKey: "marcelito.navigation.pending") else { return }
+        UserDefaults.standard.removeObject(forKey: "marcelito.navigation.pending")
+        if destination == "accounts" { selectedTab = .accounts }
+        else if destination == "budget" { selectedTab = .budget }
+        else { showIncomeOnboarding = false; showPayments = true }
+    }
+
 }
 
 struct HomeView: View {
+    @Environment(FinancialPlanningStore.self) private var planning
     @Environment(FinanceStore.self) private var store
     @Environment(AuthenticationModel.self) private var auth
     @State private var isImporterPresented = false
     @State private var isDeleteConfirmationPresented = false
     @State private var importReport: ImportReport?
     @State private var isImporting = false
+    @State private var importTask: Task<Void, Never>?
     @State private var importProgress = 0
     @State private var importStatus = "Preparando…"
     @State private var isDiagnosticsPresented = false
     @State private var isSettingsPresented = false
+    private struct ExpensePresentation: Identifiable {
+        let id = UUID()
+        let date: Date
+        let mode: FinancePeriodMode
+    }
+    @State private var expensePresentation: ExpensePresentation?
 
     private var hasData: Bool { !store.movements.isEmpty || !store.statements.isEmpty }
 
     @ViewBuilder
     private var homeContent: some View {
         LazyVStack(alignment: .leading, spacing: 18) {
+            if let error = planning.loadError { Text(error).font(.caption).foregroundStyle(Color.marcelitoAmber) }
             if store.hasCanonicalRebuildPending {
                 PendingLedgerRefreshCard {
                     Task { @MainActor in
@@ -85,13 +119,23 @@ struct HomeView: View {
                 }
             }
             if hasData {
-                NetWorthSummary(store: store)
+                HomeMonthlyPlanCard(upload: { isImporterPresented = true }, showLatest: { date in
+                    expensePresentation = ExpensePresentation(date: date, mode: .month)
+                })
+                PlanningDataFreshness { isImporterPresented = true }
+                PlanningAccountCoverage(period: .month(.now))
+                NavigationLink("Próximos pagos") { PaymentAgendaView() }
                 LedgerQualityBanner(store: store)
-                MetricsStrip()
+                HomePersonalMetrics(showActivity: false)
                 if store.dashboardIsBlocked || store.operationalMetricsBlocked {
                     HistoricalDashboardBlockedCard(store: store)
-                } else {
-                    CashFlowChart(store: store)
+                } else if planning.hasData(store, period: .month(.now)) {
+                    SpendingPaceSection(store: store)
+                }
+                if !store.operationalMetricsBlocked, let latest = planning.latestMovementDate(store) {
+                    LastRecordedMonthSummary(date: latest) { date, mode in
+                        expensePresentation = ExpensePresentation(date: date, mode: mode)
+                    }
                 }
             } else {
                 EmptyDataCard { isImporterPresented = true }
@@ -146,14 +190,14 @@ struct HomeView: View {
             .scrollIndicators(.hidden)
             .safeAreaPadding(.bottom, 76)
             .background(MarcelitoAmbientBackground())
-            .navigationTitle("Resumen")
-            .navigationBarTitleDisplayMode(.large)
+            .navigationTitle("Inicio")
+            .navigationBarTitleDisplayMode(.inline)
             .toolbarBackground(.ultraThinMaterial, for: .navigationBar)
             .toolbarBackground(.visible, for: .navigationBar)
             .disabled(isImporting)
             .overlay {
                 if isImporting {
-                    ImportProgressOverlay(progress: importProgress, status: importStatus)
+                    ImportProgressOverlay(progress: importProgress, status: importStatus, cancel: importTask.map { task in { task.cancel() } })
                         .transition(.opacity)
                 }
             }
@@ -184,6 +228,9 @@ struct HomeView: View {
             .sheet(isPresented: $isSettingsPresented) {
                 SettingsView()
             }
+            .sheet(item: $expensePresentation) { destination in
+                ExpensesView(initialDate: destination.date, initialMode: destination.mode, isPresentedAsSheet: true)
+            }
             .confirmationDialog(
                 "Borrar datos del dispositivo",
                 isPresented: $isDeleteConfirmationPresented,
@@ -191,6 +238,8 @@ struct HomeView: View {
             ) {
                 Button("Borrar datos", role: .destructive) {
                     store.clearLocalData()
+                    planning.clearLocalData()
+                    Task { await PlanningNotifications.refresh(store: store, planning: planning) }
                     auth.deleteAccount()
                 }
                 Button("Cancelar", role: .cancel) { }
@@ -219,9 +268,10 @@ struct HomeView: View {
                 stage: "import.start",
                 message: "Importación iniciada: \(urls.count) PDF(s)."
             )
-            Task { @MainActor in
+            importTask = Task { @MainActor in
                 var items: [ImportReportItem] = []
                 for (index, url) in urls.enumerated() {
+                    if Task.isCancelled { break }
                     importStatus = "Leyendo \(url.lastPathComponent)…"
                     let completedCount = Double(index)
                     let totalCount = max(Double(urls.count), 1)
@@ -230,12 +280,19 @@ struct HomeView: View {
                     do {
                         let summary = try await store.importPDFAsync(from: url, stage: { message in
                             importStatus = message
+                        }, progress: { fraction, message in
+                            guard isImporting else { return }
+                            importStatus = "Archivo \(index + 1)/\(urls.count) · " + message
+                            importProgress = max(importProgress, Int((Double(index) + fraction) / Double(max(1, urls.count)) * 100))
                         })
                         items.append(ImportReportItem(summary: summary))
                         DiagnosticsRecorder.record(
                             stage: "import.file",
                             message: "\(summary.source) · \(summary.period): \(summary.imported) movimiento(s)\(summary.usedOCR ? " · OCR" : "")."
                         )
+                    } catch is CancellationError {
+                        items.append(ImportReportItem(fileName: url.lastPathComponent, errorMessage: "Importación cancelada. Este archivo no se incorporó; los archivos anteriores se conservaron."))
+                        break
                     } catch {
                         DiagnosticsRecorder.record(
                             level: "error",
@@ -252,6 +309,7 @@ struct HomeView: View {
                 }
                 importStatus = "Listo"
                 isImporting = false
+                importTask = nil
                 importReport = ImportReport(fileCount: urls.count, items: items)
                 store.runAutomaticAuditIfNeeded(trigger: "import")
                 DiagnosticsRecorder.record(
@@ -300,27 +358,25 @@ struct HomeView: View {
 /// before the user has asked to see them.
 private struct DeferredTab<Content: View>: View {
     @State private var isLoaded = false
+    private let isActive: Bool
     private let content: () -> Content
 
-    init(@ViewBuilder content: @escaping () -> Content) {
+    init(isActive: Bool, @ViewBuilder content: @escaping () -> Content) {
+        self.isActive = isActive
         self.content = content
     }
-
     var body: some View {
         Group {
-            if isLoaded {
-                content()
-            } else {
-                Color.clear
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    .task {
-                        // Yield once so the selected tab's shell can render
-                        // before its financial projections are evaluated.
-                        await Task.yield()
-                        isLoaded = true
-                    }
-                    .accessibilityHidden(true)
-            }
+            if isLoaded { content() }
+            else { Color.clear.frame(maxWidth: .infinity, maxHeight: .infinity).accessibilityHidden(true) }
+        }
+        .task(id: isActive) {
+            // An offscreen placeholder may mount. Only the selected tab may
+            // construct its first projection; visited tabs keep their state.
+            guard isActive, !isLoaded else { return }
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            isLoaded = true
         }
     }
 }
@@ -479,6 +535,7 @@ struct ImportReportSheet: View {
 
                             ForEach(report.items) { item in
                                 ImportReportRow(item: item)
+                                if item.errorMessage != nil { RetryStatementImport(fileName: item.fileName) }
                             }
                         }
                     }
@@ -680,77 +737,21 @@ struct PendingLedgerRefreshCard: View {
 
 struct LedgerQualityBanner: View {
     let store: FinanceStore
-
-    private var isWarning: Bool {
-        store.dashboardIsBlocked
-            || store.dashboardIsProvisional
-            || store.operationalMetricsBlocked
-            || store.ledgerQuality.reviewMovementCount > 0
-    }
-
-    private var percentText: String {
-        "\(Int(store.ledgerQuality.reconciledPercent.rounded()))% conciliado · \(Int(store.ledgerQuality.evidencePercent.rounded()))% con evidencia"
-    }
-
+    @State private var showReview = false
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: isWarning ? "exclamationmark.triangle.fill" : "checkmark.seal.fill")
-                .foregroundStyle(isWarning ? Color.marcelitoAmber : Color.marcelitoSuccess)
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Calidad de datos / conciliación")
-                    .font(.caption.weight(.semibold))
-                Text(percentText)
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                if store.ledgerQuality.reconciledStatementCount > 0,
-                   store.ledgerQuality.reconciledStatementCount == store.ledgerQuality.statementCount,
-                   store.ledgerQuality.validatedStatementCount < store.ledgerQuality.statementCount {
-                    Text("Conciliado, pero \(store.ledgerQuality.statementCount - store.ledgerQuality.validatedStatementCount) estado(s) requieren revisión OCR antes de entrar a los KPI")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.marcelitoAmber)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                if isWarning || store.ledgerQuality.reviewMovementCount > 0 {
-                    LedgerBlockerDetailsButton().environment(store)
-                }
-                Text("Conciliación financiera: \(store.ledgerQuality.reconciledStatementCount)/\(store.ledgerQuality.statementCount) · elegibles KPI: \(store.ledgerQuality.validatedStatementCount)/\(store.ledgerQuality.statementCount)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                Text("Movimientos bloqueados por fila: \(store.ledgerQuality.blockedMovementCount) · por enriquecer: \(store.ledgerQuality.enrichmentMovementCount)")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(store.ledgerQuality.blockedMovementCount > 0 || store.ledgerQuality.enrichmentMovementCount > 0 ? Color.marcelitoAmber : .secondary)
-                Text("Por enriquecer en el libro: \(Int(store.ledgerQuality.reviewPercent.rounded()))% · \(store.ledgerQuality.reviewMovementCount) movimientos · \(money(store.ledgerQuality.reviewAmount))")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(store.ledgerQuality.reviewMovementCount > 0 ? Color.marcelitoAmber : .secondary)
-                Text("Fuera del libro: \(store.ledgerQuality.quarantinedMovementCount) · candidatos fuera de KPI (no persistidos): \(store.ledgerQuality.quarantinedCandidateCount) · \(store.ledgerQuality.quarantinedStatementCount) estado(s) fuera de KPI")
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(store.ledgerQuality.quarantinedCandidateCount > 0 ? Color.marcelitoAmber : .secondary)
-                if store.dashboardIsProvisional {
-                    Text("\(store.provisionalMovementCount) movimientos provisionales · gasto neto \(store.provisionalSpend.formatted(.currency(code: "MXN")))")
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(Color.marcelitoAmber)
-                }
-                if let message = store.ledgerQuality.message {
-                    Text(message)
-                        .font(.caption2)
-                        .foregroundStyle(isWarning ? Color.marcelitoAmber : .secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+        let count = store.ledgerQuality.reviewMovementCount
+        if count > 0 || store.dashboardIsBlocked || store.operationalMetricsBlocked {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.circle").foregroundStyle(Color.marcelitoAmber)
+                Text(count > 0 ? "\(count) movimientos por revisar · \(store.ledgerQuality.reviewAmount.formatted(.currency(code: "MXN").precision(.fractionLength(0))))" : "Hay estados por revisar")
+                    .font(.caption)
+                Spacer(minLength: 4)
+                Button("Revisar") { showReview = true }.font(.caption.weight(.semibold))
             }
-            Spacer(minLength: 0)
+            .padding(10)
+            .foregroundStyle(Color.marcelitoNavy)
+            .sheet(isPresented: $showReview) { LedgerBlockerDetailsView() }
         }
-        .foregroundStyle(Color.marcelitoNavy)
-        .padding(12)
-        .background(
-            (isWarning ? Color.marcelitoAmber : Color.marcelitoSuccess).opacity(0.10),
-            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
-        )
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Calidad de estados PDF \(percentText)\(store.dashboardIsProvisional ? ". Incluye capturas provisionales" : "")")
-    }
-
-    private func money(_ value: Decimal) -> String {
-        value.formatted(.currency(code: "MXN").precision(.fractionLength(2)))
     }
 }
 
@@ -795,6 +796,7 @@ struct HistoricalDashboardBlockedCard: View {
 struct ImportProgressOverlay: View {
     let progress: Int
     let status: String
+    var cancel: (() -> Void)? = nil
 
     var body: some View {
         ZStack {
@@ -816,6 +818,7 @@ struct ImportProgressOverlay: View {
                             .lineLimit(2)
                     }
                 }
+                if let cancel { Button("Cancelar importación", action: cancel).font(.subheadline) }
                 ProgressView(value: Double(progress), total: 100)
                     .tint(Color.marcelitoAmber)
                 Text("\(progress)%")
@@ -896,9 +899,10 @@ private struct NetWorthSummary: View {
 
     private var trendText: String {
         if store.dashboardIsBlocked { return "Conciliación requerida antes de mostrar el patrimonio" }
-        guard let trend = store.liquidPatrimonyChangePercent else { return "Compara con tu siguiente corte" }
-        let percent = Int((NSDecimalNumber(decimal: trend).doubleValue * 100).rounded())
-        return "\(percent >= 0 ? "+" : "−")\(abs(percent))% vs mes anterior"
+        let points = PositionHistoryBuilder.monthlyPoints(from: store.balanceHistory, calendar: .current)
+        guard points.count >= 2 else { return "Compara con tu siguiente corte" }
+        let delta = points[points.count - 1].value - points[points.count - 2].value
+        return "\(delta >= 0 ? "+" : "−")\(abs(delta).formatted(.currency(code: "MXN").precision(.fractionLength(0)))) vs mes anterior"
     }
 
     var body: some View {
@@ -1086,17 +1090,18 @@ struct MetricDetailSheet: View {
     private var trend: [MetricTrendPoint] {
         switch metric {
         case .patrimony:
-            patrimonyTrend()
+            return patrimonyTrend()
         case .cash:
-            statementTrend(kind: .bank, keyPath: \.cashBalance)
+            return statementTrend(kind: .bank, keyPath: \.cashBalance)
         case .debt:
-            statementTrend(kind: .card, keyPath: \.debtBalance)
+            if store.loanLedger.state.accounts.isEmpty { return statementTrend(kind: .card, keyPath: \.debtBalance) }
+            return Array(store.balanceHistory.compactMap { point in point.debt.map { MetricTrendPoint(id: point.date.description, label: dateLabel(point.date), value: NSDecimalNumber(decimal: $0).doubleValue) } }.suffix(8))
         case .expense:
-            store.cashFlowHistory.filter { Calendar.current.isDate($0.date, equalTo: .now, toGranularity: .month) }.suffix(12).map { point in
+            return store.cashFlowHistory.filter { Calendar.current.isDate($0.date, equalTo: .now, toGranularity: .month) }.suffix(12).map { point in
                 MetricTrendPoint(id: point.id.description, label: dateLabel(point.date), value: point.expense)
             }
         case .flow:
-            store.cashFlowHistory.filter { Calendar.current.isDate($0.date, equalTo: .now, toGranularity: .month) }.suffix(12).map { point in
+            return store.cashFlowHistory.filter { Calendar.current.isDate($0.date, equalTo: .now, toGranularity: .month) }.suffix(12).map { point in
                 MetricTrendPoint(id: point.id.description, label: dateLabel(point.date), value: point.net)
             }
         }
@@ -1192,7 +1197,10 @@ struct MetricDetailSheet: View {
                             .font(.system(.largeTitle, design: .rounded).weight(.bold))
                             .monospacedDigit()
                             .foregroundStyle(Color.marcelitoNavy)
-                        Text(metric.explanation)
+                        if (metric == .debt || metric == .patrimony), !store.loanLedger.state.accounts.isEmpty {
+                            LoanPositionSection()
+                        }
+                        Text(metric == .debt && !store.loanLedger.state.accounts.isEmpty ? "Tarjetas más capital e intereses vencidos confirmados de préstamos. UDIS con valor fechado; excluye intereses futuros." : metric.explanation)
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
@@ -1269,7 +1277,7 @@ struct MetricDetailSheet: View {
                                             .foregroundStyle(.secondary)
                                             .frame(width: 20)
                                         VStack(alignment: .leading, spacing: 3) {
-                                            Text(movement.displayMerchant ?? movement.title)
+                                            Text(movement.summaryDisplayTitle)
                                                 .font(.subheadline.weight(.semibold))
                                                 .lineLimit(2)
                                             Text("\(movement.category) · \(movement.date.formatted(.dateTime.day().month(.abbreviated).year()))")
@@ -1304,7 +1312,7 @@ struct MetricDetailSheet: View {
                                 List(allSupportingMovements) { movement in
                                     NavigationLink { MovementDetailView(movement: movement) } label: {
                                         VStack(alignment: .leading) {
-                                            Text(movement.displayMerchant ?? movement.title)
+                                            Text(movement.summaryDisplayTitle)
                                             Text(metric == .expense ? movement.expenseContribution : movement.amount, format: .currency(code: "MXN"))
                                         }
                                     }
@@ -1338,323 +1346,218 @@ struct MetricDetailSheet: View {
     }
 }
 
-private struct CashFlowChart: View {
-    let store: FinanceStore
-    @State private var selectedPoint: CashFlowPoint?
+struct SpendingPaceWeek: Identifiable, Equatable {
+    let number: Int
+    let amount: Decimal
+    var id: Int { number }
+}
 
-    private var points: [CashFlowPoint] {
-        store.cashFlowHistory
+struct SpendingPaceMetrics {
+    let accumulatedSpend: Decimal
+    let dailyAverage: Decimal?
+    let projectedMonth: Decimal?
+    let weeklySpend: [SpendingPaceWeek]
+    let comparisonPercentChange: Decimal?
+    let hasCompleteCurrentCoverage: Bool
+
+    /// Uses only the existing eligible real-spend rows supplied by FinanceStore.
+    /// Coverage is required before treating absent rows as zero or projecting.
+    static func calculate(
+        movements: [Movement],
+        coveredDays: Set<Date>,
+        now: Date,
+        calendar: Calendar
+    ) -> SpendingPaceMetrics? {
+        guard let monthStart = calendar.dateInterval(of: .month, for: now)?.start,
+              let today = calendar.dateInterval(of: .day, for: now)?.start,
+              let elapsed = calendar.dateComponents([.day], from: monthStart, to: today).day.map({ $0 + 1 }),
+              elapsed > 0,
+              let monthDays = calendar.range(of: .day, in: .month, for: monthStart)?.count,
+              let tomorrow = calendar.date(byAdding: .day, value: 1, to: today) else { return nil }
+
+        let normalizedCoveredDays = Set(coveredDays.map { calendar.startOfDay(for: $0) })
+        func isCovered(start: Date, dayCount: Int) -> Bool {
+            guard dayCount > 0 else { return false }
+            return (0..<dayCount).allSatisfy { offset in
+                guard let day = calendar.date(byAdding: .day, value: offset, to: start) else { return false }
+                return normalizedCoveredDays.contains(calendar.startOfDay(for: day))
+            }
+        }
+        func spend(from start: Date, to end: Date) -> Decimal {
+            movements
+                .filter { $0.date >= start && $0.date < end }
+                .reduce(Decimal.zero) { $0 + $1.expenseContribution }
+        }
+
+        let currentRows = movements.filter { $0.date >= monthStart && $0.date < tomorrow }
+        let accumulated = currentRows.reduce(Decimal.zero) { $0 + $1.expenseContribution }
+        let currentCoverage = isCovered(start: monthStart, dayCount: elapsed)
+        // With neither transactions nor complete statement coverage, a zero
+        // would be an assumption rather than an observed result.
+        guard !currentRows.isEmpty || currentCoverage else { return nil }
+
+        let dailyAverage: Decimal? = currentCoverage ? accumulated / Decimal(elapsed) : nil
+        let projectedMonth = dailyAverage.map { $0 * Decimal(monthDays) }
+        // Show verified transaction activity even when the imported statements
+        // do not cover every day yet. A week with no rows is shown as zero only
+        // when the source statements prove that the full week is covered.
+        var observedWeeklySpend: [Int: Decimal] = [:]
+        var observedWeeklyRows: [Int: Int] = [:]
+        for movement in currentRows {
+            let movementDay = calendar.startOfDay(for: movement.date)
+            guard let dayOffset = calendar.dateComponents([.day], from: monthStart, to: movementDay).day,
+                  dayOffset >= 0,
+                  dayOffset < elapsed else { continue }
+            let weekNumber = dayOffset / 7 + 1
+            observedWeeklySpend[weekNumber, default: 0] += movement.expenseContribution
+            observedWeeklyRows[weekNumber, default: 0] += 1
+        }
+        var weeks: [SpendingPaceWeek] = []
+        for number in 1...((elapsed + 6) / 7) {
+            let offset = (number - 1) * 7
+            let dayCount = min(7, elapsed - offset)
+            guard let start = calendar.date(byAdding: .day, value: offset, to: monthStart) else { continue }
+            let hasObservedRows = observedWeeklyRows[number, default: 0] > 0
+            guard hasObservedRows || isCovered(start: start, dayCount: dayCount) else { continue }
+            weeks.append(SpendingPaceWeek(number: number, amount: observedWeeklySpend[number, default: 0]))
+        }
+
+        var comparisonPercentChange: Decimal?
+        if currentCoverage,
+           let previousMonthStart = calendar.date(byAdding: .month, value: -1, to: monthStart),
+           let previousMonthDays = calendar.range(of: .day, in: .month, for: previousMonthStart)?.count {
+            let comparableDays = min(elapsed, previousMonthDays)
+            if isCovered(start: monthStart, dayCount: comparableDays),
+               isCovered(start: previousMonthStart, dayCount: comparableDays),
+               let currentEnd = calendar.date(byAdding: .day, value: comparableDays, to: monthStart),
+               let previousEnd = calendar.date(byAdding: .day, value: comparableDays, to: previousMonthStart) {
+                let previousSpend = spend(from: previousMonthStart, to: previousEnd)
+                if previousSpend > 0 {
+                    comparisonPercentChange = (spend(from: monthStart, to: currentEnd) - previousSpend) / previousSpend
+                }
+            }
+        }
+
+        return SpendingPaceMetrics(
+            accumulatedSpend: accumulated,
+            dailyAverage: dailyAverage,
+            projectedMonth: projectedMonth,
+            weeklySpend: weeks,
+            comparisonPercentChange: comparisonPercentChange,
+            hasCompleteCurrentCoverage: currentCoverage
+        )
+    }
+}
+
+private struct SpendingPaceSection: View {
+    let store: FinanceStore
+    @Environment(FinancialPlanningStore.self) private var planning
+
+    private var metrics: SpendingPaceMetrics? {
+        SpendingPaceMetrics.calculate(
+            movements: planning.expenseRows(store, period: FinancePeriod(start: Calendar.current.date(byAdding: .month, value: -1, to: FinancePeriod.month(.now).start)!, end: FinancePeriod.month(.now).end)),
+            coveredDays: store.spendingCoveredDays(),
+            now: .now,
+            calendar: .current
+        )
     }
 
-    private var yDomain: ClosedRange<Double> {
-        let values = points.map(\.net)
-        guard let minimumValue = values.min(), let maximumValue = values.max() else {
-            return -1...1
-        }
+    private func money(_ amount: Decimal) -> String {
+        amount.formatted(.currency(code: "MXN").precision(.fractionLength(0)))
+    }
 
-        if abs(maximumValue - minimumValue) < 0.01 {
-            let padding = max(abs(maximumValue) * 0.2, 1)
-            return (minimumValue - padding)...(maximumValue + padding)
-        }
-
-        let lowerBound = min(minimumValue, 0)
-        let upperBound = max(maximumValue, 0)
-        let padding = max((upperBound - lowerBound) * 0.12, 1)
-        return (lowerBound - padding)...(upperBound + padding)
+    private var comparisonLabel: String? {
+        guard let change = metrics?.comparisonPercentChange else { return nil }
+        let percent = Int((NSDecimalNumber(decimal: abs(change) * 100).doubleValue).rounded())
+        let direction = change < 0 ? "↓" : "↑"
+        return "\(direction) \(percent)% vs mismo periodo del mes anterior"
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Flujo neto")
-                    .font(.title3.weight(.bold))
-                Text("Ingresos reales menos gastos reales por fecha · MXN")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Text("Ritmo de gasto · \(FinancePeriod.month(.now).label)")
+                .font(.title3.weight(.bold))
+                .foregroundStyle(Color.marcelitoNavy)
 
-            if points.isEmpty {
-                VStack(alignment: .leading, spacing: 7) {
-                    Image(systemName: "chart.xyaxis.line")
-                        .font(.title2)
+            if let metrics {
+                Text("\(money(metrics.accumulatedSpend)) gastados este mes")
+                    .font(.headline.weight(.semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(Color.marcelitoNavy)
+
+                if let comparisonLabel {
+                    Text(comparisonLabel)
+                        .font(.subheadline)
                         .foregroundStyle(Color.marcelitoNavyMid)
-                    Text("Aún no hay movimientos con fecha")
-                        .font(.subheadline.weight(.semibold))
-                    Text("Importa un estado de cuenta para ver cómo cambia tu flujo neto.")
+                }
+
+                if metrics.accumulatedSpend == 0 {
+                    Text("Sin gastos registrados en este periodo.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else if !metrics.weeklySpend.isEmpty {
+                    Chart(metrics.weeklySpend) { week in
+                        BarMark(
+                            x: .value("Semana", week.number),
+                            y: .value("Gasto", NSDecimalNumber(decimal: week.amount).doubleValue)
+                        )
+                        .foregroundStyle(Color.marcelitoNavyMid)
+                        .cornerRadius(4)
+                        .annotation(position: .top, alignment: .center) {
+                            if week.amount != 0 {
+                                Text(money(week.amount))
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.marcelitoNavyMid)
+                            }
+                        }
+                    }
+                    .chartXAxis {
+                        AxisMarks(values: metrics.weeklySpend.map(\.number)) { value in
+                            AxisValueLabel {
+                                if let number = value.as(Int.self) { Text("Sem \(number)") }
+                            }
+                        }
+                    }
+                    .chartYAxis { AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) }
+                    .frame(height: 142)
+                }
+
+                if let dailyAverage = metrics.dailyAverage,
+                   let projectedMonth = metrics.projectedMonth {
+                    HStack(alignment: .top, spacing: 20) {
+                        paceMetric(title: "Promedio diario", value: money(dailyAverage))
+                        Spacer(minLength: 0)
+                        paceMetric(title: "Proyección del mes", value: "~\(money(projectedMonth))", alignment: .trailing)
+                    }
+                } else if !metrics.hasCompleteCurrentCoverage {
+                    Text("Faltan estados o capturas de algunos días del mes para calcular promedio y proyección.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.vertical, 16)
             } else {
-                CashFlowLineChart(points: points, yDomain: yDomain, selectedPoint: $selectedPoint)
-
-                Text("Transferencias internas y pagos de tarjeta no se muestran para no inflar el gasto.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                insufficientDataMessage
             }
         }
-        .foregroundStyle(Color.marcelitoNavy)
-        .marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 18)
-        .sheet(item: $selectedPoint) { point in
-            CashFlowPointDetail(point: point, points: points)
-        }
-    }
-}
-
-private struct CashFlowLineChart: View {
-    let points: [CashFlowPoint]
-    let yDomain: ClosedRange<Double>
-    @Binding var selectedPoint: CashFlowPoint?
-
-    private var selectedIndex: Int? {
-        guard let selectedPoint else { return nil }
-        return points.firstIndex { $0.id == selectedPoint.id }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.vertical, 4)
     }
 
-    private func xPosition(index: Int, width: CGFloat) -> CGFloat {
-        guard points.count > 1 else { return width / 2 }
-        return CGFloat(index) / CGFloat(points.count - 1) * width
+    private var insufficientDataMessage: some View {
+        Text("Faltan movimientos del mes actual. Sube un estado o capturas de este mes para calcular tu ritmo de gasto.")
+            .font(.subheadline)
+            .foregroundStyle(.secondary)
     }
 
-    private func yPosition(value: Double, height: CGFloat) -> CGFloat {
-        let range = max(yDomain.upperBound - yDomain.lowerBound, 1)
-        let normalized = (value - yDomain.lowerBound) / range
-        return height - CGFloat(normalized) * height
-    }
-
-    private func linePath(
-        keyPath: KeyPath<CashFlowPoint, Double>,
-        width: CGFloat,
-        height: CGFloat
-    ) -> Path {
-        var path = Path()
-        for (index, point) in points.enumerated() {
-            let coordinate = CGPoint(
-                x: xPosition(index: index, width: width),
-                y: yPosition(value: point[keyPath: keyPath], height: height)
-            )
-            if index == 0 {
-                path.move(to: coordinate)
-            } else {
-                path.addLine(to: coordinate)
-            }
-        }
-        return path
-    }
-
-    private func axisLabel(_ value: Double) -> String {
-        value.formatted(.number.notation(.compactName).precision(.fractionLength(0)))
-    }
-
-    private func dateLabel(_ date: Date) -> String {
-        date.formatted(.dateTime.day().month(.abbreviated))
-    }
-
-    private func selectPoint(at locationX: CGFloat, width: CGFloat) {
-        guard !points.isEmpty else { return }
-        let leftInset: CGFloat = 44
-        let plotWidth = max(width - leftInset, 1)
-        let relativeX = min(max(locationX - leftInset, 0), plotWidth)
-        let ratio = relativeX / plotWidth
-        let rawIndex = Int((ratio * CGFloat(max(points.count - 1, 0))).rounded())
-        let index = min(max(rawIndex, 0), points.count - 1)
-        selectedPoint = points[index]
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            GeometryReader { geometry in
-                let plotHeight = max(geometry.size.height - 8, 1)
-                let plotWidth = max(geometry.size.width - 44, 1)
-                ZStack(alignment: .topLeading) {
-                    VStack(alignment: .trailing, spacing: 0) {
-                        Text(axisLabel(yDomain.upperBound))
-                        Spacer()
-                        Text(axisLabel(0))
-                        Spacer()
-                        Text(axisLabel(yDomain.lowerBound))
-                    }
-                    .font(.caption2.monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .frame(width: 40, height: plotHeight, alignment: .trailing)
-
-                    ZStack(alignment: .topLeading) {
-                        Path { path in
-                            let y = yPosition(value: 0, height: plotHeight)
-                            path.move(to: CGPoint(x: 0, y: y))
-                            path.addLine(to: CGPoint(x: plotWidth, y: y))
-                        }
-                        .stroke(Color.marcelitoNavy.opacity(0.15), style: StrokeStyle(lineWidth: 1, dash: [3, 4]))
-
-                        Path { path in
-                            path.addPath(linePath(keyPath: \CashFlowPoint.net, width: plotWidth, height: plotHeight))
-                        }
-                        .stroke(Color.marcelitoNavyMid, style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
-
-                        if let selectedIndex {
-                            let x = xPosition(index: selectedIndex, width: plotWidth)
-                            Path { path in
-                                path.move(to: CGPoint(x: x, y: 0))
-                                path.addLine(to: CGPoint(x: x, y: plotHeight))
-                            }
-                            .stroke(Color.marcelitoNavy.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                        }
-                    }
-                    .frame(width: plotWidth, height: plotHeight, alignment: .topLeading)
-                    .offset(x: 44)
-                }
-                .contentShape(Rectangle())
-                .gesture(
-                    SpatialTapGesture()
-                        .onEnded { event in
-                            selectPoint(at: event.location.x, width: geometry.size.width)
-                        }
-                )
-            }
-            .frame(height: 170)
-
-            if let first = points.first, let last = points.last {
-                HStack {
-                    Spacer().frame(width: 44)
-                    Text(dateLabel(first.date))
-                    Spacer()
-                    if points.count > 2 {
-                        Text(dateLabel(points[points.count / 2].date))
-                        Spacer()
-                    }
-                    Text(dateLabel(last.date))
-                }
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-            }
-
-            CashFlowLegendItem(label: "Flujo neto", color: Color.marcelitoNavyMid)
-                .font(.caption2)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Gráfica de flujo neto por fecha")
-        .accessibilityHint("Toca una fecha para ver el flujo neto y su desglose")
-    }
-}
-
-private struct CashFlowLegendItem: View {
-    let label: String
-    let color: Color
-
-    var body: some View {
-        HStack(spacing: 4) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-            Text(label)
-        }
-        .foregroundStyle(Color.marcelitoNavy)
-    }
-}
-
-private struct CashFlowPointDetail: View {
-    let point: CashFlowPoint
-    let points: [CashFlowPoint]
-    @Environment(\.dismiss) private var dismiss
-
-    private var nearbyPoints: [CashFlowPoint] {
-        guard let index = points.firstIndex(where: { $0.id == point.id }) else { return [point] }
-        let start = max(0, index - 3)
-        let end = min(points.count, index + 4)
-        return Array(points[start..<end])
-    }
-
-    var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(point.date.formatted(.dateTime.day().month(.wide).year()))
-                            .font(.title2.weight(.bold))
-                        Text("Detalle del movimiento financiero")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    CashFlowDetailValue(title: "Flujo neto", value: point.net, color: Color.marcelitoNavyMid)
-
-                    HStack(spacing: 10) {
-                        CashFlowDetailValue(title: "Ingresos", value: point.income, color: Color.marcelitoSuccess)
-                        CashFlowDetailValue(title: "Gastos", value: point.expense, color: Color.marcelitoAmber)
-                    }
-
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("Comportamiento cercano")
-                            .font(.subheadline.weight(.semibold))
-                        MiniCashFlowChart(points: nearbyPoints)
-                            .frame(height: 150)
-                        Text("Cada punto representa ingresos reales menos gastos reales de esa fecha.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                    .foregroundStyle(Color.marcelitoNavy)
-                }
-                .padding(20)
-            }
-            .scrollIndicators(.hidden)
-            .background(MarcelitoAmbientBackground())
-            .navigationTitle("Detalle")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Cerrar") { dismiss() }
-                        .fontWeight(.semibold)
-                }
-            }
-        }
-        .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
-        .presentationBackground(Color.marcelitoCream)
-    }
-}
-
-private struct CashFlowDetailValue: View {
-    let title: String
-    let value: Double
-    let color: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
+    private func paceMetric(title: String, value: String, alignment: HorizontalAlignment = .leading) -> some View {
+        VStack(alignment: alignment, spacing: 2) {
             Text(title)
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text(value, format: .currency(code: "MXN").precision(.fractionLength(0)))
-                .font(.headline)
+            Text(value)
+                .font(.subheadline.weight(.semibold))
                 .monospacedDigit()
-                .foregroundStyle(color)
+                .foregroundStyle(Color.marcelitoNavy)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(14)
-        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-    }
-}
-
-private struct MiniCashFlowChart: View {
-    let points: [CashFlowPoint]
-
-    var body: some View {
-        Chart {
-            ForEach(points) { point in
-                LineMark(
-                    x: .value("Fecha", point.date),
-                    y: .value("Monto", point.net),
-                    series: .value("Serie", "Flujo neto")
-                )
-                .foregroundStyle(Color.marcelitoNavyMid)
-                .lineStyle(StrokeStyle(lineWidth: 2.5))
-            }
-        }
-        .chartXAxis(.hidden)
-        .chartYAxis(.hidden)
-        .chartLegend(.hidden)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Mini gráfica del comportamiento del flujo neto")
     }
 }
 

@@ -32,7 +32,7 @@ test("Amex y BBVA usan encuadres propios y los indicadores quedan fuera de la ta
   assert.match(source, /case \.amex: 1\.075/);
   assert.match(source, /case \.bbva: 1\.045/);
   assert.match(source, /\.scaleEffect\(account\.artworkScale\)/);
-  assert.match(source, /\.aspectRatio\(account\.artworkAspectRatio, contentMode: \.fit\)/);
+  assert.match(source, /\.frame\(height: 78\)/);
   assert.match(source, /HStack\(spacing: 7\)[\s\S]*ForEach\(displayedAccounts\)[\s\S]*Circle\(\)/);
 });
 

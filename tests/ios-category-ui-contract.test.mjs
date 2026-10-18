@@ -12,10 +12,27 @@ test("los selectores iOS vinculan cada categoría con el valor que se guarda", a
   const explicitStringTags = source.match(/Text\(option\)\.tag\(option\)/g) ?? [];
 
   assert.ok(explicitStringTags.length >= 2, "los selectores de alta y edición deben declarar tags String");
-  assert.match(source, /store\.updateCategory\(for: movement, to: \$0\)/);
+  assert.match(source, /store\.updateCategory\(for: movement, to: \$0, applyToMerchant: false\)/);
   assert.match(source, /La categoría se guarda al seleccionarla/);
+  assert.ok(source.includes("Aplicar también a \\(merchantRulePeerCount) otros gastos"));
+  assert.ok(source.includes("Guardar regla para futuros gastos"));
   assert.match(source, /Text\(movement\.category\)/);
   assert.match(source, /Guardado como/);
+});
+
+test("la lista pendiente deriva grupos, cantidad y total de la misma instantánea", async () => {
+  const source = await readFile(sectionsPath, "utf8");
+  const expensesStart = source.indexOf("struct PendingClassificationView");
+  const reviewStart = source.indexOf("private struct ExpenseMerchantReviewView", expensesStart);
+  const expenses = source.slice(expensesStart, reviewStart);
+  const review = source.slice(reviewStart);
+
+  assert.match(expenses, /let pendingMovements = store\.pendingExpenseCategoryMovements/);
+  assert.match(expenses, /movementCount: pendingMovements\.count/);
+  assert.match(expenses, /total: pendingMovements\.reduce/);
+  assert.match(expenses, /Text\("Total pendiente"\)/);
+  assert.match(review, /private var currentGroup: ExpenseMerchantReviewGroup\?/);
+  assert.match(review, /"Comercio actualizado"/);
 });
 
 test("la pantalla ofrece reglas locales y reporta solo cambios realmente aplicados por IA", async () => {
@@ -29,17 +46,33 @@ test("la pantalla ofrece reglas locales y reporta solo cambios realmente aplicad
   assert.equal(source.includes("Se actualizaron \\(classifications.count)"), false);
 });
 
-test("Gastos resume todo el libro real y conserva las categorías manuales entre cortes", async () => {
-  const source = await readFile(sectionsPath, "utf8");
-  const expensesStart = source.indexOf("struct ExpensesView");
-  const expensesEnd = source.indexOf("private struct ExpenseTrendPoint", expensesStart);
-  const expenses = source.slice(expensesStart, expensesEnd);
+test("Gastos usa un periodo visible por fecha del cargo y conserva el libro", async () => {
+  const source = await readFile(new URL("../apps/ios/Cauce/PlanningViews.swift", import.meta.url), "utf8");
+  const engine = await readFile(new URL("../apps/ios/Cauce/FinancialPlanning.swift", import.meta.url), "utf8");
+  assert.match(source, /safeAreaInset\(edge: \.top\)/);
+  assert.match(source, /por fecha del cargo/);
+  assert.match(source, /planning\.expenseRows\(store, period: period\)/);
+  assert.match(engine, /period\.contains\(\$0\.date\)/);
+  assert.doesNotMatch(engine, /movements\[[^\]]+\]\.amount\s*=/);
+});
 
-  assert.ok(expensesStart >= 0 && expensesEnd > expensesStart);
-  assert.equal((source.match(/store\.netExpenseMovements/g) ?? []).length, 2);
-  assert.doesNotMatch(expenses, /currentPeriodExpenseMovements/);
-  assert.match(expenses, /Gasto neto conciliado\. Lo que sigue pendiente de clasificar aparece separado arriba/);
-  assert.match(expenses, /expenseContribution/);
+test("el detalle de pendientes en Gastos muestra beneficiario y descripción bancaria", async () => {
+  const source = await readFile(sectionsPath, "utf8");
+  const detailStart = source.indexOf("struct MovementDetailView");
+  const reviewStart = source.indexOf("private struct ExpenseMerchantReviewView");
+  const reviewEnd = source.indexOf("private struct ExpenseCategorySelection", reviewStart);
+  const detail = source.slice(detailStart, reviewStart);
+  const review = source.slice(reviewStart, reviewEnd);
+
+  assert.ok(detailStart >= 0 && reviewStart > detailStart);
+  assert.ok(reviewStart >= 0 && reviewEnd > reviewStart);
+  assert.match(detail, /currentMovement\.hasTransferOrSpeiDescriptor/);
+  assert.match(detail, /No indicado en el estado/);
+  assert.match(detail, /Text\(currentMovement\.originalBankDescription\)/);
+  assert.match(review, /if movement\.hasTransferOrSpeiDescriptor/);
+  assert.match(review, /Destinatario.*no indicado en el estado/);
+  assert.match(review, /movement\.summaryDisplayTitle/);
+  assert.match(review, /Text\(movement\.originalBankDescription\)/);
 });
 
 test("Cuentas conserva un acceso superior para asignar y editar movimientos", async () => {
@@ -63,27 +96,37 @@ test("calidad distingue conciliación de comercios por enriquecer en Cuentas", a
 
   assert.match(sections, /store\.ledgerQuality\.reviewMovementCount > 0/);
   assert.match(sections, /LedgerQualityBanner\(store: store\)/);
-  assert.match(root, /store\.ledgerQuality\.reviewMovementCount > 0/);
-  assert.match(root, /Movimientos bloqueados por fila:/);
-  assert.match(root, /Por enriquecer en el libro:/);
+  assert.match(root, /let count = store\.ledgerQuality\.reviewMovementCount/);
+  assert.match(root, /movimientos por revisar/);
+  assert.match(root, /Button\("Revisar"\)/);
+  assert.doesNotMatch(root.slice(root.indexOf("struct LedgerQualityBanner"), root.indexOf("struct HistoricalDashboardBlockedCard")), /quarantinedCandidateCount/);
 });
 
-test("Resumen grafica únicamente el flujo neto y conserva su desglose", async () => {
+test("Resumen muestra ritmo de gasto con periodos equivalentes y barras semanales", async () => {
   const [root, models] = await Promise.all([
     readFile(rootTabPath, "utf8"),
     readFile(modelsPath, "utf8"),
   ]);
-  const chartStart = root.indexOf("private struct CashFlowChart");
+  const chartStart = root.indexOf("struct SpendingPaceMetrics");
   const chartEnd = root.indexOf("private struct DecisionCallout", chartStart);
-  const chart = root.slice(chartStart, chartEnd);
+  const pace = root.slice(chartStart, chartEnd);
 
   assert.ok(chartStart >= 0 && chartEnd > chartStart);
+  assert.match(root, /SpendingPaceSection\(store: store\)/);
   assert.match(models, /var net: Double \{ income - expense \}/);
-  assert.match(chart, /Text\("Flujo neto"\)/);
-  assert.match(chart, /linePath\(keyPath: \\CashFlowPoint\.net/);
-  assert.doesNotMatch(chart, /linePath\(keyPath: \\CashFlowPoint\.(income|expense|balance)/);
-  assert.match(chart, /CashFlowDetailValue\(title: "Ingresos"/);
-  assert.match(chart, /CashFlowDetailValue\(title: "Gastos"/);
+  assert.match(pace, /Ritmo de gasto ·/);
+  assert.match(pace, /BarMark\(/);
+  assert.match(pace, /weeklySpend/);
+  assert.match(pace, /vs mismo periodo del mes anterior/);
+  assert.match(pace, /Promedio diario/);
+  assert.match(pace, /Proyección del mes/);
+  assert.match(pace, /if let dailyAverage = metrics\.dailyAverage,[\s\S]*let projectedMonth = metrics\.projectedMonth/);
+  assert.match(pace, /hasObservedRows \|\| isCovered/);
+  assert.match(pace, /Faltan estados o capturas de algunos días/);
+  assert.match(pace, /store\.spendingCoveredDays\(\)/);
+  assert.match(pace, /planning\.expenseRows/);
+  assert.doesNotMatch(pace, /planning\.personalRows|planning\.personalContribution/);
+  assert.match(pace, /Faltan movimientos del mes actual/);
 });
 
 test("las métricas y categorías exponen Top 10 editable por movimiento", async () => {
@@ -92,7 +135,7 @@ test("las métricas y categorías exponen Top 10 editable por movimiento", async
     readFile(rootTabPath, "utf8"),
   ]);
   const metricStart = root.indexOf("struct MetricDetailSheet");
-  const metricEnd = root.indexOf("private struct CashFlowChart", metricStart);
+  const metricEnd = root.indexOf("struct SpendingPaceWeek", metricStart);
   const metricDetail = root.slice(metricStart, metricEnd);
 
   assert.ok(metricStart >= 0 && metricEnd > metricStart);

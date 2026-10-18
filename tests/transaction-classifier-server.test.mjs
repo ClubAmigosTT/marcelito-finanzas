@@ -32,7 +32,7 @@ const classification = {
 
 const classifierRequestVersion = {
   classifierVersion: "transaction-classifier-2026.09.08.1",
-  promptVersion: "expense-taxonomy-v2",
+  promptVersion: "expense-taxonomy-v3",
 };
 
 async function withServer(fetchImpl, callback) {
