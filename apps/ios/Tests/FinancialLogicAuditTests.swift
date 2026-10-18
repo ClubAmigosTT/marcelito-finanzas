@@ -982,6 +982,26 @@ final class FinancialLogicAuditTests: XCTestCase {
             in: [march], fileName: "EstadoCuenta.pdf", source: "Santander", period: "01/03/2026 - 31/03/2026"))
     }
 
+    func testOneAccountWithoutDayLevelPeriodsDoesNotMarkEveryMonthPartial() {
+        let calendar = Calendar.current
+        func days(_ from: Date, _ count: Int) -> Set<Date> {
+            Set((0..<count).compactMap { calendar.date(byAdding: .day, value: $0, to: calendar.startOfDay(for: from)) })
+        }
+        let bank = days(calendarDate(2026, 8, 1), 61)          // 1 ago – 30 sep
+        let card = days(calendarDate(2026, 7, 28), 62)         // 28 jul – 27 sep
+        let closedCard = days(calendarDate(2026, 1, 1), 31)    // stopped in January
+        let monthOnlyLabel = Set<Date>()                       // e.g. a "Julio 2026" period
+
+        let covered = FinanceStore.commonCoverage([bank, card, closedCard, monthOnlyLabel])
+
+        XCTAssertTrue(covered.contains(calendar.startOfDay(for: calendarDate(2026, 8, 15))))
+        XCTAssertTrue(covered.contains(calendar.startOfDay(for: calendarDate(2026, 9, 27))))
+        // The current card has no statement for 28–30 Sep yet: still partial.
+        XCTAssertFalse(covered.contains(calendar.startOfDay(for: calendarDate(2026, 9, 29))))
+        // Before the bank account existed, only the card constrains coverage.
+        XCTAssertTrue(covered.contains(calendar.startOfDay(for: calendarDate(2026, 7, 30))))
+    }
+
     func testManualKindCannotContradictTheAmountSign() {
         withStore { store in
             store.addMovement(title: "Intereses ganados", account: "BBVA", category: "Ingresos",

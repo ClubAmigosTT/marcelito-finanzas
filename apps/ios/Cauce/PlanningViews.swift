@@ -21,7 +21,7 @@ struct PlanningMetric: View {
         VStack(alignment: .leading, spacing: 5) {
             HStack { Text(title).font(.caption); CalculationHelp(explanation: explanation) }
             Text(value).font(.title3.bold()).monospacedDigit()
-            Text(period).font(.caption2).foregroundStyle(.secondary)
+            if !period.isEmpty { Text(period).font(.caption2).foregroundStyle(.secondary) }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }
@@ -192,7 +192,6 @@ struct HomeMonthlyPlanCard: View {
             } else if !snapshot.hasData {
                 Text(planning.monthlyIncome == nil ? "Prepara tu presupuesto del mes" : "Tu presupuesto está preparado").font(.title3.bold())
                 if let income = planning.monthlyIncome { Text("Ingreso habitual: \(planningMoney(income)) al mes").font(.subheadline) }
-                Text("Los gastos de \(monthName(.now)) aparecerán al cargar movimientos.").font(.subheadline)
                 if let latest = planning.latestMovementDate(store), !month.contains(latest) {
                     Button("Ver último mes con datos: \(monthName(latest)) →") { showLatest(latest) }.font(.subheadline.weight(.semibold)).tint(.white)
                 }
@@ -228,7 +227,6 @@ struct PlanningDataFreshness: View {
             VStack(alignment: .leading, spacing: 3) {
                 if let latest = planning.latestDataDate(store) { Text("Último dato: " + planningDayLabel(latest)) }
                 else { Text("Sin fecha de actualización confirmada") }
-                Text("Por estados y capturas · sin conexión en tiempo real").font(.caption2)
             }.font(.caption).foregroundStyle(.secondary)
             Spacer()
             Button("Actualizar", action: update).font(.caption.weight(.semibold))
@@ -376,7 +374,6 @@ struct ExpensesView: View {
             }
             PeriodNavigationBar(label: period.label, move: movePeriod) { showPeriodPicker = true }
             HStack {
-                Text("Por fecha del cargo").font(.caption2).foregroundStyle(.secondary)
                 Spacer()
                 Menu {
                     Button("Todas") { account = "Todas" }
@@ -399,15 +396,15 @@ struct ExpensesView: View {
     }
     private var totalsSection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            PlanningMetric(title: "Gasto registrado", value: planningMoney(total), period: period.label, explanation: "Todo el gasto por fecha del cargo, incluidos viajes, extraordinarios y gastos compartidos, menos devoluciones. Excluye traspasos propios y pagos de tarjeta. Las compras MSI confirmadas se registran completas una vez; sus mensualidades son compromisos.")
+            PlanningMetric(title: "Gasto registrado", value: planningMoney(total), period: "", explanation: "Todo el gasto por fecha del cargo, incluidos viajes, extraordinarios y gastos compartidos, menos devoluciones. Excluye traspasos propios y pagos de tarjeta. Las compras MSI confirmadas se registran completas una vez; sus mensualidades son compromisos.")
             let c = Calendar.current
             let observedEnd = min(period.end, c.date(byAdding: .day, value: 1, to: c.startOfDay(for: .now))!)
             let days = max(0, c.dateComponents([.day], from: period.start, to: observedEnd).day ?? 0)
             let purchases = rows.filter { $0.expenseContribution > 0 }
             HStack(alignment: .top, spacing: 10) {
-                PlanningMetric(title: "Promedio diario", value: days > 0 && monthIsCovered(store, period: period, through: observedEnd.addingTimeInterval(-1), account: account == "Todas" ? nil : account) ? planningMoney(total / Decimal(days)) : "Faltan días", period: period.label, explanation: "Gasto registrado del periodo / días transcurridos cubiertos. No convierte días sin estado en gasto cero.")
-                PlanningMetric(title: "Movimientos", value: String(rows.count), period: period.label, explanation: "Movimientos de consumo y devoluciones del periodo seleccionado, incluyendo compras MSI confirmadas una vez.")
-                PlanningMetric(title: "Ticket promedio", value: purchases.isEmpty ? "Sin cargos" : planningMoney(purchases.reduce(0) { $0 + $1.expenseContribution } / Decimal(purchases.count)), period: period.label, explanation: "Suma de cargos positivos / número de esos cargos. No utiliza devoluciones como cargos ni divide entre cero.")
+                PlanningMetric(title: "Promedio diario", value: days > 0 && monthIsCovered(store, period: period, through: observedEnd.addingTimeInterval(-1), account: account == "Todas" ? nil : account) ? planningMoney(total / Decimal(days)) : "Faltan días", period: "", explanation: "Gasto registrado del periodo / días transcurridos cubiertos. No convierte días sin estado en gasto cero.")
+                PlanningMetric(title: "Movimientos", value: String(rows.count), period: "", explanation: "Movimientos de consumo y devoluciones del periodo seleccionado, incluyendo compras MSI confirmadas una vez.")
+                PlanningMetric(title: "Ticket promedio", value: purchases.isEmpty ? "Sin cargos" : planningMoney(purchases.reduce(0) { $0 + $1.expenseContribution } / Decimal(purchases.count)), period: "", explanation: "Suma de cargos positivos / número de esos cargos. No utiliza devoluciones como cargos ni divide entre cero.")
             }
         }
     }
@@ -424,10 +421,10 @@ struct ExpensesView: View {
                 if !previousRows.isEmpty {
                     let old = previousRows.reduce(0) { $0 + $1.expenseContribution }
                     let current = rows.filter { currentRange.contains($0.date) }.reduce(0) { $0 + $1.expenseContribution }
-                    Text("\(current >= old ? "+" : "−")\(planningMoney(abs(current - old))) vs \(range.label)").font(.subheadline)
-                    if !monthIsCovered(store, period: range, through: range.end.addingTimeInterval(-1), account: account == "Todas" ? nil : account) || !monthIsCovered(store, period: currentRange, through: currentRange.end.addingTimeInterval(-1), account: account == "Todas" ? nil : account) {
-                        Text("Comparación parcial · faltan datos en uno o ambos periodos").font(.caption).foregroundStyle(Color.marcelitoAmber)
-                    }
+                    let partial = !monthIsCovered(store, period: range, through: range.end.addingTimeInterval(-1), account: account == "Todas" ? nil : account)
+                        || !monthIsCovered(store, period: currentRange, through: currentRange.end.addingTimeInterval(-1), account: account == "Todas" ? nil : account)
+                    (Text("\(current >= old ? "+" : "−")\(planningMoney(abs(current - old))) vs \(range.label)")
+                        + Text(partial ? " · parcial" : "").foregroundStyle(Color.marcelitoAmber)).font(.subheadline)
                 } else { Text("Sin movimientos comparables de \(previousPeriod.label)").font(.caption).foregroundStyle(.secondary) }
             }
         }
@@ -469,7 +466,7 @@ struct ExpensesView: View {
         let avg = samples.reduce(0, +) / Decimal(samples.count)
         guard avg > 0 else { return "Sin promedio comparable" }
         let change = (actualComparable - avg) / avg * 100
-        return "\(change >= 0 ? "↑" : "↓") \(Int(NSDecimalNumber(decimal: abs(change)).doubleValue.rounded()))% vs tu promedio · días 1–\(comparableDays) · historial observado"
+        return "\(change >= 0 ? "↑" : "↓") \(Int(NSDecimalNumber(decimal: abs(change)).doubleValue.rounded()))% vs tu promedio"
     }
     private var merchantsSection: some View {
         let merchants = Dictionary(grouping: rows, by: { planning.merchantLabel($0) }).map { ($0.key, $0.value.reduce(0) { $0 + $1.expenseContribution }) }.sorted { $0.1 > $1.1 }
@@ -1154,11 +1151,11 @@ struct LastRecordedMonthSummary: View {
             PeriodNavigationBar(label: period.label, move: movePeriod) { showPeriodPicker = true }
             if planning.hasData(store, period: period) {
                 HStack(alignment: .top, spacing: 12) {
-                    PlanningMetric(title: "Gasto registrado", value: planning.expenseRows(store, period: period).isEmpty ? "Sin cargos" : planningMoney(planning.total(store, period: period)), period: period.label, explanation: "Todo el gasto registrado por fecha del cargo, incluidos viajes, extraordinarios y gastos compartidos, menos devoluciones. Excluye transferencias propias y pagos de tarjeta; no representa actividad en tiempo real.")
-                    PlanningMetric(title: "Ingreso recibido", value: store.realIncomeMovements.contains(where: { period.contains($0.date) }) ? planningMoney(planning.observedIncome(store, period: period)) : "Sin depósitos", period: period.label, explanation: "Depósitos reales del periodo seleccionado. El ingreso habitual de tus fuentes se utiliza por separado para planear.")
+                    PlanningMetric(title: "Gasto registrado", value: planning.expenseRows(store, period: period).isEmpty ? "Sin cargos" : planningMoney(planning.total(store, period: period)), period: "", explanation: "Todo el gasto registrado por fecha del cargo, incluidos viajes, extraordinarios y gastos compartidos, menos devoluciones. Excluye transferencias propias y pagos de tarjeta; no representa actividad en tiempo real.")
+                    PlanningMetric(title: "Ingreso recibido", value: store.realIncomeMovements.contains(where: { period.contains($0.date) }) ? planningMoney(planning.observedIncome(store, period: period)) : "Sin depósitos", period: "", explanation: "Depósitos reales del periodo seleccionado. El ingreso habitual de tus fuentes se utiliza por separado para planear.")
                 }
                 if !monthIsCovered(store, period: period, through: min(.now, period.end.addingTimeInterval(-1))) {
-                    Text("Cobertura parcial · falta actualizar algunas cuentas").font(.caption).foregroundStyle(.secondary)
+                    Text("Cobertura parcial").font(.caption).foregroundStyle(.secondary)
                 }
                 Button("Ver movimientos") { showMovements(anchor, mode) }.font(.subheadline.weight(.semibold))
             } else { Text("Sin movimientos cargados en \(period.label.lowercased()).").font(.subheadline).foregroundStyle(.secondary) }
@@ -1178,7 +1175,7 @@ struct HomePersonalMetrics: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 12) {
                 PlanningMetric(title: "Efectivo", value: store.dashboardIsBlocked ? "Por revisar" : store.cashAvailable.map(planningMoney) ?? "Falta estado", period: balancePeriodLabel(store, kind: .bank), explanation: "Suma de saldos de cuentas de débito en sus últimos cortes conciliados. No incluye crédito disponible.")
-                PlanningMetric(title: "Deuda", value: store.dashboardIsBlocked ? "Por revisar" : store.debtTotal.map(planningMoney) ?? store.loanDebtUnavailableLabel, period: balancePeriodLabel(store, kind: .card) + (store.loanBalancePeriodLabel.isEmpty ? "" : " · " + store.loanBalancePeriodLabel), explanation: "Deuda de tarjetas más capital e intereses vencidos confirmados de préstamos. UDIS se convierte con el último valor fechado y confirmado; no agrega intereses futuros. Si falta el valor UDI, la deuda total queda pendiente. El principal MSI forma parte del saldo de tarjetas.")
+                PlanningMetric(title: "Deuda", value: store.dashboardIsBlocked ? "Por revisar" : store.debtTotal.map(planningMoney) ?? store.loanDebtUnavailableLabel, period: balancePeriodLabel(store, kind: .card), explanation: "Deuda de tarjetas más capital e intereses vencidos confirmados de préstamos. UDIS se convierte con el último valor fechado y confirmado; no agrega intereses futuros. Si falta el valor UDI, la deuda total queda pendiente. El principal MSI forma parte del saldo de tarjetas.")
             }
             if showActivity, planning.hasData(store, period: period), !store.operationalMetricsBlocked {
                 HStack(alignment: .top, spacing: 12) {
@@ -1195,7 +1192,6 @@ struct HomePersonalMetrics: View {
 func balancePeriodLabel(_ store: FinanceStore, kind: StatementKind) -> String {
     let grouped = Dictionary(grouping: store.periodMetrics.filter { $0.kind == kind }, by: { $0.accountKey ?? $0.source })
     let dates = grouped.values.compactMap { $0.first.flatMap { store.statementCutoffDate(for: $0.id) } }.sorted()
-    guard let first = dates.first, let last = dates.last else { return "Sin corte confirmado" }
-    let c = Calendar.current
-    return "Cortes · " + FinancePeriod(start: c.startOfDay(for: first), end: c.date(byAdding: .day, value: 1, to: c.startOfDay(for: last))!).label
+    guard let last = dates.last else { return "Sin corte confirmado" }
+    return "Corte al " + planningDayLabel(last)
 }

@@ -17,6 +17,22 @@ import Observation
     @discardableResult func importStatement(_ statement: LoanStatement) throws -> Bool { try book.importStatement(statement) }
     func quote(asOf date: Date = .now) -> LoanUDIQuote? { _ = revision; return book.quote(asOf: date) }
     func setQuote(value: Decimal, date: Date, now: Date = .now) throws { try book.setQuote(value: value, date: date, now: now) }
+    @discardableResult func mergeOfficialQuotes(_ quotes: [LoanUDIQuote], now: Date = .now) throws -> Int { try book.mergeOfficialQuotes(quotes, now: now) }
+    /// Downloads the official UDI values the loan still lacks, from its first
+    /// statement or installment through today. Offline or on a server error the
+    /// manual "valor UDI" entry keeps working.
+    @MainActor func refreshOfficialQuotes(now: Date = .now) async {
+        guard loadError == nil, let earliest = book.earliestQuoteNeeded else { return }
+        let calendar = Calendar.current
+        if let latest = book.quote(asOf: now), calendar.isDate(latest.date, inSameDayAs: now) { return }
+        let start = max(earliest, calendar.date(byAdding: .year, value: -5, to: now) ?? earliest)
+        // Resume after the last official value; a single hand-typed value
+        // must not stop older months from being priced.
+        let missingFrom = state.quotes.filter { $0.source == LoanUDIFeed.source && $0.date >= start }.map(\.date).max()
+            .flatMap { calendar.date(byAdding: .day, value: 1, to: $0) } ?? start
+        guard let quotes = try? await LoanUDIFeed.fetch(from: min(missingFrom, now), to: now) else { return }
+        _ = try? book.mergeOfficialQuotes(quotes, now: now)
+    }
     func debt(asOf date: Date = .now) -> Decimal? { _ = revision; return book.debt(asOf: date) }
     func receipts(_ accountID: String) -> [LoanReceipt] { _ = revision; return book.receipts(accountID) }
     func confirmLink(accountID: String, receipt: LoanReceipt, movementID: UUID, identity: String, amount: Decimal) throws { try book.confirmLink(accountID: accountID, receipt: receipt, movementID: movementID, identity: identity, amount: amount) }
