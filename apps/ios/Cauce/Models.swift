@@ -1208,17 +1208,6 @@ final class FinanceStore {
             ? maskedAccountKey(from: text, source: source)
             : nil
         let kind = statementKind(from: text, source: source)
-        let movements: [Movement]
-        if source.localizedCaseInsensitiveContains("Amex") {
-            // American Express keeps a section-aware text parser. Production
-            // extraction may fall through to parseAmexOCR when this candidate
-            // does not reconcile; this pure text seam remains deterministic.
-            movements = parseAmexText(text, fileName: fileName)
-        } else if source == "Rappi" {
-            movements = parseRappiText(text, fileName: fileName, evidenceMethod: rappiEvidenceMethod)
-        } else {
-            movements = parse(text: text, fileName: fileName, sourceHint: source)
-        }
         // Keep the contract helper on the same repaired text path as a real
         // PDF import. Amex's selectable layer can flatten section totals onto
         // one line; production separates those sections before reading the
@@ -1232,6 +1221,16 @@ final class FinanceStore {
             summaryText = text
         }
         let summary = summary(from: summaryText, source: source)
+        // Same issuer parsers as a real text-layer import. Production may
+        // still fall through to Vision when these rows do not reconcile; this
+        // pure text seam stays deterministic.
+        let movements = selectableTextCandidates(
+            text: text,
+            fileName: fileName,
+            source: source,
+            openingBalance: summary?.previousBalance,
+            rappiEvidenceMethod: rappiEvidenceMethod
+        )
         let period = periodLabel(from: text, fileName: fileName, sourceHint: source)
         return ReaderParseSnapshot(
             sourceDetection: detection,
@@ -1422,10 +1421,8 @@ final class FinanceStore {
         let source = cleanedOverride?.isEmpty == false ? cleanedOverride! : evidence.source
         let kind = kindOverride ?? statementKind(from: text, source: source)
         let repaired = rebuildAmexSelectableLines(text)
-        let rows = source.localizedCaseInsensitiveContains("Amex")
-            ? parseAmexText(repaired, fileName: fileName)
-            : parse(text: repaired, fileName: fileName, sourceHint: source)
         let statementSummary = summary(from: repaired, source: source)
+        let rows = selectableTextCandidates(text: repaired, fileName: fileName, source: source, openingBalance: statementSummary?.previousBalance)
         let reconciliation = FinanceStore(reconciliationOnly: true).reconcileStatement(
             kind: kind,
             summary: statementSummary,
@@ -1739,6 +1736,10 @@ final class FinanceStore {
 
     /// Runs the native PDF text parser used by production imports. No Vision
     /// observations are accepted by this seam by design.
+    static func isAdministrativeTitleForTesting(_ title: String) -> Bool {
+        isAdministrativeTitle(title)
+    }
+
     static func amexTextRowsForTesting(_ text: String, fileName: String) -> [Movement] {
         parseAmexText(text, fileName: fileName)
     }
@@ -2852,10 +2853,18 @@ final class FinanceStore {
             return LedgerConsistencyCheck(id: id, label: label, expected: expected, actual: actual, difference: difference, tolerance: tolerance, passed: absolute(difference) <= tolerance)
         }
 
+        // A card whose disponible exceeds its limit carries a saldo a favor: it
+        // uses no credit, so per-card usage is clamped at zero and the favor
+        // balance must be added back for the aggregate identity to hold.
+        let favorBalance = completeSum(latestCompleteMetrics(.card).map { metric in
+            metric.creditLimit.flatMap { limit in metric.creditAvailable.map { max(Decimal(0), $0 - limit) } }
+        })
         var checks = [
             check("flow", "Ingresos − gasto real = flujo neto", expected: realIncome - consolidatedRealSpend, actual: netFlow),
-            check("patrimony", "Efectivo − deuda = patrimonio líquido", expected: cashAvailable.flatMap { cash in debtTotal.map { cash - $0 } }, actual: liquidPatrimony),
-            check("credit", "Límite − crédito disponible = deuda utilizada", expected: creditLimit.flatMap { limit in creditAvailable.map { limit - $0 } }, actual: creditUsed),
+            check("patrimony", "Efectivo − pagos en tránsito − deuda = patrimonio líquido", expected: cashAvailable.flatMap { cash in debtTotal.map { cash - cardPaymentsAfterBankCutoff - $0 } }, actual: liquidPatrimony),
+            check("credit", "Límite − crédito disponible + saldo a favor = deuda utilizada",
+                expected: creditLimit.flatMap { limit in creditAvailable.flatMap { available in favorBalance.map { limit - available + $0 } } },
+                actual: creditUsed),
         ]
         for metric in latestMetricsBySource(periodMetrics.filter { $0.kind == .bank }) {
             guard let opening = statements.first(where: { $0.id == metric.id })?.summary?.previousBalance,
@@ -3190,11 +3199,32 @@ final class FinanceStore {
         eligibleMovements.filter(isRealIncome).reduce(0) { $0 + absolute($1.amount) }
     }
     var netFlow: Decimal { realIncome - consolidatedRealSpend }
-    var savingsRate: Decimal? { realIncome == 0 ? nil : netFlow / realIncome }
+    /// Income and spend over the same months: when cards exist, only cutoff
+    /// months with both a bank and a card statement are compared, so bank
+    /// income of a month without its card statement cannot inflate the rate.
+    var savingsRate: Decimal? {
+        let dashboard = statements.filter(isDashboardStatement)
+        let bankMonths = Set(dashboard.filter { statementKind($0) == .bank }.map { periodKey($0.period) })
+        let cardMonths = Set(dashboard.filter { statementKind($0) == .card }.map { periodKey($0.period) })
+        let months = cardMonths.isEmpty ? bankMonths : bankMonths.intersection(cardMonths)
+        let statementIDs = Set(dashboard.filter { months.contains(periodKey($0.period)) }.map(\.id))
+        func inWindow(_ movement: Movement) -> Bool {
+            if let statementId = movement.statementId { return statementIDs.contains(statementId) }
+            return movementPeriodKey(movement).map(months.contains) ?? false
+        }
+        let income = realIncomeMovements.filter(inWindow).reduce(Decimal(0)) { $0 + absolute($1.amount) }
+        guard income != 0 else { return nil }
+        let spend = netExpenseMovements.filter(inWindow).reduce(Decimal(0)) { $0 + $1.expenseContribution }
+        return (income - spend) / income
+    }
     var cashAvailable: Decimal? {
         completeSum(latestCompleteMetrics(.bank).map(\.cashBalance))
     }
-    var cardDebtTotal: Decimal? { completeSum(latestCompleteMetrics(.card).map(\.debtBalance)) }
+    var cardDebtTotal: Decimal? {
+        // No card statements means no card debt, not an unknown amount.
+        guard statements.contains(where: { statementKind($0) == .card }) else { return 0 }
+        return completeSum(latestCompleteMetrics(.card).map(\.debtBalance))
+    }
     var debtTotal: Decimal? {
         guard loanLedger.loadError == nil else { return nil }
         if loanLedger.state.accounts.isEmpty { return cardDebtTotal }
@@ -3204,7 +3234,25 @@ final class FinanceStore {
     }
     var liquidPatrimony: Decimal? {
         guard let cashAvailable, let debtTotal else { return nil }
-        return cashAvailable - debtTotal
+        return cashAvailable - cardPaymentsAfterBankCutoff - debtTotal
+    }
+    /// Card payments printed on the latest card statements after the newest
+    /// bank cutoff. The card debt already dropped, but no imported bank
+    /// balance shows that money leaving yet; subtracting it keeps patrimony
+    /// on a single date instead of counting the payment twice.
+    var cardPaymentsAfterBankCutoff: Decimal {
+        let banks = latestCompleteMetrics(.bank)
+        let cardIDs = Set(latestCompleteMetrics(.card).map(\.id))
+        guard !cardIDs.isEmpty,
+              let bankCutoff = banks.map({ statementEndDate(for: $0.id) }).max() else { return 0 }
+        let calendar = Calendar(identifier: .gregorian)
+        let lastBankDay = calendar.startOfDay(for: bankCutoff)
+        return eligibleMovements
+            .filter { movement in
+                guard let statementId = movement.statementId, cardIDs.contains(statementId) else { return false }
+                return movementKind(movement) == .cardPayment && calendar.startOfDay(for: movement.date) > lastBankDay
+            }
+            .reduce(Decimal(0)) { $0 + absolute($1.amount) }
     }
     var liquidPatrimonyChangePercent: Decimal? {
         let values = balanceHistory.compactMap(\.patrimony)
@@ -3238,8 +3286,8 @@ final class FinanceStore {
             guard Set(latest.map { $0.accountKey ?? "\($0.source)|\($0.kind)" }) == keys else {
                 return BalanceSnapshot(date: date, cash: nil, debt: nil)
             }
-            let cardDebt = completeSum(latest.filter { $0.kind == .card }.map(\.debtBalance))
             let hasCards = latest.contains { $0.kind == .card }
+            let cardDebt = hasCards ? completeSum(latest.filter { $0.kind == .card }.map(\.debtBalance)) : Decimal(0)
             let loans = loanLedger.debt(asOf: date)
             let debt: Decimal? = loanLedger.loadError != nil ? nil : (loanLedger.state.accounts.isEmpty ? cardDebt : (hasCards ? cardDebt : Decimal(0)).flatMap { cards in loans.map { cards + $0 } })
             return BalanceSnapshot(date: date,
@@ -3542,11 +3590,19 @@ final class FinanceStore {
             || value.contains("meses en automatico")
             || value.contains("diferir")
             || value.contains("diferid") { return .msi }
+        // Sign first: "BONIFICACION COMISION" +1,500 returns money and must
+        // not be read as a fee; a negative "DEVOLUCION" is a charge.
+        let refundWording = value.contains("devolucion") || value.contains("reembolso") || value.contains("bonificacion")
+        if refundWording && movement.amount > 0 { return .refund }
         if value.contains("interes") { return .interest }
         if value.contains("comision") || value.contains("anualidad") { return .fee }
-        if value.contains("devolucion") || value.contains("reembolso") || value.contains("bonificacion") { return .refund }
-        if (value.contains("pago") && (value.contains("tarjeta") || value.contains("amex") || value.contains("credito") || value.contains("recibido")))
-            || (value.contains("abono") && (value.contains("tarjeta") || value.contains("credito") || value.contains("recibido"))) { return .cardPayment }
+        // "PAGO RECIBIDO" is a card payment only on a card statement; in a
+        // bank account it is a client paying you. Loan instalments mention
+        // "crédito" but are real spend, not a card payment.
+        let receivedOnCard = value.contains("recibido") && isCardMovement(movement)
+        if !Self.isLoanInstallmentWording(value),
+           (value.contains("pago") && (value.contains("tarjeta") || value.contains("amex") || value.contains("credito") || receivedOnCard))
+            || (value.contains("abono") && (value.contains("tarjeta") || value.contains("credito") || receivedOnCard)) { return .cardPayment }
         if movement.flow == .transfer { return value.contains("transfer") || value.contains("traspaso") ? .bankTransfer : .cardPayment }
         if movement.flow == .income {
             // On a bank account "ABONO" is just a deposit (ABONO NOMINA,
@@ -7639,26 +7695,19 @@ final class FinanceStore {
             rowDiagnostics = selected.diagnostics
         } else if usedOCR {
             parsedCandidates = []
-        } else if source == "Rappi" {
-            parsedCandidates = Self.parseRappiText(text, fileName: fileName)
-            rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "RappiCard: importe MXN firmado en tabla regular")
-        } else if source == "BBVA" {
-            parsedCandidates = Self.parseBBVASelectableText(
+        } else {
+            parsedCandidates = Self.selectableTextCandidates(
                 text: text,
                 fileName: fileName,
-                sourceHint: source,
-                openingBalance: summary?.previousBalance
+                source: source,
+                openingBalance: summary?.previousBalance,
+                diagnosticSink: { rowDiagnostics.append($0) }
             )
-            rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "fila BBVA dentro de Detalle de Movimientos Realizados")
-        } else if source.localizedCaseInsensitiveContains("Amex") {
-            // The selectable Amex parser is section-aware and ignores all
-            // dates outside Fecha y Detalle de las operaciones.
-            parsedCandidates = Self.parseAmexText(text, fileName: fileName, diagnosticSink: { rowDiagnostics.append($0) })
-        } else {
-            // Santander uses its fixed visual columns; unsupported issuers
-            // have no generic text parser. Both remain rejected when Vision
-            // is unavailable instead of guessing rows from global numbers.
-            parsedCandidates = []
+            if source == "Rappi" {
+                rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "RappiCard: importe MXN firmado en tabla regular")
+            } else if source == "BBVA" {
+                rowDiagnostics = Self.rowDiagnostics(for: parsedCandidates, fallbackReason: "fila BBVA dentro de Detalle de Movimientos Realizados")
+            }
         }
         if usedOCR, source.localizedCaseInsensitiveCompare("Santander") == .orderedSame {
             // Score only pages that the Santander table parser identified as
@@ -11345,8 +11394,8 @@ final class FinanceStore {
             let isRefund = titleNormalized.contains("devolucion")
                 || titleNormalized.contains("reembolso")
                 || titleNormalized.contains("bonificacion")
-            let isCardPayment = titleNormalized.contains("pago de tarjeta")
-                || (titleNormalized.contains("pago") && (titleNormalized.contains("amex") || titleNormalized.contains("american express") || titleNormalized.contains("americanexpress") || titleNormalized.contains("credito")))
+            let isCardPayment = !isLoanInstallmentWording(titleNormalized) && (titleNormalized.contains("pago de tarjeta")
+                || (titleNormalized.contains("pago") && (titleNormalized.contains("amex") || titleNormalized.contains("american express") || titleNormalized.contains("americanexpress") || titleNormalized.contains("credito"))))
             let isFee = titleNormalized.contains("comision") || titleNormalized.contains("anualidad")
             let isInterest = titleNormalized.contains("interes")
             let rowIsIncoming = directionFromBalance ?? explicitIncoming
@@ -11367,7 +11416,8 @@ final class FinanceStore {
             default: signedAmount = -abs(parsedAmount)
             }
             let kind: MovementKind
-            if isRefund { kind = .refund }
+            // A "DEVOLUCION SPEI" in CARGOS is money leaving the account.
+            if isRefund && rowIsIncoming { kind = .refund }
             else if isCardPayment { kind = .cardPayment }
             else if explicitOwnTransfer { kind = .bankTransfer }
             else if isFee { kind = .fee }
@@ -11611,6 +11661,34 @@ final class FinanceStore {
         }
         flush()
         return result
+    }
+
+    /// The issuer parsers production applies to a selectable PDF text layer.
+    /// Test seams must call this, not `parse(text:)`, so they exercise the
+    /// rows a real import would keep.
+    private static func selectableTextCandidates(
+        text: String,
+        fileName: String,
+        source: String,
+        openingBalance: Decimal?,
+        rappiEvidenceMethod: String = "pdf-text",
+        diagnosticSink: ((OCRRowDiagnostic) -> Void)? = nil
+    ) -> [Movement] {
+        if source == "Rappi" {
+            return parseRappiText(text, fileName: fileName, evidenceMethod: rappiEvidenceMethod)
+        }
+        if source == "BBVA" {
+            return parseBBVASelectableText(text: text, fileName: fileName, sourceHint: source, openingBalance: openingBalance)
+        }
+        if source.localizedCaseInsensitiveContains("Amex") {
+            // The selectable Amex parser is section-aware and ignores all
+            // dates outside Fecha y Detalle de las operaciones.
+            return parseAmexText(text, fileName: fileName, diagnosticSink: diagnosticSink)
+        }
+        // Santander uses its fixed visual columns; unsupported issuers have
+        // no generic text parser. Both remain rejected when Vision is
+        // unavailable instead of guessing rows from global numbers.
+        return []
     }
 
     private static func parse(text: String, fileName: String, sourceHint: String? = nil, diagnosticSink: ((OCRRowDiagnostic) -> Void)? = nil) -> [Movement] {
@@ -12035,12 +12113,12 @@ final class FinanceStore {
                 || titleNormalized.contains("diferir")
                 || titleNormalized.contains("diferid") {
                 kind = .msi
+            } else if isRefund && signedAmount > 0 {
+                kind = .refund
             } else if titleNormalized.contains("interes") {
                 kind = .interest
             } else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") {
                 kind = .fee
-            } else if isRefund && signedAmount > 0 {
-                kind = .refund
             } else if isCardPayment {
                 kind = .cardPayment
             } else if isTransfer && explicitOwnTransfer {
@@ -12357,12 +12435,12 @@ final class FinanceStore {
             || titleNormalized.contains("diferir")
             || titleNormalized.contains("diferid") {
             movementKind = .msi
+        } else if isRefund && signedAmount > 0 {
+            movementKind = .refund
         } else if titleNormalized.contains("interes") {
             movementKind = .interest
         } else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") {
             movementKind = .fee
-        } else if isRefund {
-            movementKind = .refund
         } else if isCardPayment {
             movementKind = .cardPayment
         } else if isTransfer && explicitOwnTransfer {
@@ -13018,26 +13096,20 @@ final class FinanceStore {
         let hasAmexToken = titleNormalized.range(of: #"\bamex\b"#, options: .regularExpression) != nil
         let hasAmericanExpressToken = titleNormalized.range(of: #"\bamericanexpress\b"#, options: .regularExpression) != nil
         let hasCreditToken = titleNormalized.range(of: #"\bcredito\b"#, options: .regularExpression) != nil
-        let isCardPayment = titleNormalized.contains("pago de tarjeta")
-            || (titleNormalized.contains("pago") && (hasAmexToken || titleNormalized.contains("american express") || hasAmericanExpressToken || hasCreditToken))
+        let isCardPayment = !isLoanInstallmentWording(titleNormalized) && (titleNormalized.contains("pago de tarjeta")
+            || (titleNormalized.contains("pago") && (hasAmexToken || titleNormalized.contains("american express") || hasAmericanExpressToken || hasCreditToken)))
         let isTransfer = titleNormalized.contains("transfer") || titleNormalized.contains("traspaso") || titleNormalized.contains("spei")
         let explicitOwnTransfer = titleNormalized.contains("entre cuentas")
             || titleNormalized.contains("cuenta propia")
             || titleNormalized.contains("mismo titular")
             || titleNormalized.contains("traspaso interno")
-        let semanticIncome = titleNormalized.contains("nomina")
-            || titleNormalized.contains("sueldo")
-            || titleNormalized.contains("salario")
-            || titleNormalized.contains("deposito")
-            || titleNormalized.contains("abono")
-            || titleNormalized.contains("recibido")
-            || titleNormalized.contains("recibida")
-            || titleNormalized.contains("ingreso")
         let isDepositColumn = selectedColumn.hasPrefix("ABONOS")
         let flow: FlowKind
         if explicitOwnTransfer {
             flow = .transfer
-        } else if isDepositColumn || semanticIncome {
+        } else if isDepositColumn {
+            // The printed column is the direction. "ABONO" or "DEPOSITO" in
+            // the concept of a CARGOS row never turns it into income.
             flow = .income
         } else if isCardPayment {
             flow = .debt
@@ -13059,7 +13131,7 @@ final class FinanceStore {
         }
         let category = category(for: titleNormalized, flow: flow)
         let kind: MovementKind
-        if isRefund { kind = .refund }
+        if isRefund && isDepositColumn { kind = .refund }
         else if titleNormalized.contains("msi") || titleNormalized.contains("meses sin intereses") { kind = .msi }
         else if titleNormalized.contains("interes") { kind = .interest }
         else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") { kind = .fee }
@@ -14940,7 +15012,7 @@ final class FinanceStore {
             "consolidado de compras", "fecha original", "monto original",
             "tasa de interes anual", "saldo pendiente", "numero de mensualidad",
             "monto total a pagar", "conoce tus meses", "informacion al tarjetahabiente",
-            "a partir del", "anualidad de la tarjeta"
+            "a partir del"
         ]
 
         struct AmexOCRRow {
@@ -15022,7 +15094,16 @@ final class FinanceStore {
                 // dates/amounts of their own. Once the table is active they
                 // still form a hard boundary; never append them to the last
                 // merchant row.
-                if ignoredHeaderPhrases.contains(where: { normalized.contains($0) }) {
+                let dateCandidates = [dateRegex, shortMonthDateRegex, textDateRegex]
+                    .flatMap { allMatches(in: line.text, regex: $0) }
+                let hasDate = dateCandidates.contains { candidate in
+                    Self.isPlausibleDateToken(candidate.text)
+                        && Self.parseDate(candidate.text, defaultYear: defaultYear) != nil
+                }
+                // "Anualidad de la tarjeta" is a cover notice, but a dated
+                // row with that text is the real annual fee charge.
+                let isAnnualFeeNotice = normalized.contains("anualidad de la tarjeta") && !hasDate
+                if isAnnualFeeNotice || ignoredHeaderPhrases.contains(where: { normalized.contains($0) }) {
                     pendingRow.removeAll(keepingCapacity: true)
                     continue
                 }
@@ -15048,12 +15129,6 @@ final class FinanceStore {
                         amexSection = 0
                     }
                     continue
-                }
-                let dateCandidates = [dateRegex, shortMonthDateRegex, textDateRegex]
-                    .flatMap { allMatches(in: line.text, regex: $0) }
-                let hasDate = dateCandidates.contains { candidate in
-                    Self.isPlausibleDateToken(candidate.text)
-                        && Self.parseDate(candidate.text, defaultYear: defaultYear) != nil
                 }
                 let isTransactionDate = hasDate
                     // Vision can return the date together with a small piece
@@ -15454,12 +15529,12 @@ final class FinanceStore {
                     || titleNormalized.contains("diferir")
                     || titleNormalized.contains("diferid") {
             kind = .msi
+        } else if isRefund {
+            kind = .refund
         } else if titleNormalized.contains("interes") {
             kind = .interest
         } else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") {
             kind = .fee
-        } else if isRefund {
-            kind = .refund
         } else if isPayment {
             kind = .cardPayment
         } else {
@@ -15769,6 +15844,13 @@ final class FinanceStore {
         return nil
     }
 
+    /// Loan instalments paid from a bank ("PAGO CREDITO AUTOMOTRIZ") mention
+    /// "crédito" but are real spend, never a payment to a credit card.
+    static func isLoanInstallmentWording(_ normalized: String) -> Bool {
+        ["automotriz", "hipotec", "infonavit", "fovissste", "prestamo", "credito personal", "credito de nomina", "credito nomina", "credito auto"]
+            .contains { normalized.contains($0) }
+    }
+
     private static func isAdministrativeTitle(_ value: String) -> Bool {
         let normalized = value
             .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
@@ -15780,16 +15862,30 @@ final class FinanceStore {
             .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Unambiguous administrative phrases may appear anywhere in the line.
         let phrases = [
-            "ciudad de mexico", "serie del certificado", "no de serie del certificado",
+            "serie del certificado", "no de serie del certificado",
             "certificado sat", "total importe cargos", "total importe abonos", "total de cargos",
             "total de abonos", "del al", "fecha de corte", "fecha limite", "numero de cuenta",
-            "no de cuenta", "numero de cliente", "cuenta clabe", "rfc", "estado de cuenta",
-            "estado de cue", "periodo", "periodo de facturacion", "saldo", "saldo disponible",
-            "saldo insoluto", "total", "pagina", "fecha y detalle", "pago minimo", "referencia",
+            "no de cuenta", "numero de cliente", "cuenta clabe", "estado de cuenta",
+            "estado de cue", "periodo de facturacion", "saldo disponible",
+            "saldo insoluto", "fecha y detalle", "pago minimo",
             "movimientos del periodo", "desglose de movimientos", "cargos abonos y compras regulares"
         ]
         if phrases.contains(where: { normalized == $0 || normalized.contains(" \($0) ") || normalized.hasPrefix("\($0) ") || normalized.hasSuffix(" \($0)") }) {
+            return true
+        }
+        // Generic words are also part of real merchants ("TOTAL PLAY",
+        // "RECARGA SALDO TELCEL", "UBER EATS CIUDAD DE MEXICO"); they only mark
+        // an administrative line when they open it.
+        let leadingLabels = ["ciudad de mexico", "rfc", "periodo", "saldo", "pagina", "referencia"]
+        if leadingLabels.contains(where: { normalized == $0 || normalized.hasPrefix("\($0) ") }) {
+            return true
+        }
+        if normalized == "total" || normalized.range(
+            of: #"^total (de|del|a|al|importe|cargos|abonos|movimientos|transacciones|general|neto|pagar)\b"#,
+            options: .regularExpression
+        ) != nil {
             return true
         }
         let tokens = normalized.split(separator: " ")
@@ -16875,11 +16971,13 @@ final class FinanceStore {
             }
             return parsed
         }
-        func amounts(after labels: [String], allowBareBankAmount: Bool = false) -> [Decimal] {
+        /// `creditSign` keeps a printed "CR" (saldo a favor) as a negative
+        /// value instead of letting it read as debt.
+        func amounts(after labels: [String], allowBareBankAmount: Bool = false, creditSign: Bool = false) -> [Decimal] {
             let joined = labels
                 .map { $0.replacingOccurrences(of: " ", with: "\\s*") }
                 .joined(separator: "|")
-            let pattern = "(?:\(joined))[^0-9$-]{0,90}((?<![A-Za-z])[-+]?\\s*\\$?\\s*(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{1,2})?)"
+            let pattern = "(?:\(joined))[^0-9$-]{0,90}((?<![A-Za-z])[-+]?\\s*\\$?\\s*(?:\\d{1,3}(?:,\\d{3})+|\\d+)(?:\\.\\d{1,2})?)(\\s*cr\\b)?"
             guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
             return regex.matches(in: normalized, range: range).compactMap { match in
                 guard let valueRange = Range(match.range(at: 1), in: normalized) else { return nil }
@@ -16887,11 +16985,13 @@ final class FinanceStore {
                 if !allowBareBankAmount,
                    raw.range(of: #"^\s*\d{7,}\s*$"#, options: .regularExpression) != nil { return nil }
                 guard let parsed = parseAmount(raw) else { return nil }
-                return allowBareBankAmount ? normalizeBareBankAmount(raw, parsed) : parsed
+                let value = allowBareBankAmount ? normalizeBareBankAmount(raw, parsed) : parsed
+                let isCredit = creditSign && match.range(at: 2).location != NSNotFound
+                return isCredit ? -abs(value) : value
             }
         }
-        func amount(after labels: [String], allowBareBankAmount: Bool = false) -> Decimal? {
-            amounts(after: labels, allowBareBankAmount: allowBareBankAmount).first
+        func amount(after labels: [String], allowBareBankAmount: Bool = false, creditSign: Bool = false) -> Decimal? {
+            amounts(after: labels, allowBareBankAmount: allowBareBankAmount, creditSign: creditSign).first
         }
 
         /// The Amex credit-control row often places a cutoff date between
@@ -17071,19 +17171,22 @@ final class FinanceStore {
         let metadata = CardDocumentMetadata.parse(text)
         summary.paymentDueDate = metadata.dueDate; summary.annualInterestRate = metadata.annualRate
         var hasValue = false
-        func assign(_ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>, _ value: Decimal?) {
+        func assign(_ keyPath: WritableKeyPath<StatementSummaryRecord, Decimal?>, _ value: Decimal?, keepCreditSign: Bool = false) {
             guard let value else { return }
-            summary[keyPath: keyPath] = abs(value)
+            // Only a balance read with an explicit "CR" stays negative.
+            summary[keyPath: keyPath] = keepCreditSign && value < 0 ? value : abs(value)
             hasValue = true
         }
         let allowBareBankAmount = !source.localizedCaseInsensitiveContains("Amex")
-        assign(\.previousBalance, amount(after: ["saldo anterior", "saldo previo"], allowBareBankAmount: allowBareBankAmount))
-        assign(\.statementBalance, amount(after: ["saldo nuevo", "saldo al corte", "saldo actual", "saldo deudor"]))
+        assign(\.previousBalance, amount(after: ["saldo anterior", "saldo previo"], allowBareBankAmount: allowBareBankAmount, creditSign: true), keepCreditSign: true)
+        assign(\.statementBalance, amount(after: ["saldo nuevo", "saldo al corte", "saldo actual", "saldo deudor"], creditSign: true), keepCreditSign: true)
         assign(\.newTransactions, amount(after: ["nuevas transacciones", "compras nuevas"]))
         assign(\.payments, amount(after: ["pagos realizados", "pagos efectuados"]))
         assign(\.credits, amount(after: ["pagos y creditos", "creditos", "abonos"]))
         assign(\.newCharges, amount(after: ["nuevos cargos", "total de cargos"]))
-        assign(\.interest, amount(after: ["intereses", "interes del periodo"]))
+        // "Pago mínimo más meses sin intereses" and "Pago para no generar
+        // intereses" are payment labels, not the interest charged.
+        assign(\.interest, amount(after: ["(?<!sin\\s)(?<!generar\\s)intereses", "interes del periodo"]))
         assign(\.fees, amount(after: ["comisiones", "comision"]))
         if let creditPair = creditControlPair() {
             summary.creditLimit = abs(creditPair.0)
@@ -17096,7 +17199,7 @@ final class FinanceStore {
             // committed debt is reconstructed as límite − disponible.
             assign(\.creditAvailable, amount(after: ["credito disponible", "limite disponible", "linea disponible", "disponible para compras"]))
         }
-        assign(\.minimumPayment, amount(after: ["pago minimo"]))
+        assign(\.minimumPayment, amount(after: ["pago minimo(?!\\s*(?:mas|\\+))"]))
         assign(\.minimumPlusMsi, amount(after: ["pago minimo mas meses sin intereses", "pago minimo mas msi"]))
         assign(\.paymentForNoInterest, amount(after: ["pago para no generar intereses", "pago para no generar interes"]))
         assign(\.msiPending, amount(after: ["msi pendientes", "saldo msi", "principal diferido"]))

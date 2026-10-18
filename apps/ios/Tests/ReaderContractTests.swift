@@ -11,6 +11,9 @@ final class ReaderContractTests: XCTestCase {
             var movement = Movement(date: .now, title: title, account: "Santander", category: "Otros / Por revisar", amount: amount, flow: .expense,
                 extractionEvidence: MovementExtractionEvidence(method: "screenshot-vision", page: 2, confidence: 0.95, sourceText: "\(title) \(amount) MXN", selectedAmount: amount))
             XCTAssertTrue(store.movementBlockingReasons(movement).isEmpty, title)
+            // TOTAL PASS is a real merchant, not a header, so it needs no
+            // screenshot exception; only the RFC heading depends on it.
+            guard title.contains("RFC") else { continue }
             movement.extractionEvidence?.method = "pdfkit"
             XCTAssertFalse(store.movementBlockingReasons(movement).isEmpty, "A PDF header must not inherit the screenshot exception")
             movement.extractionEvidence?.method = "screenshot-vision"
@@ -762,9 +765,18 @@ final class ReaderContractTests: XCTestCase {
         Grupo Financiero BBVA
         BBVA México, Institución de Banca Múltiple
         Cuenta de cheques
-        Fecha Descripcion
-        01/08/2026 NOMINA EMPRESA 10,000.00 20,000.00
-        02/08/2026 TRANSFERENCIA SANTANDER 125.00 19,875.00
+        Periodo DEL 01/08/2026 AL 31/08/2026
+        No. de Cuenta 1575694922
+        Saldo Anterior 10,000.00
+        Depósitos / Abonos (+) 1 10,000.00
+        Retiros / Cargos (-) 1 125.00
+        Saldo Final 19,875.00
+        Detalle de Movimientos Realizados
+        01/AGO 01/AGO NOMINA EMPRESA 10,000.00 20,000.00 20,000.00
+        02/AGO 02/AGO TRANSFERENCIA SANTANDER 125.00 19,875.00 19,875.00
+        Total de Movimientos
+        TOTAL IMPORTE CARGOS 125.00 TOTAL MOVIMIENTOS CARGOS 1
+        TOTAL IMPORTE ABONOS 10,000.00 TOTAL MOVIMIENTOS ABONOS 1
         """
 
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
@@ -1477,10 +1489,19 @@ final class ReaderContractTests: XCTestCase {
         let text = """
         Grupo Financiero BBVA
         BBVA México, Institución de Banca Múltiple
-        Fecha Descripcion
-        03/08/2026 Ciudad de México No. de Serie del Certificado 2030010100001 123,456.78
-        05/08/2026 SPEI RECIBIDO 1234567
-        04/08/2026 OXXO 95.00 1,200.00
+        Periodo DEL 01/08/2026 AL 31/08/2026
+        No. de Cuenta 1575694922
+        Saldo Anterior 1,295.00
+        Depósitos / Abonos (+) 0 0.00
+        Retiros / Cargos (-) 1 95.00
+        Saldo Final 1,200.00
+        Detalle de Movimientos Realizados
+        03/AGO 03/AGO Ciudad de México No. de Serie del Certificado 2030010100001 123,456.78
+        05/AGO 05/AGO SPEI RECIBIDO 1234567
+        04/AGO 04/AGO OXXO 95.00 1,200.00 1,200.00
+        Total de Movimientos
+        TOTAL IMPORTE CARGOS 95.00 TOTAL MOVIMIENTOS CARGOS 1
+        TOTAL IMPORTE ABONOS 0.00 TOTAL MOVIMIENTOS ABONOS 0
         """
 
         let snapshot = FinanceStore.readerParseSnapshotForTesting(
@@ -1501,19 +1522,28 @@ final class ReaderContractTests: XCTestCase {
         let text = """
         Grupo Financiero BBVA
         BBVA México, Institución de Banca Múltiple
-        Fecha Descripcion Cargos Abonos Saldo
-        01/08/2026 Ciudad de México 123,456.78
-        02/08/2026 No. de Serie del Certificado 2030010100001 456,789.01
-        03/08/2026 TOTAL IMPORTE CARGOS 22,058.69
-        04/08/2026 DEL AL 01/08/2026 31/08/2026 1,230.94
-        05/08/2026 fecha de corte 27/08/2026 3,996.62
-        06/08/2026 número de cuenta 0123456789 10,000.00
-        07/08/2026 RFC ABC123456789 9,999.99
-        08/08/2026 cuenta CLABE 111122223333444455 8,888.88
-        09/08/2026 saldo disponible 7,777.77
-        10/08/2026 total del periodo 6,666.66
-        11/08/2026 periodo de facturación 5,555.55
-        12/08/2026 OXXO 95.00 935.94
+        Periodo DEL 01/08/2026 AL 31/08/2026
+        No. de Cuenta 1575694922
+        Saldo Anterior 1,030.94
+        Depósitos / Abonos (+) 0 0.00
+        Retiros / Cargos (-) 1 95.00
+        Saldo Final 935.94
+        Detalle de Movimientos Realizados
+        01/AGO 01/AGO Ciudad de México 123,456.78
+        02/AGO 02/AGO No. de Serie del Certificado 2030010100001 456,789.01
+        03/AGO 03/AGO TOTAL IMPORTE CARGOS 22,058.69
+        04/AGO 04/AGO DEL AL 01/08/2026 31/08/2026 1,230.94
+        05/AGO 05/AGO fecha de corte 27/08/2026 3,996.62
+        06/AGO 06/AGO número de cuenta 0123456789 10,000.00
+        07/AGO 07/AGO RFC ABC123456789 9,999.99
+        08/AGO 08/AGO cuenta CLABE 111122223333444455 8,888.88
+        09/AGO 09/AGO saldo disponible 7,777.77
+        10/AGO 10/AGO total del periodo 6,666.66
+        11/AGO 11/AGO periodo de facturación 5,555.55
+        12/AGO 12/AGO OXXO 95.00 935.94 935.94
+        Total de Movimientos
+        TOTAL IMPORTE CARGOS 95.00 TOTAL MOVIMIENTOS CARGOS 1
+        TOTAL IMPORTE ABONOS 0.00 TOTAL MOVIMIENTOS ABONOS 0
         """
 
         let snapshot = FinanceStore.readerParseSnapshotForTesting(

@@ -103,14 +103,15 @@ export function normalizeConcept(value: string) {
     .slice(0, 120);
 }
 
+// Unambiguous administrative phrases may appear anywhere in the line.
 const administrativePhrases = [
-  "ciudad de mexico", "no de serie del certificado", "serie del certificado",
+  "no de serie del certificado", "serie del certificado",
   "total importe cargos", "total importe abonos", "total de cargos", "total de abonos",
   "del al", "fecha de corte", "fecha y detalle", "numero de cuenta", "no de cuenta",
-  "numero de cliente", "no de cliente", "cuenta clabe", "cuenta clave", "rfc",
-  "estado de cuenta", "estado de cue", "estado de cta", "resumen de cuenta", "periodo de facturacion", "periodo",
+  "numero de cliente", "no de cliente", "cuenta clabe", "cuenta clave",
+  "estado de cuenta", "estado de cue", "estado de cta", "resumen de cuenta", "periodo de facturacion",
   "saldo inicial", "saldo anterior", "saldo final", "saldo al corte", "saldo disponible",
-  "saldo", "total de movimientos", "total de transacciones", "total", "pagina",
+  "total de movimientos", "total de transacciones",
   "informacion al cliente", "titular de la cuenta", "fecha limite", "pago minimo",
 ];
 
@@ -119,7 +120,11 @@ export function isAdministrativeDescription(value: string) {
   const normalized = normalizeConcept(value);
   if (!normalized || normalized.length < 3) return true;
   if (administrativePhrases.some((phrase) => normalized === phrase || normalized.includes(` ${phrase} `) || normalized.startsWith(`${phrase} `) || normalized.endsWith(` ${phrase}`))) return true;
-  if (/^(del|al|no|n|rfc|clabe|fecha|periodo|saldo|total)(?:\s|$)/.test(normalized)) return true;
+  // Generic words are also part of real merchants ("TOTAL PLAY", "RECARGA
+  // SALDO TELCEL", "UBER EATS CIUDAD DE MEXICO"); they only mark an
+  // administrative line when they open it.
+  if (/^(del|al|no|n|rfc|clabe|fecha|periodo|saldo|pagina|ciudad de mexico)(?:\s|$)/.test(normalized)) return true;
+  if (/^total(?:$| (?:de|del|a|al|importe|cargos|abonos|movimientos|transacciones|general|neto|pagar)\b)/.test(normalized)) return true;
   const words = normalized.split(" ");
   const numericWords = words.filter((word) => /^\d+$/.test(word)).length;
   return numericWords >= Math.max(2, words.length - 1) || !/[a-z]{2}/.test(normalized);
@@ -142,10 +147,11 @@ function kindFromText(transaction: Transaction): TransactionKind {
   // new expense or as an MSI installment itself.
   if (/monto a diferir/.test(text) && (transaction.amount > 0 || transaction.flow === "income")) return "credit";
   if (/msi|meses sin intereses|meses en automatico|diferid/.test(text)) return "msi";
+  // Sign first: "BONIFICACION COMISION" +1,500 returns money, it is not a fee.
+  if (/devolucion|reembolso|bonificacion|refund/.test(text) && transaction.amount > 0) return "refund";
   if (/interes/.test(text)) return "interest";
   if (/comision|anualidad/.test(text)) return "fee";
-  if (/devolucion|reembolso|bonificacion|refund/.test(text)) return "refund";
-  if (/pago.*(?:tarjeta|amex|credito|recibido)|tarjeta.*pago|gracias por su pago|abono.*(?:tarjeta|credito|recibido)/.test(text)) return "cardPayment";
+  if (!isLoanInstallment(transaction) && /pago.*(?:tarjeta|amex|credito)|tarjeta.*pago|gracias por su pago|abono.*(?:tarjeta|credito)/.test(text)) return "cardPayment";
   if (/transfer|traspaso|spei|entre cuentas/.test(text)) return "bankTransfer";
   if (transaction.flow === "income") return "income";
   if (transaction.flow === "expense") return "purchase";
@@ -253,8 +259,20 @@ function transferPairEvidence(outflow: Transaction, inflow: Transaction, stateme
   return { score, reason: reasons.join(" · ") };
 }
 
-function hasCardPaymentHint(transaction: Transaction) {
-  return /pago.*(?:tarjeta|amex|credito|recibido)|tarjeta.*pago|gracias por su pago|abono.*(?:tarjeta|credito|recibido)|american express/.test(normalizeConcept(transaction.description));
+// Loan instalments paid from a bank ("PAGO CREDITO AUTOMOTRIZ") mention
+// "crédito" but are real spend, never a payment to a credit card. Read the
+// folded description: normalizeConcept strips words starting with "aut".
+function isLoanInstallment(transaction: Transaction) {
+  return /automotriz|hipotec|infonavit|fovissste|prestamo|credito (?:personal|de nomina|nomina|auto)/.test(fold(transaction.description));
+}
+
+// "PAGO RECIBIDO" is a card payment only on a card statement; on a bank
+// account it is a client paying you, so callers pass the account kind.
+function hasCardPaymentHint(transaction: Transaction, onCard = false) {
+  const text = normalizeConcept(transaction.description);
+  if (isLoanInstallment(transaction)) return false;
+  if (onCard && /(?:pago|abono).*recibido/.test(text)) return true;
+  return /pago.*(?:tarjeta|amex|credito)|tarjeta.*pago|gracias por su pago|abono.*(?:tarjeta|credito)|american express/.test(text);
 }
 
 function hasIncomeHint(transaction: Transaction) {
@@ -670,9 +688,17 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
   const invalidTransactions = normalized.filter((transaction) => transaction.validationStatus === "invalid");
   const valid = normalized.filter((transaction) => transaction.validationStatus !== "invalid");
   const seen = new Map<string, Transaction[]>();
-  const canonical: Transaction[] = [];
+  const kept = new Set<Transaction>();
   const duplicateTransactions: Transaction[] = [];
-  valid.forEach((transaction) => {
+  // When the same movement arrives from two statements, keep the copy that
+  // can reach the KPIs: a row (or statement) waiting for review must never
+  // displace a valid copy just because it was imported first.
+  const blockedRank = (transaction: Transaction) => {
+    const statement = transaction.statementId ? statements.find((item) => item.id === transaction.statementId) : undefined;
+    const statementBlocked = Boolean(statement && (statement.status === "review" || (statement.reconciliationStatus ?? "valid") !== "valid"));
+    return transaction.validationStatus === "review" || statementBlocked ? 1 : 0;
+  };
+  [...valid].sort((left, right) => blockedRank(left) - blockedRank(right)).forEach((transaction) => {
     const key = transaction.deduplicationKey ?? buildDeduplicationKey(transaction);
     const previous = seen.get(key) ?? [];
     const hasDifferentStatement = Boolean(transaction.statementId && previous.some((item) => item.statementId && item.statementId !== transaction.statementId));
@@ -684,8 +710,9 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
       return;
     }
     seen.set(key, [...previous, transaction]);
-    canonical.push(transaction);
+    kept.add(transaction);
   });
+  const canonical = valid.filter((transaction) => kept.has(transaction));
 
   const byId = new Map(canonical.map((transaction) => [transaction.id, transaction]));
   const consumed = new Set<string>();
@@ -731,9 +758,11 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
         // “abono”, so an explicit payment hint or card-payment kind is enough.
         // A positive card row alone is not sufficient: it may be a credit or
         // issuer adjustment with the same amount as an unrelated bank charge.
+        // The bank's "PAGO TARJETA" wording alone never turns a card purchase
+        // into the receiving side of a payment.
         && (kindFromText(card) === "cardPayment"
-          || hasCardPaymentHint(card)
-          || hasCardPaymentHint(bank)
+          || hasCardPaymentHint(card, true)
+          || (hasCardPaymentHint(bank) && card.flow !== "expense")
           || (card.flow === "debt" && /pago|abono|credito|recib/.test(normalizeConcept(card.description)))))
       .sort((left, right) => absolute((parseDate(left.date) ?? 0) - (parseDate(bank.date) ?? 0)) - absolute((parseDate(right.date) ?? 0) - (parseDate(bank.date) ?? 0)))[0];
     if (partner) replacePair(bank, partner, "cardPayment");
@@ -822,10 +851,12 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
     const text = reconciled.normalizedDescription || normalizeConcept(reconciled.description);
     let kind = kindFromText(reconciled);
     let flow = reconciled.flow;
-    if (hasRefundHint(reconciled)) {
+    // Words never override the sign: a negative "DEVOLUCION" is a charge and
+    // "COMISION POR DEPOSITO" of −15 is a fee, not income.
+    if (hasRefundHint(reconciled) && reconciled.amount > 0) {
       kind = "refund";
       flow = "income";
-    } else if (hasCardPaymentHint(reconciled) || kind === "cardPayment") {
+    } else if (hasCardPaymentHint(reconciled, isCardTransaction(reconciled, statements)) || kind === "cardPayment") {
       kind = "cardPayment";
       flow = isCardTransaction(reconciled, statements) ? "debt" : "expense";
     } else if (hasTransferHint(reconciled) || kind === "bankTransfer") {
@@ -851,7 +882,7 @@ export function runTransactionPipeline(input: Transaction[], statements: Stateme
         kind = "bankTransfer";
         flow = "transfer";
       }
-    } else if (hasIncomeHint(reconciled) || (reconciled.amount > 0 && isBankTransaction(reconciled, statements))) {
+    } else if (reconciled.amount > 0 && (hasIncomeHint(reconciled) || isBankTransaction(reconciled, statements))) {
       kind = "income";
       flow = "income";
     } else if (reconciled.amount < 0) {

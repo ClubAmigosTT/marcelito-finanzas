@@ -932,13 +932,16 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   const latestMsiPending = sumKnown(latestCardPeriods.map((period) => period.msiPending ?? period.msiOriginalDeferred));
   const latestRevolvingDebt = debtTotal !== undefined && latestMsiPending !== undefined ? Math.max(0, debtTotal - latestMsiPending) : debtTotal;
   const liquidPatrimony = cashAvailable !== undefined && debtTotal !== undefined ? cashAvailable - debtTotal : undefined;
-  const creditLimit = sumKnown(latestCardPeriods.map((period) => period.creditLimit));
-  const creditAvailable = sumKnown(latestCardPeriods.map((period) => period.creditAvailable));
-  const creditUsed = sumKnown(latestCardPeriods.map((period) => (
-    period.creditLimit !== undefined && period.creditAvailable !== undefined
-      ? Math.max(0, period.creditLimit - period.creditAvailable)
-      : undefined
-  )));
+  // Limit, disponible and usage must describe the same cards: a card with a
+  // limit but no disponible cannot enter the limit total or the identity
+  // check would compare different populations.
+  const creditPeriods = latestCardPeriods.filter((period) => period.creditLimit !== undefined && period.creditAvailable !== undefined);
+  const creditLimit = sumKnown(creditPeriods.map((period) => period.creditLimit));
+  const creditAvailable = sumKnown(creditPeriods.map((period) => period.creditAvailable));
+  const creditUsed = sumKnown(creditPeriods.map((period) => period.creditUsed));
+  // A saldo a favor (disponible above the limit) uses no credit; it is added
+  // back so the per-card clamp at zero does not break the aggregate identity.
+  const creditFavorBalance = sum(creditPeriods.map((period) => Math.max(0, (period.creditAvailable ?? 0) - (period.creditLimit ?? 0))));
   const creditUtilizationRate = creditUsed !== undefined && creditLimit ? creditUsed / creditLimit : undefined;
   const extraordinarySpendTotal = sum(transactions.filter((transaction) => isSpendTransaction(transaction) && isExtraordinaryTransaction(transaction) && !isTravelTransaction(transaction)).map((transaction) => absolute(transaction.amount)));
   const ordinarySpend = Math.max(0, consolidatedRealSpend - travelSpend - extraordinarySpendTotal);
@@ -1208,7 +1211,7 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   const consistencyChecks: FinancialConsistencyCheck[] = [];
   consistencyChecks.push(buildConsistencyCheck("flow", "Ingresos − gasto real = flujo neto", realIncome - consolidatedRealSpend, netFlow));
   consistencyChecks.push(buildConsistencyCheck("patrimony", "Efectivo − deuda = patrimonio líquido", cashAvailable !== undefined && debtTotal !== undefined ? cashAvailable - debtTotal : undefined, liquidPatrimony));
-  consistencyChecks.push(buildConsistencyCheck("credit", "Límite − crédito disponible = deuda utilizada", creditLimit !== undefined && creditAvailable !== undefined ? creditLimit - creditAvailable : undefined, creditUsed));
+  consistencyChecks.push(buildConsistencyCheck("credit", "Límite − crédito disponible + saldo a favor = deuda utilizada", creditLimit !== undefined && creditAvailable !== undefined ? creditLimit - creditAvailable + creditFavorBalance : undefined, creditUsed));
   latestBankPeriods.forEach((period) => {
     const statement = statements.find((item) => item.id === period.statementId);
     const opening = statement?.summary?.previousBalance;
