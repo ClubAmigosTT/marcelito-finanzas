@@ -41,6 +41,24 @@ final class LoanBook {
         let quote = LoanUDIQuote(date: Calendar.current.startOfDay(for: date), value: value, source: "Banxico · valor confirmado por el usuario")
         var next = state; next.quotes.removeAll { Calendar.current.isDate($0.date, inSameDayAs: quote.date) }; next.quotes.append(quote); try commit(next)
     }
+    /// First day the loan needs a UDI value for: its earliest statement or
+    /// installment, so every past month's reserve and debt can be priced.
+    var earliestQuoteNeeded: Date? {
+        state.accounts.flatMap(\.statements).flatMap { statement in [statement.asOf] + statement.installments.map(\.dueDate) }.min()
+    }
+    /// Adds officially published values for days that have none. A value the
+    /// user typed for a day is kept as entered.
+    @discardableResult func mergeOfficialQuotes(_ quotes: [LoanUDIQuote], now: Date = .now) throws -> Int {
+        let calendar = Calendar.current
+        var known = Set(state.quotes.map { calendar.startOfDay(for: $0.date) })
+        var next = state
+        for quote in quotes where quote.date <= now && quote.value > 0 && known.insert(calendar.startOfDay(for: quote.date)).inserted {
+            next.quotes.append(quote)
+        }
+        let added = next.quotes.count - state.quotes.count
+        if added > 0 { next.quotes.sort { $0.date < $1.date }; try commit(next) }
+        return added
+    }
     func debt(asOf date: Date = .now) -> Decimal? {
         if state.accounts.isEmpty { return 0 }
         var native: Decimal = 0

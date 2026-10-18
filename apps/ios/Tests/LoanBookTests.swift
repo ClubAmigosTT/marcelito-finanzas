@@ -76,6 +76,29 @@ final class LoanBookTests: XCTestCase {
         XCTAssertNil(b.quote(asOf: day("09/07/2026")))
         XCTAssertEqual(b.quote(asOf: day("11/07/2026"))?.value, 10)
     }
+    func testOfficialUDIFeedParsesPublishedValues() throws {
+        let json = #"{"messageCode":200,"response":"OK","ListaIndicadores":[{"codIndicador":39705,"codTipoIndicador":159,"fecha":"01-09-2026","valor":"8.811040"},{"codIndicador":1,"codTipoIndicador":158,"fecha":"01-09-2026","valor":"17.5"}],"TotalIndicadores":2}"#
+        let quotes = try LoanUDIFeed.parse(Data(json.utf8))
+        XCTAssertEqual(quotes.count, 1)
+        XCTAssertEqual(quotes.first?.value, Decimal(string: "8.811040"))
+        XCTAssertEqual(quotes.first?.date, Calendar.current.startOfDay(for: day("01/09/2026")))
+        XCTAssertEqual(LoanUDIFeed.url(from: day("01/09/2026"), to: day("03/09/2026")).absoluteString,
+            "https://sidof.segob.gob.mx/dof/sidof/indicadores/159/01-09-2026/03-09-2026")
+    }
+    func testOfficialQuotesFillMissingDaysAndKeepTypedValues() throws {
+        let b = LoanBook(defaults: nil); try b.importStatement(statement())
+        XCTAssertNil(b.debt(asOf: day("11/07/2026")))
+        try b.setQuote(value: 10, date: day("10/07/2026"))
+        let official = [
+            LoanUDIQuote(date: day("09/07/2026"), value: 9, source: LoanUDIFeed.source),
+            LoanUDIQuote(date: day("10/07/2026"), value: 11, source: LoanUDIFeed.source),
+        ]
+        XCTAssertEqual(try b.mergeOfficialQuotes(official, now: day("11/07/2026")), 1)
+        XCTAssertEqual(b.quote(asOf: day("09/07/2026"))?.value, 9)
+        XCTAssertEqual(b.quote(asOf: day("10/07/2026"))?.value, 10)
+        XCTAssertEqual(try b.mergeOfficialQuotes(official, now: day("11/07/2026")), 0)
+        XCTAssertNotNil(b.earliestQuoteNeeded)
+    }
     func testReserveUsesWholePaymentOnceAndExtraDoesNotChangeDebt() throws {
         let b = LoanBook(defaults: nil); let s = try statement(); try b.importStatement(s)
         XCTAssertNil(b.reserve(month: day("20/07/2026"), paid: 0).reserved)

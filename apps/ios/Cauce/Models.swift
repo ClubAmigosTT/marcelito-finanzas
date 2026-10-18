@@ -3962,14 +3962,40 @@ final class FinanceStore {
 
     /// Only days explicitly covered by every selected account may contribute
     /// zero to an average. Missing statements never fabricate zero-spend days.
+    /// Days on which every account that could have had spending is covered by
+    /// a statement. The old rule intersected every account ever seen, so one
+    /// account without day-level periods (a month-only label) or one closed
+    /// card marked every month as partial forever. Now an account only
+    /// constrains days inside its own life: from its first covered day, and
+    /// after its last one only while it is still current (its newest
+    /// statement is within ~two cycles of the newest statement overall).
+    static func commonCoverage(_ accounts: [Set<Date>]) -> Set<Date> {
+        let evidenced = accounts.filter { !$0.isEmpty }
+        guard let newest = evidenced.compactMap({ $0.max() }).max() else { return [] }
+        let calendar = Calendar.current
+        let staleBefore = calendar.date(byAdding: .day, value: -62, to: newest) ?? newest
+        let spans = evidenced.map { days in
+            (days: days, first: days.min()!, last: days.max()!, current: days.max()! >= staleBefore)
+        }
+        let candidates = evidenced.reduce(into: Set<Date>()) { $0.formUnion($1) }
+        return candidates.filter { day in
+            spans.allSatisfy { span in
+                guard day >= span.first, span.current || day <= span.last else { return true }
+                return span.days.contains(day)
+            }
+        }
+    }
+
     func spendingCoveredDays(account: String? = nil) -> Set<Date> {
         let key = CoverageCacheKey(account: account, day: Calendar.current.startOfDay(for: .now))
         if let value = cachedProjection(spendingCoverageCache[key]) { return value }
         let value: Set<Date> = {
         let calendar = Calendar.current
         let selected = statements.filter { account == nil || $0.source == account || $0.accountKey == account }
-        let groups = Dictionary(grouping: selected) { $0.accountKey ?? $0.source }
-        var common: Set<Date>?
+        // A reissued Amex keeps its billing family, so old and new plastic are
+        // one account rather than an old card that "stopped" being updated.
+        let groups = Dictionary(grouping: selected) { $0.accountFamilyFingerprint ?? $0.accountKey ?? $0.source }
+        var accountDays: [Set<Date>] = []
         for records in groups.values {
             var days = Set<Date>()
             for record in records where isEligibleStatement(record) {
@@ -3985,9 +4011,9 @@ final class FinanceStore {
                     cursor = next
                 }
             }
-            common = common.map { $0.intersection(days) } ?? days
+            accountDays.append(days)
         }
-        return common ?? []
+        return Self.commonCoverage(accountDays)
 
         }()
         if spendingCoverageCache.count > 32 { spendingCoverageCache.removeAll() }

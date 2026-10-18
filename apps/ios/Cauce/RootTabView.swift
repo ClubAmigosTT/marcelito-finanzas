@@ -67,6 +67,9 @@ struct RootTabView: View {
             guard store.hasCanonicalRebuildPending else { return }
             _ = await store.rebuildCanonicalLedgerIfNeededAsync()
         }
+        // Runs on every unlock; separate so a slow network never delays the
+        // ledger replay or notification refresh above.
+        .task { await store.loanLedger.refreshOfficialQuotes() }
         .onChange(of: scenePhase) { _, phase in if phase != .active { planning.savePendingPlanChanges() } }
         .task(id: store.ledgerVersion) { await PlanningNotifications.refresh(store: store, planning: planning) }
         .task(id: planning.revision) {
