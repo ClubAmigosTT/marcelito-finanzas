@@ -640,8 +640,11 @@ struct BudgetView: View {
     @State private var reopenConfirmation = false
     @State private var amountEdit: BudgetAmountEdit?
     @State private var amountText = ""
+    @State private var editingLoanAmount = false
+    @State private var loanAmountText = ""
     private var snapshot: BudgetSnapshot { planning.snapshot(store, month: month) }
     private var limits: [String: Decimal] { planning.limits(store, month: month) }
+    private var scheduledLoanReserve: Decimal? { store.loanLedger.reserve(month: month, paid: store.loanPaid(in: .month(month))).reserved }
     private var fixed: [String: Decimal] { planning.fixedLimits(store, month: month) }
     private var actual: [String: Decimal] { planning.plan(for: month).closing?.categorySpent ?? planning.budgetCategoryTotals(store, period: .month(month)) }
     private var categories: [String] { Array(Set(personalExpenseCategories.filter { $0 != "Otros / Por revisar" }).union(limits.keys).union(fixed.keys)).sorted() }
@@ -681,6 +684,18 @@ struct BudgetView: View {
                 } message: {
                     Text(amountEdit?.average.map { "Promedio de tus últimos 3 meses: \(planningMoney($0))" } ?? "Escribe el monto exacto en pesos.")
                 }
+                .alert("Abono al préstamo este mes", isPresented: $editingLoanAmount) {
+                    TextField("Monto en pesos", text: $loanAmountText).keyboardType(.numberPad)
+                    Button("Guardar") {
+                        if let amount = Decimal(string: loanAmountText.filter { $0.isNumber }) {
+                            var plan = planning.plan(for: month); plan.loanReserveAmount = amount; plan.loanReserveIncluded = true
+                            planning.setPlan(plan, for: month)
+                        }
+                    }
+                    Button("Cancelar", role: .cancel) { }
+                } message: {
+                    Text(scheduledLoanReserve.map { "Cuota programada: \(planningMoney($0))" } ?? "Escribe cuánto vas a abonar este mes.")
+                }
         }
     }
     private var planContent: some View {
@@ -712,9 +727,33 @@ struct BudgetView: View {
                     if !store.loanLedger.state.accounts.isEmpty {
                         VStack(alignment: .leading, spacing: 7) {
                             Text("Préstamos").font(.headline)
-                            LabeledContent("Cuotas y abonos previstos", value: snapshot.loans.map { "~" + planningMoney($0) } ?? "Falta valor UDI")
+                            let plan = planning.plan(for: month)
+                            let included = plan.loanReserveIncluded ?? true
+                            Toggle("Incluir pago del préstamo", isOn: Binding(get: { included }, set: { value in
+                                var next = planning.plan(for: month); next.loanReserveIncluded = value; planning.setPlan(next, for: month)
+                            })).disabled(plan.closed)
+                            if included {
+                                HStack {
+                                    Text("Abono de este mes")
+                                    Spacer()
+                                    Button {
+                                        loanAmountText = (snapshot.loans ?? scheduledLoanReserve).map { NSDecimalNumber(decimal: $0).stringValue } ?? ""
+                                        editingLoanAmount = true
+                                    } label: {
+                                        HStack(spacing: 4) {
+                                            Text(snapshot.loans.map { (plan.loanReserveAmount == nil ? "~" : "") + planningMoney($0) } ?? "Falta valor UDI").monospacedDigit()
+                                            Image(systemName: "pencil").font(.caption2)
+                                        }
+                                    }.buttonStyle(.plain).disabled(plan.closed)
+                                }
+                                if plan.loanReserveAmount != nil, let scheduled = scheduledLoanReserve {
+                                    Button("Usar cuota programada (\(planningMoney(scheduled)))") {
+                                        var next = planning.plan(for: month); next.loanReserveAmount = nil; planning.setPlan(next, for: month)
+                                    }.font(.caption).disabled(plan.closed)
+                                }
+                            }
                             LabeledContent("Abonos bancarios vinculados", value: planningMoney(store.loanPaid(in: snapshot.period)))
-                            Text("La reserva usa la cuota del mes más el extra que configures, o el total pagado si es mayor. Los intereses vinculados no se descuentan otra vez como variables.").font(.caption).foregroundStyle(.secondary)
+                            Text(included ? "Por defecto se reserva la cuota del mes, o lo ya pagado si es mayor. Toca el monto para planear un abono distinto." : "El préstamo no se descuenta de tu disponible este mes.").font(.caption).foregroundStyle(.secondary)
                             NavigationLink("Ver préstamos y configurar abono extra") { LoanAccountsView() }
                         }
                     }

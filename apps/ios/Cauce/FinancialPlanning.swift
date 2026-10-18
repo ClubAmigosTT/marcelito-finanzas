@@ -135,6 +135,11 @@ struct MonthBudgetPlan: Codable {
     var legacyImported: Bool? = nil
     var legacySpendingLimit: Decimal? = nil
     var legacySavingsTarget: Decimal? = nil
+    /// nil = the loan payment is part of the plan (default).
+    var loanReserveIncluded: Bool? = nil
+    /// The amount the user plans to pay toward loans this month; nil uses the
+    /// scheduled installment (or what was already paid, if larger).
+    var loanReserveAmount: Decimal? = nil
 }
 struct PlanningIncomeSource: Identifiable, Codable, Equatable {
     var id = UUID()
@@ -638,15 +643,18 @@ struct PlanningState: Codable {
         let monthlyMSI = commitments(store, month: month)
         let income = monthlyIncome(for: month)
         let loanReserve = store.loanLedger.reserve(month: month, paid: store.loanPaid(in: period))
-        let unknownLoans = loanReserve.reserved == nil || store.loanLedger.loadError != nil
+        let loansIncluded = plan.loanReserveIncluded ?? true
+        let plannedLoans: Decimal? = loansIncluded ? (plan.loanReserveAmount ?? loanReserve.reserved) : 0
+        let unknownLoans = loansIncluded && plan.loanReserveAmount == nil
+            && (loanReserve.reserved == nil || store.loanLedger.loadError != nil)
         let unknown = hasUnknownCommitments(store, month: month)
-        let available = unknown || unknownLoans ? nil : income.map { min($0 + plan.carryIn - plan.savingsTarget, plan.spendingLimit ?? ($0 + plan.carryIn - plan.savingsTarget)) - fixedBudget - fixedOverrun - monthlyMSI - (loanReserve.reserved ?? 0) }
+        let available = unknown || unknownLoans ? nil : income.map { min($0 + plan.carryIn - plan.savingsTarget, plan.spendingLimit ?? ($0 + plan.carryIn - plan.savingsTarget)) - fixedBudget - fixedOverrun - monthlyMSI - (plannedLoans ?? 0) }
         let remaining = available.map { $0 - variableSpent }
         let c = Calendar.current
         let today = c.startOfDay(for: now)
         let from = max(period.start, today)
         let days = from < period.end ? c.dateComponents([.day], from: from, to: period.end).day ?? 0 : 0
-        let value = BudgetSnapshot(period: period, income: income, fixed: fixedBudget, msi: monthlyMSI, savings: plan.savingsTarget, variableSpent: variableSpent, available: available, remaining: remaining, remainingDays: days, hasData: hasData(store, period: period), hasUnknownCommitments: unknown, fixedOverrun: fixedOverrun, loans: loanReserve.reserved, hasUnknownLoans: unknownLoans)
+        let value = BudgetSnapshot(period: period, income: income, fixed: fixedBudget, msi: monthlyMSI, savings: plan.savingsTarget, variableSpent: variableSpent, available: available, remaining: remaining, remainingDays: days, hasData: hasData(store, period: period), hasUnknownCommitments: unknown, fixedOverrun: fixedOverrun, loans: plannedLoans, hasUnknownLoans: unknownLoans)
         if snapshotCache.count >= 24 { snapshotCache.removeAll() }
         snapshotCache[cacheKey] = value; return value
     }
@@ -718,12 +726,31 @@ struct PlanningState: Codable {
             let latest = latestByAccount[last.account] ?? last.date
             guard (Calendar.current.dateComponents([.day], from: last.date, to: latest).day ?? 0) <= recency else { return nil }
             return RecurringExpenseSuggestion(id: key, name: merchantLabel(last), account: last.account, category: category(last), amount: pattern.amount, cadence: cadence, regular: true, count: evidence.count, observedMonths: Set(evidence.map { monthKey($0.date) }).count, lastDate: last.date, movements: evidence)
-        }.sorted {
+        }
+        // Known subscriptions (Canva, Apple, Google, Spotify…) are suggested
+        // from a single recent charge: they bill in USD or several plans per
+        // merchant, which the amount-and-interval detector above rejects.
+        let detected = Set(items.map(\.id))
+        let calendar = Calendar.current
+        let subscriptions = grouped.compactMap { key, rows -> RecurringExpenseSuggestion? in
+            guard !configured.contains(key), !detected.contains(key),
+                  let last = rows.max(by: { $0.date < $1.date }),
+                  RecurringPattern.isKnownSubscription([last.normalizedMerchant, last.displayMerchant, last.title, last.rawDescription].compactMap { $0 }.joined(separator: " ")) else { return nil }
+            let latest = latestByAccount[last.account] ?? last.date
+            guard (calendar.dateComponents([.day], from: last.date, to: latest).day ?? 0) <= 45 else { return nil }
+            // Every plan billed by the merchant in the last month adds up
+            // (two Apple subscriptions on different days are one monthly cost).
+            let lastMonth = rows.filter { (calendar.dateComponents([.day], from: $0.date, to: last.date).day ?? 99) < 31 }
+            let amount = lastMonth.reduce(Decimal(0)) { $0 + $1.expenseContribution }
+            let evidence = rows.sorted { $0.date < $1.date }
+            return RecurringExpenseSuggestion(id: key, name: merchantLabel(last), account: last.account, category: "Software y suscripciones", amount: amount, cadence: .monthly, regular: evidence.count >= 2, count: evidence.count, observedMonths: Set(evidence.map { monthKey($0.date) }).count, lastDate: last.date, movements: evidence)
+        }
+        let sortedItems = (items + subscriptions).sorted {
             if $0.count != $1.count { return $0.count > $1.count }
             if $0.lastDate != $1.lastDate { return $0.lastDate > $1.lastDate }
             return $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
-        recurringExpenseCache = (value.key, day, items); return items
+        recurringExpenseCache = (value.key, day, sortedItems); return sortedItems
     }
     private func recurrenceKey(_ row: Movement, income: Bool) -> String {
         let descriptor = row.transferRecipient ?? row.normalizedMerchant ?? row.title
