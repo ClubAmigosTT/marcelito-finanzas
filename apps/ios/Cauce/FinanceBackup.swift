@@ -30,7 +30,7 @@ enum FinanceBackup {
         "marcelito.canonicalRebuild.v1", "marcelito.canonicalRebuild.readerVersion.v1", "marcelito.canonicalRebuild.expectedCount.v1",
         "marcelito.extractionReplayVersion.v1", "marcelito.ledger.normalizedReaderVersion.v1", "marcelito.transfer.ownerAliases.v1",
         "marcelito.transfer.matcherVersion.v1", "marcelito.bankScreenshotCaptures.v1", "marcelito.planning.v1", "marcelito.loans.v1",
-        "marcelito.transfer.rejectedPairs.v1"
+        "marcelito.transfer.rejectedPairs.v1", "marcelito.accounts.closed.v1"
     ]
     static func allowed(_ key: String) -> Bool { keys.contains(key) || key.hasPrefix("marcelito.monthlyPlan.") }
     static var support: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0] }

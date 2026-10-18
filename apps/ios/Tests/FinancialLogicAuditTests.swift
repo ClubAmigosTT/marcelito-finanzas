@@ -1316,4 +1316,36 @@ final class FinancialLogicAuditTests: XCTestCase {
             XCTAssertEqual(store.savingsRate, Decimal(string: "0.5"))
         }
     }
+
+    func testClosedAccountLeavesCurrentTotalsButKeepsItsHistory() {
+        withStore { store in
+            let open = statement("BBVA", key: "bbva:4922", kind: .bank, period: "01/08/2026 - 31/08/2026", summary: .init(cashBalance: 10_000))
+            let closedJuly = statement("Santander", key: "santander:1111", kind: .bank, period: "01/07/2026 - 31/07/2026", summary: .init(cashBalance: 2_000))
+            let openJuly = statement("BBVA", key: "bbva:4922", kind: .bank, period: "01/07/2026 - 31/07/2026", summary: .init(cashBalance: 9_000))
+            store.statements = [open, openJuly, closedJuly]
+            XCTAssertEqual(store.cashAvailable, 12_000)
+
+            store.setAccountClosed(true, source: "Santander", kind: .bank, accountKey: "santander:1111")
+
+            XCTAssertTrue(store.isAccountClosed(source: "Santander", kind: .bank, accountKey: "santander:1111"))
+            XCTAssertEqual(store.cashAvailable, 10_000)
+            XCTAssertEqual(store.liquidPatrimony, 10_000)
+            // July still includes the closed account; August no longer does.
+            XCTAssertEqual(store.balanceHistory.map(\.cash), [11_000, 10_000])
+            XCTAssertEqual(store.accountStatementStatus(for: "Santander", kind: .bank, accountKey: "santander:1111").state, .closed)
+
+            store.setAccountClosed(false, source: "Santander", kind: .bank, accountKey: "santander:1111")
+            XCTAssertEqual(store.cashAvailable, 12_000)
+        }
+    }
+
+    func testClosedAccountsSurviveReloadAndAreBackedUp() {
+        withStore { store in
+            store.statements = [statement("Santander", key: "santander:1111", kind: .bank, summary: .init(cashBalance: 2_000))]
+            store.setAccountClosed(true, source: "Santander", kind: .bank, accountKey: "santander:1111")
+            XCTAssertTrue(FinanceStore().closedAccountKeys.contains("santander:1111"))
+            XCTAssertTrue(FinanceBackup.allowed(FinanceStore.closedAccountsKey))
+        }
+        XCTAssertTrue(FinanceStore().closedAccountKeys.isEmpty)
+    }
 }

@@ -1740,6 +1740,7 @@ private struct AccountStatementStatusBanner: View {
         case .due: "Sube el siguiente estado"
         case .needsReview: "Revisa el último estado"
         case .noStatement: "Sube el primer estado"
+        case .closed: "Cuenta cerrada"
         }
     }
 
@@ -1755,6 +1756,8 @@ private struct AccountStatementStatusBanner: View {
             return "El último estado aún no está conciliado."
         case .noStatement:
             return "Aún no hay un estado de cuenta para esta cuenta."
+        case .closed:
+            return "Ya no suma a tu efectivo, deuda ni patrimonio actuales."
         }
     }
 
@@ -2483,12 +2486,33 @@ private struct AccountDetailView: View {
         }
     }
 
+    private var isClosed: Binding<Bool> {
+        Binding(
+            get: { store.isAccountClosed(source: source, kind: kind, accountKey: accountKey) },
+            set: { store.setAccountClosed($0, source: source, kind: kind, accountKey: accountKey) }
+        )
+    }
+
+    private var closedAccountToggle: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle("Cuenta cerrada", isOn: isClosed)
+                .font(.subheadline.weight(.semibold))
+            Text("Al cerrarla, su último saldo deja de contar en efectivo, deuda y patrimonio. Su historial se conserva hasta el último corte.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .foregroundStyle(Color.marcelitoNavy)
+        .padding(16)
+        .background(Color.marcelitoCreamSoft, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 header
                 paymentSummary
                 trendSection
+                if latest != nil { closedAccountToggle }
             }
             .padding(20)
         }

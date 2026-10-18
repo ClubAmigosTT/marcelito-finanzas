@@ -94,7 +94,9 @@ function fold(value: string) {
 /** Canonical concept used by deduplication and merchant grouping. */
 export function normalizeConcept(value: string) {
   return fold(value)
-    .replace(/\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizacion)?|operacion)\s*[:#./_-]*\s*[a-z0-9-]+/g, " ")
+    // Whole words only: "AUTOZONE", "AUTOMOTRIZ" or "SANBORNS REFORMA" are
+    // merchants, not an authorization or reference label.
+    .replace(/\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizacion)?|operacion)\b\s*[:#./_-]*\s*[a-z0-9-]+/g, " ")
     .replace(/\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizacion)?)\b/g, " ")
     .replace(/\b\d{2,}\b/g, " ")
     .replace(/[^a-z0-9]+/g, " ")
