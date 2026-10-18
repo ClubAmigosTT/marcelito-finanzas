@@ -579,13 +579,14 @@ struct AccountStatementStatus: Equatable {
         case needsReview
         case due
         case current
+        case closed
     }
 
     let state: State
     let latestCutoff: Date?
     let nextCutoff: Date?
 
-    var isUpToDate: Bool { state == .current }
+    var isUpToDate: Bool { state == .current || state == .closed }
 }
 
 func readerRecoveryLabel(_ value: String) -> String {
@@ -1106,6 +1107,10 @@ final class FinanceStore {
     private let manualDashboardUnlockKey = "marcelito.dashboard.manualUnlock.v1"
     private let transferOwnerAliasesKey = "marcelito.transfer.ownerAliases.v1"
     private let transferMatcherVersionKey = "marcelito.transfer.matcherVersion.v1"
+    static let closedAccountsKey = "marcelito.accounts.closed.v1"
+    /// Accounts the user closed. Their last balance stays in the history up
+    /// to their final cutoff but no longer counts as current cash or debt.
+    private(set) var closedAccountKeys: Set<String> = []
     private static let transferMatcherVersion = "issuer-card-payments-v4"
     private static let defaultTransferOwnerAliases = [
         "Marcelo Díaz",
@@ -1451,33 +1456,8 @@ final class FinanceStore {
         FinanceStore(reconciliationOnly: true).reconcileStatement(kind: kind, summary: summary, movements: movements)
     }
 
-    /// Runs the Santander visual row reader against normalized Vision-like
-    /// observations. This keeps the column contract testable without invoking
-    /// Vision or persisting any PDF data.
-    static func santanderOCRRowsForTesting(
-        _ fixtures: [OCRObservationFixture],
-        fileName: String
-    ) -> [Movement] {
-        let observations = fixtures.map { fixture in
-            OCRObservation(
-                page: fixture.page,
-                text: fixture.text,
-                boundingBox: CGRect(
-                    x: fixture.x,
-                    y: fixture.y,
-                    width: fixture.width,
-                    height: fixture.height
-                ),
-                confidence: fixture.confidence
-            )
-        }
-        return parseSantanderOCR(observations, fileName: fileName)
-    }
-
     /// Runs Santander's fixed table geometry reader against Vision-like
-    /// observations. This is the production contract for Santander; the
-    /// legacy OCR seam above remains available only for backwards-compatible
-    /// fixture diagnostics.
+    /// observations. This is the production contract for Santander.
     static func santanderTableRowsForTesting(
         _ fixtures: [OCRObservationFixture],
         fileName: String,
@@ -1522,29 +1502,6 @@ final class FinanceStore {
             document: recoveryPDF
         )
         return (result.movements, result.diagnostics)
-    }
-
-    /// Reports whether the OCR fixture contains a geometrically valid
-    /// DEPÓSITO/RETIRO/SALDO header. Production imports use this signal to
-    /// keep a fallback-column read provisional until a person reviews it.
-    static func santanderOCRColumnsCalibratedForTesting(
-        _ fixtures: [OCRObservationFixture],
-        fileName: String
-    ) -> Bool {
-        let observations = fixtures.map { fixture in
-            OCRObservation(
-                page: fixture.page,
-                text: fixture.text,
-                boundingBox: CGRect(
-                    x: fixture.x,
-                    y: fixture.y,
-                    width: fixture.width,
-                    height: fixture.height
-                ),
-                confidence: fixture.confidence
-            )
-        }
-        return parseSantanderOCRResult(observations, fileName: fileName).columnsCalibrated
     }
 
     /// Runs the BBVA-specific visual reader against normalized Vision-like
@@ -3054,6 +3011,10 @@ final class FinanceStore {
         guard let latest = accountStatements.first else {
             return AccountStatementStatus(state: .noStatement, latestCutoff: nil, nextCutoff: nil)
         }
+        if isAccountClosed(source: source, kind: kind, accountKey: accountKey) {
+            let finalCutoff = statementRange(from: latest.period)?.upperBound ?? statementEndDate(for: latest.id)
+            return AccountStatementStatus(state: .closed, latestCutoff: finalCutoff, nextCutoff: nil)
+        }
 
         let calendar = Calendar(identifier: .gregorian)
         let latestCutoff = statementRange(from: latest.period)?.upperBound ?? statementEndDate(for: latest.id)
@@ -3125,9 +3086,28 @@ final class FinanceStore {
     var latestPaymentForNoInterest: Decimal? { completeSum(latestCompleteMetrics(.card).map(\.paymentForNoInterest)) }
     private func latestCompleteMetrics(_ kind: StatementKind) -> [StatementMetric] {
         let values = latestMetricsBySource(periodMetrics.filter { $0.kind == kind })
+            .filter { !closedAccountKeys.contains($0.accountKey ?? "\($0.source)|\(kind)") }
         let expected = Set(statements.filter { statementKind($0) == kind }.map { $0.accountKey ?? "\($0.source)|\(kind)" })
+            .subtracting(closedAccountKeys)
         let present = Set(values.map { $0.accountKey ?? "\($0.source)|\(kind)" })
         return expected == present ? values : []
+    }
+
+    static func accountIdentity(source: String, kind: StatementKind, accountKey: String?) -> String {
+        accountKey ?? "\(source)|\(kind)"
+    }
+
+    func isAccountClosed(source: String, kind: StatementKind, accountKey: String?) -> Bool {
+        closedAccountKeys.contains(Self.accountIdentity(source: source, kind: kind, accountKey: accountKey))
+    }
+
+    func setAccountClosed(_ closed: Bool, source: String, kind: StatementKind, accountKey: String?) {
+        let identity = Self.accountIdentity(source: source, kind: kind, accountKey: accountKey)
+        if closed { closedAccountKeys.insert(identity) } else { closedAccountKeys.remove(identity) }
+        if !isReconciliationOnly {
+            UserDefaults.standard.set(closedAccountKeys.sorted(), forKey: Self.closedAccountsKey)
+        }
+        invalidateDerivedProjections()
     }
     private func completeSum(_ values: [Decimal?]) -> Decimal? {
         guard !values.isEmpty, values.allSatisfy({ $0 != nil }) else { return nil }
@@ -3281,9 +3261,16 @@ final class FinanceStore {
             return (metric, date)
         }
         let loanDates = loanLedger.state.accounts.flatMap { $0.statements.map(\.asOf) }
+        // A closed account counts until its final cutoff and then leaves the
+        // account universe instead of carrying its last balance forever.
+        let finalCutoff = Dictionary(dated.map { ($0.0.accountKey ?? "\($0.0.source)|\($0.0.kind)", $0.1) }, uniquingKeysWith: max)
         return Set(dated.map { $0.1 } + loanDates).sorted().map { date in
+            let activeKeys = keys.filter { key in
+                !closedAccountKeys.contains(key) || (finalCutoff[key].map { date <= $0 } ?? false)
+            }
             let latest = latestMetricsBySource(dated.filter { $0.1 <= date }.map { $0.0 })
-            guard Set(latest.map { $0.accountKey ?? "\($0.source)|\($0.kind)" }) == keys else {
+                .filter { activeKeys.contains($0.accountKey ?? "\($0.source)|\($0.kind)") }
+            guard Set(latest.map { $0.accountKey ?? "\($0.source)|\($0.kind)" }) == activeKeys else {
                 return BalanceSnapshot(date: date, cash: nil, debt: nil)
             }
             let hasCards = latest.contains { $0.kind == .card }
@@ -5014,6 +5001,7 @@ final class FinanceStore {
         let defaults = UserDefaults.standard
         loanLedger = LoanLedger(defaults: defaults)
         isReconciliationOnly = false
+        closedAccountKeys = Set(defaults.stringArray(forKey: Self.closedAccountsKey) ?? [])
         manualDashboardUnlockEnabled = false
         defaults.removeObject(forKey: manualDashboardUnlockKey)
         var loadedAtomicEnvelope = false
@@ -5916,6 +5904,8 @@ final class FinanceStore {
         defaults.removeObject(forKey: categoryRulesKey)
         defaults.removeObject(forKey: transferOwnerAliasesKey)
         defaults.removeObject(forKey: transferMatcherVersionKey)
+        defaults.removeObject(forKey: Self.closedAccountsKey)
+        closedAccountKeys = []
         defaults.removeObject(forKey: "marcelito.transfer.rejectedPairs.v1")
         defaults.removeObject(forKey: "marcelito.ledger.beforeTransferV2.v1")
         defaults.removeObject(forKey: "marcelito.manualReviews.beforeTransferV2.v1")
@@ -11690,8 +11680,8 @@ final class FinanceStore {
     }
 
     /// The issuer parsers production applies to a selectable PDF text layer.
-    /// Test seams must call this, not `parse(text:)`, so they exercise the
-    /// rows a real import would keep.
+    /// Test seams call this too, so they exercise the rows a real import
+    /// would keep.
     private static func selectableTextCandidates(
         text: String,
         fileName: String,
@@ -11715,796 +11705,6 @@ final class FinanceStore {
         // no generic text parser. Both remain rejected when Vision is
         // unavailable instead of guessing rows from global numbers.
         return []
-    }
-
-    private static func parse(text: String, fileName: String, sourceHint: String? = nil, diagnosticSink: ((OCRRowDiagnostic) -> Void)? = nil) -> [Movement] {
-        let dateRegex = try? NSRegularExpression(
-            pattern: #"(?<!\d)(\d{1,2})[\/\-.](\d{1,2})[\/\-.](\d{2,4})(?!\d)"#
-        )
-        let shortMonthDateRegex = try? NSRegularExpression(
-            // Vision occasionally reads a final "o" in AGO as zero (AG0)
-            // and a leading zero in the day as O/B/I (O5, OBI). Keep those
-            // OCR-only glyphs in the date token; parseDate repairs them in
-            // isolation after the row has already been date-anchored.
-            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
-        )
-        let isoDateRegex = try? NSRegularExpression(
-            pattern: #"(?<!\d)(\d{4})[\/\-.](\d{1,2})[\/\-.](\d{1,2})(?!\d)"#
-        )
-        let textDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
-        )
-        let pageMarkerRegex = try? NSRegularExpression(pattern: #"^__pdf_page_(\d+)__$"#)
-        let amountRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?\s*(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)(?:[.,]\d{1,2})?(?![A-Za-z0-9])"#
-        )
-        let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#)
-        func inferredYear(in value: String) -> Int? {
-            guard let yearRegex,
-                  let match = firstMatch(in: value, regex: yearRegex) else { return nil }
-            return Int(match.text)
-        }
-        let defaultYear = inferredYear(in: fileName)
-            ?? inferredYear(in: text)
-            ?? Calendar.current.component(.year, from: .now)
-        let filenameAccount = sourceHint ?? accountName(from: fileName)
-        let documentNormalized = text.folding(
-            options: [.diacriticInsensitive, .caseInsensitive],
-            locale: .current
-        )
-        let documentLayoutNormalized = documentNormalized
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let account = filenameAccount == "Importado"
-            ? accountName(from: documentNormalized)
-            : filenameAccount
-        let documentKind = statementKind(from: documentNormalized, source: account)
-        if account.localizedCaseInsensitiveCompare("BBVA") == .orderedSame {
-            let bbvaRows = parseBBVASelectableText(
-                text: text,
-                fileName: fileName,
-                sourceHint: sourceHint,
-                openingBalance: summary(from: text, source: account)?.previousBalance
-            )
-            if !bbvaRows.isEmpty { return bbvaRows }
-        }
-        let ignoredPhrases = [
-            "saldo anterior", "saldo al corte", "pago minimo",
-            "limite de credito", "tasa anual", "numero de cuenta",
-            "fecha de corte", "fecha limite", "total a pagar",
-            "periodo de facturacion", "este no es un documento",
-            "total de las transacciones", "el estado de cuenta incluye",
-            "estimado cliente", "en caso de que la fecha",
-            "resumen informativo", "cuenta de cheques", "saldo inicial",
-            "saldo final", "saldo promedio", "saldo disponible", "mes anterior",
-            "mes actual", "intereses brutos", "comisiones cobradas", "otros cargos",
-            "dias del periodo", "codigo de cliente",
-            "depositos", "retiros", "abonos"
-        ]
-
-        // Amex puts the merchant, RFC and amount on separate PDF text lines.
-        // Group each date-started row before extracting the amount. Page
-        // sentinels are emitted by the shared reader so a row keeps its
-        // provenance even when the text layer is selectable.
-        struct ParsedTextRow {
-            let text: String
-            let page: Int?
-            /// Amex repeats a date/description table for domestic, foreign
-            /// and MSI sections. Keep the section on the row so a foreign
-            /// purchase without an explicit currency label still uses the
-            /// local MXN amount and reconciles against the right subtotal.
-            let forcedForeignCurrency: Bool
-            let section: Int
-        }
-        let isAmexText = account.localizedCaseInsensitiveContains("Amex")
-        // A selectable Amex statement has three separate transaction tables.
-        // Restrict row anchors to those tables; dates in page headers,
-        // payment instructions and the MSI summary are not movements.
-        let amexSectionAware = isAmexText
-            && (documentNormalized.contains("fecha y detalle de las operaciones")
-                || documentLayoutNormalized.contains("fecha y detalle de las operaciones"))
-        var amexSection = 0 // 0: outside, 1: domestic, 2: foreign, 3: MSI
-        var rows: [ParsedTextRow] = []
-        var pendingRow = ""
-        var pendingPage: Int?
-        var pendingForcedForeignCurrency = false
-        var pendingSection = 0
-        var currentPage: Int?
-        func flushPending() {
-            guard !pendingRow.isEmpty else { return }
-            rows.append(
-                ParsedTextRow(
-                    text: pendingRow,
-                    page: pendingPage,
-                    forcedForeignCurrency: pendingForcedForeignCurrency,
-                    section: pendingSection
-                )
-            )
-            pendingRow = ""
-            pendingPage = nil
-            pendingForcedForeignCurrency = false
-        }
-        func leadingDateMatch(in value: String) -> TextMatch? {
-            let candidate = value.trimmingCharacters(in: .whitespacesAndNewlines)
-            let matches: [TextMatch?] = [
-                dateRegex.flatMap { firstMatch(in: candidate, regex: $0) },
-                shortMonthDateRegex.flatMap { firstMatch(in: candidate, regex: $0) },
-                isoDateRegex.flatMap { firstMatch(in: candidate, regex: $0) },
-                textDateRegex.flatMap { firstMatch(in: candidate, regex: $0) }
-            ]
-            return matches.compactMap { match in
-                guard let match, match.range.location == 0 else { return nil }
-                return match
-            }.first
-        }
-        let textForRows = amexSectionAware ? Self.rebuildAmexSelectableLines(text) : text
-        for rawLine in textForRows.components(separatedBy: .newlines) {
-            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard line.count > 1 else { continue }
-            let normalizedLine = line.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-            if let pageMarkerRegex,
-               let marker = firstMatch(in: normalizedLine, regex: pageMarkerRegex),
-               let page = Int(marker.text.filter { $0.isNumber }) {
-                flushPending()
-                currentPage = page
-                continue
-            }
-
-            // Bank statements place their authoritative totals immediately
-            // after the last movement. Without an explicit boundary, the
-            // final transaction absorbs the totals line and is rejected as
-            // administrative text, producing the characteristic “N-1 filas”
-            // result (for example BBVA's last SPEI is silently lost).
-            if normalizedLine.contains("total importe cargos")
-                || normalizedLine.contains("total importe abonos")
-                || normalizedLine.contains("total movimientos cargos")
-                || normalizedLine.contains("total movimientos abonos") {
-                flushPending()
-                continue
-            }
-
-            if amexSectionAware {
-                // The section headers are repeated on every page. Flushing
-                // first prevents a page header that was concatenated to the
-                // prior amount by PDFKit from becoming part of that row.
-                if normalizedLine.contains("estado de cuenta pagina")
-                    || normalizedLine.hasPrefix("estado de cuenta")
-                    || normalizedLine.contains("numero de cuenta")
-                    || normalizedLine.contains("tarjetahabiente") {
-                    flushPending()
-                    continue
-                }
-                if normalizedLine.contains("fecha y detalle de las operaciones") {
-                    flushPending()
-                    if amexSection == 0 { amexSection = 1 }
-                    continue
-                }
-                if normalizedLine.contains("total de transacciones en moneda extranjera") {
-                    flushPending()
-                    amexSection = 0
-                    continue
-                }
-                if normalizedLine.contains("total de las transacciones en") {
-                    flushPending()
-                    amexSection = 2
-                    continue
-                }
-                if normalizedLine.contains("transacciones de meses sin intereses")
-                    || normalizedLine.contains("descripcion de compras en meses sin intereses") {
-                    flushPending()
-                    amexSection = 3
-                    continue
-                }
-                if normalizedLine.contains("total de meses sin intereses")
-                    || normalizedLine.contains("total de plan de meses sin intereses")
-                    || normalizedLine.contains("resumen de meses sin intereses")
-                    || normalizedLine.contains("consolidado de compras en meses sin intereses") {
-                    flushPending()
-                    amexSection = 0
-                    continue
-                }
-                // Ignore all text outside an Amex movement table. This is the
-                // key boundary that keeps dates in headers/equations from
-                // being interpreted as transactions.
-                if amexSection == 0 { continue }
-            }
-
-            let leadingDate = leadingDateMatch(in: line)
-            if leadingDate != nil {
-                flushPending()
-                pendingRow = line
-                pendingPage = currentPage
-                pendingForcedForeignCurrency = amexSectionAware && amexSection == 2
-                pendingSection = amexSection
-            } else if !pendingRow.isEmpty {
-                pendingRow += " " + line
-            }
-        }
-        flushPending()
-
-        return rows.compactMap { parsedRow in
-            let original = parsedRow.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            // Diagnostic-only trace: preserves rejected anchors as well as
-            // accepted candidates. It does not change selection or accounting.
-            var diagnosticReason = "amex.row-too-short"
-            var diagnosticAmount: Decimal?
-            var diagnosticTokens: [String] = []
-            var diagnosticMovement: Movement?
-            let diagnosticSection = [1: "NACIONALES_PAGOS_CREDITOS", 2: "MONEDA_EXTRANJERA", 3: "MSI"][parsedRow.section] ?? "FUERA_DE_SECCION"
-            defer {
-                if isAmexText {
-                    diagnosticSink?(OCRRowDiagnostic(page: parsedRow.page, rawText: original,
-                        selectedColumn: diagnosticSection, selectedAmount: diagnosticAmount,
-                        direction: diagnosticMovement.map { $0.amount >= 0 ? "in" : "out" },
-                        reason: diagnosticReason, accepted: diagnosticMovement != nil,
-                        cellTexts: diagnosticTokens))
-                }
-            }
-            guard original.count > 3 else { return nil }
-
-            let normalized = original.folding(
-                options: [.diacriticInsensitive, .caseInsensitive],
-                locale: .current
-            )
-            diagnosticReason = "amex.administrative-row"
-            guard !ignoredPhrases.contains(where: { normalized.contains($0) }) else { return nil }
-
-            diagnosticReason = "amex.date-invalid"
-            guard let dateMatch = leadingDateMatch(in: original),
-                  let parsedDate = parseDate(dateMatch.text, defaultYear: defaultYear) else { return nil }
-            var working = original
-            var date = parsedDate
-            working = working.replacingCharacters(in: Range(dateMatch.range, in: working)!, with: " ")
-            // BBVA places operation and settlement dates before the merchant
-            // (for example `23/JUL 22/JUL FACEBK`). The first date anchors the
-            // row; remove the second one before building the description.
-            working = working.replacingOccurrences(
-                of: #"^\s*\d{1,2}\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?\s+"#,
-                with: " ",
-                options: .regularExpression
-            )
-            // PDFKit can concatenate the next page header directly to the
-            // final amount of the previous row (for example
-            // `290.00Estado de Cuenta Página 3`). It is layout metadata, not
-            // part of the merchant description.
-            working = working.replacingOccurrences(
-                of: #"(?i)estado\s+de\s+cuenta\s+p(?:á|a|�)gina\s+\d+"#,
-                with: " ",
-                options: .regularExpression
-            )
-
-            guard let amountRegex else { return nil }
-            let allAmountMatches = allMatches(in: working, regex: amountRegex)
-            let moneyMatches = allAmountMatches.filter {
-                $0.text.contains("$") || $0.text.range(of: #"[.,]\d{1,2}$"#, options: .regularExpression) != nil
-            }
-            let usableAmountMatches = moneyMatches.isEmpty ? allAmountMatches : moneyMatches
-            diagnosticTokens = usableAmountMatches.map(\.text)
-            diagnosticReason = "amex.amount-invalid"
-            let foreignCurrency = parsedRow.forcedForeignCurrency || Self.hasForeignCurrency(in: normalized)
-            let bankLikeRow = documentKind == .bank
-                || ["deposito", "retiro", "saldo", "cuenta de cheques", "cuenta de ahorro", "abono"]
-                    .contains { normalized.contains($0) }
-            let amountMatch: TextMatch? = {
-                guard !usableAmountMatches.isEmpty else { return nil }
-                if foreignCurrency {
-                    // Amex prints the source-currency amount and exchange
-                    // rate before the final MXN amount. Select the local
-                    // amount, not the USD value or TC, so reconciliation is
-                    // performed in the same currency as the statement totals.
-                    let currencyPattern = #"(?i)d[óo]lar(?:es)?|euro?s?|peso(?:s)?\s+colombiano?s?|tipo\s+de\s+cambio|\btc\s*:"#
-                    if let markerRange = working.range(of: currencyPattern, options: .regularExpression) {
-                        let marker = NSRange(markerRange, in: working)
-                        let markerEnd = marker.location + marker.length
-                        let afterMarker = usableAmountMatches.filter { $0.range.location >= markerEnd }
-                        let beforeMarker = usableAmountMatches.filter { $0.range.location < marker.location }
-                        return afterMarker.last ?? beforeMarker.last ?? usableAmountMatches.last
-                    }
-                    return usableAmountMatches.last
-                }
-                if bankLikeRow, account == "BBVA" { return usableAmountMatches.first }
-                if bankLikeRow, usableAmountMatches.count > 1 {
-                    return usableAmountMatches[usableAmountMatches.count - 2]
-                }
-                return usableAmountMatches.last
-            }()
-            guard let amountMatch,
-                  let parsedAmount = parseAmount(amountMatch.text),
-                  parsedAmount != 0,
-                  abs(parsedAmount) < 10_000_000 else {
-                return nil
-            }
-            // A bare long integer in a PDF row is overwhelmingly an account,
-            // certificate or operation identifier, not a monetary amount.
-            // Keep ordinary integer charges (up to six digits), but require a
-            // currency marker, grouping separator or cents for larger values
-            // so administrative numbers cannot become million-peso expenses.
-            let rawAmount = amountMatch.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            diagnosticAmount = parsedAmount
-            diagnosticReason = "amex.amount-looks-like-reference"
-            let digitsOnly = rawAmount.filter { $0.isNumber }
-            let hasMoneyShape = rawAmount.contains("$")
-                || rawAmount.range(of: #"[.,]\d{1,2}$"#, options: .regularExpression) != nil
-                || rawAmount.range(of: #"\d{1,3}(?:[ ,]\d{3})+"#, options: .regularExpression) != nil
-            if !hasMoneyShape && digitsOnly.count > 6 { return nil }
-            working = working.replacingCharacters(in: Range(amountMatch.range, in: working)!, with: " ")
-            if bankLikeRow {
-                // A bank row normally carries both the movement amount and a
-                // running balance. The selected token is the former; remove
-                // any other currency-shaped tokens before building the title
-                // so a balance such as `935.94` cannot become part of the
-                // merchant name.
-                let residualMoneyMatches = allMatches(in: working, regex: amountRegex).filter {
-                    $0.text.contains("$")
-                        || $0.text.range(of: #"[.,]\d{1,2}$"#, options: .regularExpression) != nil
-                }
-                for match in residualMoneyMatches.reversed() {
-                    if let range = Range(match.range, in: working) {
-                        working.replaceSubrange(range, with: " ")
-                    }
-                }
-            }
-
-            var title = working
-                .replacingOccurrences(of: #"\bRFC\s*[:#]?\s*[A-Z0-9]+\b"#, with: "", options: .regularExpression)
-                .replacingOccurrences(of: #"/REF[A-Z0-9_]+\b"#, with: "", options: .regularExpression)
-                .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
-                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            title = cleanMerchantTitle(title)
-            diagnosticReason = "amex.description-invalid"
-            guard title.count >= 3, !isAdministrativeTitle(title) else { return nil }
-            guard title.rangeOfCharacter(from: .letters) != nil else { return nil }
-
-            let titleNormalized = title.folding(
-                options: [.diacriticInsensitive, .caseInsensitive],
-                locale: .current
-            )
-            let hasCreditMarker = normalized.range(of: #"\b(cr|abono|credito)\b"#, options: .regularExpression) != nil
-            let isRefund = titleNormalized.contains("devolucion")
-                || titleNormalized.contains("reembolso")
-                || titleNormalized.contains("bonificacion")
-            let isCardPayment = titleNormalized.contains("gracias por su pago")
-                || titleNormalized.contains("pago de tarjeta")
-                || (titleNormalized.contains("pago")
-                    && (titleNormalized.contains("tarjeta") || titleNormalized.contains("amex") || titleNormalized.contains("american express") || titleNormalized.contains("americanexpress") || titleNormalized.contains("credito") || documentKind == .card))
-                || (normalized.contains("pago") && (normalized.contains("american express") || normalized.contains("americanexpress")))
-            let isIncome = titleNormalized.contains("nomina")
-                || titleNormalized.contains("sueldo")
-                || titleNormalized.contains("salario")
-                || titleNormalized.contains("deposito")
-                || titleNormalized.contains("abono")
-                || titleNormalized.contains("ingreso")
-                || titleNormalized.contains("recibido")
-                || titleNormalized.contains("transferencia recibida")
-            let isTransfer = titleNormalized.contains("transfer")
-                || titleNormalized.contains("traspaso")
-                || titleNormalized.contains("spei")
-                || titleNormalized.contains("entre cuentas")
-                || titleNormalized.contains("clabe")
-            let explicitOwnTransfer = titleNormalized.contains("entre cuentas")
-                || titleNormalized.contains("cuenta propia")
-                || titleNormalized.contains("mismo titular")
-                || titleNormalized.contains("traspaso interno")
-            let directionSignal = documentKind == .card
-                || (bankLikeRow && usableAmountMatches.count > 1)
-                || isRefund
-                || isCardPayment
-                || isIncome
-                || isTransfer
-                || titleNormalized.range(of: #"\b(cargo|retiro|compra|pago|deposito|abono|nomina|sueldo|salario|credito|devolucion|reembolso|comision|iva|interes|anualidad|cuota)\b"#, options: .regularExpression) != nil
-                || amountMatch.text.contains("-")
-                || amountMatch.text.contains("+")
-                || hasCreditMarker
-            diagnosticReason = "amex.direction-unresolved"
-            guard directionSignal else { return nil }
-            let isStatementCredit = hasCreditMarker && !isCardPayment && !isRefund && !isIncome
-            let flow: FlowKind
-            if isRefund || isStatementCredit {
-                flow = .income
-            } else if isCardPayment {
-                flow = .debt
-            } else if explicitOwnTransfer {
-                flow = .transfer
-            } else if isIncome {
-                flow = .income
-            } else {
-                flow = .expense
-            }
-
-            let transferIsIncoming = titleNormalized.contains("transferencia recibida")
-                || titleNormalized.contains("spei recibido")
-                || titleNormalized.contains("abono")
-                || titleNormalized.contains("deposito")
-                || titleNormalized.contains("entrada")
-            let signedAmount: Decimal
-            switch flow {
-            case .income:
-                signedAmount = abs(parsedAmount)
-            case .transfer:
-                signedAmount = transferIsIncoming ? abs(parsedAmount) : -abs(parsedAmount)
-            default:
-                signedAmount = -abs(parsedAmount)
-            }
-            let displayAccount = flow == .transfer && titleNormalized.contains("amex")
-                ? "Santander a Amex"
-                : account
-            let category = category(for: titleNormalized, flow: flow)
-            let kind: MovementKind
-            if isStatementCredit {
-                kind = .credit
-            } else if titleNormalized.contains("msi")
-                || titleNormalized.contains("meses sin intereses")
-                || titleNormalized.contains("meses en automatico")
-                || titleNormalized.contains("diferir")
-                || titleNormalized.contains("diferid") {
-                kind = .msi
-            } else if isRefund && signedAmount > 0 {
-                kind = .refund
-            } else if titleNormalized.contains("interes") {
-                kind = .interest
-            } else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") {
-                kind = .fee
-            } else if isCardPayment {
-                kind = .cardPayment
-            } else if isTransfer && explicitOwnTransfer {
-                kind = .bankTransfer
-            } else if isIncome {
-                kind = .income
-            } else if flow == .income {
-                kind = .credit
-            } else {
-                kind = .purchase
-            }
-            let travelRelated = ["viaje", "hotel", "hospedaje", "aerolinea", "vuelo", "avion", "transporte", "uber", "taxi", "metro", "renta de auto", "destino", "equipaje"].contains { titleNormalized.contains($0) }
-
-            let movement = Movement(
-                date: date,
-                title: title,
-                account: displayAccount,
-                category: category,
-                amount: signedAmount,
-                flow: flow,
-                kind: kind,
-                travelRelated: travelRelated,
-                foreignCurrency: foreignCurrency,
-                extractionEvidence: MovementExtractionEvidence(
-                    method: "pdf-text",
-                    page: parsedRow.page,
-                    confidence: 0.93,
-                    sourceText: String(original.prefix(isAmexText ? 500 : 240)),
-                    selectedColumn: isAmexText ? diagnosticSection : nil,
-                    selectedAmount: isAmexText ? parsedAmount : nil,
-                    selectionReason: isAmexText ? "amex.selected-token; token=\(rawAmount); kind=\(kind.rawValue); foreign=\(foreignCurrency)" : nil
-                )
-            )
-            diagnosticMovement = movement
-            diagnosticReason = "amex.candidate-extracted; kind=\(kind.rawValue); foreign=\(foreignCurrency); signed=\(NSDecimalNumber(decimal: signedAmount).stringValue); token=\(rawAmount)"
-            return movement
-        }
-    }
-
-    /// Universal OCR fallback for scanned statements that are not one of the
-    /// known Santander or Amex layouts. It uses the date as the row anchor and
-    /// the last right-aligned amount (or the penultimate amount for bank rows,
-    /// where the final value is commonly the running balance).
-    private static func parseGenericOCR(
-        _ observations: [OCRObservation],
-        fileName: String,
-        source: String,
-        kind: StatementKind
-    ) -> [Movement] {
-        guard let dayFirstDateRegex = try? NSRegularExpression(
-            pattern: #"(?<!\d)(\d{1,2})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{2,4})(?!\d)"#
-        ), let isoDateRegex = try? NSRegularExpression(
-            pattern: #"(?<!\d)(\d{4})\s*[\/\-.]\s*(\d{1,2})\s*[\/\-.]\s*(\d{1,2})(?!\d)"#
-        ), let shortMonthDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-]\s*[A-Za-zÁÉÍÓÚáéíóú0]{3,}(?:\s*[\/\-]\s*(?:20)?\d{2})?(?![A-Za-z])"#
-        ), let textDateRegex = try? NSRegularExpression(
-            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*(?:de\s*)?([A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s+(?:de\s+)?(\d{4}))?"#
-        ), let amountRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
-        ) else {
-            return []
-        }
-
-        let defaultYear: Int = {
-            if let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#),
-               let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
-                return year
-            }
-            return Calendar.current.component(.year, from: .now)
-        }()
-
-        let linesByPage = Dictionary(grouping: ocrLines(from: observations), by: \.page)
-        var rows: [[OCRObservation]] = []
-        let ignoredHeaderPhrases = [
-            "estado de cuenta", "resumen de cuenta", "resumen de movimientos",
-            "resumen de meses", "periodo de facturacion", "periodo de corte",
-            "fecha de corte", "fecha limite", "pago minimo", "saldo anterior",
-            "saldo al corte", "saldo final", "saldo actual", "saldo disponible",
-            "limite de credito", "credito disponible", "fecha descripcion",
-            "fecha folio", "total de movimientos", "total de transacciones",
-            "total de las transacciones", "informacion al cliente", "titular de la cuenta",
-            "saldo inicial", "saldo promedio", "pagina"
-        ]
-        for page in linesByPage.keys.sorted() {
-            let pageLines = (linesByPage[page] ?? []).sorted {
-                if abs($0.centerY - $1.centerY) > 0.012 {
-                    return $0.centerY > $1.centerY
-                }
-                return $0.centerX < $1.centerX
-            }
-            var pendingRow: [OCRObservation] = []
-
-            for line in pageLines {
-                let normalized = line.text.folding(
-                    options: [.diacriticInsensitive, .caseInsensitive],
-                    locale: .current
-                )
-                // End the current row before dropping totals or a new section
-                // header. This keeps the final charge in each page/section.
-                if normalized.contains("total de movimientos")
-                    || normalized.contains("total de transacciones")
-                    || normalized.contains("total de las transacciones")
-                    || normalized.contains("total de meses sin intereses") {
-                    if !pendingRow.isEmpty {
-                        rows.append(pendingRow)
-                        pendingRow.removeAll(keepingCapacity: true)
-                    }
-                    continue
-                }
-
-                let dateMatch = firstMatch(in: line.text, regex: dayFirstDateRegex)
-                    ?? firstMatch(in: line.text, regex: isoDateRegex)
-                    ?? firstMatch(in: line.text, regex: shortMonthDateRegex)
-                    ?? firstMatch(in: line.text, regex: textDateRegex)
-                let isTransactionDate = dateMatch != nil
-                    // The date column is usually left aligned, but some banks
-                    // place it farther inboard on a narrow/mobile statement.
-                    // Keep the threshold broad; headers are filtered by text.
-                    && line.boundingBox.minX < 0.72
-                    && !ignoredHeaderPhrases.contains(where: { normalized.contains($0) })
-
-                if isTransactionDate {
-                    if !pendingRow.isEmpty { rows.append(pendingRow) }
-                    pendingRow = [line]
-                } else if !pendingRow.isEmpty {
-                    if ignoredHeaderPhrases.contains(where: { normalized.contains($0) }) {
-                        rows.append(pendingRow)
-                        pendingRow.removeAll(keepingCapacity: true)
-                    } else {
-                        pendingRow.append(line)
-                    }
-                }
-            }
-            if !pendingRow.isEmpty { rows.append(pendingRow) }
-        }
-
-        return rows.compactMap {
-            parseGenericOCRRow(
-                $0,
-                dayFirstDateRegex: dayFirstDateRegex,
-                isoDateRegex: isoDateRegex,
-                shortMonthDateRegex: shortMonthDateRegex,
-                textDateRegex: textDateRegex,
-                amountRegex: amountRegex,
-                source: source,
-                kind: kind,
-                defaultYear: defaultYear
-            )
-        }
-    }
-
-    private static func parseGenericOCRRow(
-        _ row: [OCRObservation],
-        dayFirstDateRegex: NSRegularExpression,
-        isoDateRegex: NSRegularExpression,
-        shortMonthDateRegex: NSRegularExpression,
-        textDateRegex: NSRegularExpression,
-        amountRegex: NSRegularExpression,
-        source: String,
-        kind: StatementKind,
-        defaultYear: Int
-    ) -> Movement? {
-        let fullText = row.map(\.text).joined(separator: " ")
-        let dateMatch = firstMatch(in: fullText, regex: dayFirstDateRegex)
-            ?? firstMatch(in: fullText, regex: isoDateRegex)
-            ?? firstMatch(in: fullText, regex: shortMonthDateRegex)
-            ?? firstMatch(in: fullText, regex: textDateRegex)
-        guard let dateMatch, let date = parseDate(dateMatch.text, defaultYear: defaultYear) else { return nil }
-
-        let normalizedFullText = fullText.folding(
-            options: [.diacriticInsensitive, .caseInsensitive],
-            locale: .current
-        )
-        let ignoredPhrases = [
-            "estado de cuenta", "resumen de cuenta", "resumen de movimientos",
-            "resumen de meses", "periodo de facturacion", "fecha de corte",
-            "fecha limite", "pago minimo", "saldo anterior", "saldo al corte",
-            "saldo final", "saldo actual", "saldo disponible", "limite de credito",
-            "credito disponible", "total de movimientos", "total de transacciones",
-            "total de las transacciones", "informacion al cliente", "titular de la cuenta",
-            "saldo inicial", "saldo promedio"
-        ]
-        guard !ignoredPhrases.contains(where: { normalizedFullText.contains($0) }) else { return nil }
-
-        let candidates = row.enumerated().flatMap { observationOrder, observation in
-            allMatches(in: observation.text, regex: amountRegex).enumerated().compactMap { matchOrder, match -> OCRAmountCandidate? in
-                guard let value = parseAmount(match.text), abs(value) > 0, abs(value) < 100_000_000 else {
-                    return nil
-                }
-                return OCRAmountCandidate(
-                    value: value,
-                    text: match.text,
-                    x: observation.boundingBox.minX,
-                    order: observationOrder * 100 + matchOrder,
-                    observationIndex: observationOrder,
-                    characterOffset: match.range.location
-                )
-            }
-        }.sorted { $0.order < $1.order }
-        guard !candidates.isEmpty else { return nil }
-
-        let hasForeignCurrency = Self.hasForeignCurrency(in: normalizedFullText)
-        let bankLikeRow = kind == .bank
-            || ["deposito", "retiro", "saldo", "cuenta de cheques", "cuenta de ahorro", "abono"]
-                .contains { normalizedFullText.contains($0) }
-        let selected: OCRAmountCandidate
-        if hasForeignCurrency {
-            selected = candidates[0]
-        } else if bankLikeRow,
-                  let columnAmount = candidates
-                    .filter({ $0.x >= 0.52 && $0.x < 0.88 })
-                    .sorted(by: { $0.order < $1.order })
-                    .first {
-            // BBVA and similar bank layouts place CARGOS/ABONOS in the
-            // middle-right columns and the running balance farther right.
-            // Prefer the column evidence whenever Vision returned separate
-            // words; this avoids turning a balance into a transaction.
-            selected = columnAmount
-        } else if bankLikeRow, candidates.count > 1 {
-            selected = candidates[max(0, candidates.count - 2)]
-        } else {
-            selected = candidates[candidates.count - 1]
-        }
-
-        var title = fullText
-            .replacingOccurrences(
-                of: #"(?i)(?<!\d)\d{1,4}\s*[\/\-.]\s*\d{1,4}\s*[\/\-.]\s*\d{2,4}(?!\d)"#,
-                with: " ",
-                options: .regularExpression
-            )
-            .replacingOccurrences(
-                of: #"(?i)(?<!\d)\d{1,2}\s*(?:de\s*)?[A-Za-zÁÉÍÓÚáéíóú]{3,}(?:\s+(?:de\s+)?\d{4})?"#,
-                with: " ",
-                options: .regularExpression
-            )
-            .replacingOccurrences(
-                of: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#,
-                with: " ",
-                options: .regularExpression
-            )
-            .replacingOccurrences(of: #"\bRFC\s*[:#]?\s*[A-Z0-9]+\b"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"/REF[A-Z0-9_]+\b"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"\bCR\b"#, with: "", options: .regularExpression)
-            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        title = cleanMerchantTitle(title)
-        guard title.count >= 3, title.rangeOfCharacter(from: .letters) != nil, !isAdministrativeTitle(title) else { return nil }
-
-        let titleNormalized = title.folding(
-            options: [.diacriticInsensitive, .caseInsensitive],
-            locale: .current
-        )
-        let hasCreditMarker = normalizedFullText.range(of: #"\b(cr|abono|credito)\b"#, options: .regularExpression) != nil
-        let isRefund = titleNormalized.contains("devolucion")
-            || titleNormalized.contains("reembolso")
-            || titleNormalized.contains("bonificacion")
-        let isCardPayment = titleNormalized.contains("gracias por su pago")
-            || titleNormalized.contains("pago de tarjeta")
-            || (titleNormalized.contains("pago")
-                && (titleNormalized.contains("tarjeta") || titleNormalized.contains("amex") || titleNormalized.contains("american express") || titleNormalized.contains("americanexpress") || titleNormalized.contains("credito") || kind == .card))
-        let isIncome = titleNormalized.contains("nomina")
-            || titleNormalized.contains("sueldo")
-            || titleNormalized.contains("salario")
-            || titleNormalized.contains("deposito")
-            || titleNormalized.contains("abono")
-            || titleNormalized.contains("ingreso")
-            || titleNormalized.contains("transferencia recibida")
-        let isTransfer = titleNormalized.contains("transfer")
-            || titleNormalized.contains("traspaso")
-            || titleNormalized.contains("spei")
-            || titleNormalized.contains("entre cuentas")
-            || titleNormalized.contains("clabe")
-        let explicitOwnTransfer = titleNormalized.contains("entre cuentas")
-            || titleNormalized.contains("cuenta propia")
-            || titleNormalized.contains("mismo titular")
-            || titleNormalized.contains("traspaso interno")
-        let isStatementCredit = hasCreditMarker && !isCardPayment && !isRefund && !isIncome
-
-        let flow: FlowKind
-        if isRefund || isStatementCredit {
-            flow = .income
-        } else if isCardPayment {
-            flow = .debt
-        } else if explicitOwnTransfer {
-            flow = .transfer
-        } else if isIncome {
-            flow = .income
-        } else {
-            flow = .expense
-        }
-        let transferIsIncoming = titleNormalized.contains("transferencia recibida")
-            || titleNormalized.contains("spei recibido")
-            || titleNormalized.contains("abono")
-            || titleNormalized.contains("deposito")
-            || titleNormalized.contains("entrada")
-        let signedAmount: Decimal
-        switch flow {
-        case .income:
-            signedAmount = abs(selected.value)
-        case .transfer:
-            signedAmount = transferIsIncoming ? abs(selected.value) : -abs(selected.value)
-        default:
-            signedAmount = -abs(selected.value)
-        }
-        let displayAccount = flow == .transfer && titleNormalized.contains("amex")
-            ? "Santander a Amex"
-            : source
-        let movementKind: MovementKind
-        if isStatementCredit {
-            movementKind = .credit
-        } else if titleNormalized.contains("msi")
-            || titleNormalized.contains("meses sin intereses")
-            || titleNormalized.contains("meses en automatico")
-            || titleNormalized.contains("diferir")
-            || titleNormalized.contains("diferid") {
-            movementKind = .msi
-        } else if isRefund && signedAmount > 0 {
-            movementKind = .refund
-        } else if titleNormalized.contains("interes") {
-            movementKind = .interest
-        } else if titleNormalized.contains("comision") || titleNormalized.contains("anualidad") {
-            movementKind = .fee
-        } else if isCardPayment {
-            movementKind = .cardPayment
-        } else if isTransfer && explicitOwnTransfer {
-            movementKind = .bankTransfer
-        } else if isIncome {
-            movementKind = .income
-        } else {
-            movementKind = .purchase
-        }
-        let travelRelated = [
-            "viaje", "hotel", "hospedaje", "aerolinea", "vuelo", "avion",
-            "transporte", "uber", "taxi", "metro", "renta de auto", "destino", "equipaje",
-            "airbnb", "aeromexico", "vivaaerobus", "volaris"
-        ].contains { titleNormalized.contains($0) }
-
-        return Movement(
-            date: date,
-            title: title,
-            account: displayAccount,
-            category: category(for: titleNormalized, flow: flow),
-            amount: signedAmount,
-            flow: flow,
-            kind: movementKind,
-            travelRelated: travelRelated,
-            foreignCurrency: hasForeignCurrency,
-            extractionEvidence: MovementExtractionEvidence(
-                method: "vision-ocr",
-                page: row.first.map { $0.page + 1 },
-                confidence: row.map(\.confidence).min() ?? 0,
-                sourceText: String(fullText.prefix(240)),
-                bounds: extractionBounds(for: row),
-                selectedColumn: bankLikeRow ? "MOVIMIENTO (OCR genérico)" : "IMPORTE",
-                selectedAmount: abs(selected.value),
-                selectionReason: bankLikeRow
-                    ? "importe de la columna de movimiento; saldo corrido excluido por regla genérica"
-                    : "importe monetario derecho seleccionado por el lector OCR genérico"
-            )
-        )
     }
 
     /// BBVA's statement is a two-direction bank table. Keep CARGOS and ABONOS
@@ -14169,314 +13369,6 @@ final class FinanceStore {
             ))
         }
         return SantanderOCRParseResult(movements: parsed, columnsCalibrated: true, diagnostics: diagnostics)
-    }
-
-    /// Santander's statement is a scanned table. A plain text OCR stream loses
-    /// the distinction between the transaction amount and the running balance,
-    /// so use Vision bounding boxes to read the deposit/withdrawal columns.
-    private static func parseSantanderOCR(
-        _ observations: [OCRObservation],
-        fileName: String
-    ) -> [Movement] {
-        parseSantanderOCRResult(observations, fileName: fileName).movements
-    }
-
-    private static func parseSantanderOCRResult(
-        _ observations: [OCRObservation],
-        fileName: String
-    ) -> SantanderOCRParseResult {
-        guard let dateRegex = try? NSRegularExpression(
-            // Full dates (16-JUL-2026) and short bank dates (23/JUL) are
-            // both common in Santander scans. OCR glyph repairs remain
-            // scoped to this date token; parseDate supplies the filename
-            // year when the short form has no explicit year.
-            pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})\s*[\/\-.]\s*(\d{1,2}|[A-Za-zÁÉÍÓÚáéíóú0]{3,})(?:\s*[\/\-.]\s*(\d{2,4}))?(?![A-Za-z])"#
-        ), let amountRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9])"#
-        ) else {
-            return SantanderOCRParseResult(movements: [], columnsCalibrated: false, diagnostics: [])
-        }
-
-        let defaultYear: Int = {
-            if let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#),
-               let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
-                return year
-            }
-            return Calendar.current.component(.year, from: .now)
-        }()
-
-        var inMovementSection = false
-        var scopedObservations: [OCRObservation] = []
-        for observation in observations.sorted(by: {
-            $0.page == $1.page ? $0.centerY > $1.centerY : $0.page < $1.page
-        }) {
-            let normalized = observation.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-            if normalized.contains("detalle de movimientos cuenta de cheques") {
-                inMovementSection = true
-                continue
-            }
-            if inMovementSection && normalized.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("total") {
-                inMovementSection = false
-                continue
-            }
-            if inMovementSection { scopedObservations.append(observation) }
-        }
-        let observationsByPage = Dictionary(grouping: scopedObservations, by: \.page)
-        var parsed: [Movement] = []
-        var diagnostics: [OCRRowDiagnostic] = []
-        var previousRunningBalance: Decimal?
-        var lastCalibratedColumns: SantanderOCRColumns?
-        var everyPageCalibrated = true
-
-        for page in observationsByPage.keys.sorted() {
-            let rawPageObservations = observationsByPage[page] ?? []
-            let localColumns = santanderOCRColumns(from: rawPageObservations)
-            let columns: SantanderOCRColumns
-            if localColumns.calibratedFromHeader {
-                columns = localColumns
-                lastCalibratedColumns = localColumns
-            } else if let lastCalibratedColumns {
-                // Continuation pages often omit the repeated header. Reuse
-                // the last header calibrated on-device, but record that the
-                // page was inherited so the audit can distinguish it from a
-                // page whose columns were guessed from a global layout.
-                columns = SantanderOCRColumns(
-                    movementMinX: lastCalibratedColumns.movementMinX,
-                    balanceMinX: lastCalibratedColumns.balanceMinX,
-                    depositMaxX: lastCalibratedColumns.depositMaxX,
-                    calibratedFromHeader: true,
-                    calibrationReason: "\(lastCalibratedColumns.calibrationReason); geometría heredada para página \(page + 1)"
-                )
-            } else {
-                columns = localColumns
-                let hasDateAnchoredRow = rawPageObservations.contains { observation in
-                    observation.boundingBox.minX < 0.24
-                        && firstMatch(in: observation.text, regex: dateRegex) != nil
-                }
-                let pageText = rawPageObservations
-                    .map { $0.text.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current) }
-                    .joined(separator: " ")
-                let hasTableSignal = pageText.contains("fecha")
-                    && pageText.contains("saldo")
-                    && (pageText.contains("deposit") || pageText.contains("abono") || pageText.contains("retiro") || pageText.contains("cargo"))
-                if hasDateAnchoredRow || hasTableSignal { everyPageCalibrated = false }
-            }
-            let pageObservations = rawPageObservations.sorted {
-                if abs($0.centerY - $1.centerY) > 0.008 {
-                    return $0.centerY > $1.centerY
-                }
-                return $0.centerX < $1.centerX
-            }
-
-            var rows: [[OCRObservation]] = []
-            var pendingRow: [OCRObservation] = []
-            for observation in pageObservations {
-                let normalized = observation.text.folding(
-                    options: [.diacriticInsensitive, .caseInsensitive],
-                    locale: .current
-                )
-                let hasDate = firstMatch(in: observation.text, regex: dateRegex) != nil
-                let isDateCell = hasDate
-                    && observation.boundingBox.minX < 0.24
-                    && !normalized.contains("periodo")
-                    && !normalized.contains("corte")
-                    && !normalized.contains("pagina")
-
-                if isDateCell {
-                    if !pendingRow.isEmpty { rows.append(pendingRow) }
-                    pendingRow = [observation]
-                } else if !pendingRow.isEmpty {
-                    pendingRow.append(observation)
-                }
-            }
-            if !pendingRow.isEmpty { rows.append(pendingRow) }
-
-            for row in rows {
-                if let result = parseSantanderRow(
-                    row,
-                    dateRegex: dateRegex,
-                    amountRegex: amountRegex,
-                    defaultYear: defaultYear,
-                    previousRunningBalance: previousRunningBalance,
-                    columns: columns
-                ) {
-                    parsed.append(result.movement)
-                    diagnostics.append(
-                        OCRRowDiagnostic(
-                            page: row.first.map { $0.page + 1 },
-                            rawText: row.map(\.text).joined(separator: " "),
-                            selectedColumn: result.movement.extractionEvidence?.selectedColumn,
-                            selectedAmount: result.movement.extractionEvidence?.selectedAmount,
-                            direction: result.movement.amount >= 0 ? "in" : "out",
-                            reason: result.movement.extractionEvidence?.selectionReason ?? "movimiento Santander validado contra la fila visual",
-                            accepted: true
-                        )
-                    )
-                    previousRunningBalance = result.runningBalance
-                } else {
-                    diagnostics.append(
-                        OCRRowDiagnostic(
-                            page: row.first.map { $0.page + 1 },
-                            rawText: row.map(\.text).joined(separator: " "),
-                            reason: "fila Santander rechazada: no se pudo probar fecha, columna de movimiento, saldo o descripción",
-                            accepted: false
-                        )
-                    )
-                    // A row without a trustworthy running balance must not
-                    // contaminate the next row's delta-based repair.
-                    previousRunningBalance = nil
-                }
-            }
-        }
-
-        return SantanderOCRParseResult(
-            movements: parsed,
-            columnsCalibrated: everyPageCalibrated && !observationsByPage.isEmpty,
-            diagnostics: diagnostics
-        )
-    }
-
-    private static func santanderOCRColumns(from observations: [OCRObservation]) -> SantanderOCRColumns {
-        // Do not combine labels from different pages (or from unrelated
-        // summary rows on the same page). A valid table header has all three
-        // anchors on one visual line; otherwise the fallback layout remains
-        // provisional and cannot feed the dashboard automatically.
-        let normalizedLabel: (OCRObservation) -> String = { observation in
-            // Vision occasionally substitutes digits for glyphs in small
-            // column labels (SALD0, DEPOS1T0, RET1R0).  Restrict this repair
-            // to the short header token before matching known labels; it must
-            // never rewrite transaction descriptions or amounts.
-            observation.text
-                .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-                .replacingOccurrences(of: #"\s+"#, with: "", options: .regularExpression)
-                .replacingOccurrences(of: "0", with: "o")
-                .replacingOccurrences(of: "1", with: "i")
-        }
-        let grouped = Dictionary(grouping: observations, by: \.page)
-        let headerYTolerance: CGFloat = 0.05
-        // Santander changes the labels between account products and PDF
-        // templates (DEPÓSITOS/ABONOS and RETIROS/CARGOS). Treat these as
-        // equivalent anchors, while still requiring all three columns on the
-        // same visual header line before automatic acceptance.
-        let depositLabels = ["deposito", "depositos", "abono", "abonos", "entrada", "entradas"]
-        let withdrawalLabels = ["retiro", "retiros", "cargo", "cargos", "salida", "salidas"]
-        let balanceLabels = ["saldo", "balance", "saldoactual"]
-        func anchorX(_ observation: OCRObservation, labels: [String]) -> CGFloat? {
-            let compact = normalizedLabel(observation)
-            let length = max(compact.utf16.count, 1)
-            let anchors = labels.compactMap { label -> CGFloat? in
-                guard let range = compact.range(of: label) else { return nil }
-                let nsRange = NSRange(range, in: compact)
-                let relative = CGFloat(nsRange.location + (nsRange.length / 2)) / CGFloat(length)
-                return min(max(observation.boundingBox.minX + observation.boundingBox.width * relative, 0), 1)
-            }
-            return anchors.max()
-        }
-        var anchors: (deposit: CGFloat, withdrawal: CGFloat, balance: CGFloat)?
-        for page in grouped.keys.sorted() {
-            let pageObservations = grouped[page] ?? []
-            // Vision can return the complete header as one observation. Use
-            // character offsets inside that box just as the BBVA reader does;
-            // otherwise a perfectly legible header would be mistaken for an
-            // uncalibrated page and every row would be quarantined.
-            let headerSignals = pageObservations.filter { observation in
-                let label = normalizedLabel(observation)
-                return label.contains("fecha")
-                    || label.contains("descripcion")
-                    || label.contains("description")
-            }
-            for signal in headerSignals {
-                let sameLine: (OCRObservation) -> Bool = { observation in
-                    abs(observation.centerY - signal.centerY) <= headerYTolerance
-                }
-                let depositAnchors = pageObservations.filter(sameLine).compactMap { anchorX($0, labels: depositLabels) }
-                let withdrawalAnchors = pageObservations.filter(sameLine).compactMap { anchorX($0, labels: withdrawalLabels) }
-                let balanceAnchors = pageObservations.filter(sameLine).compactMap { anchorX($0, labels: balanceLabels) }
-                guard let deposit = depositAnchors.min(),
-                      let withdrawal = withdrawalAnchors.filter({ $0 > deposit }).min(),
-                      let balance = balanceAnchors.filter({ $0 > withdrawal }).max(),
-                      deposit < withdrawal,
-                      withdrawal < balance else { continue }
-                anchors = (deposit, withdrawal, balance)
-                break
-            }
-            if anchors != nil { break }
-
-            let deposits = pageObservations.filter { depositLabels.contains(normalizedLabel($0)) }
-            let withdrawals = pageObservations.filter { withdrawalLabels.contains(normalizedLabel($0)) }
-            let balances = pageObservations.filter { balanceLabels.contains(normalizedLabel($0)) }
-            for deposit in deposits {
-                let hasTableRowHeader = pageObservations.contains { observation in
-                    let label = normalizedLabel(observation)
-                    guard label == "fecha" || label == "descripcion" || label == "description" else { return false }
-                    return abs(observation.centerY - deposit.centerY) <= headerYTolerance
-                }
-                guard hasTableRowHeader else { continue }
-                guard let withdrawal = withdrawals.first(where: {
-                    $0.centerX > deposit.centerX
-                        && abs($0.centerY - deposit.centerY) <= headerYTolerance
-                }), let balance = balances.first(where: {
-                    $0.centerX > withdrawal.centerX
-                        && abs($0.centerY - deposit.centerY) <= headerYTolerance
-                }) else { continue }
-                anchors = (deposit.centerX, withdrawal.centerX, balance.centerX)
-                break
-            }
-            if anchors != nil { break }
-        }
-
-        // On scanned Santander pages Vision may split the header into
-        // separate lines. Keep calibration page-local, but allow the labels
-        // to be distributed vertically when the page has several date rows.
-        // This is still deterministic: all three anchors must be ordered and
-        // the page must contain a real movement table signal.
-        for page in grouped.keys.sorted() {
-            let pageObservations = grouped[page] ?? []
-            let dateLikeRows = pageObservations.filter {
-                $0.boundingBox.minX < 0.24
-                    && $0.text.range(of: #"(?i)\b[0-9OBI]{1,3}\s*[\/-]\s*(?:[0-9]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,})"#, options: .regularExpression) != nil
-            }.count
-            guard dateLikeRows >= 2 else { continue }
-            let pageText = pageObservations.map { normalizedLabel($0) }.joined(separator: " ")
-            guard pageText.contains("deposit") || pageText.contains("abono") || pageText.contains("entrada"),
-                  pageText.contains("retiro") || pageText.contains("cargo") || pageText.contains("salida"),
-                  pageText.contains("saldo") || pageText.contains("balance") else { continue }
-            let deposits = pageObservations.compactMap { anchorX($0, labels: depositLabels) }
-            let withdrawals = pageObservations.compactMap { anchorX($0, labels: withdrawalLabels) }
-            let balances = pageObservations.compactMap { anchorX($0, labels: balanceLabels) }
-            guard let deposit = deposits.min(),
-                  let withdrawal = withdrawals.filter({ $0 > deposit }).min(),
-                  let balance = balances.filter({ $0 > withdrawal }).max(),
-                  deposit < withdrawal,
-                  withdrawal < balance else { continue }
-            anchors = (deposit, withdrawal, balance)
-            break
-        }
-
-        guard let anchors,
-              anchors.deposit < anchors.withdrawal,
-              anchors.withdrawal < anchors.balance else {
-            return .fallback
-        }
-
-        // The header center is more stable than the left edge of a wide OCR
-        // box. Leave a small margin around each anchor and keep every bound
-        // inside the normalized page so malformed Vision boxes cannot make a
-        // running balance look like a movement.
-        let movementMinX = max(0.40, min(0.70, anchors.deposit - 0.10))
-        let balanceMinX = max(0.72, min(0.96, (anchors.withdrawal + anchors.balance) / 2))
-        let depositMaxX = max(movementMinX + 0.04, min(balanceMinX - 0.04, (anchors.deposit + anchors.withdrawal) / 2))
-        guard movementMinX < depositMaxX, depositMaxX < balanceMinX else {
-            return .fallback
-        }
-        return SantanderOCRColumns(
-            movementMinX: movementMinX,
-            balanceMinX: balanceMinX,
-            depositMaxX: depositMaxX,
-            calibratedFromHeader: true,
-            calibrationReason: "columnas calibradas con el encabezado visual de esta página"
-        )
     }
 
     private static func parseSantanderRow(

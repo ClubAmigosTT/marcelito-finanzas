@@ -2080,3 +2080,14 @@ test("B7: un pago de banco no convierte en pago una compra de tarjeta del mismo 
   assert.notEqual(purchase?.kind, "cardPayment");
   assert.equal(purchase?.flow, "expense");
 });
+
+test("normalizeConcept conserva comercios que empiezan con aut, ref o rfc", async () => {
+  const { normalizeConcept } = await import("../src/reconciliation.ts");
+  assert.equal(normalizeConcept("AUTOZONE INSURGENTES"), "autozone insurgentes");
+  assert.equal(normalizeConcept("AUTOLAVADO EL GUERO"), "autolavado el guero");
+  assert.equal(normalizeConcept("SANBORNS REFORMA"), "sanborns reforma");
+  assert.equal(normalizeConcept("PAGO CREDITO AUTOMOTRIZ"), "pago credito automotriz");
+  assert.equal(normalizeConcept("OXXO RFC: ABC010101AB1"), "oxxo");
+  assert.equal(normalizeConcept("FACEBK AUT: 057867"), "facebk");
+  assert.equal(normalizeConcept("SPEI REF 4455 NOMINA"), "spei nomina");
+});
