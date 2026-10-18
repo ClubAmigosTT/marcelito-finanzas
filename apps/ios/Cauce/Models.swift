@@ -4868,18 +4868,27 @@ final class FinanceStore {
         }
 
         // Statements can be missing or not overlap. A transfer descriptor
-        // that explicitly names the configured owner is still safe to exclude
-        // on one side, while the owner's name without transfer semantics is
-        // deliberately left as ordinary income/spend.
+        // that explicitly names the configured owner ("SPEI a Marcelo Andrés
+        // Díaz Sánchez") moves money between the owner's own accounts, even
+        // when the other account was never imported: exclude it from spend and
+        // income on this side. The owner's name without transfer semantics is
+        // deliberately left as ordinary income/spend, and a manual
+        // reclassification (accountingReviewLocked) always wins.
         for index in movements.indices {
             let movement = movements[index]
             guard !movement.accountingReviewLocked, !consumed.contains(movement.id),
                   isBankMovement(movement),
                   hasTransferHint(movement),
-                  ownerAliasMentioned(in: transferDescriptor(movement)) else { continue }
-            movements[index].reconciliationConfidence = 60
-            movements[index].reconciliationReason = "Posible transferencia propia: falta contraparte. Confirma el tipo manualmente; permanece en métricas."
-            ambiguousRows.insert(movement.id)
+                  ownerAliasMentioned(in: transferDescriptor(movement)),
+                  // Funding the owner's own card (STP to RappiCard, Amex) is
+                  // only excluded once the card's purchases are in the ledger;
+                  // the card-payment matcher handles that case.
+                  normalizedConcept(transferDescriptor(movement)).range(of: #"\b(rappi|rappicard|amex|american express|tarjeta|tdc)\b"#, options: .regularExpression) == nil
+            else { continue }
+            movements[index].flow = .transfer
+            movements[index].kind = .bankTransfer
+            movements[index].reconciliationConfidence = 80
+            movements[index].reconciliationReason = "Traspaso a tu nombre · falta contraparte cargada. No cuenta como gasto ni ingreso."
         }
 
         if !ambiguousRows.isEmpty {

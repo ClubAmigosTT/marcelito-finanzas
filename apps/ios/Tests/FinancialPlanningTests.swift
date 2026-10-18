@@ -20,6 +20,32 @@ import XCTest
         }
         body(store, FinancialPlanningStore(defaults: defaults), defaults)
     }
+    func testLoanPaymentCanBeExcludedOrSetPerMonth() {
+        withStores { store, p, _ in
+            let month = date(10, 1)
+            var plan = p.plan(for: month)
+            plan.loanReserveAmount = 5000
+            p.setPlan(plan, for: month)
+            XCTAssertEqual(p.snapshot(store, month: month).loans, 5000)
+            XCTAssertFalse(p.snapshot(store, month: month).hasUnknownLoans)
+
+            plan = p.plan(for: month)
+            plan.loanReserveIncluded = false
+            p.setPlan(plan, for: month)
+            XCTAssertEqual(p.snapshot(store, month: month).loans, 0)
+            XCTAssertFalse(p.snapshot(store, month: month).hasUnknownLoans)
+        }
+    }
+
+    func testKnownSubscriptionsAreRecognisedByName() {
+        for name in ["CANVA* 04123 SYDNEY", "APPLE.COM/BILL 866-712-7753", "GOOGLE *YouTube Premium", "SPOTIFY P2A1B3", "Netflix.com", "OPENAI *CHATGPT SUBSCR"] {
+            XCTAssertTrue(RecurringPattern.isKnownSubscription(name), name)
+        }
+        for name in ["OXXO GAS INSURGENTES", "APPLEBEES POLANCO", "SPEI A ALICIA GABRIELA", "LIVERPOOL INSURGENTES"] {
+            XCTAssertFalse(RecurringPattern.isKnownSubscription(name), name)
+        }
+    }
+
     func testLargeBookProjectionIsReusedAcrossTabsAndPeriodChanges() {
         withStores { store, p, _ in
             store.movements = (0..<1377).map { index in row(6 + index % 3, 1 + index % 27, -100) }

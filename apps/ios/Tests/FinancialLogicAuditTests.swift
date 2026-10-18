@@ -738,7 +738,9 @@ final class FinancialLogicAuditTests: XCTestCase {
             store.normalizeFinanceForTesting()
             XCTAssertTrue(store.movements.allSatisfy { $0.matchedMovementId == nil })
             XCTAssertEqual(store.realIncome, 15000)
-            XCTAssertEqual(store.consolidatedRealSpend, 15000)
+            // "TRANSFERENCIA A MARCELO ANDRES DIAZ SANC" moves money to the
+            // owner's own account: it is not spend even without a counterpart.
+            XCTAssertEqual(store.consolidatedRealSpend, 0)
         }
     }
 
@@ -916,6 +918,28 @@ final class FinancialLogicAuditTests: XCTestCase {
             XCTAssertEqual(store.movements.first?.flow, firstFlow)
             XCTAssertEqual(store.movements.first?.kind, .bankTransfer)
             XCTAssertEqual(store.consolidatedRealSpend, firstSpend)
+        }
+    }
+
+    func testSPEIToTheOwnersOwnNameIsNotSpendEvenWithoutTheOtherAccount() {
+        withStore { store in
+            let bank = statement("BBVA", key: "bbva:1111", kind: .bank)
+            store.statements = [bank]
+            var own = row(-15000, date: calendarDate(2026, 9, 30), title: "SPEI ENVIADO NU MEXICO")
+            own.rawDescription = "SPEI ENVIADO NU MEXICO 0123 MARCELO ANDRES DIAZ SANCHEZ"
+            own.kind = nil
+            own.statementId = bank.id
+            var other = row(-5400, date: calendarDate(2026, 9, 29), title: "SPEI ENVIADO BANORTE")
+            other.rawDescription = "SPEI ENVIADO BANORTE 0456 ALICIA GABRIELA"
+            other.kind = nil
+            other.statementId = bank.id
+            store.movements = [own, other]
+            store.normalizeFinanceForTesting()
+
+            XCTAssertEqual(store.movements.first { $0.id == own.id }?.flow, .transfer)
+            XCTAssertEqual(store.consolidatedRealSpend, 5400)
+            store.normalizeFinanceForTesting()
+            XCTAssertEqual(store.consolidatedRealSpend, 5400)
         }
     }
 

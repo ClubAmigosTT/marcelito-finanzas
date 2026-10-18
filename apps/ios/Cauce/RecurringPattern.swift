@@ -62,6 +62,17 @@ enum RecurringPattern {
         return nil
     }
 
+    /// Well-known subscription merchants. These charge monthly (or yearly)
+    /// but often in USD, so the amount moves with the exchange rate, and one
+    /// merchant (Apple, Google) can bill several subscriptions with different
+    /// amounts. The generic detector rejects both, so they are recognised by
+    /// name instead.
+    static func isKnownSubscription(_ text: String) -> Bool {
+        let value = normalized(text)
+        let pattern = #"\b(canva|apple\.com|apple com|itunes|icloud|google\s*\*\s*\w+|google one|google play|google storage|google workspace|youtube|spotify|netflix|disney|hbo|max\.com|prime video|amazon prime|amzn prime|amazon music|microsoft|xbox|playstation|adobe|openai|chatgpt|notion|dropbox|duolingo|uber one|rappi pro|paramount|crunchyroll|deezer|audible|linkedin|github|zoom|figma|anthropic|claude\.ai|vix|star plus|apple tv|apple music|strava|calm|headspace)\b"#
+        return value.range(of: pattern, options: .regularExpression) != nil
+    }
+
     static func hasPayrollEvidence(_ texts: [String]) -> Bool {
         texts.contains {
             let text = normalized($0).replacingOccurrences(of: #"\b(super|(?:sub)?cuenta|tarjeta)\s+nomina\b"#, with: " ", options: .regularExpression)
