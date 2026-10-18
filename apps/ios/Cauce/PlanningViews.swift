@@ -765,14 +765,36 @@ struct BudgetView: View {
         }.marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 14)
     }
     private func budgetRow(_ category: String, fixed: Bool) -> some View {
-        let limit = fixed ? self.fixed[category] ?? 0 : limits[category] ?? 0
-        let closing = planning.plan(for: month).closing
-        let spent = closing.map { fixed ? ($0.fixedSpent?[category] ?? 0) : (($0.categorySpent?[category] ?? 0) - ($0.fixedSpent?[category] ?? 0)) } ?? planning.budgetCategoryTotals(store, period: .month(month), fixed: fixed)[category] ?? 0
-        let ratio = limit > 0 ? NSDecimalNumber(decimal: spent / limit).doubleValue : (spent > 0 ? 1 : 0)
+        // Split into typed steps: the one-line form exceeded the CI
+        // compiler's type-checking time limit.
+        let limit: Decimal = fixed ? (self.fixed[category] ?? 0) : (limits[category] ?? 0)
+        let spent: Decimal
+        if let closing = planning.plan(for: month).closing {
+            let fixedSpent: Decimal = closing.fixedSpent?[category] ?? 0
+            let categorySpent: Decimal = closing.categorySpent?[category] ?? 0
+            spent = fixed ? fixedSpent : categorySpent - fixedSpent
+        } else {
+            let totals: [String: Decimal] = planning.budgetCategoryTotals(store, period: .month(month), fixed: fixed)
+            spent = totals[category] ?? 0
+        }
+        let ratio: Double
+        if limit > 0 {
+            ratio = NSDecimalNumber(decimal: spent / limit).doubleValue
+        } else {
+            ratio = spent > 0 ? 1 : 0
+        }
         let c = Calendar.current
-        let elapsed = c.isDate(month, equalTo: .now, toGranularity: .month) ? c.component(.day, from: .now) : c.range(of: .day, in: .month, for: month)!.count
-        let expected = Double(elapsed) / Double(c.range(of: .day, in: .month, for: month)!.count)
-        let color: Color = ratio > 1 || (ratio > expected * 1.25 && ratio > 0.8) ? .marcelitoDanger : ratio > expected * 1.1 ? .marcelitoAmber : .marcelitoSuccess
+        let daysInMonth: Int = c.range(of: .day, in: .month, for: month)!.count
+        let elapsed: Int = c.isDate(month, equalTo: .now, toGranularity: .month) ? c.component(.day, from: .now) : daysInMonth
+        let expected: Double = Double(elapsed) / Double(daysInMonth)
+        let color: Color
+        if ratio > 1 || (ratio > expected * 1.25 && ratio > 0.8) {
+            color = .marcelitoDanger
+        } else if ratio > expected * 1.1 {
+            color = .marcelitoAmber
+        } else {
+            color = .marcelitoSuccess
+        }
         return VStack(alignment: .leading, spacing: 6) {
             HStack { Text(category).font(.subheadline.weight(.semibold)); Spacer(); Text(planningMoney(limit)).monospacedDigit() }
             Slider(value: Binding(get: { NSDecimalNumber(decimal: fixed ? self.fixed[category] ?? 0 : limits[category] ?? 0).doubleValue }, set: { value in
