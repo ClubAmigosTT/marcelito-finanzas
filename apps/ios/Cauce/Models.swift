@@ -3264,9 +3264,13 @@ final class FinanceStore {
         // A closed account counts until its final cutoff and then leaves the
         // account universe instead of carrying its last balance forever.
         let finalCutoff = Dictionary(dated.map { ($0.0.accountKey ?? "\($0.0.source)|\($0.0.kind)", $0.1) }, uniquingKeysWith: max)
+        // An account is only required from its first imported cutoff: a card
+        // first loaded in September must not blank every earlier point.
+        let firstCutoff = Dictionary(dated.map { ($0.0.accountKey ?? "\($0.0.source)|\($0.0.kind)", $0.1) }, uniquingKeysWith: min)
         return Set(dated.map { $0.1 } + loanDates).sorted().map { date in
             let activeKeys = keys.filter { key in
-                !closedAccountKeys.contains(key) || (finalCutoff[key].map { date <= $0 } ?? false)
+                (!closedAccountKeys.contains(key) || (finalCutoff[key].map { date <= $0 } ?? false))
+                    && (firstCutoff[key].map { $0 <= date } ?? false)
             }
             let latest = latestMetricsBySource(dated.filter { $0.1 <= date }.map { $0.0 })
                 .filter { activeKeys.contains($0.accountKey ?? "\($0.source)|\($0.kind)") }

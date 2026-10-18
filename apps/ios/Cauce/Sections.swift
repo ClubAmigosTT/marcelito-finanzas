@@ -3292,7 +3292,7 @@ struct NetWorthView: View {
             }
 
             PeriodNavigationBar(label: historyPeriod.label, move: moveHistory) { showHistoryPicker = true }
-            Text("Saldos por corte · los meses sin datos no se reconstruyen").font(.caption2).foregroundStyle(.secondary)
+            Text("Saldos por corte · cada cuenta suma desde su primer estado cargado").font(.caption2).foregroundStyle(.secondary)
             if store.dashboardIsBlocked {
                 Text("La conciliación está pendiente.")
                     .font(.subheadline)
@@ -3340,7 +3340,7 @@ struct NetWorthView: View {
     }
 }
 
-private struct PositionMetricRow: View {
+struct PositionMetricRow: View {
     let title: String
     let value: String
 
@@ -3388,8 +3388,9 @@ private struct PositionBalanceBarRow: View {
     }
 }
 
-private struct PositionUtilizationBar: View {
+struct PositionUtilizationBar: View {
     let fraction: Double
+    var accessibilityName = "Utilización de crédito"
 
     var body: some View {
         GeometryReader { geometry in
@@ -3401,6 +3402,6 @@ private struct PositionUtilizationBar: View {
             }
         }
         .frame(height: 7)
-        .accessibilityLabel("Utilización de crédito \(Int(fraction * 100)) por ciento")
+        .accessibilityLabel("\(accessibilityName) \(Int(fraction * 100)) por ciento")
     }
 }

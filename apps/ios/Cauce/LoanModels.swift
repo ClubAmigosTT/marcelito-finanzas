@@ -67,6 +67,20 @@ struct LoanStatement: Sendable, Codable, Identifiable, Equatable {
         }
     }
     var recognizedDebt: Decimal { principalRemaining + accruedUnpaidInterest }
+    /// Debt in UDIS on an earlier day, rebuilt from this statement's own
+    /// history: today's principal plus every principal payment made after that
+    /// day, plus interest already due by then and unpaid at the time. Before
+    /// the first installment or payment the loan's balance is unknown.
+    func recognizedDebt(asOf date: Date) -> Decimal? {
+        guard date < asOf else { return date == asOf ? recognizedDebt : nil }
+        guard let start = (installments.map(\.dueDate) + allocations.map(\.date)).min(), date >= start else { return nil }
+        let principalPaidSince = allocations.filter { $0.date > date }.reduce(Decimal(0)) { $0 + $1.principalUDIS }
+        let accrued = installments.filter { $0.dueDate <= date }.reduce(Decimal(0)) { total, installment in
+            let paid = allocations.filter { $0.installment == installment.number && $0.date <= date }.reduce(Decimal(0)) { $0 + $1.interestUDIS }
+            return total + max(0, installment.interest - paid)
+        }
+        return principalRemaining + principalPaidSince + accrued
+    }
     func status(_ installment: LoanInstallment, now: Date = .now) -> String {
         if remaining(installment) <= Decimal(string: "0.05")! {
             let lastPayment = allocations.filter { $0.installment == installment.number }.map(\.date).max()

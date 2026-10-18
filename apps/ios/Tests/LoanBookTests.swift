@@ -99,6 +99,20 @@ final class LoanBookTests: XCTestCase {
         XCTAssertEqual(try b.mergeOfficialQuotes(official, now: day("11/07/2026")), 0)
         XCTAssertNotNil(b.earliestQuoteNeeded)
     }
+    func testDebtBeforeTheFirstStatementIsRebuiltFromItsPayments() throws {
+        let s = try statement()
+        // On 30 May the 26 May and 30 Jun principal payments (40 + 40 UDIS)
+        // had not happened yet... only installment 1's payments up to that day.
+        let rebuilt = try XCTUnwrap(s.recognizedDebt(asOf: day("27/05/2026")))
+        let paidAfter = s.allocations.filter { $0.date > day("27/05/2026") }.reduce(Decimal(0)) { $0 + $1.principalUDIS }
+        XCTAssertGreaterThanOrEqual(rebuilt, s.principalRemaining + paidAfter)
+        XCTAssertNil(s.recognizedDebt(asOf: day("01/01/2026")))
+        XCTAssertEqual(s.recognizedDebt(asOf: s.asOf), s.recognizedDebt)
+
+        let b = LoanBook(defaults: nil); try b.importStatement(s)
+        try b.setQuote(value: 10, date: day("01/05/2026"))
+        XCTAssertNotNil(b.debt(asOf: day("27/05/2026")))
+    }
     func testReserveUsesWholePaymentOnceAndExtraDoesNotChangeDebt() throws {
         let b = LoanBook(defaults: nil); let s = try statement(); try b.importStatement(s)
         XCTAssertNil(b.reserve(month: day("20/07/2026"), paid: 0).reserved)
