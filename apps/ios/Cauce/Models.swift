@@ -1122,6 +1122,9 @@ final class FinanceStore {
     private let isReconciliationOnly: Bool
     private var repairInProgress = false
     private var activeRebuildTask: Task<CanonicalRebuildResult, Never>? = nil
+    /// Bumped by `clearLocalData` so an in-flight rebuild never commits a
+    /// ledger the user erased while it was running.
+    @ObservationIgnored private var ledgerResetGeneration = 0
     private(set) var ledgerRefreshState: LedgerRefreshState = .ready
     private(set) var canonicalRebuildPending = false
 
@@ -3545,7 +3548,12 @@ final class FinanceStore {
         if (value.contains("pago") && (value.contains("tarjeta") || value.contains("amex") || value.contains("credito") || value.contains("recibido")))
             || (value.contains("abono") && (value.contains("tarjeta") || value.contains("credito") || value.contains("recibido"))) { return .cardPayment }
         if movement.flow == .transfer { return value.contains("transfer") || value.contains("traspaso") ? .bankTransfer : .cardPayment }
-        if movement.flow == .income { return value.contains("credito") || value.contains("abono") ? .credit : .income }
+        if movement.flow == .income {
+            // On a bank account "ABONO" is just a deposit (ABONO NOMINA,
+            // ABONO SPEI); only card statements use it for accounting credits.
+            let creditWording = value.contains("credito") || (value.contains("abono") && !isBankMovement(movement))
+            return creditWording ? .credit : .income
+        }
         return movement.flow == .expense ? .purchase : .other
     }
 
@@ -3629,7 +3637,9 @@ final class FinanceStore {
 
     /// Resolves the end/cutoff date encoded in a period label. It accepts
     /// numeric and Spanish month-name dates, plus month/year-only labels.
-    private func periodDate(from value: String) -> Date? {
+    private func periodDate(from value: String) -> Date? { Self.periodDate(from: value) }
+
+    private static func periodDate(from value: String) -> Date? {
         let normalized = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
         let patterns = [
@@ -3676,7 +3686,9 @@ final class FinanceStore {
             && rightRange.lowerBound <= leftRange.upperBound
     }
 
-    private func statementRange(from value: String) -> ClosedRange<Date>? {
+    private func statementRange(from value: String) -> ClosedRange<Date>? { Self.statementRange(from: value) }
+
+    private static func statementRange(from value: String) -> ClosedRange<Date>? {
         let normalized = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
         let spanishCyclePattern = #"(?i)\b(\d{1,2})\s+(?:de\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\s+al\s+(\d{1,2})\s+(?:de\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\s+(?:de\s+)?(20\d{2})\b"#
@@ -4645,9 +4657,15 @@ final class FinanceStore {
             }
         }
         for index in movements.indices where !consumed.contains(movements[index].id) && (movements[index].reconciliationReason != nil || movements[index].matchedMovementId != nil) {
+            // Only a former pair rewrote flow/kind. An advisory reason (no
+            // counterpart, ambiguous amount/date) left the parser's
+            // classification untouched, so resetting it here made a second
+            // pass count an own transfer as spend and income.
+            let wasLinked = movements[index].matchedMovementId != nil
             movements[index].matchedMovementId = nil
             movements[index].reconciliationConfidence = nil
             movements[index].reconciliationReason = nil
+            guard wasLinked else { continue }
             if !movements[index].accountingReviewLocked {
                 let cardText = normalizedConcept(transferDescriptor(movements[index]))
                 let independentlyPrintedReceipt = isCardMovement(movements[index])
@@ -5563,8 +5581,60 @@ final class FinanceStore {
         return true
     }
 
-    func updateClassification(for movement: Movement, kind: MovementKind, travelRelated: Bool) {
+    /// Kinds a user may assign without contradicting the signed amount. A
+    /// positive row can never become a purchase/fee/interest (that would be an
+    /// expense with money coming in) and a negative row can never become
+    /// income, credit or a refund. Transfers and card payments accept both.
+    static func selectableKinds(forAmount amount: Decimal) -> [MovementKind] {
+        MovementKind.allCases.filter { flow(for: $0, amount: amount) != nil }
+    }
+
+    /// The flow implied by a manual kind for a signed amount, or nil when the
+    /// pair is contradictory and would invalidate the stored row.
+    static func flow(for kind: MovementKind, amount: Decimal) -> FlowKind? {
+        switch kind {
+        case .cardPayment, .bankTransfer:
+            return .transfer
+        case .income, .credit, .refund:
+            return amount > 0 ? .income : nil
+        case .purchase, .msi, .interest, .fee, .other:
+            return amount < 0 ? .expense : nil
+        }
+    }
+
+    /// Kind shown in the detail picker. Rows reset by reconciliation carry
+    /// `kind == nil`; defaulting those to `.purchase` made an untouched income
+    /// look like a purchase and a single toggle would turn it into spend.
+    static func displayKind(for movement: Movement) -> MovementKind {
+        if let kind = movement.kind, flow(for: kind, amount: movement.amount) != nil { return kind }
+        switch movement.flow {
+        case .transfer: return .bankTransfer
+        case .income: return .income
+        case .expense, .debt: return movement.amount > 0 ? .income : .purchase
+        }
+    }
+
+    /// Marks a row as travel-related without touching its accounting kind.
+    func updateTravelRelated(for movement: Movement, travelRelated: Bool) {
         guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return }
+        movements[index].manuallyReviewed = true
+        movements[index].travelRelated = travelRelated
+        movements[index].classificationTags.removeAll { $0 == "viaje" }
+        if travelRelated { movements[index].classificationTags.append("viaje") }
+        persist(markingChange: true)
+    }
+
+    @discardableResult
+    func updateClassification(for movement: Movement, kind: MovementKind, travelRelated: Bool) -> Bool {
+        guard let index = movements.firstIndex(where: { $0.id == movement.id }) else { return false }
+        guard let flow = Self.flow(for: kind, amount: movements[index].amount) else {
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "movement.classification.rejected",
+                message: "No se aplicó \(kind.rawValue) a un importe de \(movements[index].amount): contradice el signo del movimiento."
+            )
+            return false
+        }
         if kind != movements[index].kind {
             if let peerID = movements[index].matchedMovementId,
                let peerIndex = movements.firstIndex(where: { $0.id == peerID }) {
@@ -5578,19 +5648,14 @@ final class FinanceStore {
         movements[index].travelRelated = travelRelated
         movements[index].classificationTags.removeAll { $0 == "viaje" }
         if travelRelated { movements[index].classificationTags.append("viaje") }
-        switch kind {
-        case .cardPayment, .bankTransfer:
-            movements[index].flow = .transfer
-        case .income, .credit, .refund:
-            movements[index].flow = .income
-        default:
-            movements[index].flow = .expense
-        }
+        movements[index].flow = flow
         reconcileStoredMovements()
-        if kind == .bankTransfer, movements[index].matchedMovementId == nil {
-            movements[index].reconciliationReason = "Traspaso propio confirmado · contraparte pendiente"
+        if kind == .bankTransfer, let current = movements.firstIndex(where: { $0.id == movement.id }),
+           movements[current].matchedMovementId == nil {
+            movements[current].reconciliationReason = "Traspaso propio confirmado · contraparte pendiente"
         }
         persist(markingChange: true)
+        return true
     }
 
     private func manualReviewKey(_ movement: Movement) -> String {
@@ -5747,6 +5812,7 @@ final class FinanceStore {
     }
 
     func clearLocalData() {
+        ledgerResetGeneration += 1
         loanLedger.clear()
         UserDefaults.standard.removeObject(forKey: "marcelito.manualReviews.v1")
         movements = []
@@ -6087,6 +6153,7 @@ final class FinanceStore {
 
         let storedURLs = storedPDFURLs
         let knownStatements = statements
+        let resetGenerationAtStart = ledgerResetGeneration
         let candidates: [URL]
         do {
             candidates = try await PDFExtractionCoordinator.shared.perform {
@@ -6232,11 +6299,31 @@ final class FinanceStore {
             return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount + failedCount)
         }
 
+        // "Borrar datos" while the PDFs were being read must win: committing
+        // the scratch ledger would resurrect everything the user just erased.
+        guard ledgerResetGeneration == resetGenerationAtStart else {
+            DiagnosticsRecorder.record(
+                level: "error",
+                stage: "rebuild.discarded",
+                message: "Reconstrucción descartada porque los datos locales se borraron mientras corría."
+            )
+            return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: 0, invalidCount: 0)
+        }
+
         // One atomic in-memory commit followed by one envelope write. Invalid
         // statements still remain available for diagnostics, but no partial
-        // candidate state is ever rendered by the dashboard.
-        movements = scratch.movements
-        statements = scratch.statements
+        // candidate state is ever rendered by the dashboard. The OCR pass can
+        // take minutes, so fold in what the user did meanwhile (manual rows,
+        // screenshots, PDF imports or deletions) instead of overwriting it.
+        let merged = Self.mergeConcurrentLedgerChanges(
+            rebuiltMovements: scratch.movements,
+            rebuiltStatements: scratch.statements,
+            liveMovements: movements,
+            liveStatements: statements,
+            baselineStatements: knownStatements
+        )
+        movements = merged.movements
+        statements = merged.statements
         lastImportedFile = scratch.lastImportedFile ?? lastImportedFile
         ledgerVersion = UUID()
         normalizeStoredLedger()
@@ -6247,12 +6334,56 @@ final class FinanceStore {
         defaults.set("complete", forKey: rebuildStateKey)
         defaults.removeObject(forKey: ledgerBackupKey)
         refreshCanonicalRebuildStatus()
+        // Screenshot links were cleared while the rebuild was pending (no
+        // statement was eligible then). Re-link them against the new official
+        // rows so a provisional copy never counts beside its PDF movement.
+        reconcileBankScreenshotsAgainstOfficialLedger()
         ledgerRefreshState = .ready
         DiagnosticsRecorder.record(
             stage: "rebuild.done",
             message: "Reconstrucción asíncrona terminada: \(importedCount) válido(s), \(invalidCount) bloqueado(s), \(movements.count) movimiento(s) canónicos."
         )
         return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount)
+    }
+
+    /// Combines a rebuilt ledger with changes the user made while the rebuild
+    /// was reading PDFs. `baselineStatements` is the live ledger when the
+    /// rebuild started.
+    /// - Rows without a statement (manual rows, provisional screenshots) are
+    ///   always taken from the live ledger, the rebuild only re-reads PDFs.
+    /// - A statement imported meanwhile is kept with its rows, and replaces a
+    ///   rebuilt copy of the same PDF.
+    /// - A statement deleted meanwhile is not resurrected by the rebuild.
+    static func mergeConcurrentLedgerChanges(
+        rebuiltMovements: [Movement],
+        rebuiltStatements: [StatementRecord],
+        liveMovements: [Movement],
+        liveStatements: [StatementRecord],
+        baselineStatements: [StatementRecord]
+    ) -> (movements: [Movement], statements: [StatementRecord]) {
+        let baselineIDs = Set(baselineStatements.map(\.id))
+        let liveIDs = Set(liveStatements.map(\.id))
+        let addedStatements = liveStatements.filter { !baselineIDs.contains($0.id) }
+        let addedIDs = Set(addedStatements.map(\.id))
+        let removedFingerprints = Set(baselineStatements
+            .filter { !liveIDs.contains($0.id) }
+            .compactMap(\.sourceFingerprint))
+        let addedFingerprints = Set(addedStatements.compactMap(\.sourceFingerprint))
+        let keptRebuilt = rebuiltStatements.filter { statement in
+            guard let fingerprint = statement.sourceFingerprint else { return true }
+            return !removedFingerprints.contains(fingerprint) && !addedFingerprints.contains(fingerprint)
+        }
+        let keptRebuiltIDs = Set(keptRebuilt.map(\.id))
+        let unattached = liveMovements.filter { $0.statementId == nil }
+        let rebuiltRows = rebuiltMovements.filter { movement in
+            guard let statementId = movement.statementId else { return false }
+            return keptRebuiltIDs.contains(statementId)
+        }
+        let addedRows = liveMovements.filter { movement in
+            guard let statementId = movement.statementId else { return false }
+            return addedIDs.contains(statementId)
+        }
+        return (unattached + rebuiltRows + addedRows, keptRebuilt + addedStatements)
     }
 
     /// Older TestFlight builds persisted rows produced by the former parser.
@@ -6639,6 +6770,61 @@ final class FinanceStore {
             summary: controls,
             movements: candidates
         ).status == .valid
+    }
+
+    /// Statements print most rows without a year ("05/ENE", "20 de
+    /// Diciembre"), so every reader assumes one year for the whole document.
+    /// A cycle from 16-dic-2025 to 15-ene-2026 then dated January rows a year
+    /// early or December rows a year in the future. Re-anchor a row by one
+    /// year only when that moves it inside the printed cycle; rows that
+    /// already fit (or carry an older original purchase date) are untouched.
+    /// Records saved before fingerprints existed can only be recognised by
+    /// file name. Banks reuse names such as "EstadoCuenta.pdf" every month,
+    /// so the name alone would let April's import replace March's rows. Reuse
+    /// the legacy record only when issuer and printed period also match.
+    static func legacyStatementForReimport(
+        in statements: [StatementRecord], fileName: String, source: String, period: String
+    ) -> StatementRecord? {
+        func samePeriod(_ left: String, _ right: String) -> Bool {
+            if let leftRange = statementRange(from: left), let rightRange = statementRange(from: right) {
+                return leftRange == rightRange
+            }
+            let fold = { (value: String) in
+                value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
+                    .replacingOccurrences(of: #"[^a-z0-9]+"#, with: "", options: .regularExpression)
+            }
+            return fold(left) == fold(right)
+        }
+        return statements.first { statement in
+            statement.sourceFingerprint == nil
+                && statement.fileName == fileName
+                && statement.source.caseInsensitiveCompare(source) == .orderedSame
+                && samePeriod(statement.period, period)
+        }
+    }
+
+    static func parseDateForTesting(_ value: String, defaultYear: Int? = nil) -> Date? {
+        parseDate(value, defaultYear: defaultYear)
+    }
+
+    static func movementsAnchoredToStatementPeriod(_ movements: [Movement], period: String) -> [Movement] {
+        guard let range = statementRange(from: period) else { return movements }
+        let calendar = Calendar(identifier: .gregorian)
+        guard let latestPlausible = calendar.date(byAdding: .day, value: 10, to: range.upperBound) else { return movements }
+        let crossesYear = calendar.component(.year, from: range.lowerBound) != calendar.component(.year, from: range.upperBound)
+        return movements.map { movement in
+            var anchored = movement
+            if movement.date > latestPlausible,
+               let earlier = calendar.date(byAdding: .year, value: -1, to: movement.date),
+               earlier <= latestPlausible {
+                anchored.date = earlier
+            } else if crossesYear, movement.date < range.lowerBound,
+                      let later = calendar.date(byAdding: .year, value: 1, to: movement.date),
+                      later >= range.lowerBound, later <= latestPlausible {
+                anchored.date = later
+            }
+            return anchored
+        }
     }
 
     private static func extractPDF(
@@ -7569,7 +7755,7 @@ final class FinanceStore {
                 source: source
             ),
             kind: kind,
-            candidates: candidates,
+            candidates: Self.movementsAnchoredToStatementPeriod(candidates, period: period),
             period: period,
             summary: summary,
             usedOCR: usedOCR,
@@ -7611,7 +7797,7 @@ final class FinanceStore {
         // fall back to a legacy filename-only record once for older builds
         // that did not persist fingerprints.
         let existingStatement = statements.first(where: { $0.sourceFingerprint == sourceFingerprint })
-            ?? statements.first(where: { $0.sourceFingerprint == nil && $0.fileName == url.lastPathComponent })
+            ?? Self.legacyStatementForReimport(in: statements, fileName: url.lastPathComponent, source: source, period: period)
         let statementId = existingStatement?.id ?? UUID()
         let fresh = candidates.map { candidate -> Movement in
             var imported = candidate
@@ -8864,7 +9050,7 @@ final class FinanceStore {
             pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
         )
         let signedMoneyRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9.,])[+-−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+            pattern: #"(?<![A-Za-z0-9.,])[-+−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         )
         let unsignedMoneyRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9.,])\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
@@ -8963,7 +9149,7 @@ final class FinanceStore {
             pattern: #"(?i)(?<!\d)(?:[0-9OBI]{4}\s*[-/.]\s*[0-9OBI]{1,2}\s*[-/.]\s*[0-9OBI]{1,2}|[0-9OBI]{1,2}\s*[-/.]\s*(?:[0-9OBI]{1,2}|[A-Za-zÁÉÍÓÚáéíóú]{3,12})\s*[-/.]\s*[0-9OBI]{2,4})(?![A-Za-z])"#
         )
         let signedMoneyRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9.,])[+-−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+            pattern: #"(?<![A-Za-z0-9.,])[-+−–—]\s*\$?\s*(?:\d{1,3}(?:[,. ]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         )
 
         let unsignedMoneyRegex = try? NSRegularExpression(
@@ -10897,11 +11083,14 @@ final class FinanceStore {
             // Spanish month name so merchant text cannot become a row date.
             pattern: #"(?i)(?<!\d)([0-9OBI]{1,3})(?:\s+|(?=(?:ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)))(?:de\s*)?(?:ene(?:ro)?|feb(?:rero)?|mar(?:zo)?|abr(?:il)?|may(?:o)?|jun(?:io)?|jul(?:io)?|ago(?:sto)?|sep(?:tiembre)?|set(?:iembre)?|oct(?:ubre)?|nov(?:iembre)?|dic(?:iembre)?)(?:\s+(?:de\s+)?\d{4})?(?![A-Za-z])"#
         ), let amountRegex = try? NSRegularExpression(
-            pattern: #"(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[ ,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
+            // BBVA's text layer groups thousands with commas. A plain space is
+            // not a separator here: "OXXO SUC 845 150.00" is branch 845 and
+            // 150.00, never 845,150.00.
+            pattern: #"(?<![A-Za-z0-9.,])[-+]?\s*\$?(?:\d{1,3}(?:[,.\u00a0]\d{3})+|\d+)[.,]\d{2}(?![A-Za-z0-9.,])"#
         ) else { return [] }
 
         let defaultYear: Int = {
-            guard let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#) else {
+            guard let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#) else {
                 return Calendar.current.component(.year, from: .now)
             }
             return firstMatch(in: fileName, regex: yearRegex).flatMap { Int($0.text) }
@@ -11445,7 +11634,7 @@ final class FinanceStore {
         let amountRegex = try? NSRegularExpression(
             pattern: #"(?<![A-Za-z0-9])[-+]?\s*\$?\s*(?:\d{1,3}(?:[ ,. ]\d{3})+|\d+)(?:[.,]\d{1,2})?(?![A-Za-z0-9])"#
         )
-        let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#)
+        let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#)
         func inferredYear(in value: String) -> Int? {
             guard let yearRegex,
                   let match = firstMatch(in: value, regex: yearRegex) else { return nil }
@@ -11916,7 +12105,7 @@ final class FinanceStore {
         }
 
         let defaultYear: Int = {
-            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+            if let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#),
                let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
                 return year
             }
@@ -12412,7 +12601,7 @@ final class FinanceStore {
         }
 
         let defaultYear: Int = {
-            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+            if let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#),
                let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
                 return year
             }
@@ -13075,7 +13264,7 @@ final class FinanceStore {
         }
 
         let defaultYear: Int = {
-            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+            if let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#),
                let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
                 return year
             }
@@ -13911,7 +14100,7 @@ final class FinanceStore {
         }
 
         let defaultYear: Int = {
-            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+            if let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#),
                let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
                 return year
             }
@@ -14736,7 +14925,7 @@ final class FinanceStore {
         }
 
         let defaultYear: Int = {
-            if let yearRegex = try? NSRegularExpression(pattern: #"\b20\d{2}\b"#),
+            if let yearRegex = try? NSRegularExpression(pattern: #"(?<![0-9])20\d{2}(?![0-9])"#),
                let year = firstMatch(in: fileName, regex: yearRegex).flatMap({ Int($0.text) }) {
                 return year
             }
@@ -15340,6 +15529,22 @@ final class FinanceStore {
             .replacingOccurrences(of: "$", with: "")
             .replacingOccurrences(of: " ", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Trailing-minus credit notation ("1,234.56-") is a negative amount.
+        if cleaned.count > 1, cleaned.hasSuffix("-"), !cleaned.hasPrefix("-") {
+            cleaned = "-" + cleaned.dropLast()
+        }
+        // OCR often reads a thousands comma as a dot ("54.977.93"). With the
+        // same separator repeated and two final digits, only the last one is
+        // decimal; Decimal(string:) would otherwise stop at the second dot
+        // and silently return 54.977.
+        for separator in [Character("."), Character(",")] {
+            let other: Character = separator == "." ? "," : "."
+            guard cleaned.filter({ $0 == separator }).count > 1, !cleaned.contains(other),
+                  let last = cleaned.lastIndex(of: separator) else { continue }
+            let fraction = cleaned[cleaned.index(after: last)...]
+            let integer = cleaned[..<last].filter { $0 != separator }
+            cleaned = fraction.count == 2 ? integer + "." + fraction : cleaned.filter { $0 != separator }
+        }
 
         let commaIndex = cleaned.lastIndex(of: ",")
         let dotIndex = cleaned.lastIndex(of: ".")
@@ -15357,7 +15562,14 @@ final class FinanceStore {
             cleaned = cleaned.replacingOccurrences(of: ",", with: "")
         }
 
+        // Decimal(string:) accepts a numeric prefix ("1CR" → 1). Reject
+        // anything that is not a complete amount instead of truncating it.
+        guard cleaned.range(of: #"^[-+]?\d+(?:\.\d+)?$"#, options: .regularExpression) != nil else { return nil }
         return Decimal(string: cleaned, locale: Locale(identifier: "en_US_POSIX"))
+    }
+
+    static func parseAmountForTesting(_ value: String) -> Decimal? {
+        parseAmount(value)
     }
 
     /// Rappi's OCR sometimes changes a thousands comma into a decimal point,
@@ -15646,14 +15858,17 @@ final class FinanceStore {
             month = parsedMonth
             day = parsedDay
         } else {
-            guard let monthToken = parts.dropFirst().first(where: {
-                numericToken($0) != nil || monthNumber(String($0)) != nil
+            guard let monthIndex = parts.indices.dropFirst().first(where: {
+                numericToken(parts[$0]) != nil || monthNumber(String(parts[$0])) != nil
             }) else { return nil }
+            let monthToken = parts[monthIndex]
             day = first
             month = numericToken(monthToken) ?? monthNumber(String(monthToken))!
-            year = parts.dropFirst()
+            // Only tokens after the month can be a year. Two-digit years
+            // ("28/12/25") used to be discarded and replaced by the default.
+            year = parts[(monthIndex + 1)...]
                 .compactMap { numericToken($0) }
-                .last(where: { $0 >= 100 })
+                .last(where: { (0...99).contains($0) || (1_900...2_200).contains($0) })
                 ?? defaultYear
                 ?? Calendar.current.component(.year, from: .now)
         }

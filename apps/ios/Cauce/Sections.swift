@@ -481,7 +481,7 @@ struct MovementDetailView: View {
     init(movement: Movement) {
         self.movement = movement
         _selectedCategory = State(initialValue: movement.category == "ITAM" ? "Educación" : movementCategoryOptions.contains(movement.category) ? movement.category : "Otros / Por revisar")
-        _selectedKind = State(initialValue: movement.kind ?? .purchase)
+        _selectedKind = State(initialValue: FinanceStore.displayKind(for: movement))
         _isTravel = State(initialValue: movement.travelRelated)
         _categorySaveMessage = State(initialValue: nil)
     }
@@ -685,18 +685,19 @@ struct MovementDetailView: View {
             Picker("Tipo de movimiento", selection: Binding(
                 get: { selectedKind },
                 set: {
-                    selectedKind = $0
-                    store.updateClassification(for: movement, kind: $0, travelRelated: isTravel)
+                    if store.updateClassification(for: movement, kind: $0, travelRelated: isTravel) {
+                        selectedKind = $0
+                    }
                 }
             )) {
-                ForEach(MovementKind.allCases) { Text($0.rawValue).tag($0) }
+                ForEach(FinanceStore.selectableKinds(forAmount: movement.amount)) { Text($0.rawValue).tag($0) }
             }
             if store.netExpenseMovements.contains(where: { $0.id == currentMovement.id }) || currentMovement.kind == .msi { MovementPlanningLabels(movement: currentMovement) }
             Toggle("Relacionado con viaje", isOn: Binding(
                 get: { isTravel },
                 set: {
                     isTravel = $0
-                    store.updateClassification(for: movement, kind: selectedKind, travelRelated: $0)
+                    store.updateTravelRelated(for: movement, travelRelated: $0)
                 }
             ))
             }

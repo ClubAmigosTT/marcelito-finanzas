@@ -43,6 +43,14 @@ struct MarcelitoApp: App {
             .onReceive(NotificationCenter.default.publisher(for: .financeBackupRestored)) { _ in
                 financeStore = FinanceStore(); planningStore = FinancialPlanningStore(); authModel.lock()
             }
+            .overlay {
+                // iOS captures the app-switcher snapshot while the scene is
+                // inactive, before `.background` locks the app. Cover the
+                // figures so the snapshot never shows balances.
+                if scenePhase != .active && authModel.isAuthenticated {
+                    MarcelitoAmbientBackground().ignoresSafeArea()
+                }
+            }
             .background(MarcelitoAmbientBackground())
             .tint(Color.marcelitoNavy)
             .preferredColorScheme(.light)

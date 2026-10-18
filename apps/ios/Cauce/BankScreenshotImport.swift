@@ -697,10 +697,26 @@ extension FinanceStore {
 
     func deleteBankScreenshotCapture(_ capture: BankScreenshotCapture) {
         screenshotCaptures.removeAll { $0.id == capture.id }
+        // Rows in other captures that were excluded as copies of the deleted
+        // rows are now the only observation of those movements.
+        let deletedRowIDs = Set(capture.movements.map(\.id))
+        for captureIndex in screenshotCaptures.indices {
+            for rowIndex in screenshotCaptures[captureIndex].movements.indices {
+                if let original = screenshotCaptures[captureIndex].movements[rowIndex].duplicateOf,
+                   deletedRowIDs.contains(original) {
+                    screenshotCaptures[captureIndex].movements[rowIndex].duplicateOf = nil
+                }
+                if let original = screenshotCaptures[captureIndex].movements[rowIndex].possibleDuplicateOf,
+                   deletedRowIDs.contains(original) {
+                    screenshotCaptures[captureIndex].movements[rowIndex].possibleDuplicateOf = nil
+                }
+            }
+        }
         for name in capture.localImageNames {
             let safeName = URL(fileURLWithPath: name).lastPathComponent
             try? FileManager.default.removeItem(at: bankScreenshotFilesDirectoryURL.appendingPathComponent(safeName))
         }
+        reconcileBankScreenshotsAgainstOfficialLedger()
         synchronizeProvisionalScreenshotLedger()
         persistBankScreenshotCaptures()
     }
@@ -729,55 +745,93 @@ extension FinanceStore {
             return (movement, statement)
         }
         var usedOfficialIDs = Set<UUID>()
+        let officialByID = Dictionary(official.map { ($0.0.id, $0.0) }, uniquingKeysWith: { first, _ in first })
+        // Account identity on screenshots is best-effort: the header may not
+        // show the masked number, and Rappi screenshots show the card's last
+        // four while its statement uses the account's. When an issuer has a
+        // single statement account, that account is the only possible match.
+        var officialAccountsBySource: [BankScreenshotSource: Set<String>] = [:]
+        for (_, statement) in official {
+            guard let source = BankScreenshotSource.identify(statement.source) else { continue }
+            officialAccountsBySource[source, default: []].insert(statement.accountKey ?? "")
+        }
         var next = screenshotCaptures
-        for captureIndex in next.indices {
-            for rowIndex in next[captureIndex].movements.indices {
-                // Reconsider legacy automatic exclusions whose provenance was
-                // lost by the old cross-account identity function.
-                if let priorID = next[captureIndex].movements[rowIndex].duplicateOf,
-                   next[captureIndex].movements[rowIndex].duplicateReviewed != true {
-                    let previous = screenshotCaptures.first { $0.movements.contains { $0.id == priorID } }
-                    if previous?.source != next[captureIndex].source || previous?.accountKey == nil
-                        || previous?.accountKey != next[captureIndex].accountKey {
-                        next[captureIndex].movements[rowIndex].duplicateOf = nil
-                    }
+        // Settle ordinary observations first, so a suspected copy can only
+        // claim an official row its original did not already take.
+        let positions = next.indices.flatMap { captureIndex in
+            next[captureIndex].movements.indices.map { (captureIndex, $0) }
+        }
+        let ordered = positions.filter { next[$0.0].movements[$0.1].possibleDuplicateOf == nil }
+            + positions.filter { next[$0.0].movements[$0.1].possibleDuplicateOf != nil }
+        for (captureIndex, rowIndex) in ordered {
+            // Reconsider legacy automatic exclusions whose provenance was
+            // lost by the old cross-account identity function.
+            if let priorID = next[captureIndex].movements[rowIndex].duplicateOf,
+               next[captureIndex].movements[rowIndex].duplicateReviewed != true {
+                let previous = screenshotCaptures.first { $0.movements.contains { $0.id == priorID } }
+                if previous?.source != next[captureIndex].source || previous?.accountKey == nil
+                    || previous?.accountKey != next[captureIndex].accountKey {
+                    next[captureIndex].movements[rowIndex].duplicateOf = nil
                 }
-                guard next[captureIndex].movements[rowIndex].duplicateOf == nil else {
-                    next[captureIndex].movements[rowIndex].matchedOfficialMovementID = nil
-                    continue
+            }
+            guard next[captureIndex].movements[rowIndex].duplicateOf == nil else {
+                next[captureIndex].movements[rowIndex].matchedOfficialMovementID = nil
+                continue
+            }
+            let row = next[captureIndex].movements[rowIndex]
+            let candidates = official.compactMap { pair -> (UUID, Int)? in
+                let movement = pair.0
+                let statement = pair.1
+                guard !usedOfficialIDs.contains(movement.id),
+                      BankScreenshotSource.identify(statement.source) == next[captureIndex].source else { return nil }
+                let captureKey = next[captureIndex].accountKey
+                let singleAccount = (officialAccountsBySource[next[captureIndex].source]?.count ?? 0) <= 1
+                let sameAccount = captureKey != nil && captureKey == statement.accountKey
+                guard sameAccount
+                        || (singleAccount && (captureKey == nil || next[captureIndex].source == .rappi)) else { return nil }
+                guard abs(movement.amount - row.normalizedAmount) < Decimal(string: "0.005")! else { return nil }
+                let days = abs(Calendar.current.dateComponents([.day], from: row.date, to: movement.date).day ?? 99)
+                guard days <= 3 else { return nil }
+                let descriptionScore = tokenSimilarity(row.title, movement.title)
+                guard descriptionScore >= 0.65 else { return nil }
+                let score = 70 + max(0, 18 - days * 6) + Int(descriptionScore * 20)
+                return score >= 82 ? (movement.id, score) : nil
+            }.sorted { $0.1 > $1.1 }
+            // Two identical official rows (same day, amount and concept,
+            // e.g. two UBER 85.00) tie on score. They are interchangeable,
+            // so link the first; the next identical screenshot row takes
+            // the other. Refusing both left each copy counted twice.
+            let interchangeableTie = candidates.count > 1
+                && candidates[0].1 == candidates[1].1
+                && candidates.filter { $0.1 == candidates[0].1 }.allSatisfy { candidate in
+                    guard let lead = officialByID[candidates[0].0], let other = officialByID[candidate.0] else { return false }
+                    return Calendar.current.isDate(lead.date, inSameDayAs: other.date)
+                        && lead.amount == other.amount
+                        && tokenSimilarity(lead.title, other.title) >= 0.99
                 }
-                let row = next[captureIndex].movements[rowIndex]
-                guard row.possibleDuplicateOf == nil else { continue }
-                let candidates = official.compactMap { pair -> (UUID, Int)? in
-                    let movement = pair.0
-                    let statement = pair.1
-                    guard !usedOfficialIDs.contains(movement.id),
-                          BankScreenshotSource.identify(statement.source) == next[captureIndex].source else { return nil }
-                    guard let captureKey = next[captureIndex].accountKey,
-                          let statementKey = statement.accountKey,
-                          captureKey == statementKey else { return nil }
-                    guard abs(movement.amount - row.normalizedAmount) < Decimal(string: "0.005")! else { return nil }
-                    let days = abs(Calendar.current.dateComponents([.day], from: row.date, to: movement.date).day ?? 99)
-                    guard days <= 3 else { return nil }
-                    let descriptionScore = tokenSimilarity(row.title, movement.title)
-                    guard descriptionScore >= 0.65 else { return nil }
-                    let score = 70 + max(0, 18 - days * 6) + Int(descriptionScore * 20)
-                    return score >= 82 ? (movement.id, score) : nil
-                }.sorted { $0.1 > $1.1 }
-                let unambiguous = candidates.count == 1 || (candidates.count > 1 && candidates[0].1 - candidates[1].1 >= 8)
-                let match = unambiguous ? candidates.first?.0 : nil
-                next[captureIndex].movements[rowIndex].matchedOfficialMovementID = match
-                if let match {
-                    usedOfficialIDs.insert(match)
-                    if let original = movements.first(where: { $0.id == row.id && $0.manuallyReviewed }),
-                       let target = movements.firstIndex(where: { $0.id == match }), !movements[target].manuallyReviewed {
-                        movements[target].category = original.category
-                        movements[target].kind = original.kind
-                        movements[target].flow = original.flow
-                        movements[target].travelRelated = original.travelRelated
-                        movements[target].classificationTags = original.classificationTags
-                        movements[target].manuallyReviewed = true
-                    }
+            let unambiguous = candidates.count == 1
+                || (candidates.count > 1 && candidates[0].1 - candidates[1].1 >= 8)
+                || interchangeableTie
+            let match = unambiguous ? candidates.first?.0 : nil
+            if match == nil, let originalID = row.possibleDuplicateOf,
+               next.contains(where: { $0.movements.contains { $0.id == originalID && $0.matchedOfficialMovementID != nil } }) {
+                // The statement printed one official row for both
+                // observations: the suspected copy was the same movement.
+                next[captureIndex].movements[rowIndex].duplicateOf = originalID
+                next[captureIndex].movements[rowIndex].matchedOfficialMovementID = nil
+                continue
+            }
+            next[captureIndex].movements[rowIndex].matchedOfficialMovementID = match
+            if let match {
+                usedOfficialIDs.insert(match)
+                if let original = movements.first(where: { $0.id == row.id && $0.manuallyReviewed }),
+                   let target = movements.firstIndex(where: { $0.id == match }), !movements[target].manuallyReviewed {
+                    movements[target].category = original.category
+                    movements[target].kind = original.kind
+                    movements[target].flow = original.flow
+                    movements[target].travelRelated = original.travelRelated
+                    movements[target].classificationTags = original.classificationTags
+                    movements[target].manuallyReviewed = true
                 }
             }
         }
