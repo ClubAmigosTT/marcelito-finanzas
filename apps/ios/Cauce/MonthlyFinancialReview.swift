@@ -66,9 +66,40 @@ struct TransferReviewView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var confirmation: TransferReviewPair?
     @State private var repairMessage: String?
+    @State private var ownershipAnswer: OwnershipAnswer?
+    private struct OwnershipAnswer { let movement: Movement; let ownAccount: Bool }
     var body: some View {
         NavigationStack {
             List {
+                let ownership = store.pendingOwnershipReviews
+                if !ownership.isEmpty {
+                    Section {
+                        ForEach(ownership.prefix(30)) { movement in
+                            VStack(alignment: .leading, spacing: 8) {
+                                FinancialReviewRow(movement: movement)
+                                HStack {
+                                    Button("Sí, es mía") { ownershipAnswer = OwnershipAnswer(movement: movement, ownAccount: true) }
+                                        .buttonStyle(.bordered)
+                                    Button(movement.amount < 0 ? "No, fue un gasto" : "No, fue un ingreso") { ownershipAnswer = OwnershipAnswer(movement: movement, ownAccount: false) }
+                                        .buttonStyle(.borderless)
+                                }
+                            }
+                        }
+                    } header: {
+                        Text("¿Fue a una cuenta tuya? (\(ownership.count))")
+                    } footer: {
+                        Text("El estado no dice a quién fue la transferencia. Si fue a otra cuenta tuya no cuenta como gasto ni ingreso.")
+                    }
+                }
+                let rules = store.transferOwnershipRules
+                if !rules.isEmpty {
+                    Section("Tus reglas de transferencias") {
+                        ForEach(rules.keys.sorted(), id: \.self) { key in
+                            LabeledContent(key.split(separator: "|").dropFirst().joined().uppercased(), value: rules[key] == "own" ? "Cuenta tuya" : "Gasto o ingreso")
+                                .swipeActions { Button("Olvidar", role: .destructive) { store.removeTransferOwnershipRule(key) } }
+                        }
+                    }
+                }
                 Section {
                     Text("Confirmar excluye ambos lados de ingresos y gastos. Descartar sólo rechaza esta pareja; no cambia sus tipos ni categorías.")
                         .font(.caption).foregroundStyle(.secondary)
@@ -108,6 +139,20 @@ struct TransferReviewView: View {
                     Button("Volver a mostrar parejas descartadas") { store.resetRejectedTransferPairs() }
                         .font(.caption)
                 }
+            }
+            .confirmationDialog(ownershipAnswer.map { $0.ownAccount ? "Marcar como traspaso entre tus cuentas" : "Marcar como movimiento con otra persona" } ?? "",
+                isPresented: Binding(get: { ownershipAnswer != nil }, set: { if !$0 { ownershipAnswer = nil } }), titleVisibility: .visible) {
+                if let answer = ownershipAnswer {
+                    Button("Solo este movimiento") {
+                        store.resolveTransferOwnership(answer.movement, ownAccount: answer.ownAccount, applyToConcept: false); ownershipAnswer = nil
+                    }
+                    Button("Todos los «\(answer.movement.title)»") {
+                        store.resolveTransferOwnership(answer.movement, ownAccount: answer.ownAccount, applyToConcept: true); ownershipAnswer = nil
+                    }
+                    Button("Cancelar", role: .cancel) { ownershipAnswer = nil }
+                }
+            } message: {
+                Text("Con «Todos» la respuesta queda como regla para este concepto, incluso en estados que importes después. Puedes olvidarla abajo.")
             }
             .navigationTitle("Revisar transferencias")
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cerrar") { dismiss() } } }
@@ -244,5 +289,26 @@ struct MonthlyAuditMovementsView: View {
         }
         .navigationTitle(bucket.rawValue)
         .foregroundStyle(Color.marcelitoNavy)
+    }
+}
+
+/// Inicio entry point for transfers whose destination the statement omits.
+struct OwnershipReviewBanner: View {
+    let store: FinanceStore
+    @State private var showReview = false
+    var body: some View {
+        let pending = store.pendingOwnershipReviews
+        if !pending.isEmpty {
+            HStack(spacing: 8) {
+                Image(systemName: "arrow.left.arrow.right.circle").foregroundStyle(Color.marcelitoAmber)
+                Text("\(pending.count) transferencias sin destinatario · ¿fueron a cuentas tuyas?")
+                    .font(.caption)
+                Spacer(minLength: 4)
+                Button("Responder") { showReview = true }.font(.caption.weight(.semibold))
+            }
+            .padding(10)
+            .foregroundStyle(Color.marcelitoNavy)
+            .sheet(isPresented: $showReview) { TransferReviewView() }
+        }
     }
 }

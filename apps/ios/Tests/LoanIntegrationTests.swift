@@ -62,6 +62,27 @@ import XCTest
             XCTAssertEqual(store.loanLedger.state.links.count, 1)
         }
     }
+    func testUnambiguousITAMPaymentIsLinkedAutomatically() throws {
+        try withStores { store, _ in
+            _ = try setup(store)
+            store.movements[0].manuallyReviewed = false
+            XCTAssertEqual(store.consolidatedRealSpend, 500)
+            XCTAssertEqual(store.autoLinkLoanPayments(), 1)
+            XCTAssertEqual(store.loanLedger.state.links.count, 1)
+            // Only the receipt's interest remains as spend.
+            XCTAssertEqual(store.consolidatedRealSpend, 100)
+            XCTAssertEqual(store.autoLinkLoanPayments(), 0)
+        }
+    }
+    func testChargeThatDoesNotNameTheInstitutionIsNotLinkedAutomatically() throws {
+        try withStores { store, _ in
+            _ = try setup(store)
+            store.movements[0].title = "TIENDA DEPARTAMENTAL"
+            store.movements[0].rawDescription = "TIENDA DEPARTAMENTAL 500.00"
+            XCTAssertEqual(store.autoLinkLoanPayments(), 0)
+            XCTAssertEqual(store.consolidatedRealSpend, 500)
+        }
+    }
     func testLoanDebtDoesNotAlterCardUtilizationAndHistoryRequiresDatedEvidence() throws {
         try withStores { store, _ in
             _ = try setup(store)

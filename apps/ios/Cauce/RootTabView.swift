@@ -71,7 +71,11 @@ struct RootTabView: View {
         // ledger replay or notification refresh above.
         .task { await store.loanLedger.refreshOfficialQuotes() }
         .onChange(of: scenePhase) { _, phase in if phase != .active { planning.savePendingPlanChanges() } }
-        .task(id: store.ledgerVersion) { await PlanningNotifications.refresh(store: store, planning: planning) }
+        .task(id: store.ledgerVersion) {
+            // New bank rows can complete an ITAM payment match.
+            store.autoLinkLoanPayments()
+            await PlanningNotifications.refresh(store: store, planning: planning)
+        }
         .task(id: planning.revision) {
             try? await Task.sleep(for: .milliseconds(400))
             guard !Task.isCancelled else { return }
@@ -129,6 +133,7 @@ struct HomeView: View {
                 PlanningAccountCoverage(period: .month(.now))
                 NavigationLink("Próximos pagos") { PaymentAgendaView() }
                 LedgerQualityBanner(store: store)
+                OwnershipReviewBanner(store: store)
                 HomePersonalMetrics(showActivity: false)
                 if store.dashboardIsBlocked || store.operationalMetricsBlocked {
                     HistoricalDashboardBlockedCard(store: store)
