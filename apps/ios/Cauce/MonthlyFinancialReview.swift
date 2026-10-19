@@ -312,3 +312,30 @@ struct OwnershipReviewBanner: View {
         }
     }
 }
+
+/// "Ya cortó tu Amex · sube el PDF": shown in Inicio for every account whose
+/// next statement should already be published, with or without notifications.
+struct NewStatementBanner: View {
+    let store: FinanceStore
+    let upload: () -> Void
+    var body: some View {
+        let waiting = store.accountsAwaitingNewStatement
+        if !waiting.isEmpty {
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "doc.badge.arrow.up").foregroundStyle(Color.marcelitoAmber)
+                VStack(alignment: .leading, spacing: 2) {
+                    ForEach(Array(waiting.enumerated()), id: \.offset) { _, item in
+                        let label = item.accountKey.flatMap { $0.split(separator: ":").last.map { " ••" + $0 } } ?? ""
+                        Text("Ya cortó tu \(item.source)\(label) · \(planningDayLabel(item.cutoff))")
+                    }
+                    Text("Sube el PDF para completar tus gastos.").foregroundStyle(.secondary)
+                }
+                .font(.caption)
+                Spacer(minLength: 4)
+                Button("Subir", action: upload).font(.caption.weight(.semibold))
+            }
+            .padding(10)
+            .foregroundStyle(Color.marcelitoNavy)
+        }
+    }
+}

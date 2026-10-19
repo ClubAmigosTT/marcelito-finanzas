@@ -314,10 +314,11 @@ struct SpendingCalendarAnalytics {
             }
         case .month:
             guard let start = calendar.date(byAdding: .month, value: -1, to: range.start),
-                  let monthEnd = calendar.date(byAdding: .month, value: 1, to: start),
-                  let proposed = calendar.date(byAdding: .day, value: observedDayCount, to: start) else { return [] }
-            let end = min(monthEnd, proposed)
-            guard days(from: start, to: end).count == observedDayCount,
+                  let monthEnd = calendar.date(byAdding: .month, value: 1, to: start) else { return [] }
+            // A 31-day month compared with a 30-day one uses every day of the
+            // shorter month; requiring the same count dropped the comparison
+            // in March, May, July, October and December.
+            guard let end = Self.comparableEnd(start: start, monthEnd: monthEnd, observedDayCount: observedDayCount, calendar: calendar),
                   days(from: start, to: end).allSatisfy({ coveredDays?.contains($0) == true }) else { return [] }
             return [movements(in: start, end: end)]
         }
@@ -328,12 +329,17 @@ struct SpendingCalendarAnalytics {
         return (1...12).compactMap { offset -> [Movement]? in
             guard let start = calendar.date(byAdding: .month, value: -offset, to: selectedMonth),
                   let monthEnd = calendar.date(byAdding: .month, value: 1, to: start),
-                  let proposed = calendar.date(byAdding: .day, value: observedDayCount, to: start) else { return nil }
-            let end = min(monthEnd, proposed)
-            guard days(from: start, to: end).count == observedDayCount,
+                  let end = Self.comparableEnd(start: start, monthEnd: monthEnd, observedDayCount: observedDayCount, calendar: calendar),
                   days(from: start, to: end).allSatisfy({ coveredDays?.contains($0) == true }) else { return nil }
             return movements(in: start, end: end)
         }
+    }
+
+    /// End of the comparable span in an earlier month: the same number of
+    /// observed days, capped at that month's own length.
+    static func comparableEnd(start: Date, monthEnd: Date, observedDayCount: Int, calendar: Calendar) -> Date? {
+        guard observedDayCount > 0, let proposed = calendar.date(byAdding: .day, value: observedDayCount, to: start) else { return nil }
+        return min(monthEnd, proposed)
     }
 
     private func movements(in start: Date, end: Date) -> [Movement] {

@@ -1068,7 +1068,9 @@ struct InstallmentEditor: View {
                 }
                 Toggle("Ya registré todas las compras MSI de esta cuenta", isOn: $allPlansConfirmed)
                 Section("Vincula únicamente cargos de esta misma compra") {
-                    ForEach(store.netExpenseMovements.filter { $0.account == movement.account && ($0.id == movement.id || $0.kind == .msi) }) { row in
+                    // Printed MSI installments are not "net expense" rows, so the
+                    // old list could never show them for linking.
+                    ForEach(store.movements.filter { $0.account == movement.account && $0.amount < 0 && ($0.id == movement.id || $0.kind == .msi) }) { row in
                         Toggle(isOn: Binding(get: { linked.contains(row.id) }, set: { on in if on { linked.insert(row.id) } else { linked.remove(row.id) } })) {
                             Text("\(row.title) · \(planningMoney(abs(row.amount)))").font(.caption)
                         }

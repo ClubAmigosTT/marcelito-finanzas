@@ -152,10 +152,10 @@ struct PlanningIncomeSource: Identifiable, Codable, Equatable {
 }
 
 enum FixedExpenseCadence: String, CaseIterable, Codable, Identifiable {
-    case monthly = "Mensual", fortnightly = "Quincenal", weekly = "Semanal", annual = "Anual"
+    case monthly = "Mensual", biweekly = "Catorcenal", fortnightly = "Quincenal", weekly = "Semanal", annual = "Anual"
     var id: String { rawValue }
     var paymentsPerYear: Decimal {
-        switch self { case .monthly: return 12; case .fortnightly: return 24; case .weekly: return 52; case .annual: return 1 }
+        switch self { case .monthly: return 12; case .biweekly: return 26; case .fortnightly: return 24; case .weekly: return 52; case .annual: return 1 }
     }
 }
 struct PlanningFixedExpense: Identifiable, Codable, Equatable {
@@ -357,6 +357,22 @@ struct PlanningState: Codable {
         let previous = state
         var history = state.incomeHistory ?? [IncomeRevision(effectiveMonth: .distantPast, sources: legacyIncomeSources)]
         let start = FinancePeriod.month(month).start
+        // "From month X" must reach later revisions too: a raise entered from
+        // September was lost in October when October already had its own
+        // revision. Carry each added, edited or removed source forward; any
+        // other difference a later revision already had is kept.
+        let before = history.filter { $0.effectiveMonth <= start }.max { $0.effectiveMonth < $1.effectiveMonth }?.sources ?? []
+        let beforeByID = Dictionary(before.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let afterByID = Dictionary(sources.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        for index in history.indices where history[index].effectiveMonth > start {
+            var later = history[index].sources
+            for source in sources where beforeByID[source.id] != source {
+                if let position = later.firstIndex(where: { $0.id == source.id }) { later[position] = source }
+                else if beforeByID[source.id] == nil { later.append(source) }
+            }
+            later.removeAll { beforeByID[$0.id] != nil && afterByID[$0.id] == nil }
+            history[index] = IncomeRevision(effectiveMonth: history[index].effectiveMonth, sources: later)
+        }
         history.removeAll { $0.effectiveMonth == start }
         history.append(IncomeRevision(effectiveMonth: start, sources: sources))
         state.incomeHistory = history.sorted { $0.effectiveMonth < $1.effectiveMonth }
@@ -722,7 +738,7 @@ struct PlanningState: Codable {
             guard let last = evidence.last else { return nil }
             // Recommend patterns still present near the account's latest data,
             // not old habits from a year ago. Missing statements imply no cancellation.
-            let recency = cadence == .weekly ? 18 : cadence == .fortnightly ? 36 : cadence == .monthly ? 45 : 400
+            let recency = cadence == .weekly ? 18 : (cadence == .fortnightly || cadence == .biweekly) ? 36 : cadence == .monthly ? 45 : 400
             let latest = latestByAccount[last.account] ?? last.date
             guard (Calendar.current.dateComponents([.day], from: last.date, to: latest).day ?? 0) <= recency else { return nil }
             return RecurringExpenseSuggestion(id: key, name: merchantLabel(last), account: last.account, category: category(last), amount: pattern.amount, cadence: cadence, regular: true, count: evidence.count, observedMonths: Set(evidence.map { monthKey($0.date) }).count, lastDate: last.date, movements: evidence)

@@ -965,7 +965,11 @@ export function buildFinanceMetrics(inputTransactions: Transaction[], statements
   const currentMonthIncome = sum(currentMonthTransactions.filter((transaction) => isRealIncomeTransaction(transaction, statements)).map((transaction) => absolute(transaction.amount)));
   const periodGroups = new Map<string, PeriodMetrics[]>();
   periods.forEach((period) => periodGroups.set(period.key, [...(periodGroups.get(period.key) ?? []), period]));
-  const periodKeys = Array.from(periodGroups.keys());
+  // A month that has movements but no statement cutoff of its own (an
+  // Amex cycle that ends on the 15th leaves the last days of the previous
+  // month without one) must still appear in analytics and categories.
+  const periodKeys = Array.from(new Set([...periodGroups.keys(), ...transactionPeriodKeys]))
+    .sort((left, right) => right.localeCompare(left));
   const spendTransactions = transactions.filter(isSpendTransaction);
   const periodByStatement = new Map(periods.map((period) => [period.statementId, period.key]));
 

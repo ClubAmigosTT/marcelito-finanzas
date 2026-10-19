@@ -26,6 +26,8 @@ struct BudgetClosing: Codable {
     let goalID: UUID?
     var categorySpent: [String: Decimal]? = nil
     var fixedSpent: [String: Decimal]? = nil
+    /// Amount actually carried or credited; older closes assigned the whole surplus.
+    var assigned: Decimal? = nil
     func snapshot(in period: FinancePeriod) -> BudgetSnapshot { recorded }
 }
 
@@ -80,7 +82,18 @@ extension FinancialPlanningStore {
         let surplus = cashSurplus(store, month: month)
         let previous = state
         var plan = plan(for: month)
-        let assigned = max(0, surplus)
+        // The cash surplus still contains the month's savings target. Carried
+        // to next month it must leave the target aside; credited to a goal it
+        // must not repeat contributions already recorded by hand this month.
+        let assigned: Decimal
+        if plan.surplusDestination == .nextMonth {
+            assigned = max(0, surplus - plan.savingsTarget)
+        } else {
+            let manual = goalID.flatMap { id in state.goals.first { $0.id == id } }?.entries?
+                .filter { $0.closingMonth == nil && range.contains($0.date) }
+                .reduce(Decimal(0)) { $0 + $1.amount } ?? 0
+            assigned = max(0, surplus - manual)
+        }
         if assigned == 0 {
             // A deficit month can still be closed without inventing savings.
         } else if plan.surplusDestination == .nextMonth {
@@ -96,7 +109,7 @@ extension FinancialPlanningStore {
         }
         plan.limits = limits(store, month: month); plan.fixedLimits = fixedLimits(store, month: month)
         plan.closed = true
-        plan.closing = BudgetClosing(recordedAt: now, recorded: snapshot, surplus: surplus, destination: plan.surplusDestination, goalID: assigned > 0 && plan.surplusDestination == .savings ? goalID : nil, categorySpent: budgetCategoryTotals(store, period: range), fixedSpent: budgetCategoryTotals(store, period: range, fixed: true))
+        plan.closing = BudgetClosing(recordedAt: now, recorded: snapshot, surplus: surplus, destination: plan.surplusDestination, goalID: assigned > 0 && plan.surplusDestination == .savings ? goalID : nil, categorySpent: budgetCategoryTotals(store, period: range), fixedSpent: budgetCategoryTotals(store, period: range, fixed: true), assigned: assigned)
         state.budgets[monthKey(month)] = plan
         if save() { return true }; state = previous; return false
     }
@@ -107,7 +120,7 @@ extension FinancialPlanningStore {
         var plan = plan(for: month)
         guard plan.closed else { return false }
         guard let closing = plan.closing else { return false }
-        let assigned = max(0, closing.surplus)
+        let assigned = closing.assigned ?? max(0, closing.surplus)
         if assigned == 0 {
             // There was no assignment to reverse.
         } else if closing.destination == .nextMonth {

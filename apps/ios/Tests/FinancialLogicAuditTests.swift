@@ -1066,6 +1066,38 @@ final class FinancialLogicAuditTests: XCTestCase {
         }
     }
 
+    func testCategoryRuleKeyKeepsWordsThatStartLikeReferences() {
+        withStore { store in
+            let autozone = row(-500, title: "AUTOZONE INSURGENTES")
+            let autolavado = row(-150, title: "AUTOLAVADO INSURGENTES")
+            let reference = row(-80, title: "OXXO REF 123456")
+            XCTAssertNotEqual(store.categoryRuleKey(for: autozone), store.categoryRuleKey(for: autolavado))
+            XCTAssertEqual(store.categoryRuleKey(for: reference), store.categoryRuleKey(for: row(-80, title: "OXXO REF 998877")))
+        }
+    }
+
+    func testNextCutoffKeepsTheUsualDayAfterAShortMonth() {
+        withStore { store in
+            let january = statement("Amex", key: "amex:1003", kind: .card, period: "29/12/2025 - 28/01/2026")
+            let february = statement("Amex", key: "amex:1003", kind: .card, period: "29/01/2026 - 28/02/2026")
+            store.statements = [january, february]
+            let next = store.accountStatementStatus(for: "Amex", kind: .card, accountKey: "amex:1003", today: calendarDate(2026, 3, 1)).nextCutoff
+            XCTAssertEqual(next.map { Calendar(identifier: .gregorian).component(.day, from: $0) }, 28)
+        }
+    }
+
+    func testCardsCuttingOnDifferentDaysAverageOverTheirCycles() {
+        withStore { store in
+            store.statements = [
+                statement("Amex", key: "amex:1003", kind: .card, period: "01/08/2026 - 31/08/2026"),
+                statement("Amex", key: "amex:1003", kind: .card, period: "01/09/2026 - 30/09/2026"),
+                statement("Rappi", key: "rappi:9040", kind: .card, period: "03/08/2026 - 02/09/2026"),
+                statement("Rappi", key: "rappi:9040", kind: .card, period: "03/09/2026 - 02/10/2026"),
+            ]
+            XCTAssertEqual(store.cardPeriodCount, 2)
+        }
+    }
+
     func testBankDepositLabelledAbonoIsIncomeNotAccountingCredit() {
         withStore { store in
             let bank = statement("BBVA", key: "bbva:1111", kind: .bank)
