@@ -46,6 +46,51 @@ import XCTest
         }
     }
 
+    func testPayEveryFourteenDaysIsCatorcenalNotQuincenal() {
+        let calendar = Calendar(identifier: .gregorian)
+        let start = calendar.date(from: DateComponents(year: 2026, month: 6, day: 5))!
+        let rows = (0..<6).map { RecurringObservation(date: calendar.date(byAdding: .day, value: 14 * $0, to: start)!, amount: 10000) }
+        let match = RecurringPattern.detect(rows, calendar: calendar)
+        XCTAssertEqual(match?.cadence, .biweekly)
+        XCTAssertEqual(RecurringCadence.biweekly.monthlyAmount(10000), Decimal(string: "21666.67"))
+        let quincenal = [1, 16, 31, 46, 61, 76].map { RecurringObservation(date: calendar.date(byAdding: .day, value: $0, to: start)!, amount: 10000) }
+        XCTAssertEqual(RecurringPattern.detect(quincenal, calendar: calendar)?.cadence, .fortnightly)
+    }
+
+    func testPaymentReminderStillArrivesWhenTheStatementIsLate() {
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(identifier: "America/Mexico_City")!
+        func at(_ day: Int, _ hour: Int) -> Date { calendar.date(from: DateComponents(year: 2026, month: 10, day: day, hour: hour))! }
+        let due = at(20, 0)
+        XCTAssertEqual(PlanningNotifications.paymentReminderDay(due: due, now: at(16, 12), calendar: calendar), calendar.startOfDay(for: at(17, 0)))
+        // Refreshing at 08:00 of the reminder day still schedules 09:00.
+        XCTAssertEqual(PlanningNotifications.paymentReminderDay(due: due, now: at(17, 8), calendar: calendar), calendar.startOfDay(for: at(17, 0)))
+        // Statement imported one day before the due date: remind next morning.
+        XCTAssertEqual(PlanningNotifications.paymentReminderDay(due: due, now: at(19, 10), calendar: calendar), calendar.startOfDay(for: at(20, 0)))
+        XCTAssertNil(PlanningNotifications.paymentReminderDay(due: due, now: at(21, 10), calendar: calendar))
+        XCTAssertEqual(PlanningNotifications.dueLabel(due: due, reminderDay: at(20, 0), calendar: calendar), "vence hoy")
+    }
+
+    func testThirtyOneDayMonthIsComparedWithTheWholePreviousMonth() {
+        let calendar = Calendar(identifier: .gregorian)
+        let september = calendar.date(from: DateComponents(year: 2026, month: 9, day: 1))!
+        let october = calendar.date(from: DateComponents(year: 2026, month: 10, day: 1))!
+        XCTAssertEqual(SpendingCalendarAnalytics.comparableEnd(start: september, monthEnd: october, observedDayCount: 31, calendar: calendar), october)
+    }
+
+    func testIncomeEditFromAMonthReachesLaterRevisions() {
+        withStores { store, p, _ in
+            let salary = PlanningIncomeSource(name: "Sueldo", amount: 20000, cadence: "Mensual")
+            XCTAssertTrue(p.setIncomeSources([salary], effectiveFrom: date(6, 1)))
+            let freelance = PlanningIncomeSource(name: "Freelance", amount: 5000, cadence: "Mensual")
+            XCTAssertTrue(p.setIncomeSources([salary, freelance], effectiveFrom: date(10, 1)))
+            var raised = salary; raised.amount = 25000
+            XCTAssertTrue(p.setIncomeSources([raised], effectiveFrom: date(9, 1)))
+            XCTAssertEqual(p.monthlyIncome(for: date(9, 15)), 25000)
+            XCTAssertEqual(p.monthlyIncome(for: date(10, 15)), 30000)
+            XCTAssertEqual(p.monthlyIncome(for: date(7, 15)), 20000)
+        }
+    }
+
     func testLargeBookProjectionIsReusedAcrossTabsAndPeriodChanges() {
         withStores { store, p, _ in
             store.movements = (0..<1377).map { index in row(6 + index % 3, 1 + index % 27, -100) }

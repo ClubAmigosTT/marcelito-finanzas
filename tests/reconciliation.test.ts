@@ -2091,3 +2091,26 @@ test("normalizeConcept conserva comercios que empiezan con aut, ref o rfc", asyn
   assert.equal(normalizeConcept("FACEBK AUT: 057867"), "facebk");
   assert.equal(normalizeConcept("SPEI REF 4455 NOMINA"), "spei nomina");
 });
+
+test("un estado del lector actual en revisión no se aprueba solo al recargar", () => {
+  const statement: Statement = {
+    ...bank("bbva-pending-review", "BBVA", "15/07/2026 AL 14/08/2026"),
+    readerVersion: "web-reader-2026.09.06.10",
+    status: "review",
+    reconciliationStatus: "pending",
+    reconciliation: { status: "pending", tolerance: 0.05, reason: "Revisión del usuario" },
+    summary: { previousBalance: 1_000, cashBalance: 900, depositTotal: 0, withdrawalTotal: 100, depositCount: 0, withdrawalCount: 1 },
+  };
+  const row = movement({
+    id: "pending-review-row",
+    date: "10 ago 2026",
+    description: "OXXO SUC 1234",
+    account: "BBVA",
+    amount: -100,
+    flow: "expense",
+    statementId: statement.id,
+    confidence: 0.62,
+  });
+  const prepared = prepareStoredLedger([statement], [row], "web-reader-2026.09.06.10");
+  assert.equal(prepared.statements[0]?.status, "review");
+});

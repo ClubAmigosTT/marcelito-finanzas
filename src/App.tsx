@@ -1543,6 +1543,8 @@ function ImportDialog({ open, initialMode, onClose, onSave, onSaveScreenshot, ca
   const [screenshotSourceHint, setScreenshotSourceHint] = useState<"Auto" | "BBVA" | "Santander" | "Amex">("Auto");
   const [screenshotAccountKey, setScreenshotAccountKey] = useState("");
   const [items, setItems] = useState<Transaction[]>([]);
+  const itemsRef = useRef<Transaction[]>([]);
+  useEffect(() => { itemsRef.current = items; }, [items]);
   const [error, setError] = useState("");
   const [classificationBusy, setClassificationBusy] = useState(false);
   const [classificationMessage, setClassificationMessage] = useState("");
@@ -1681,7 +1683,16 @@ function ImportDialog({ open, initialMode, onClose, onSave, onSaveScreenshot, ca
         authorization: `Bearer ${token}`,
         timeoutMs: 90_000,
       });
-      const classified = applyTransactionClassifications(items, response);
+      // Classifications are positional, so apply them to the rows that were
+      // sent, then keep any row the user edited during the (up to 90 s)
+      // request instead of overwriting it with the snapshot's result.
+      const classifiedById = new Map(applyTransactionClassifications(items, response).map((item) => [item.id, item]));
+      const sentById = new Map(items.map((item) => [item.id, item]));
+      const classified = itemsRef.current.map((current) => {
+        const sent = sentById.get(current.id);
+        const editedMeanwhile = sent !== undefined && sent.category !== current.category;
+        return editedMeanwhile ? current : classifiedById.get(current.id) ?? current;
+      });
       setItems(classified);
       setResult((current) => current ? { ...current, transactions: classified } : current);
       setClassificationMessage(response.classifications.length ? `Listo: ${response.classifications.length} gasto(s) enriquecido(s) con Zen.` : "No hay gastos elegibles para clasificar.");

@@ -99,8 +99,17 @@ enum FinanceBackup {
             _ = try validate(payload); return payload
         } catch { throw LoanError.invalid("No se pudo abrir el respaldo. Revisa la contraseña y el archivo; tus datos se conservan.") }
     }
-    private static func apply(_ payload: FinanceBackupPayload, defaults: UserDefaults, directory: URL) throws {
-        let prefs = try validate(payload)
+    /// `trusted` is used only to roll back to the device's own previous state:
+    /// that snapshot must be restorable even if it would not pass the import
+    /// checks (for example a corrupt plan the user was trying to replace),
+    /// otherwise a failed restore left the app stuck in "Recuperación pendiente".
+    private static func apply(_ payload: FinanceBackupPayload, defaults: UserDefaults, directory: URL, trusted: Bool = false) throws {
+        let prefs: [String: Any]
+        if trusted {
+            prefs = (try PropertyListSerialization.propertyList(from: payload.preferences, format: nil) as? [String: Any] ?? [:]).filter { allowed($0.key) }
+        } else {
+            prefs = try validate(payload)
+        }
         let fm = FileManager.default
         for folder in folders {
             let next = directory.appendingPathComponent("restore-next-" + UUID().uuidString)
@@ -126,6 +135,10 @@ enum FinanceBackup {
             }
         }
         defaults.removeObject(forKey: "marcelito.categoryUndo.v1")
+        // A canonical rebuild interrupted before the restore must not replay
+        // the pre-restore ledger over the restored one on the next launch.
+        defaults.removeObject(forKey: "marcelito.ledger.rebuildState.v1")
+        LedgerStorage.remove(forKey: "marcelito.ledger.backup.v1", defaults: defaults, directory: ledgerStore(directory))
         defaults.synchronize()
     }
     static func restore(_ payload: FinanceBackupPayload, defaults: UserDefaults = .standard, directory: URL = support) throws {
@@ -135,13 +148,13 @@ enum FinanceBackup {
         let previous = try capture(defaults: defaults, directory: directory)
         try JSONEncoder().encode(previous).write(to: rollback, options: fileOptions)
         do { try apply(payload, defaults: defaults, directory: directory); try FileManager.default.removeItem(at: rollback) }
-        catch { try apply(previous, defaults: defaults, directory: directory); try? FileManager.default.removeItem(at: rollback); throw error }
+        catch { try apply(previous, defaults: defaults, directory: directory, trusted: true); try? FileManager.default.removeItem(at: rollback); throw error }
     }
     static func recoverInterruptedRestore(defaults: UserDefaults = .standard, directory: URL = support) throws {
         let rollback = directory.appendingPathComponent("marcelito-restore-rollback.json")
         guard FileManager.default.fileExists(atPath: rollback.path) else { return }
         let previous = try JSONDecoder().decode(FinanceBackupPayload.self, from: Data(contentsOf: rollback))
-        try apply(previous, defaults: defaults, directory: directory)
+        try apply(previous, defaults: defaults, directory: directory, trusted: true)
         try FileManager.default.removeItem(at: rollback)
     }
 }

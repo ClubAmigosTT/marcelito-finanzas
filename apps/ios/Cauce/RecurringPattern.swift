@@ -7,9 +7,9 @@ struct RecurringObservation: Hashable {
 }
 
 enum RecurringCadence: String, CaseIterable {
-    case weekly = "Semanal", fortnightly = "Quincenal", monthly = "Mensual", annual = "Anual"
+    case weekly = "Semanal", biweekly = "Catorcenal", fortnightly = "Quincenal", monthly = "Mensual", annual = "Anual"
     var paymentsPerYear: Decimal {
-        switch self { case .weekly: return 52; case .fortnightly: return 24; case .monthly: return 12; case .annual: return 1 }
+        switch self { case .weekly: return 52; case .biweekly: return 26; case .fortnightly: return 24; case .monthly: return 12; case .annual: return 1 }
     }
     func monthlyAmount(_ amount: Decimal) -> Decimal {
         var value = amount * paymentsPerYear / 12; var rounded: Decimal = 0
@@ -42,12 +42,16 @@ enum RecurringPattern {
         let gaps = zip(matching, matching.dropFirst()).map {
             calendar.dateComponents([.day], from: calendar.startOfDay(for: $0.date), to: calendar.startOfDay(for: $1.date)).day ?? 0
         }
-        for cadence in [RecurringCadence.weekly, .fortnightly, .monthly, .annual] {
-            if (cadence == .weekly || cadence == .fortnightly) && matching.count < 4 { continue }
+        for cadence in [RecurringCadence.weekly, .biweekly, .fortnightly, .monthly, .annual] {
+            if (cadence == .weekly || cadence == .biweekly || cadence == .fortnightly) && matching.count < 4 { continue }
             let direct: ClosedRange<Int>
             let missingOne: ClosedRange<Int>
             switch cadence {
             case .weekly: direct = 5...9; missingOne = 12...16
+            // Every 14 days (26 a year) is not "quincenal" (the 15th and the
+            // last day, 24 a year): treating it as quincenal undercounted a
+            // catorcenal payroll by 7.7% a month.
+            case .biweekly: direct = 13...14; missingOne = 27...29
             case .fortnightly: direct = 12...18; missingOne = 27...33
             case .monthly: direct = 25...35; missingOne = 56...66
             case .annual: direct = 350...380; missingOne = 715...745

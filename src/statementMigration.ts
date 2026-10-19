@@ -137,6 +137,10 @@ export function prepareStoredLedger(
   const preparedStatements = initiallyPrepared.map((prepared, index) => {
     const original = statements[index];
     if (!original || !isSupportedReaderVersion(original.readerVersion, readerVersion)) return prepared;
+    // A statement the current reader sent to review is waiting for the
+    // user's confirmation; a reload must not promote it to "ready" on its own.
+    // (Statements from an older compatible reader are revalidated below.)
+    if (original.status === "review" && original.readerVersion === readerVersion) return prepared;
     if (!hasVerifiedSourceEvidence(original)) return prepared;
     if (original.kind === "unknown" || !hasSufficientOcrQuality(original)) return prepared;
     const linked = preparedTransactions.filter((transaction) => transaction.statementId === original.id);

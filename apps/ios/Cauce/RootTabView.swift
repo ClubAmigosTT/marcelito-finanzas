@@ -133,6 +133,7 @@ struct HomeView: View {
                 PlanningAccountCoverage(period: .month(.now))
                 NavigationLink("Próximos pagos") { PaymentAgendaView() }
                 LedgerQualityBanner(store: store)
+                NewStatementBanner(store: store) { isImporterPresented = true }
                 OwnershipReviewBanner(store: store)
                 HomePersonalMetrics(showActivity: false)
                 if store.dashboardIsBlocked || store.operationalMetricsBlocked {

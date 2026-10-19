@@ -2875,7 +2875,14 @@ final class FinanceStore {
         return value
     }
     var cardPeriodMetrics: [StatementMetric] { periodMetrics.filter { $0.kind == .card } }
-    var cardPeriodCount: Int { Set(cardPeriodMetrics.map { periodKey($0.period) }).count }
+    /// Billing cycles behind the card purchase total. Cards that cut on
+    /// different days (the 31st and the 2nd) put the same two cycles into three
+    /// calendar months; counting months made the average a third too low.
+    /// The card with the most imported cycles sets the span.
+    var cardPeriodCount: Int {
+        Dictionary(grouping: cardPeriodMetrics, by: { $0.accountKey ?? $0.source })
+            .values.map { Set($0.map { periodKey($0.period) }).count }.max() ?? 0
+    }
 
     /// One auditable row per imported PDF. The row counts distinguish the
     /// syntactically valid/quarantined rows from the strict canonical rows;
@@ -3025,14 +3032,22 @@ final class FinanceStore {
                 from: cutoffMonthComponents
             ),
             let nextMonthStart = calendar.date(byAdding: .month, value: 1, to: monthStart),
-            let latestMonthRange = calendar.range(of: .day, in: .month, for: latestCutoff),
             let nextMonthRange = calendar.range(of: .day, in: .month, for: nextMonthStart),
             let latestDay = calendar.dateComponents([.day], from: latestCutoff).day else {
                 return nil
             }
-            let day = latestDay == latestMonthRange.count
-                ? nextMonthRange.count
-                : min(latestDay, nextMonthRange.count)
+            // Use the account's usual cutoff day, not only the latest one: a
+            // card that cuts on the 28th closed on 28-Feb (the month's last
+            // day) and was projected to 31-Mar, three days late. Only an
+            // account whose every cutoff fell on a month's last day is
+            // treated as "end of month".
+            let cutoffs = accountStatements.compactMap { statementRange(from: $0.period)?.upperBound }
+            let dayCounts = Dictionary(grouping: cutoffs.compactMap { calendar.dateComponents([.day], from: $0).day }, by: { $0 }).mapValues(\.count)
+            let usualDay = dayCounts.max { $0.value == $1.value ? $0.key < $1.key : $0.value < $1.value }?.key ?? latestDay
+            let alwaysMonthEnd = !cutoffs.isEmpty && cutoffs.allSatisfy { cutoff in
+                calendar.dateComponents([.day], from: cutoff).day == calendar.range(of: .day, in: .month, for: cutoff)?.count
+            } && cutoffs.count > 1
+            let day = alwaysMonthEnd ? nextMonthRange.count : min(usualDay, nextMonthRange.count)
             return calendar.date(byAdding: .day, value: day - 1, to: nextMonthStart)
         }()
         let requiresReview = latest.requiresReview || latest.reconciliation?.status != .valid
@@ -3050,6 +3065,25 @@ final class FinanceStore {
             state = .current
         }
         return AccountStatementStatus(state: state, latestCutoff: latestCutoff, nextCutoff: nextCutoff)
+    }
+
+    /// Accounts whose next statement should already be published (two days
+    /// after the expected cutoff) but has not been imported.
+    var accountsAwaitingNewStatement: [(source: String, accountKey: String?, cutoff: Date)] {
+        let calendar = Calendar.current
+        var seen = Set<String>()
+        var result: [(source: String, accountKey: String?, cutoff: Date)] = []
+        for statement in statements {
+            let kind = statementKind(statement)
+            let identity = "\(statement.source)|\(kind.rawValue)|\(statement.accountKey ?? "")"
+            guard seen.insert(identity).inserted else { continue }
+            let status = accountStatementStatus(for: statement.source, kind: kind, accountKey: statement.accountKey)
+            guard status.state == .due, let cutoff = status.nextCutoff,
+                  let ready = calendar.date(byAdding: .day, value: 2, to: calendar.startOfDay(for: cutoff)),
+                  calendar.startOfDay(for: .now) >= ready else { continue }
+            result.append((statement.source, statement.accountKey, cutoff))
+        }
+        return result.sorted { $0.cutoff < $1.cutoff }
     }
 
     var totalNewTransactions: Decimal {
@@ -11929,8 +11963,16 @@ final class FinanceStore {
         // Locate the label inside that box and project its character offset
         // back into normalized page coordinates. This retains calibration
         // even when the OCR engine does not split the header into columns.
+        let headerWords = ["fecha", "descripcion", "description", "referencia", "cargo", "retiro", "abono", "deposito", "saldo", "operacion", "liquidacion", "entrada", "salida"]
         func anchorX(_ observation: OCRObservation, labels: [String]) -> CGFloat? {
             let compact = normalizedLabel(observation)
+            // Only a header box anchors a column: the label on its own
+            // ("CARGOS") or a combined header with several labels. A first
+            // movement row such as "RETIRO CAJERO" sits within the y
+            // tolerance and used to pull the charges column far to the left.
+            let isBareLabel = labels.contains { compact == $0 || compact == $0 + ":" }
+            let headerCount = headerWords.filter { compact.contains($0) }.count
+            guard isBareLabel || headerCount >= 2 else { return nil }
             let utfLength = max(compact.utf16.count, 1)
             let matches = labels.compactMap { label -> CGFloat? in
                 guard let range = compact.range(of: label) else { return nil }
@@ -16931,7 +16973,9 @@ final class FinanceStore {
     private static func categoryRuleKey(_ value: String) -> String {
         value
             .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
-            .replacingOccurrences(of: #"(?i)\b(?:rfc|ref|referencia|aut)\s*[a-z0-9_-]+"#, with: " ", options: .regularExpression)
+            // Only real references ("REF 12345", "RFC: ABC123", "AUT/9981"): a
+            // bare prefix used to erase words such as AUTOZONE or REFORMA.
+            .replacingOccurrences(of: #"(?i)\b(?:rfc|ref|referencia|aut)(?:\s*[:#./_-]+\s*|\s+)[a-z0-9_-]*\d[a-z0-9_-]*"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\b\d{2,}\b"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)

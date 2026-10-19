@@ -1671,8 +1671,10 @@ private struct AccountSummaryRow: View {
         guard let balance = kind == .card ? metric?.debtBalance : metric?.cashBalance else {
             return statement?.requiresReview == true ? "Por revisar" : "Pendiente"
         }
-        let formatted = balance.formatted(.currency(code: "MXN").precision(.fractionLength(0)))
-        return kind == .card ? "−\(formatted)" : formatted
+        let formatted = abs(balance).formatted(.currency(code: "MXN").precision(.fractionLength(0)))
+        // A card with a credit balance used to read "−-$500".
+        if kind == .card { return balance < 0 ? "\(formatted) a favor" : "−\(formatted)" }
+        return balance.formatted(.currency(code: "MXN").precision(.fractionLength(0)))
     }
 
     private var detailText: String {
@@ -2439,6 +2441,13 @@ private struct AccountDetailView: View {
             Text(kind == .card ? "Deuda registrada al último corte." : "Efectivo disponible al último corte.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+            // The list row shows the newest statement ("Por revisar"); say
+            // why this screen still shows the previous reconciled balance.
+            if let newest = store.latestStatement(for: source, kind: kind, accountKey: accountKey), newest.id != latest?.id {
+                Text("El corte más reciente está por revisar; aquí ves el saldo del corte conciliado anterior.")
+                    .font(.caption)
+                    .foregroundStyle(Color.marcelitoAmber)
+            }
         }
     }
 
