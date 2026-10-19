@@ -82,6 +82,15 @@ struct SavingsGoalsView: View {
                         Text("~\(FinancePeriod.month(date).label) al ritmo observado · \(planningMoney(rate))/mes para esta meta").font(.caption)
                     } else if observed != nil { Text("El ritmo registrado aún no genera ahorro para esta meta.").font(.caption) }
                     else if let months = goal.estimatedMonths, let date = Calendar.current.date(byAdding: .month, value: months, to: .now) { Text("~\(FinancePeriod.month(date).label) si apartas \(planningMoney(goal.monthlyContribution))/mes").font(.caption) }
+                    if let deadline = goal.targetDate, let required = goal.requiredMonthly() {
+                        let onTrack = goal.monthlyContribution >= required
+                        Text(required == 0 ? "Meta cumplida" : "Para \(FinancePeriod.month(deadline).label): aparta \(planningMoney(required))/mes")
+                            .font(.caption.weight(.semibold))
+                        if required > 0 {
+                            Text(onTrack ? "Tu aportación de \(planningMoney(goal.monthlyContribution)) alcanza." : "Te faltan \(planningMoney(required - goal.monthlyContribution))/mes sobre tu aportación actual.")
+                                .font(.caption).foregroundStyle(onTrack ? Color.marcelitoSuccess : Color.marcelitoAmber)
+                        }
+                    }
                     CalculationHelp(explanation: "Fecha estimada con el ahorro observado en meses completos, repartido entre las aportaciones previstas de tus metas. Si falta historia se usa la aportación mensual configurada. No acredita dinero bancario ni supone rendimientos.")
                     HStack {
                         Button("Editar") { editing = goal }
@@ -96,6 +105,21 @@ struct SavingsGoalsView: View {
                 }
             }
             Button("Agregar meta") { editing = SavingsGoal(name: "", target: 0, saved: 0, monthlyContribution: 0) }
+            Section("Metas sugeridas") {
+                if let average = planning.ordinaryMonthlyAverage(store, before: .now), average > 0 {
+                    Button("Colchón de 3 meses · \(planningMoney(average * 3))") {
+                        editing = SavingsGoal(name: "Colchón de 3 meses", target: (average * 3).roundedPesos, saved: store.cashAvailable.map { max(0, $0) }?.roundedPesos ?? 0, monthlyContribution: 0,
+                            targetDate: Calendar.current.date(byAdding: .month, value: 12, to: .now))
+                    }
+                }
+                if let debt = store.loanLedger.debt(), debt > 0 {
+                    Button("Liquidar el préstamo ITAM · \(planningMoney(debt))") {
+                        editing = SavingsGoal(name: "Liquidar ITAM", target: debt.roundedPesos, saved: 0, monthlyContribution: 0,
+                            targetDate: Calendar.current.date(byAdding: .month, value: 24, to: .now))
+                    }
+                }
+                Text("Se llenan con tus datos: gasto ordinario de los últimos meses y deuda de hoy con la UDI oficial. Puedes cambiar el monto y la fecha.").font(.caption).foregroundStyle(.secondary)
+            }
             if planning.state.goals.contains(where: { $0.archived == true }) {
                 Section("Archivadas") {
                     ForEach(planning.state.goals.filter { $0.archived == true }) { goal in
@@ -117,6 +141,8 @@ struct SavingsGoalEditor: View {
     @State private var target = ""
     @State private var saved = ""
     @State private var monthly = ""
+    @State private var hasDeadline = false
+    @State private var deadline = Date.now
     @State private var error: String?
     var body: some View {
         NavigationStack {
@@ -125,9 +151,18 @@ struct SavingsGoalEditor: View {
                 TextField("Objetivo MXN", text: $target).keyboardType(.decimalPad)
                 TextField("Saldo registrado MXN", text: $saved).keyboardType(.decimalPad)
                 TextField("Aportación mensual MXN", text: $monthly).keyboardType(.decimalPad)
+                Toggle("Fecha límite", isOn: $hasDeadline)
+                if hasDeadline {
+                    DatePicker("Llegar antes de", selection: $deadline, in: Date.now..., displayedComponents: .date)
+                    if let target = parsePlanningAmount(target), let saved = parsePlanningAmount(saved) {
+                        let preview = SavingsGoal(name: name, target: target, saved: saved, monthlyContribution: 0, targetDate: deadline)
+                        if let required = preview.requiredMonthly() { Text("Necesitas apartar \(planningMoney(required)) al mes.").font(.caption) }
+                    }
+                }
                 Button("Guardar meta") {
                     guard let target = parsePlanningAmount(target), let saved = parsePlanningAmount(saved), let monthly = parsePlanningAmount(monthly) else { error = "Completa los importes."; return }
                     var updated = goal; updated.name = name; updated.target = target; updated.saved = saved; updated.monthlyContribution = monthly
+                    updated.targetDate = hasDeadline ? deadline : nil
                     if planning.saveGoal(updated) { dismiss() } else { error = "Revisa el nombre y el objetivo. No se pudo guardar." }
                 }
                 if planning.state.goals.contains(where: { $0.id == goal.id }) {
@@ -136,7 +171,7 @@ struct SavingsGoalEditor: View {
                 }
                 if let error { Text(error).foregroundStyle(Color.marcelitoDanger) }
             }.navigationTitle("Meta de ahorro").toolbar { Button("Cerrar") { dismiss() } }
-        }.onAppear { name = goal.name; target = NSDecimalNumber(decimal: goal.target).stringValue; saved = NSDecimalNumber(decimal: goal.saved).stringValue; monthly = NSDecimalNumber(decimal: goal.monthlyContribution).stringValue }
+        }.onAppear { name = goal.name; target = NSDecimalNumber(decimal: goal.target).stringValue; saved = NSDecimalNumber(decimal: goal.saved).stringValue; monthly = NSDecimalNumber(decimal: goal.monthlyContribution).stringValue; hasDeadline = goal.targetDate != nil; deadline = goal.targetDate ?? Calendar.current.date(byAdding: .month, value: 12, to: .now) ?? .now }
     }
 }
 struct SavingsContributionEditor: View {

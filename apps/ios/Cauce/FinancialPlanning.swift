@@ -114,6 +114,21 @@ struct SavingsGoal: Codable, Identifiable {
         guard monthlyContribution > 0 else { return nil }
         return Int(ceil(NSDecimalNumber(decimal: max(0, target - saved) / monthlyContribution).doubleValue))
     }
+    /// Optional deadline ("terminar el ITAM antes de junio").
+    var targetDate: Date? = nil
+    /// What has to be set aside each month, from this month through the
+    /// deadline's month, to reach the target on time.
+    func requiredMonthly(now: Date = .now, calendar: Calendar = .current) -> Decimal? {
+        guard let targetDate else { return nil }
+        let remaining = max(0, target - saved)
+        guard remaining > 0 else { return 0 }
+        let start = FinancePeriod.month(now).start
+        let months = (calendar.dateComponents([.month], from: start, to: FinancePeriod.month(targetDate).start).month ?? 0) + 1
+        guard months > 0 else { return remaining }
+        var value = remaining / Decimal(months), rounded = Decimal()
+        NSDecimalRound(&rounded, &value, 0, .up)
+        return rounded
+    }
 }
 struct CardPaymentTerms: Codable {
     var statementID: UUID? = nil

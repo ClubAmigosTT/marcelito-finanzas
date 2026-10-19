@@ -20,8 +20,33 @@ struct FinanceBackupView: View {
     @State private var payload: FinanceBackupPayload?
     @State private var confirmRestore = false
     @State private var message: String?
+    @State private var choosingAutoFolder = false
+    @State private var autoMessage: String?
+    @State private var autoRevision = 0
     var body: some View {
         Form {
+            Section {
+                let _ = autoRevision
+                if AutoBackup.isConfigured {
+                    LabeledContent("Carpeta", value: AutoBackup.folderName ?? "Elegida")
+                    LabeledContent("Último respaldo", value: AutoBackup.lastRun.map { planningDayLabel($0) } ?? "Pendiente")
+                    if let error = AutoBackup.lastError { Text(error).font(.caption).foregroundStyle(Color.marcelitoDanger) }
+                    Button("Respaldar ahora") {
+                        busy = true
+                        Task {
+                            planning.savePendingPlanChanges()
+                            let ok = await AutoBackup.runIfDue(force: true)
+                            autoMessage = ok ? "Respaldo guardado en \(AutoBackup.folderName ?? "la carpeta")." : (AutoBackup.lastError ?? "No se pudo guardar el respaldo.")
+                            autoRevision += 1; busy = false
+                        }
+                    }
+                    Button("Desactivar respaldo automático", role: .destructive) { AutoBackup.disable(); autoRevision += 1; autoMessage = nil }
+                } else {
+                    Text("Elige una carpeta de iCloud Drive (en Archivos) y Marcelito guardará ahí un respaldo cifrado una vez al día, más una copia por mes. Usa la contraseña de arriba; se guarda en el llavero de este iPhone.").font(.caption)
+                    Button("Elegir carpeta y activar") { choosingAutoFolder = true }.disabled(password.count < 12 || password != confirmation)
+                }
+                if let autoMessage { Text(autoMessage).font(.caption) }
+            } header: { Text("Respaldo automático") }
             Section("Respaldo completo") {
                 Text("Incluye estados, capturas, movimientos, clasificaciones, reglas, ingresos, presupuestos, metas y préstamos. No incluye tu acceso, datos biométricos ni claves de IA.").font(.subheadline)
                 SecureField("Contraseña · mínimo 12 caracteres", text: $password).textContentType(.newPassword)
@@ -53,6 +78,19 @@ struct FinanceBackupView: View {
                     } catch { message = error.localizedDescription }
                     busy = false
                 }
+            }
+            .fileImporter(isPresented: $choosingAutoFolder, allowedContentTypes: [.folder]) { result in
+                guard case .success(let folder) = result else { return }
+                do {
+                    try AutoBackup.configure(folder: folder, password: password)
+                    busy = true
+                    Task {
+                        planning.savePendingPlanChanges()
+                        let ok = await AutoBackup.runIfDue(force: true)
+                        autoMessage = ok ? "Respaldo automático activado en \(folder.lastPathComponent)." : (AutoBackup.lastError ?? "Se activó, pero el primer respaldo falló.")
+                        autoRevision += 1; busy = false
+                    }
+                } catch { autoMessage = error.localizedDescription }
             }
             .confirmationDialog("¿Restaurar el respaldo?", isPresented: $confirmRestore, titleVisibility: .visible) {
                 Button("Restaurar este respaldo", role: .destructive) { restore() }
