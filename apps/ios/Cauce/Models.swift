@@ -5006,6 +5006,21 @@ final class FinanceStore {
             movements[index].reconciliationReason = "Traspaso a tu nombre · falta contraparte cargada. No cuenta como gasto ni ingreso."
         }
 
+        // The owner's concept rules ("PAGO CUENTA DE TERCERO" is always to my
+        // own account) apply to every unreviewed row, including new imports.
+        let ownershipRules = transferOwnershipRules
+        if ownershipRules.values.contains("own") {
+            for index in movements.indices {
+                let movement = movements[index]
+                guard !movement.accountingReviewLocked, !consumed.contains(movement.id), movement.matchedMovementId == nil,
+                      isBankMovement(movement), ownershipRules[ownershipDescriptorKey(movement)] == "own" else { continue }
+                movements[index].flow = .transfer
+                movements[index].kind = .bankTransfer
+                movements[index].reconciliationConfidence = 90
+                movements[index].reconciliationReason = Self.ownershipRuleReason
+            }
+        }
+
         if !ambiguousRows.isEmpty {
             for index in movements.indices where ambiguousRows.contains(movements[index].id) && movements[index].reconciliationReason == nil {
                 movements[index].reconciliationConfidence = 0
@@ -5606,6 +5621,64 @@ final class FinanceStore {
         return (updated, skipped)
     }
 
+    static let transferOwnershipRulesKey = "marcelito.transfer.ownershipRules.v1"
+    private static let ownershipRuleReason = "Regla tuya: este concepto es traspaso entre tus cuentas · falta contraparte"
+
+    /// Concept-level answers to "¿fue a una cuenta tuya?" ("own" or "external").
+    var transferOwnershipRules: [String: String] {
+        UserDefaults.standard.dictionary(forKey: Self.transferOwnershipRulesKey) as? [String: String] ?? [:]
+    }
+
+    func ownershipDescriptorKey(_ movement: Movement) -> String {
+        let source = statementForMovement(movement)?.source ?? movement.account
+        return normalizedConcept(source) + "|" + normalizedConcept(movement.title)
+    }
+
+    /// Bank transfers of $1,000 or more that name no recipient ("PAGO CUENTA
+    /// DE TERCERO"): the statement alone cannot tell an own account from
+    /// someone else's, so the owner is asked once.
+    var pendingOwnershipReviews: [Movement] {
+        let rules = transferOwnershipRules
+        return eligibleMovements.filter { movement in
+            isBankMovement(movement) && absolute(movement.amount) >= 1000
+                && !movement.accountingReviewLocked && movement.matchedMovementId == nil && movement.flow != .transfer
+                && rules[ownershipDescriptorKey(movement)] == nil && isRecipientlessTransfer(movement)
+        }.sorted { $0.date > $1.date }
+    }
+
+    /// Only concepts that carry no counterparty at all. SPEI rows usually do
+    /// name one (a person, a concept like "CLUB AMIGOS"), even when the parser
+    /// cannot extract it, so asking about them would be noise.
+    private func isRecipientlessTransfer(_ movement: Movement) -> Bool {
+        normalizedConcept(movement.title).contains("cuenta de tercero")
+    }
+
+    /// Records the owner's answer for one movement and, optionally, for every
+    /// movement with the same concept (now and in future imports).
+    func resolveTransferOwnership(_ movement: Movement, ownAccount: Bool, applyToConcept: Bool) {
+        if applyToConcept {
+            var rules = transferOwnershipRules
+            rules[ownershipDescriptorKey(movement)] = ownAccount ? "own" : "external"
+            UserDefaults.standard.set(rules, forKey: Self.transferOwnershipRulesKey)
+        }
+        let kind: MovementKind = ownAccount ? .bankTransfer : (movement.amount < 0 ? .purchase : .income)
+        updateClassification(for: movement, kind: kind, travelRelated: movement.travelRelated)
+    }
+
+    func removeTransferOwnershipRule(_ key: String) {
+        var rules = transferOwnershipRules
+        rules.removeValue(forKey: key)
+        UserDefaults.standard.set(rules, forKey: Self.transferOwnershipRulesKey)
+        for index in movements.indices where movements[index].reconciliationReason == Self.ownershipRuleReason {
+            movements[index].reconciliationReason = nil
+            movements[index].reconciliationConfidence = nil
+            movements[index].flow = movements[index].amount > 0 ? .income : .expense
+            movements[index].kind = nil
+        }
+        normalizeStoredLedger()
+        persist(markingChange: true)
+    }
+
     var pendingTransferReviewPairs: [TransferReviewPair] {
         let rows = eligibleMovements.filter { $0.matchedMovementId == nil }
         let incoming = Dictionary(grouping: rows.filter {
@@ -6035,6 +6108,7 @@ final class FinanceStore {
         defaults.removeObject(forKey: Self.closedAccountsKey)
         closedAccountKeys = []
         defaults.removeObject(forKey: "marcelito.transfer.rejectedPairs.v1")
+        defaults.removeObject(forKey: Self.transferOwnershipRulesKey)
         LedgerStorage.remove(forKey: "marcelito.ledger.beforeTransferV2.v1")
         LedgerStorage.remove(forKey: "marcelito.manualReviews.beforeTransferV2.v1")
         LedgerStorage.remove(forKey: "marcelito.ledger.beforeDescriptorRepair.v1")

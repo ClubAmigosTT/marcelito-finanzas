@@ -57,7 +57,13 @@ struct LoanAccountsView: View {
                         }
                         Section {
                             Button("Guardar préstamo") {
-                                do { let added = try store.loanLedger.importStatement(draft.statement); notice = added ? "Préstamo guardado. Revisa sus abonos para vincularlos con el banco." : "Este estado ya estaba guardado. No se duplicaron cuotas ni abonos."; self.draft = nil }
+                                do {
+                                    let added = try store.loanLedger.importStatement(draft.statement)
+                                    let linked = store.autoLinkLoanPayments()
+                                    let linkedNote = linked > 0 ? " Se vincularon \(linked) abono(s) con tu banco." : ""
+                                    notice = (added ? "Préstamo guardado. Revisa sus abonos para vincularlos con el banco." : "Este estado ya estaba guardado. No se duplicaron cuotas ni abonos.") + linkedNote
+                                    self.draft = nil
+                                }
                                 catch { self.error = error.localizedDescription; self.draft = nil }
                             }.fontWeight(.semibold)
                         }

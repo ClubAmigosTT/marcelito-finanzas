@@ -188,7 +188,7 @@ struct MovementsView: View {
                 Section("Revisión financiera") {
                     CategoryUndoButton()
                     Button("Resumen mensual") { isMonthlyReviewPresented = true }
-                    Button("Revisar transferencias (\(store.pendingTransferReviewPairs.count) parejas)") { isTransferReviewPresented = true }
+                    Button("Revisar transferencias (\(store.pendingTransferReviewPairs.count + store.pendingOwnershipReviews.count))") { isTransferReviewPresented = true }
                 }
                 if filtered.isEmpty {
                     ContentUnavailableView("Sin movimientos", systemImage: "doc.text.magnifyingglass", description: Text(store.movements.isEmpty ? "Importa un estado de cuenta o agrega un movimiento manual." : "No hay movimientos con estos filtros. Prueba otro banco, mes o estado de cuenta."))

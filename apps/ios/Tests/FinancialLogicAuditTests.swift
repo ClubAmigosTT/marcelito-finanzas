@@ -1040,6 +1040,32 @@ final class FinancialLogicAuditTests: XCTestCase {
         }
     }
 
+    func testRecipientlessTransferAnswerBecomesAConceptRule() {
+        withStore { store in
+            let bbva = statement("BBVA", key: "bbva:4922", kind: .bank)
+            store.statements = [bbva]
+            var first = row(-2000, date: calendarDate(2026, 3, 1), title: "PAGO CUENTA DE TERCERO")
+            first.kind = nil; first.statementId = bbva.id
+            var second = row(-10000, date: calendarDate(2026, 3, 9), title: "PAGO CUENTA DE TERCERO")
+            second.kind = nil; second.statementId = bbva.id
+            var small = row(-300, date: calendarDate(2026, 3, 10), title: "PAGO CUENTA DE TERCERO")
+            small.kind = nil; small.statementId = bbva.id
+            store.movements = [first, second, small]
+            store.normalizeFinanceForTesting()
+            XCTAssertEqual(store.pendingOwnershipReviews.map(\.id), [second.id, first.id])
+            XCTAssertEqual(store.consolidatedRealSpend, 12300)
+
+            store.resolveTransferOwnership(store.movements.first { $0.id == first.id }!, ownAccount: true, applyToConcept: true)
+            XCTAssertTrue(store.pendingOwnershipReviews.isEmpty)
+            XCTAssertEqual(store.consolidatedRealSpend, 0)
+
+            let key = store.ownershipDescriptorKey(store.movements[0])
+            store.removeTransferOwnershipRule(key)
+            // The explicitly answered row keeps its answer; the others return.
+            XCTAssertEqual(store.consolidatedRealSpend, 10300)
+        }
+    }
+
     func testBankDepositLabelledAbonoIsIncomeNotAccountingCredit() {
         withStore { store in
             let bank = statement("BBVA", key: "bbva:1111", kind: .bank)

@@ -73,6 +73,38 @@ extension FinanceStore {
             && abs(Calendar.current.dateComponents([.day], from: row.date, to: receipt.date).day ?? 999) <= 5
         }.sorted { $0.date > $1.date }
     }
+    /// Links ITAM receipts to the bank charge that paid them without asking
+    /// when the match is unambiguous both ways: the receipt has exactly one
+    /// candidate charge (same total ±0.05 within five days), that charge fits
+    /// no other unlinked receipt, and its text names the institution. Then the
+    /// principal stops counting as spend and only the interest remains.
+    @discardableResult func autoLinkLoanPayments() -> Int {
+        guard loanLedger.loadError == nil else { return 0 }
+        var linked = 0
+        for account in loanLedger.state.accounts {
+            let receipts = loanLedger.receipts(account.id)
+            for receipt in receipts {
+                let linkedReceipts = Set(loanLedger.state.links.map(\.receiptID))
+                guard !linkedReceipts.contains(receipt.id) else { continue }
+                let candidates = loanBankCandidates(for: receipt).filter { Self.namesLoanInstitution($0) }
+                guard candidates.count == 1, let row = candidates.first else { continue }
+                let competing = receipts.contains { other in
+                    other.id != receipt.id && !linkedReceipts.contains(other.id)
+                        && loanBankCandidates(for: other).contains { $0.id == row.id }
+                }
+                guard !competing else { continue }
+                if (try? confirmLoanPayment(accountID: account.id, receipt: receipt, movement: row)) != nil { linked += 1 }
+            }
+        }
+        if linked > 0 {
+            DiagnosticsRecorder.record(stage: "loans.autolink", message: "\(linked) abono(s) del préstamo vinculados automáticamente con el banco.")
+        }
+        return linked
+    }
+    static func namesLoanInstitution(_ row: Movement) -> Bool {
+        let text = (row.title + " " + (row.rawDescription ?? "")).folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+        return text.range(of: #"\b(itam|instituto tecnolog|tecnologico autonomo|ayudas financieras)"#, options: .regularExpression) != nil
+    }
     func confirmLoanPayment(accountID: String, receipt: LoanReceipt, movement: Movement) throws {
         guard loanBankCandidates(for: receipt).contains(where: { $0.id == movement.id }) else { throw LoanError.invalid("El movimiento cambió o ya está vinculado. Revisa de nuevo el abono.") }
         try loanLedger.confirmLink(accountID: accountID, receipt: receipt, movementID: movement.id, identity: Self.loanBankIdentity(movement), amount: movement.amount)
