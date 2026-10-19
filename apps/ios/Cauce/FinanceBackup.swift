@@ -34,8 +34,12 @@ enum FinanceBackup {
     ]
     static func allowed(_ key: String) -> Bool { keys.contains(key) || key.hasPrefix("marcelito.monthlyPlan.") }
     static var support: URL { FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0] }
+    /// Large records (ledger, reviews, screenshots) are files; the backup keeps
+    /// carrying them as preference values so its format does not change.
+    static func ledgerStore(_ directory: URL) -> URL { directory.appendingPathComponent("MarcelitoLedgerStore", isDirectory: true) }
     static func capture(defaults: UserDefaults = .standard, directory: URL = support) throws -> FinanceBackupPayload {
-        let values = defaults.dictionaryRepresentation().filter { allowed($0.key) }
+        var values = defaults.dictionaryRepresentation().filter { allowed($0.key) }
+        for (key, data) in LedgerStorage.allValues(directory: ledgerStore(directory)) where allowed(key) { values[key] = data }
         let preferences = try PropertyListSerialization.data(fromPropertyList: values, format: .binary, options: 0)
         var files: [String: Data] = [:]; var bytes = 0
         for folder in folders {
@@ -111,7 +115,16 @@ enum FinanceBackup {
             catch { if fm.fileExists(atPath: old.path) { try? fm.moveItem(at: old, to: target) }; throw error }
         }
         for key in defaults.dictionaryRepresentation().keys where allowed(key) { defaults.removeObject(forKey: key) }
-        for (key, value) in prefs { defaults.set(value, forKey: key) }
+        for key in LedgerStorage.allValues(directory: ledgerStore(directory)).keys where allowed(key) {
+            LedgerStorage.remove(forKey: key, defaults: defaults, directory: ledgerStore(directory))
+        }
+        for (key, value) in prefs {
+            if LedgerStorage.isFileKey(key), let data = value as? Data {
+                LedgerStorage.set(data, forKey: key, defaults: defaults, directory: ledgerStore(directory))
+            } else {
+                defaults.set(value, forKey: key)
+            }
+        }
         defaults.removeObject(forKey: "marcelito.categoryUndo.v1")
         defaults.synchronize()
     }
