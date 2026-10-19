@@ -339,3 +339,115 @@ struct NewStatementBanner: View {
         }
     }
 }
+
+/// Every pending action in one place on Inicio instead of loose rows under
+/// "Próximos pagos".
+struct HomePendingCard: View {
+    let store: FinanceStore
+    let upload: () -> Void
+    var body: some View {
+        let hasItems = store.ledgerQuality.reviewMovementCount > 0 || store.dashboardIsBlocked || store.operationalMetricsBlocked
+            || !store.accountsAwaitingNewStatement.isEmpty || !store.pendingOwnershipReviews.isEmpty || !store.unusualCharges().isEmpty
+        if hasItems {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Pendientes").font(.headline).padding(.leading, 10)
+                LedgerQualityBanner(store: store)
+                NewStatementBanner(store: store, upload: upload)
+                OwnershipReviewBanner(store: store)
+                UnusualChargesBanner(store: store)
+            }
+            .padding(.vertical, 8)
+            .marcelitoCard(fill: Color.marcelitoCreamSoft.opacity(0.75), radius: 16, padding: 6)
+        }
+    }
+}
+
+struct UnusualChargesBanner: View {
+    let store: FinanceStore
+    @State private var showList = false
+    var body: some View {
+        let charges = store.unusualCharges()
+        if !charges.isEmpty {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.magnifyingglass").foregroundStyle(Color.marcelitoAmber)
+                Text(charges.count == 1 ? "1 cargo raro por revisar" : "\(charges.count) cargos raros por revisar").font(.caption)
+                Spacer(minLength: 4)
+                Button("Ver") { showList = true }.font(.caption.weight(.semibold))
+            }
+            .padding(10)
+            .foregroundStyle(Color.marcelitoNavy)
+            .sheet(isPresented: $showList) { UnusualChargesView() }
+        }
+    }
+}
+
+struct UnusualChargesView: View {
+    @Environment(FinanceStore.self) private var store
+    @Environment(\.dismiss) private var dismiss
+    @State private var revision = 0
+    var body: some View {
+        NavigationStack {
+            List {
+                let _ = revision
+                let charges = store.unusualCharges()
+                if charges.isEmpty {
+                    ContentUnavailableView("Sin cargos raros", systemImage: "checkmark.circle", description: Text("No hay duplicados, aumentos de precio ni comisiones nuevas en los últimos 60 días."))
+                }
+                ForEach(charges) { charge in
+                    Section(charge.kind == .duplicate ? "Posible duplicado" : charge.kind == .priceIncrease ? "Subió de precio" : "Comisión nueva") {
+                        FinancialReviewRow(movement: charge.movement)
+                        Text(charge.message).font(.caption).foregroundStyle(.secondary)
+                        Button("Está bien, no avisar otra vez") { store.dismissUnusualCharge(charge); revision += 1 }.font(.caption)
+                    }
+                }
+            }
+            .navigationTitle("Cargos raros")
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Cerrar") { dismiss() } } }
+            .scrollContentBackground(.hidden)
+            .background(MarcelitoAmbientBackground())
+            .foregroundStyle(Color.marcelitoNavy)
+        }
+    }
+}
+
+/// "A este ritmo terminarás octubre gastando $X" and, in the first ten days
+/// of a month, the previous month's summary.
+struct HomeInsightsCard: View {
+    let store: FinanceStore
+    let planning: FinancialPlanningStore
+    var body: some View {
+        let projection = planning.monthEndProjection(store)
+        let previousMonth = Calendar.current.date(byAdding: .month, value: -1, to: .now) ?? .now
+        let summary = Calendar.current.component(.day, from: .now) <= 10 ? planning.monthlySummary(store, month: previousMonth) : nil
+        if projection != nil || summary != nil {
+            VStack(alignment: .leading, spacing: 12) {
+                if let projection {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("A este ritmo terminarás \(monthName(projection.month.start)) gastando").font(.caption).foregroundStyle(.secondary)
+                        Text(planningMoney(projection.projected)).font(.title2.bold()).monospacedDigit()
+                        if let budget = projection.budget {
+                            let difference = projection.projected - budget
+                            Text(difference > 0 ? "\(planningMoney(difference)) arriba de tu presupuesto de \(planningMoney(budget))" : "\(planningMoney(-difference)) debajo de tu presupuesto de \(planningMoney(budget))")
+                                .font(.caption).foregroundStyle(difference > 0 ? Color.marcelitoAmber : Color.marcelitoSuccess)
+                        }
+                        Text("Con \(planningMoney(projection.spent)) en \(projection.observedDays) de \(projection.daysInMonth) días con datos").font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                if let summary {
+                    if projection != nil { Divider().opacity(0.5) }
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Resumen de \(monthName(summary.month.start))").font(.headline)
+                        LabeledContent("Ingreso", value: planningMoney(summary.income))
+                        LabeledContent("Gasto", value: planningMoney(summary.spend))
+                        LabeledContent(summary.saving >= 0 ? "Ahorro" : "Déficit", value: planningMoney(abs(summary.saving)))
+                        ForEach(summary.changes, id: \.category) { change in
+                            Text("\(change.category): \(change.change > 0 ? "+" : "−")\(planningMoney(abs(change.change))) vs el mes anterior").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }.font(.subheadline)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .marcelitoCard(fill: Color.marcelitoCreamSoft.opacity(0.75), radius: 16, padding: 14)
+        }
+    }
+}

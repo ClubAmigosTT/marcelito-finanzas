@@ -88,6 +88,29 @@ enum PlanningNotifications {
             var components = c.dateComponents([.year, .month, .day], from: date); components.hour = 9
             try? await center.add(UNNotificationRequest(identifier: prefix + id, content: content, trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false)))
         }
+        // Day 1, 09:00: the previous month's summary is ready on Inicio.
+        if let nextMonth = c.date(byAdding: .month, value: 1, to: FinancePeriod.month(.now).start) {
+            var components = c.dateComponents([.year, .month, .day], from: nextMonth)
+            components.hour = 9
+            let content = UNMutableNotificationContent()
+            content.title = "Tu resumen de \(monthName(.now)) está listo"
+            content.body = "Ingreso, gasto, ahorro y las 3 categorías que más cambiaron. Ábrelo en Inicio."
+            content.sound = .default; content.userInfo = ["destination": "home"]
+            try? await center.add(UNNotificationRequest(identifier: prefix + "summary." + planning.monthKey(nextMonth), content: content,
+                trigger: UNCalendarNotificationTrigger(dateMatching: components, repeats: false)))
+        }
+        // New unusual charges: one notification per batch, never repeated.
+        let unseen = store.unusualCharges().filter { !UserDefaults.standard.bool(forKey: prefix + "unusual." + $0.id + ".sent") }
+        if let first = unseen.first {
+            let content = UNMutableNotificationContent()
+            content.title = unseen.count == 1 ? "Un cargo para revisar" : "\(unseen.count) cargos para revisar"
+            content.body = unseen.count == 1 ? "\(first.movement.title): \(first.message)" : "Posibles duplicados, aumentos de precio o comisiones nuevas. Revísalos en Inicio."
+            content.sound = .default; content.userInfo = ["destination": "home"]
+            do {
+                try await center.add(UNNotificationRequest(identifier: prefix + "unusual." + first.id, content: content, trigger: UNTimeIntervalNotificationTrigger(timeInterval: 2, repeats: false)))
+                for charge in unseen { UserDefaults.standard.set(true, forKey: prefix + "unusual." + charge.id + ".sent") }
+            } catch { /* retry on the next refresh */ }
+        }
         let limits = planning.limits(store, month: .now)
         let actual = planning.budgetCategoryTotals(store, period: .month(.now), fixed: false)
         guard c.component(.day, from: .now) < 20 else { return }

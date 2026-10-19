@@ -69,7 +69,12 @@ struct RootTabView: View {
         }
         // Runs on every unlock; separate so a slow network never delays the
         // ledger replay or notification refresh above.
-        .task { await store.loanLedger.refreshOfficialQuotes() }
+        .task {
+            await store.loanLedger.refreshOfficialQuotes()
+            // At most once every ~20 hours, only when the user activated it.
+            planning.savePendingPlanChanges()
+            await AutoBackup.runIfDue()
+        }
         .onChange(of: scenePhase) { _, phase in if phase != .active { planning.savePendingPlanChanges() } }
         .task(id: store.ledgerVersion) {
             // New bank rows can complete an ITAM payment match.
@@ -85,6 +90,7 @@ struct RootTabView: View {
     private func routeNotification() {
         guard let destination = UserDefaults.standard.string(forKey: "marcelito.navigation.pending") else { return }
         UserDefaults.standard.removeObject(forKey: "marcelito.navigation.pending")
+        if destination == "home" { selectedTab = .summary; return }
         if destination == "accounts" { selectedTab = .accounts }
         else if destination == "budget" { selectedTab = .budget }
         else { showIncomeOnboarding = false; showPayments = true }
@@ -131,10 +137,11 @@ struct HomeView: View {
                 })
                 PlanningDataFreshness { isImporterPresented = true }
                 PlanningAccountCoverage(period: .month(.now))
-                NavigationLink("Próximos pagos") { PaymentAgendaView() }
-                LedgerQualityBanner(store: store)
-                NewStatementBanner(store: store) { isImporterPresented = true }
-                OwnershipReviewBanner(store: store)
+                HomePendingCard(store: store) { isImporterPresented = true }
+                HomeInsightsCard(store: store, planning: planning)
+                NavigationLink { PaymentAgendaView() } label: {
+                    HStack { Label("Próximos pagos", systemImage: "calendar"); Spacer(); Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary) }
+                }.font(.subheadline.weight(.semibold))
                 HomePersonalMetrics(showActivity: false)
                 if store.dashboardIsBlocked || store.operationalMetricsBlocked {
                     HistoricalDashboardBlockedCard(store: store)
@@ -250,6 +257,7 @@ struct HomeView: View {
                     planning.clearLocalData()
                     Task { await PlanningNotifications.refresh(store: store, planning: planning) }
                     auth.deleteAccount()
+                    AutoBackup.disable()
                 }
                 Button("Cancelar", role: .cancel) { }
             } message: {

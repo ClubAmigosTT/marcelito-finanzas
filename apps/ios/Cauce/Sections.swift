@@ -188,6 +188,11 @@ struct MovementsView: View {
                 Section("Revisión financiera") {
                     CategoryUndoButton()
                     Button("Resumen mensual") { isMonthlyReviewPresented = true }
+                    ShareLink(item: MovementsCSVFile(rows: filtered, statements: store.statements, fileName: "Marcelito-movimientos-" + LoanMath.dayKey(.now) + ".csv"),
+                              preview: SharePreview("Movimientos (\(filtered.count)) · CSV")) {
+                        Label("Exportar a Excel (CSV)", systemImage: "square.and.arrow.up")
+                    }
+                    .disabled(filtered.isEmpty)
                     Button("Revisar transferencias (\(store.pendingTransferReviewPairs.count + store.pendingOwnershipReviews.count))") { isTransferReviewPresented = true }
                 }
                 if filtered.isEmpty {
