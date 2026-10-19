@@ -3926,7 +3926,12 @@ final class FinanceStore {
     }
 
     private func ownerAliasMentioned(in text: String) -> Bool {
-        let normalized = normalizedConcept(text)
+        // Bank text glues references to names ("0811250Marcelo Andres Diaz");
+        // split digit/letter runs so the alias can match as whole words.
+        let separated = text.replacingOccurrences(
+            of: #"(?<=[0-9])(?=[A-Za-zÁÉÍÓÚÜÑáéíóúüñ])|(?<=[A-Za-zÁÉÍÓÚÜÑáéíóúüñ])(?=[0-9])"#,
+            with: " ", options: .regularExpression)
+        let normalized = normalizedConcept(separated)
         return transferOwnerAliases
             .map(normalizedConcept)
             .filter { $0.split(separator: " ").count >= 2 }
@@ -4451,6 +4456,43 @@ final class FinanceStore {
             }
         }
 
+        // Other issuers (RappiCard) can also reissue the account under a new
+        // masked number without a family fingerprint. Treat the new number as
+        // the same credit line only on balance continuity: the next cycle starts
+        // the day after the previous one ends, opens with exactly the previous
+        // closing balance, and the old number has no statement from then on.
+        // Otherwise both numbers stay separate accounts.
+        let reissueCandidates = statements.indices.filter { index in
+            let statement = statements[index]
+            let isAmex = statement.source.localizedCaseInsensitiveCompare("Amex") == .orderedSame
+                || statement.source.localizedCaseInsensitiveCompare("American Express") == .orderedSame
+            return !isAmex && statementKind(statement) == .card && statement.accountKey != nil
+                && statementRange(from: statement.period) != nil
+        }
+        for indexes in Dictionary(grouping: reissueCandidates, by: { sourceScope(statements[$0]) }).values {
+            let ordered = indexes.sorted {
+                statementRange(from: statements[$0].period)!.lowerBound < statementRange(from: statements[$1].period)!.lowerBound
+            }
+            for (previousIndex, nextIndex) in zip(ordered, ordered.dropFirst()) {
+                let previous = statements[previousIndex], next = statements[nextIndex]
+                guard let oldKey = previous.accountKey, let newKey = next.accountKey, oldKey != newKey,
+                      adjacentStatementPeriods(previous, next),
+                      let closing = previous.summary?.statementBalance ?? previous.summary?.debtBalance,
+                      let opening = next.summary?.previousBalance,
+                      absolute(closing - opening) < Decimal(string: "0.005")!,
+                      let nextStart = statementRange(from: next.period)?.lowerBound else { continue }
+                let oldKeyContinues = statements.contains { statement in
+                    statement.accountKey == oldKey && sourceScope(statement) == sourceScope(next)
+                        && (statementRange(from: statement.period)?.lowerBound ?? .distantPast) >= nextStart
+                }
+                guard !oldKeyContinues else { continue }
+                for index in statements.indices where statements[index].accountKey == newKey && sourceScope(statements[index]) == sourceScope(next) {
+                    statements[index].accountKey = oldKey
+                    changed = true
+                }
+            }
+        }
+
         let identified = statements.filter { $0.accountKey != nil }
         let groups = Dictionary(grouping: identified) { statement in
             "\(sourceScope(statement))|\(statement.accountKey!)|\(statementPeriodIdentity(statement.period))"
@@ -4797,6 +4839,76 @@ final class FinanceStore {
             }
         }
 
+        // Several same-amount payments to one card on nearby days (1,000 on
+        // the 16th, 17th and 20th from the bank; 1,000 credited on the 16th,
+        // 17th and 18th) all have more than one compatible partner, so the
+        // unique-pair rule above rejected every one and each payment counted
+        // as spend on top of the card's purchases. Such payments are
+        // interchangeable: when a connected group has as many bank payments as
+        // card credits, pairing them in date order gives the same totals as
+        // any other pairing. Unequal groups stay unmatched for review, since a
+        // surplus bank row may be a real purchase.
+        let fundingRows = movements.indices.filter { index in
+            let bank = movements[index]
+            return canAutomaticallyMatch(bank, kind: .cardPayment) && !consumed.contains(bank.id) && isBankMovement(bank) && isOutflow(bank)
+        }
+        var cardEdges: [Int: [Int]] = [:]
+        var bankEdges: [Int: [Int]] = [:]
+        for bankIndex in fundingRows {
+            for cardIndex in movements.indices where !consumed.contains(movements[cardIndex].id)
+                && canAutomaticallyMatch(movements[cardIndex], kind: .cardPayment)
+                && compatibleCardPayment(movements[bankIndex], movements[cardIndex], destinations: destinations) {
+                bankEdges[bankIndex, default: []].append(cardIndex)
+                cardEdges[cardIndex, default: []].append(bankIndex)
+            }
+        }
+        var visitedBanks = Set<Int>()
+        for start in bankEdges.keys.sorted() where !visitedBanks.contains(start) {
+            var banks = Set<Int>(), cards = Set<Int>(), queue = [start]
+            while let bankIndex = queue.popLast() {
+                guard banks.insert(bankIndex).inserted else { continue }
+                for cardIndex in bankEdges[bankIndex] ?? [] where cards.insert(cardIndex).inserted {
+                    queue.append(contentsOf: cardEdges[cardIndex] ?? [])
+                }
+            }
+            visitedBanks.formUnion(banks)
+            // Extra card credits are fine (payments from accounts that are not
+            // imported); extra bank rows are not, one of them may be a purchase.
+            // A single bank payment with several possible receipts stays a
+            // pending pair for the user to confirm.
+            guard banks.count >= 2, banks.count <= cards.count else { continue }
+            var available = Set(cards)
+            var pairs: [(Int, Int)] = []
+            for bankIndex in banks.sorted(by: { movements[$0].date < movements[$1].date }) {
+                let options = (bankEdges[bankIndex] ?? []).filter { available.contains($0) }
+                guard let best = options.min(by: { left, right in
+                    let leftGap = abs(movements[left].date.timeIntervalSince(movements[bankIndex].date))
+                    let rightGap = abs(movements[right].date.timeIntervalSince(movements[bankIndex].date))
+                    return leftGap == rightGap ? movements[left].date < movements[right].date : leftGap < rightGap
+                }) else { pairs.removeAll(); break }
+                available.remove(best)
+                pairs.append((bankIndex, best))
+            }
+            guard pairs.count == banks.count else { continue }
+            for (bankIndex, cardIndex) in pairs {
+                let reason = "Pago de tarjeta · importe exacto · pagos equivalentes emparejados por fecha"
+                movements[bankIndex].flow = .transfer
+                movements[bankIndex].kind = .cardPayment
+                if !movements[bankIndex].manuallyReviewed { movements[bankIndex].category = "Transferencia" }
+                movements[bankIndex].matchedMovementId = movements[cardIndex].id
+                movements[bankIndex].reconciliationConfidence = 95
+                movements[bankIndex].reconciliationReason = reason
+                movements[cardIndex].flow = .transfer
+                movements[cardIndex].kind = .cardPayment
+                if !movements[cardIndex].manuallyReviewed { movements[cardIndex].category = "Transferencia" }
+                movements[cardIndex].matchedMovementId = movements[bankIndex].id
+                movements[cardIndex].reconciliationConfidence = 95
+                movements[cardIndex].reconciliationReason = reason
+                consumed.insert(movements[bankIndex].id)
+                consumed.insert(movements[cardIndex].id)
+            }
+        }
+
         var scoredCandidates: [ScoredTransferCandidate] = []
         var ambiguousRows = Set<UUID>()
         for outflowIndex in movements.indices {
@@ -4879,7 +4991,10 @@ final class FinanceStore {
             guard !movement.accountingReviewLocked, !consumed.contains(movement.id),
                   isBankMovement(movement),
                   hasTransferHint(movement),
-                  ownerAliasMentioned(in: transferDescriptor(movement)),
+                  // OCR can split the name inside the long bank description
+                  // ("MARCELO ANDRES DIAZ 1,000.00 29,320.83 SANC") while the
+                  // row title keeps it whole; either is enough.
+                  ownerAliasMentioned(in: transferDescriptor(movement)) || ownerAliasMentioned(in: movement.title),
                   // Funding the owner's own card (STP to RappiCard, Amex) is
                   // only excluded once the card's purchases are in the ledger;
                   // the card-payment matcher handles that case.
@@ -5018,7 +5133,7 @@ final class FinanceStore {
         manualDashboardUnlockEnabled = false
         defaults.removeObject(forKey: manualDashboardUnlockKey)
         var loadedAtomicEnvelope = false
-        if let data = defaults.data(forKey: ledgerEnvelopeKey),
+        if let data = LedgerStorage.data(forKey: ledgerEnvelopeKey),
            let envelope = try? JSONDecoder().decode(LedgerEnvelope.self, from: data),
            envelope.schemaVersion == ledgerSchemaVersion {
             movements = envelope.movements
@@ -5028,13 +5143,13 @@ final class FinanceStore {
         } else {
             // One-time compatibility path for versions that stored the two
             // arrays separately. The next persist() writes the atomic envelope.
-            if let data = defaults.data(forKey: movementKey),
+            if let data = LedgerStorage.data(forKey: movementKey),
                let saved = try? JSONDecoder().decode([Movement].self, from: data) {
                 movements = saved
             } else {
                 movements = []
             }
-            if let data = defaults.data(forKey: statementKey),
+            if let data = LedgerStorage.data(forKey: statementKey),
                let saved = try? JSONDecoder().decode([StatementRecord].self, from: data) {
                 statements = saved
             } else {
@@ -5042,31 +5157,31 @@ final class FinanceStore {
             }
             ledgerVersion = UUID()
         }
-        screenshotCaptures = defaults.data(forKey: bankScreenshotCaptureStorageKey)
+        screenshotCaptures = LedgerStorage.data(forKey: bankScreenshotCaptureStorageKey)
             .flatMap { try? JSONDecoder().decode([BankScreenshotCapture].self, from: $0) }
             ?? []
         lastAuditRun = defaults.data(forKey: auditRunKey).flatMap { try? JSONDecoder().decode(LedgerAuditRun.self, from: $0) }
         lastImportedFile = defaults.string(forKey: importKey)
         // Keep a recoverable snapshot before any new matcher/normalization runs.
         let transferBackupKey = "marcelito.ledger.beforeTransferV2.v1"
-        if !movements.isEmpty, defaults.data(forKey: transferBackupKey) == nil,
+        if !movements.isEmpty, LedgerStorage.data(forKey: transferBackupKey) == nil,
            let backup = try? JSONEncoder().encode(currentEnvelope()) {
-            defaults.set(backup, forKey: transferBackupKey)
-            defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeTransferV2.v1")
+            LedgerStorage.set(backup, forKey: transferBackupKey)
+            LedgerStorage.set(LedgerStorage.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeTransferV2.v1")
         }
 
         let independentLinkBackupKey = "marcelito.ledger.beforeTransferV3.v1"
-        if !movements.isEmpty, defaults.data(forKey: independentLinkBackupKey) == nil,
+        if !movements.isEmpty, LedgerStorage.data(forKey: independentLinkBackupKey) == nil,
            let backup = try? JSONEncoder().encode(currentEnvelope()) {
-            defaults.set(backup, forKey: independentLinkBackupKey)
-            defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeTransferV3.v1")
+            LedgerStorage.set(backup, forKey: independentLinkBackupKey)
+            LedgerStorage.set(LedgerStorage.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeTransferV3.v1")
         }
 
         let paymentBackupKey = "marcelito.ledger.beforeCardPaymentsV4.v1"
-        if !movements.isEmpty, defaults.data(forKey: paymentBackupKey) == nil,
+        if !movements.isEmpty, LedgerStorage.data(forKey: paymentBackupKey) == nil,
            let backup = try? JSONEncoder().encode(currentEnvelope()) {
-            defaults.set(backup, forKey: paymentBackupKey)
-            defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeCardPaymentsV4.v1")
+            LedgerStorage.set(backup, forKey: paymentBackupKey)
+            LedgerStorage.set(LedgerStorage.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeCardPaymentsV4.v1")
         }
 
         // A prior reader could miss the masked account number when BBVA put
@@ -5225,7 +5340,7 @@ final class FinanceStore {
         let defaults = UserDefaults.standard
         guard (defaults.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]) == record.expectedRules,
               (defaults.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]) == record.expectedOverrides,
-              defaults.data(forKey: "marcelito.manualReviews.v1") == record.expectedReviews else { return false }
+              LedgerStorage.data(forKey: "marcelito.manualReviews.v1") == record.expectedReviews else { return false }
         let current = Dictionary(movements.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         for expected in record.expectedRows {
             guard let row = current[expected.id], row.category == expected.category,
@@ -5246,8 +5361,8 @@ final class FinanceStore {
         }
         defaults.set(record.rules, forKey: categoryRulesKey)
         defaults.set(record.overrides, forKey: manualCategoryOverridesKey)
-        if let reviews = record.reviews { defaults.set(reviews, forKey: "marcelito.manualReviews.v1") }
-        else { defaults.removeObject(forKey: "marcelito.manualReviews.v1") }
+        if let reviews = record.reviews { LedgerStorage.set(reviews, forKey: "marcelito.manualReviews.v1") }
+        else { LedgerStorage.remove(forKey: "marcelito.manualReviews.v1") }
         persist(markingChange: true)
         categoryUndoCache = nil; defaults.removeObject(forKey: "marcelito.categoryUndo.v1")
         return true
@@ -5258,7 +5373,7 @@ final class FinanceStore {
         let beforeRows = movements
         let beforeRules = UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:]
         let beforeOverrides = UserDefaults.standard.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:]
-        let beforeReviews = UserDefaults.standard.data(forKey: "marcelito.manualReviews.v1")
+        let beforeReviews = LedgerStorage.data(forKey: "marcelito.manualReviews.v1")
         let key = categoryRuleKey(for: movements[index])
         func apply(_ targetIndex: Int, manuallyReviewed: Bool) {
             let title = movements[targetIndex].normalizedMerchant ?? movements[targetIndex].displayMerchant ?? movements[targetIndex].title
@@ -5330,7 +5445,7 @@ final class FinanceStore {
                 expectedRows: movements.filter { changedIDs.contains($0.id) },
                 expectedRules: UserDefaults.standard.dictionary(forKey: categoryRulesKey) as? [String: String] ?? [:],
                 expectedOverrides: UserDefaults.standard.dictionary(forKey: manualCategoryOverridesKey) as? [String: String] ?? [:],
-                expectedReviews: UserDefaults.standard.data(forKey: "marcelito.manualReviews.v1"))
+                expectedReviews: LedgerStorage.data(forKey: "marcelito.manualReviews.v1"))
             if let data = try? JSONEncoder().encode(record) { UserDefaults.standard.set(data, forKey: "marcelito.categoryUndo.v1"); categoryUndoCache = record }
         }
         DiagnosticsRecorder.record(
@@ -5431,10 +5546,10 @@ final class FinanceStore {
         isRepairingPaymentDescriptions = true
         defer { isRepairingPaymentDescriptions = false; paymentDescriptionRepairProgress = nil }
         let defaults = UserDefaults.standard
-        if defaults.data(forKey: "marcelito.ledger.beforeDescriptorRepair.v1") == nil,
+        if LedgerStorage.data(forKey: "marcelito.ledger.beforeDescriptorRepair.v1") == nil,
            let backup = try? JSONEncoder().encode(currentEnvelope()) {
-            defaults.set(backup, forKey: "marcelito.ledger.beforeDescriptorRepair.v1")
-            defaults.set(defaults.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeDescriptorRepair.v1")
+            LedgerStorage.set(backup, forKey: "marcelito.ledger.beforeDescriptorRepair.v1")
+            LedgerStorage.set(LedgerStorage.data(forKey: "marcelito.manualReviews.v1"), forKey: "marcelito.manualReviews.beforeDescriptorRepair.v1")
         }
         let sources = statements.filter { isEligibleStatement($0) && ["BBVA", "Santander"].contains($0.source) }
         var descriptors: [UUID: (text: String, date: Date, amount: Decimal, page: Int?, statementID: UUID?, fingerprint: String?)] = [:]
@@ -5748,7 +5863,7 @@ final class FinanceStore {
 
     private func restoreManualReviews() {
         guard !isReconciliationOnly,
-              let data = UserDefaults.standard.data(forKey: "marcelito.manualReviews.v1"),
+              let data = LedgerStorage.data(forKey: "marcelito.manualReviews.v1"),
               let saved = try? JSONDecoder().decode([String: Movement].self, from: data) else { return }
         let counts = Dictionary(grouping: movements, by: manualReviewKey).mapValues(\.count)
         func financialKey(_ movement: Movement) -> String {
@@ -5897,7 +6012,7 @@ final class FinanceStore {
     func clearLocalData() {
         ledgerResetGeneration += 1
         loanLedger.clear()
-        UserDefaults.standard.removeObject(forKey: "marcelito.manualReviews.v1")
+        LedgerStorage.remove(forKey: "marcelito.manualReviews.v1")
         movements = []
         statements = []
         screenshotCaptures = []
@@ -5911,8 +6026,8 @@ final class FinanceStore {
         categoryUndoCache = nil
         UserDefaults.standard.removeObject(forKey: "marcelito.categoryUndo.v1")
         let defaults = UserDefaults.standard
-        defaults.removeObject(forKey: movementKey)
-        defaults.removeObject(forKey: statementKey)
+        LedgerStorage.remove(forKey: movementKey)
+        LedgerStorage.remove(forKey: statementKey)
         defaults.removeObject(forKey: importKey)
         defaults.removeObject(forKey: categoryRulesKey)
         defaults.removeObject(forKey: transferOwnerAliasesKey)
@@ -5920,14 +6035,14 @@ final class FinanceStore {
         defaults.removeObject(forKey: Self.closedAccountsKey)
         closedAccountKeys = []
         defaults.removeObject(forKey: "marcelito.transfer.rejectedPairs.v1")
-        defaults.removeObject(forKey: "marcelito.ledger.beforeTransferV2.v1")
-        defaults.removeObject(forKey: "marcelito.manualReviews.beforeTransferV2.v1")
-        defaults.removeObject(forKey: "marcelito.ledger.beforeDescriptorRepair.v1")
-        defaults.removeObject(forKey: "marcelito.manualReviews.beforeDescriptorRepair.v1")
-        defaults.removeObject(forKey: "marcelito.ledger.beforeCardPaymentsV4.v1")
-        defaults.removeObject(forKey: "marcelito.manualReviews.beforeCardPaymentsV4.v1")
-        defaults.removeObject(forKey: "marcelito.ledger.beforeTransferV3.v1")
-        defaults.removeObject(forKey: "marcelito.manualReviews.beforeTransferV3.v1")
+        LedgerStorage.remove(forKey: "marcelito.ledger.beforeTransferV2.v1")
+        LedgerStorage.remove(forKey: "marcelito.manualReviews.beforeTransferV2.v1")
+        LedgerStorage.remove(forKey: "marcelito.ledger.beforeDescriptorRepair.v1")
+        LedgerStorage.remove(forKey: "marcelito.manualReviews.beforeDescriptorRepair.v1")
+        LedgerStorage.remove(forKey: "marcelito.ledger.beforeCardPaymentsV4.v1")
+        LedgerStorage.remove(forKey: "marcelito.manualReviews.beforeCardPaymentsV4.v1")
+        LedgerStorage.remove(forKey: "marcelito.ledger.beforeTransferV3.v1")
+        LedgerStorage.remove(forKey: "marcelito.manualReviews.beforeTransferV3.v1")
         defaults.removeObject(forKey: manualCategoryOverridesKey)
         defaults.removeObject(forKey: categoryTaxonomyVersionKey)
         defaults.removeObject(forKey: numericRepairKey)
@@ -5936,12 +6051,12 @@ final class FinanceStore {
         defaults.removeObject(forKey: canonicalRebuildExpectedCountKey)
         defaults.removeObject(forKey: Self.extractionReplayVersionKey)
         defaults.removeObject(forKey: Self.normalizedLedgerReaderVersionKey)
-        defaults.removeObject(forKey: ledgerEnvelopeKey)
-        defaults.removeObject(forKey: ledgerBackupKey)
+        LedgerStorage.remove(forKey: ledgerEnvelopeKey)
+        LedgerStorage.remove(forKey: ledgerBackupKey)
         defaults.removeObject(forKey: rebuildStateKey)
         defaults.removeObject(forKey: auditRunKey)
         defaults.removeObject(forKey: manualDashboardUnlockKey)
-        defaults.removeObject(forKey: bankScreenshotCaptureStorageKey)
+        LedgerStorage.remove(forKey: bankScreenshotCaptureStorageKey)
         try? FileManager.default.removeItem(at: statementFilesDirectoryURL)
         try? FileManager.default.removeItem(at: bankScreenshotFilesDirectoryURL)
         if let directory = try? LoanPDFReader.directory() { try? FileManager.default.removeItem(at: directory) }
@@ -6022,10 +6137,10 @@ final class FinanceStore {
     private func recoverInterruptedRebuildIfNeeded() {
         let defaults = UserDefaults.standard
         guard defaults.string(forKey: rebuildStateKey) == "inProgress",
-              let data = defaults.data(forKey: ledgerBackupKey),
+              let data = LedgerStorage.data(forKey: ledgerBackupKey),
               let backup = try? JSONDecoder().decode(LedgerEnvelope.self, from: data) else {
             defaults.removeObject(forKey: rebuildStateKey)
-            defaults.removeObject(forKey: ledgerBackupKey)
+            LedgerStorage.remove(forKey: ledgerBackupKey)
             return
         }
         movements = backup.movements
@@ -6033,7 +6148,7 @@ final class FinanceStore {
         ledgerVersion = backup.version
         defaults.set(false, forKey: Self.canonicalRebuildKey)
         defaults.removeObject(forKey: rebuildStateKey)
-        defaults.removeObject(forKey: ledgerBackupKey)
+        LedgerStorage.remove(forKey: ledgerBackupKey)
         DiagnosticsRecorder.record(
             level: "error",
             stage: "rebuild.recover",
@@ -6087,7 +6202,7 @@ final class FinanceStore {
         // Imports below may persist intermediate rows, but they can always be
         // rolled back if the app is killed or crashes mid-rebuild.
         if let backupData = try? JSONEncoder().encode(currentEnvelope()) {
-            defaults.set(backupData, forKey: ledgerBackupKey)
+            LedgerStorage.set(backupData, forKey: ledgerBackupKey)
         }
         defaults.set("inProgress", forKey: rebuildStateKey)
 
@@ -6100,7 +6215,7 @@ final class FinanceStore {
             Self.recordCanonicalRebuildCompletion(in: defaults)
             defaults.set(true, forKey: numericRepairKey)
             defaults.set("complete", forKey: rebuildStateKey)
-            defaults.removeObject(forKey: ledgerBackupKey)
+            LedgerStorage.remove(forKey: ledgerBackupKey)
             refreshCanonicalRebuildStatus()
             DiagnosticsRecorder.record(stage: "rebuild.done", message: "No había PDFs locales para reconstruir; el libro quedó limpio.")
             return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
@@ -6149,7 +6264,7 @@ final class FinanceStore {
         }
         guard failedCount == 0 else {
             defaults.removeObject(forKey: rebuildStateKey)
-            defaults.removeObject(forKey: ledgerBackupKey)
+            LedgerStorage.remove(forKey: ledgerBackupKey)
             canonicalRebuildPending = true
             ledgerRefreshState = .failed
             DiagnosticsRecorder.record(
@@ -6168,7 +6283,7 @@ final class FinanceStore {
         Self.recordCanonicalRebuildCompletion(in: defaults)
         defaults.set(true, forKey: numericRepairKey)
         defaults.set("complete", forKey: rebuildStateKey)
-        defaults.removeObject(forKey: ledgerBackupKey)
+        LedgerStorage.remove(forKey: ledgerBackupKey)
         refreshCanonicalRebuildStatus()
         DiagnosticsRecorder.record(
             stage: "rebuild.done",
@@ -6275,7 +6390,7 @@ final class FinanceStore {
         // Keep a recovery marker for a process kill, but do not clear or
         // rewrite the live envelope.  The scratch store below is disposable.
         if let backupData = try? JSONEncoder().encode(currentEnvelope()) {
-            defaults.set(backupData, forKey: ledgerBackupKey)
+            LedgerStorage.set(backupData, forKey: ledgerBackupKey)
         }
         defaults.set("inProgress", forKey: rebuildStateKey)
 
@@ -6287,7 +6402,7 @@ final class FinanceStore {
 
         func abortAfterCancellation() -> CanonicalRebuildResult {
             defaults.removeObject(forKey: rebuildStateKey)
-            defaults.removeObject(forKey: ledgerBackupKey)
+            LedgerStorage.remove(forKey: ledgerBackupKey)
             canonicalRebuildPending = true
             ledgerRefreshState = .pending
             DiagnosticsRecorder.record(
@@ -6302,7 +6417,7 @@ final class FinanceStore {
             // Missing source files are not a reason to delete the last usable
             // ledger. Leave the snapshot intact and ask the user to reimport.
             defaults.removeObject(forKey: rebuildStateKey)
-            defaults.removeObject(forKey: ledgerBackupKey)
+            LedgerStorage.remove(forKey: ledgerBackupKey)
             canonicalRebuildPending = true
             ledgerRefreshState = .failed
             DiagnosticsRecorder.record(
@@ -6373,7 +6488,7 @@ final class FinanceStore {
 
         guard failedCount == 0 else {
             defaults.removeObject(forKey: rebuildStateKey)
-            defaults.removeObject(forKey: ledgerBackupKey)
+            LedgerStorage.remove(forKey: ledgerBackupKey)
             canonicalRebuildPending = true
             ledgerRefreshState = .failed
             DiagnosticsRecorder.record(
@@ -6417,7 +6532,7 @@ final class FinanceStore {
         Self.recordCanonicalRebuildCompletion(in: defaults)
         defaults.set(true, forKey: numericRepairKey)
         defaults.set("complete", forKey: rebuildStateKey)
-        defaults.removeObject(forKey: ledgerBackupKey)
+        LedgerStorage.remove(forKey: ledgerBackupKey)
         refreshCanonicalRebuildStatus()
         // Screenshot links were cleared while the rebuild was pending (no
         // statement was eligible then). Re-link them against the new official
@@ -8384,23 +8499,19 @@ final class FinanceStore {
             ledgerVersion = UUID()
         }
         invalidateDerivedProjections()
-        let defaults = UserDefaults.standard
         if markingChange {
-            var saved = defaults.data(forKey: "marcelito.manualReviews.v1").flatMap { try? JSONDecoder().decode([String: Movement].self, from: $0) } ?? [:]
+            var saved = LedgerStorage.data(forKey: "marcelito.manualReviews.v1").flatMap { try? JSONDecoder().decode([String: Movement].self, from: $0) } ?? [:]
             for movement in movements where movement.manuallyReviewed { saved[manualReviewKey(movement)] = movement }
-            if let data = try? JSONEncoder().encode(saved) { defaults.set(data, forKey: "marcelito.manualReviews.v1") }
+            if let data = try? JSONEncoder().encode(saved) { LedgerStorage.set(data, forKey: "marcelito.manualReviews.v1") }
         }
         guard let envelopeData = try? JSONEncoder().encode(currentEnvelope()) else { return }
-        // The envelope is the authoritative pointer. Keep the old keys for a
-        // single-version compatibility window so an older installed build can
-        // still open the app if the user rolls back from TestFlight.
-        defaults.set(envelopeData, forKey: ledgerEnvelopeKey)
-        if let movementsData = try? JSONEncoder().encode(movements) {
-            defaults.set(movementsData, forKey: movementKey)
-        }
-        if let statementsData = try? JSONEncoder().encode(statements) {
-            defaults.set(statementsData, forKey: statementKey)
-        }
+        // The envelope (a file, see LedgerStorage) is the only ledger copy.
+        // The separate movement/statement copies once kept for rolling back
+        // to older builds doubled every write and also exceeded the
+        // UserDefaults size limit; they are only read as a legacy fallback.
+        LedgerStorage.set(envelopeData, forKey: ledgerEnvelopeKey)
+        LedgerStorage.remove(forKey: movementKey)
+        LedgerStorage.remove(forKey: statementKey)
     }
 
     private var statementFilesDirectoryURL: URL {

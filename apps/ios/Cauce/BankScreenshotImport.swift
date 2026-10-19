@@ -842,7 +842,7 @@ extension FinanceStore {
 
     private func persistBankScreenshotCaptures() {
         guard let data = try? JSONEncoder().encode(screenshotCaptures) else { return }
-        UserDefaults.standard.set(data, forKey: bankScreenshotCaptureStorageKey)
+        LedgerStorage.set(data, forKey: bankScreenshotCaptureStorageKey)
     }
 
     private func screenshotIdentity(_ row: BankScreenshotMovement, source: BankScreenshotSource, accountKey: String?) -> String {

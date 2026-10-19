@@ -943,6 +943,103 @@ final class FinancialLogicAuditTests: XCTestCase {
         }
     }
 
+    func testOwnNameSplitByOCRInTheDescriptionIsStillAnOwnTransfer() {
+        withStore { store in
+            let santander = statement("Santander", key: "santander:7079", kind: .bank)
+            let bbva = statement("BBVA", key: "bbva:4922", kind: .bank)
+            store.statements = [santander, bbva]
+            var split = row(-1000, date: calendarDate(2026, 4, 29), title: "PAGO TRANSF RAPIDA SPEI TRANSFERENCIA A MARCELO ANDRES DIAZ SANC IVA REF 6265157")
+            split.account = "Santander"; split.kind = nil; split.statementId = santander.id
+            split.rawDescription = "29-ABR-2026 5134658 PAGO TRANSF RAPIDA SPEI TRANSFERENCIA A MARCELO ANDRES DIAZ 1,000.00 29,320.83 SANC RFC DISM9802121F4"
+            var glued = row(-500, date: calendarDate(2025, 12, 1), title: "SPEI ENVIADO SANTANDER")
+            glued.kind = nil; glued.statementId = bbva.id
+            glued.rawDescription = "01/DIC SPEI ENVIADO SANTANDER 500.00 0811250Marcelo Andres Diaz Sanchez Referencia 0091099472"
+            store.movements = [split, glued]
+            store.normalizeFinanceForTesting()
+            XCTAssertTrue(store.movements.allSatisfy { $0.flow == .transfer })
+            XCTAssertEqual(store.consolidatedRealSpend, 0)
+        }
+    }
+
+    func testInterchangeableCardPaymentsArePairedByDate() {
+        withStore { store in
+            let santander = statement("Santander", key: "santander:7079", kind: .bank)
+            let rappi = statement("Rappi", key: "rappi:9040", kind: .card)
+            store.statements = [santander, rappi]
+            @MainActor func funding(_ day: Int) -> Movement {
+                var m = row(-1000, date: calendarDate(2026, 4, day), title: "PAGO TRANSFERENCIA SPEI CONCEPTO TRANSFERENCIA A MADS RAPPI")
+                m.account = "Santander"; m.statementId = santander.id
+                m.rawDescription = "ENVIADO A STP A LA CUENTA 646180120648657422 AL CLIENTE MARCELO ANDRES DIAZ SANCHEZ CONCEPTO TRANSFERENCIA A MADS RAPPI"
+                return m
+            }
+            @MainActor func credit(_ day: Int) -> Movement {
+                var m = row(1000, kind: .cardPayment, date: calendarDate(2026, 4, day), title: "PAGO POR SPEI")
+                m.account = "Rappi"; m.flow = .transfer; m.statementId = rappi.id
+                return m
+            }
+            store.movements = [funding(16), funding(17), funding(20), credit(16), credit(17), credit(18)]
+            store.normalizeFinanceForTesting()
+            XCTAssertTrue(store.movements.allSatisfy { $0.matchedMovementId != nil })
+            XCTAssertEqual(store.consolidatedRealSpend, 0)
+            store.normalizeFinanceForTesting()
+            XCTAssertEqual(store.consolidatedRealSpend, 0)
+        }
+    }
+
+    func testReissuedRappiNumberWithBalanceContinuityIsOneAccount() {
+        withStore { store in
+            let august = statement("Rappi", key: "rappi:9040", kind: .card, period: "22/07/2026 - 21/08/2026",
+                summary: .init(statementBalance: 2728.5, debtBalance: 2728.5, creditLimit: 16000, creditAvailable: 13271.5))
+            var september = statement("Rappi", key: "rappi:6121", kind: .card, period: "22/08/2026 - 21/09/2026",
+                summary: .init(debtBalance: Decimal(string: "2592.34"), creditLimit: 16000, creditAvailable: Decimal(string: "13407.66")))
+            september.summary?.previousBalance = Decimal(string: "2728.50")
+            september.summary?.statementBalance = Decimal(string: "2592.34")
+            store.statements = [august, september]
+            store.normalizeFinanceForTesting()
+            XCTAssertEqual(Set(store.statements.compactMap(\.accountKey)), ["rappi:9040"])
+            XCTAssertEqual(store.creditLimit, 16000)
+            XCTAssertEqual(store.cardDebtTotal, Decimal(string: "2592.34"))
+        }
+    }
+
+    func testLedgerLargerThanTheUserDefaultsLimitIsStoredAndMigrated() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("ledger-store-\(UUID())")
+        let suite = "marcelito.ledger.storage.\(UUID())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { try? FileManager.default.removeItem(at: directory); defaults.removePersistentDomain(forName: suite) }
+
+        // iOS refuses UserDefaults values of 4 MB or more; files have no such limit.
+        let large = Data(repeating: 7, count: 5_000_000)
+        LedgerStorage.set(large, forKey: "marcelito.ledger.active.v1", defaults: defaults, directory: directory)
+        XCTAssertEqual(LedgerStorage.data(forKey: "marcelito.ledger.active.v1", defaults: defaults, directory: directory), large)
+        XCTAssertNil(defaults.data(forKey: "marcelito.ledger.active.v1"))
+
+        // A value left in UserDefaults by an older build moves to a file once read.
+        let legacy = Data("legacy-reviews".utf8)
+        defaults.set(legacy, forKey: "marcelito.manualReviews.v1")
+        XCTAssertEqual(LedgerStorage.data(forKey: "marcelito.manualReviews.v1", defaults: defaults, directory: directory), legacy)
+        XCTAssertNil(defaults.data(forKey: "marcelito.manualReviews.v1"))
+        XCTAssertEqual(LedgerStorage.allValues(directory: directory)["marcelito.manualReviews.v1"], legacy)
+
+        LedgerStorage.remove(forKey: "marcelito.ledger.active.v1", defaults: defaults, directory: directory)
+        XCTAssertNil(LedgerStorage.data(forKey: "marcelito.ledger.active.v1", defaults: defaults, directory: directory))
+    }
+
+    func testImportedLedgerSurvivesReopeningTheStore() {
+        withStore { store in
+            let bank = statement("BBVA", key: "bbva:4922", kind: .bank, summary: .init(cashBalance: 1_000))
+            var purchase = row(-250, title: "COMERCIO EJEMPLO")
+            purchase.statementId = bank.id
+            store.statements = [bank]
+            store.movements = [purchase]
+            store.normalizeFinanceForTesting()
+            _ = store.updateCategory(for: store.movements[0], to: "Salud", applyToMerchant: false)
+            let reopened = FinanceStore()
+            XCTAssertEqual(reopened.statements.count, 1)
+            XCTAssertEqual(reopened.movements.first?.category, "Salud")
+        }
+    }
+
     func testBankDepositLabelledAbonoIsIncomeNotAccountingCredit() {
         withStore { store in
             let bank = statement("BBVA", key: "bbva:1111", kind: .bank)
