@@ -16,6 +16,11 @@ struct PDFReadingCache {
         return directory.appendingPathComponent(key + ".json")
     }
 
+    /// Forgets every saved extraction so the next import reads the PDF again.
+    func removeAll() {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
     func load<Value: Decodable>(_ type: Value.Type, key: String) -> Value? {
         guard let url = file(key), let data = try? Data(contentsOf: url) else { return nil }
         return try? JSONDecoder().decode(type, from: data)

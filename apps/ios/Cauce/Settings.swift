@@ -8,6 +8,10 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var ownerAliasesText = ""
     @State private var transferSaveMessage: String?
+    @State private var rereading = false
+    @State private var rereadProgress = 0.0
+    @State private var rereadStatus: String?
+    @State private var confirmReread = false
 
     private var quality: LedgerQuality { store.ledgerQuality }
 
@@ -69,6 +73,20 @@ struct SettingsView: View {
                     }
                 }
 
+                Section {
+                    Button("Releer todos mis PDFs") { confirmReread = true }
+                        .disabled(rereading)
+                    if rereading {
+                        ProgressView(value: rereadProgress) { Text(rereadStatus ?? "Leyendo…").font(.caption) }
+                    } else if let rereadStatus {
+                        Text(rereadStatus).font(.caption).fixedSize(horizontal: false, vertical: true)
+                    }
+                } header: {
+                    Text("Lectura de estados")
+                } footer: {
+                    Text("Vuelve a leer cada PDF guardado con la versión actual de la app, sin usar lecturas anteriores. Tus clasificaciones y movimientos manuales se conservan, y si algún estado deja de cuadrar se queda el libro que ya tenías.")
+                }
+
                 Section("Tu información") {
                     NavigationLink("Respaldo y restauración") { FinanceBackupView() }
                     CategoryUndoButton()
@@ -80,11 +98,18 @@ struct SettingsView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .confirmationDialog("¿Releer todos tus PDFs?", isPresented: $confirmReread, titleVisibility: .visible) {
+                Button("Releer ahora") { rereadAll() }
+                Button("Cancelar", role: .cancel) {}
+            } message: {
+                Text("Puede tardar varios minutos si hay estados escaneados. Mantén la app abierta.")
+            }
+            .interactiveDismissDisabled(rereading)
             .navigationTitle("Ajustes")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cerrar") { dismiss() }
+                    Button("Cerrar") { dismiss() }.disabled(rereading)
                 }
             }
             .onAppear {
@@ -92,7 +117,30 @@ struct SettingsView: View {
             }
         }
         .presentationDetents([.medium, .large])
-        .presentationDragIndicator(.visible)
+        .presentationDragIndicator(rereading ? .hidden : .visible)
         .presentationBackground(.regularMaterial)
+    }
+
+    private func rereadAll() {
+        rereading = true
+        rereadProgress = 0
+        rereadStatus = "Preparando la relectura…"
+        Task { @MainActor in
+            let result = await store.rereadAllStoredPDFsAsync { completed, total, fileName in
+                rereadProgress = Double(completed) / Double(max(total, 1))
+                rereadStatus = "Leyendo \(fileName) · \(completed)/\(total)"
+            }
+            if result.candidateCount == 0 {
+                rereadStatus = "No hay PDFs guardados en este iPhone para releer."
+            } else if result.keptPrevious {
+                rereadStatus = "Se conservó tu libro anterior: con la relectura cuadraban menos estados. Revisa Diagnóstico para ver cuáles."
+            } else if result.invalidCount > 0 {
+                rereadStatus = "\(result.importedCount) estados releídos · \(result.invalidCount) requieren revisión."
+            } else {
+                rereadStatus = "\(result.importedCount) estados releídos con la versión actual."
+            }
+            rereading = false
+            store.runAutomaticAuditIfNeeded(trigger: "manual-reread")
+        }
     }
 }

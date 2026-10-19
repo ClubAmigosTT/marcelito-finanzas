@@ -968,6 +968,9 @@ struct CanonicalRebuildResult {
     let candidateCount: Int
     let importedCount: Int
     let invalidCount: Int
+    /// A forced re-read that would have left fewer reconciled statements
+    /// than before is discarded; the previous ledger stays in place.
+    var keptPrevious = false
 }
 
 /// The launch path intentionally has only three cheap states.  A pending
@@ -6407,6 +6410,7 @@ final class FinanceStore {
     @MainActor
     @discardableResult
     func rebuildCanonicalLedgerIfNeededAsync(
+        keepPreviousIfWorse: Bool = false,
         progress: ((Int, Int, String) -> Void)? = nil
     ) async -> CanonicalRebuildResult {
         if let activeRebuildTask {
@@ -6431,7 +6435,7 @@ final class FinanceStore {
             guard let self else {
                 return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
             }
-            return await self.performCanonicalRebuildIfNeededAsync(progress: progress)
+            return await self.performCanonicalRebuildIfNeededAsync(keepPreviousIfWorse: keepPreviousIfWorse, progress: progress)
         }
         activeRebuildTask = task
         let result = await task.value
@@ -6444,6 +6448,7 @@ final class FinanceStore {
     /// remains usable while a refresh is running or if one file fails.
     @MainActor
     private func performCanonicalRebuildIfNeededAsync(
+        keepPreviousIfWorse: Bool = false,
         progress: ((Int, Int, String) -> Void)? = nil
     ) async -> CanonicalRebuildResult {
         let defaults = UserDefaults.standard
@@ -6607,6 +6612,27 @@ final class FinanceStore {
             return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount + failedCount)
         }
 
+        if keepPreviousIfWorse {
+            func reconciledCount(_ records: [StatementRecord]) -> Int {
+                records.filter { $0.reconciliation?.status == .valid && !$0.requiresReview }.count
+            }
+            let before = reconciledCount(knownStatements)
+            let after = reconciledCount(scratch.statements)
+            if after < before {
+                defaults.removeObject(forKey: rebuildStateKey)
+                LedgerStorage.remove(forKey: ledgerBackupKey)
+                refreshCanonicalRebuildStatus()
+                DiagnosticsRecorder.record(
+                    level: "error",
+                    stage: "rebuild.kept",
+                    message: "Relectura descartada: \(after) estado(s) conciliados contra \(before) antes; se conservó el libro anterior."
+                )
+                var result = CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount)
+                result.keptPrevious = true
+                return result
+            }
+        }
+
         // "Borrar datos" while the PDFs were being read must win: committing
         // the scratch ledger would resurrect everything the user just erased.
         guard ledgerResetGeneration == resetGenerationAtStart else {
@@ -6652,6 +6678,27 @@ final class FinanceStore {
             message: "Reconstrucción asíncrona terminada: \(importedCount) válido(s), \(invalidCount) bloqueado(s), \(movements.count) movimiento(s) canónicos."
         )
         return CanonicalRebuildResult(candidateCount: candidates.count, importedCount: importedCount, invalidCount: invalidCount)
+    }
+
+    /// Re-reads every stored PDF with the current code, ignoring cached
+    /// extractions, through the same scratch rebuild as an app update. The
+    /// result replaces the ledger only if no statement stops reconciling.
+    @MainActor
+    @discardableResult
+    func rereadAllStoredPDFsAsync(
+        progress: ((Int, Int, String) -> Void)? = nil
+    ) async -> CanonicalRebuildResult {
+        if let activeRebuildTask {
+            return await activeRebuildTask.value
+        }
+        guard !storedPDFURLs.isEmpty else {
+            return CanonicalRebuildResult(candidateCount: 0, importedCount: 0, invalidCount: 0)
+        }
+        PDFReadingCache.local?.removeAll()
+        canonicalRebuildPending = true
+        ledgerRefreshState = .pending
+        DiagnosticsRecorder.record(stage: "rebuild.reread", message: "Relectura completa solicitada: se vació la caché de lecturas.")
+        return await rebuildCanonicalLedgerIfNeededAsync(keepPreviousIfWorse: true, progress: progress)
     }
 
     /// Combines a rebuilt ledger with changes the user made while the rebuild
