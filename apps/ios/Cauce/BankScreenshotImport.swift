@@ -38,7 +38,7 @@ struct BankScreenshotMovement: Identifiable, Codable, Equatable, Sendable {
     let displayedAmount: Decimal
     /// Ledger-compatible sign used only for matching an official movement.
     let normalizedAmount: Decimal
-    let pending: Bool
+    var pending: Bool
     let confidence: Double
     let imageFingerprint: String
     let evidence: MovementExtractionEvidence
@@ -46,6 +46,9 @@ struct BankScreenshotMovement: Identifiable, Codable, Equatable, Sendable {
     var matchedOfficialMovementID: UUID?
     var possibleDuplicateOf: UUID? = nil
     var duplicateReviewed: Bool? = nil
+    /// Additional cardholder printed under the charge (Amex app); nil when
+    /// the charge is the account holder's own.
+    var cardholder: String? = nil
 
     init(
         id: UUID = UUID(),
@@ -83,6 +86,7 @@ extension BankScreenshotMovement {
         )
         copy.possibleDuplicateOf = possibleDuplicateOf
         copy.duplicateReviewed = duplicateReviewed
+        copy.cardholder = cardholder
         return copy
     }
 }
@@ -275,6 +279,20 @@ enum BankScreenshotReader {
             return .santander
         }
         return nil
+    }
+
+    /// "ANA LOPEZ R Pendiente >" → "ANA LOPEZ R". Only a line
+    /// made of two to five words of letters is a name.
+    static func cardholderName(in line: String) -> String? {
+        let words = line
+            .replacingOccurrences(of: #"(?i)\bpendiente\b"#, with: " ", options: .regularExpression)
+            .replacingOccurrences(of: #"[>›»]"#, with: " ", options: .regularExpression)
+            .split(whereSeparator: { $0.isWhitespace })
+            .map(String.init)
+        guard (2...5).contains(words.count),
+              words.allSatisfy({ $0.allSatisfy { $0.isLetter || $0 == "." } }),
+              words.joined(separator: " ").count >= 6 else { return nil }
+        return words.joined(separator: " ")
     }
 
     /// Placeholder for an Amex row whose date header is above the capture.
@@ -480,14 +498,7 @@ enum BankScreenshotReader {
             : nil
 
         func markPreviousPending(_ line: BankScreenshotRecognizedLine) {
-            let previous = result.removeLast()
-            result.append(BankScreenshotMovement(
-                id: previous.id, date: previous.date, title: previous.title,
-                displayedAmount: previous.displayedAmount, normalizedAmount: previous.normalizedAmount,
-                pending: true, confidence: min(previous.confidence, line.confidence),
-                imageFingerprint: previous.imageFingerprint, evidence: previous.evidence,
-                duplicateOf: previous.duplicateOf, matchedOfficialMovementID: previous.matchedOfficialMovementID
-            ))
+            result[result.count - 1].pending = true
         }
 
         for line in lines {
@@ -510,6 +521,7 @@ enum BankScreenshotReader {
                lastAmount(in: compact) == nil,
                block.minY - line.bounds.maxY < line.bounds.height * 1.2 {
                 if folded.contains("pendiente") { markPreviousPending(line) }
+                if let name = Self.cardholderName(in: compact) { result[result.count - 1].cardholder = name }
                 rowBlock = block.union(line.bounds)
                 continue
             }

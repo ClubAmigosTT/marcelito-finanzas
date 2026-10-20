@@ -181,5 +181,8 @@ final class BankScreenshotReaderTests: XCTestCase {
         XCTAssertEqual(unique.first { $0.title.hasPrefix("MUSEO") }?.pending, false)
         XCTAssertEqual(unique.first { $0.title.hasPrefix("TAXI") && $0.displayedAmount == decimal("57.10") }?.title, "TAXI APP VIAJE")
         XCTAssertFalse(unique.contains { $0.title.contains("COMERCIO CORT") }, "a row under the tab bar has no reliable date")
+        XCTAssertEqual(unique.first { $0.title.hasPrefix("SUPER") }?.cardholder, "TITULAR ADICIONAL")
+        XCTAssertEqual(unique.first { $0.title.hasPrefix("MUSEO") }?.cardholder, "TITULAR ADICIONAL")
+        XCTAssertTrue(unique.filter { $0.title.hasPrefix("TAXI") }.allSatisfy { $0.cardholder == nil })
     }
 }
