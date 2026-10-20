@@ -8,8 +8,9 @@ import UniformTypeIdentifiers
 private let expenseCategoryOptions = [
     "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento",
     "Viajes", "Transporte", "Deporte", "Compras personales", "Software y suscripciones",
-    "Salud", "Educación", "Entrenamiento", "Binance (salarios)",
-    "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar"
+    "Salud", "Cuidado personal", "Educación", "Entrenamiento", "Binance (salarios)",
+    "Club Amigos / Proyectos", "Comisiones y finanzas", "Retiros de efectivo",
+    "Transferencias a terceros", "Otros / Por revisar"
 ]
 
 private let movementCategoryOptions = expenseCategoryOptions
@@ -309,7 +310,9 @@ struct MovementsView: View {
                 }
                 Button("Cancelar", role: .cancel) { }
             } message: {
-                Text("Se enviarán a \(ExpenseAISettingsStore.selectedProvider.displayName) únicamente el comercio, importe y fecha de estos gastos. No se envían cuentas, PDFs, saldos, ingresos, transferencias ni movimientos ya clasificados.")
+                Text(ExpenseAISettingsStore.selectedProvider.isOnDevice
+                     ? "Se clasificarán dentro de este iPhone con Apple Intelligence; no se envía nada a internet."
+                     : "Se enviarán a \(ExpenseAISettingsStore.selectedProvider.displayName) únicamente el comercio, importe y fecha de estos gastos. No se envían cuentas, PDFs, saldos, ingresos, transferencias ni movimientos ya clasificados.")
             }
             .alert("Clasificación lista", isPresented: Binding(
                 get: { aiMessage != nil },
@@ -335,6 +338,10 @@ struct MovementsView: View {
         let provider = ExpenseAISettingsStore.selectedProvider
         guard let apiKey = ExpenseAISettingsStore.apiKey(for: provider) else {
             isAISettingsPresented = true
+            return
+        }
+        if provider.isOnDevice {
+            aiMessage = "Con Apple Intelligence cada sugerencia se confirma por comercio: abre Gastos → Clasificar pendientes."
             return
         }
         let items = pendingForAI
@@ -1000,13 +1007,19 @@ struct PendingClassificationView: View {
                     isPresented: $isAIConfirmationPresented,
                     titleVisibility: .visible
                 ) {
-                    Button("Enviar \(pendingGroups.filter { !$0.classifiableMovements.isEmpty }.count) comercios") {
+                    let onDevice = ExpenseAISettingsStore.selectedProvider.isOnDevice
+                    let groupCount = pendingGroups.filter { !$0.classifiableMovements.isEmpty }.count
+                    Button(onDevice ? "Sugerir para \(min(groupCount, 30)) comercios" : "Enviar \(groupCount) comercios") {
                         classifyPendingMerchantGroups()
                     }
                     Button("Cancelar", role: .cancel) { }
                 } message: {
                     let groupCount = pendingGroups.filter { !$0.classifiableMovements.isEmpty }.count
-                    Text("Se enviarán comercio, fecha, importe y un código aleatorio temporal por cada uno de \(groupCount) comercios pendientes. No se envían PDFs, nombres de cuenta ni saldos. Primero se actualizaron las reglas locales (\(localRuleChangeCount) movimientos).")
+                    if ExpenseAISettingsStore.selectedProvider.isOnDevice {
+                        Text("Apple Intelligence sugerirá una categoría dentro de este iPhone para los \(min(groupCount, 30)) comercios con más gasto; tú confirmas cada una. No se envía nada a internet. Primero se actualizaron las reglas locales (\(localRuleChangeCount) movimientos).")
+                    } else {
+                        Text("Se enviarán comercio, fecha, importe y un código aleatorio temporal por cada uno de \(groupCount) comercios pendientes. No se envían PDFs, nombres de cuenta ni saldos. Primero se actualizaron las reglas locales (\(localRuleChangeCount) movimientos).")
+                    }
                 }
                 .alert("Configura clasificación IA", isPresented: $isAISetupPromptPresented) {
                     Button("Configurar") { isAISettingsPresented = true }
@@ -1057,8 +1070,11 @@ struct PendingClassificationView: View {
             isAISetupPromptPresented = true
             return
         }
-        let groupsToClassify = pendingReviewGroups.filter { !$0.classifiableMovements.isEmpty }
+        var groupsToClassify = pendingReviewGroups.filter { !$0.classifiableMovements.isEmpty }
         guard !groupsToClassify.isEmpty else { return }
+        // The on-device model takes a few seconds per merchant: suggest for
+        // the 30 biggest pending merchants per run.
+        if provider.isOnDevice { groupsToClassify = Array(groupsToClassify.prefix(30)) }
         let representatives = groupsToClassify.map(\.representative)
         let groupByRepresentativeID = Dictionary(uniqueKeysWithValues: zip(representatives.map(\.id), groupsToClassify))
         let model = ExpenseAISettingsStore.selectedModel(for: provider)
