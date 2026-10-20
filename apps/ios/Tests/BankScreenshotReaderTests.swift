@@ -142,4 +142,44 @@ final class BankScreenshotReaderTests: XCTestCase {
         store.resolveScreenshotDuplicates(captureID: overlap.captureID, keepBoth: [])
         XCTAssertEqual(store.canonicalScreenshotMovements.count, 1)
     }
+
+    func testAmexOverlappingCapturesCountEachChargeOnceAndKeepCardholderLinesInTheirRow() {
+        let october19 = Calendar(identifier: .gregorian).date(from: DateComponents(year: 2026, month: 10, day: 19, hour: 17))!
+        let header = "The Platinum Credit Card American Ex... ••••54321"
+        let tabBar = "Inicio Membresía Promociones Mi Cuenta"
+        let first: [(text: String, y: Double)] = [
+            ("5:00", 0.97), (header, 0.92),
+            ("TIENDA ESQUINA $41.00", 0.85),
+            ("14 oct", 0.78),
+            ("CINE EJEMPLO DULCERIA $350.00", 0.72),
+            ("CINE EJEMPLO DULCERIA $350.00", 0.66),
+            ("SUPER EJEMPLO SUCURSAL NORTE $1,234.56", 0.60),
+            ("TITULAR ADICIONAL Pendiente", 0.585),
+            ("MUSEO EJEMPLO $210.00", 0.52),
+            ("TITULAR ADICIONAL", 0.505),
+            ("TAXI APP VIAJE $57.10", 0.44),
+            ("4", 0.07), (tabBar, 0.04), ("COMERCIO CORT $480.00", 0.02),
+        ]
+        let second: [(text: String, y: Double)] = [
+            (header, 0.92),
+            ("15 oct", 0.85),
+            ("TIENDA ESQUINA $41.00", 0.80),
+            ("TAXI APP VIAJE $64.20", 0.74),
+            ("14 oct", 0.68),
+            ("CINE EJEMPLO DULCERIA $350.00", 0.62),
+            (tabBar, 0.04),
+        ]
+        let result = BankScreenshotReader.parseImagesForTesting([first, second], source: .amex, capturedAt: october19)
+        let unique = result.movements.filter { $0.duplicateOf == nil }
+        XCTAssertEqual(result.droppedUndated, 0)
+        XCTAssertEqual(unique.count, 7)
+        XCTAssertEqual(unique.filter { $0.title == "CINE EJEMPLO DULCERIA" }.count, 2)
+        XCTAssertEqual(unique.filter { $0.title == "TIENDA ESQUINA" }.map { Calendar.current.component(.day, from: $0.date) }, [15])
+        XCTAssertEqual(unique.first { $0.title.hasPrefix("SUPER") }?.title, "SUPER EJEMPLO SUCURSAL NORTE")
+        XCTAssertEqual(unique.first { $0.title.hasPrefix("SUPER") }?.pending, true)
+        XCTAssertEqual(unique.first { $0.title.hasPrefix("MUSEO") }?.title, "MUSEO EJEMPLO")
+        XCTAssertEqual(unique.first { $0.title.hasPrefix("MUSEO") }?.pending, false)
+        XCTAssertEqual(unique.first { $0.title.hasPrefix("TAXI") && $0.displayedAmount == decimal("57.10") }?.title, "TAXI APP VIAJE")
+        XCTAssertFalse(unique.contains { $0.title.contains("COMERCIO CORT") }, "a row under the tab bar has no reliable date")
+    }
 }

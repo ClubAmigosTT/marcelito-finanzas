@@ -508,6 +508,49 @@ final class FinancialLogicAuditTests: XCTestCase {
             inputs: [BankScreenshotInput(data: Data([1]), fileName: "synthetic.image")], imageFingerprints: [fingerprint], movements: movements, warnings: [])
     }
 
+    func testReissuedAmexCardLinksAndStatementRetiresUnmatchedPendingRows() throws {
+        try withStore { store in
+            let day = calendarDate(2026, 10, 14)
+            func shot(_ title: String, _ amount: Decimal, pending: Bool) -> BankScreenshotMovement {
+                BankScreenshotMovement(date: day, title: title, displayedAmount: -amount, normalizedAmount: amount,
+                    pending: pending, confidence: 0.99, imageFingerprint: "amex-reissue",
+                    evidence: MovementExtractionEvidence(method: "screenshot-vision", page: 1, confidence: 0.99,
+                        sourceText: title, selectedAmount: amount))
+            }
+            // The app shows the reissued card (••••54321); before the statement
+            // arrives both rows are provisional spending.
+            _ = try store.saveBankScreenshotImport(BankScreenshotImportResult(source: .amex, accountKey: "amex:4321", importedAt: day,
+                inputs: [BankScreenshotInput(data: Data([7]), fileName: "synthetic.image")], imageFingerprints: ["amex-reissue"],
+                movements: [shot("TAXI APP VIAJE", -57.10, pending: false), shot("RESTAURANTE EJEMPLO TERRAZA", -420, pending: true)],
+                warnings: []))
+            XCTAssertEqual(store.consolidatedRealSpend, Decimal(string: "477.10"))
+
+            // The statement keeps the account's digits (9003) and posts the
+            // restaurant with the tip, so only the Uber row can match.
+            let card = statement("Amex", key: "amex:9003", kind: .card, period: "del 28 de septiembre al 27 de octubre de 2026")
+            var uber = row(Decimal(string: "-57.10")!, date: day, title: "TAXI APP VIAJE"); uber.account = "Amex"; uber.statementId = card.id
+            var restaurant = row(-480, date: day, title: "RESTAURANTE EJEMPLO TERRAZA"); restaurant.account = "Amex"; restaurant.statementId = card.id
+            store.statements = [card]
+            store.movements = store.movements.filter { $0.statementId == nil } + [uber, restaurant]
+            store.reconcileBankScreenshotsAgainstOfficialLedger()
+
+            XCTAssertEqual(store.screenshotCaptures.first?.confirmedCount, 1)
+            XCTAssertFalse(store.movements.contains(where: store.isProvisionalScreenshotMovement))
+            XCTAssertEqual(store.consolidatedRealSpend, Decimal(string: "537.10"))
+        }
+    }
+
+    func testCardPaymentSeenInAScreenshotIsNotIncome() throws {
+        try withStore { store in
+            _ = try store.saveBankScreenshotImport(capture(.amex, key: "amex:4321",
+                rows: [("GRACIAS POR SU PAGO EN LINEA", 5_000), ("TIENDA EJEMPLO", -100)], fingerprint: "audit-amex-payment"))
+            let payment = try XCTUnwrap(store.movements.first { $0.title.hasPrefix("GRACIAS") })
+            XCTAssertEqual(payment.kind, .cardPayment)
+            XCTAssertEqual(payment.flow, .transfer)
+            XCTAssertEqual(store.consolidatedRealSpend, 100)
+        }
+    }
+
     func testTwoIdenticalScreenshotRowsLinkToTwoIdenticalOfficialRows() throws {
         try withStore { store in
             let bank = statement("BBVA", key: "bbva:1111", kind: .bank)

@@ -33,7 +33,10 @@ test("native screenshot observations feed a reversible provisional live ledger",
   assert.match(models, /var screenshotCaptures:\s*\[BankScreenshotCapture\]/);
   assert.match(reader, /var canonicalScreenshotMovements/);
   assert.match(models, /func synchronizeProvisionalScreenshotLedger\(\)/);
-  assert.match(models, /row\.duplicateOf == nil && row\.matchedOfficialMovementID == nil/);
+  assert.match(models, /isActiveProvisionalScreenshotRow\(row, in: capture, periods: periods\)/);
+  assert.match(reader, /guard row\.duplicateOf == nil, row\.matchedOfficialMovementID == nil/);
+  // A reconciled statement covering the row's day replaces it.
+  assert.match(reader, /period\.range\.contains\(day\)/);
   assert.match(models, /extractionEvidence:\s*row\.evidence/);
   assert.match(models, /persist\(markingChange: true\)/);
   assert.match(reader, /reconcileBankScreenshotsAgainstOfficialLedger/);
