@@ -540,6 +540,71 @@ final class FinancialLogicAuditTests: XCTestCase {
         }
     }
 
+    func testAdditionalCardholderChargesAreSeparatedAndTrackedAsOwed() throws {
+        try withStore { store in
+            let day = calendarDate(2026, 10, 14)
+            func shot(_ title: String, _ amount: Decimal, holder: String?) -> BankScreenshotMovement {
+                var row = BankScreenshotMovement(date: day, title: title, displayedAmount: -amount, normalizedAmount: amount,
+                    pending: false, confidence: 0.99, imageFingerprint: "amex-holder",
+                    evidence: MovementExtractionEvidence(method: "screenshot-vision", page: 1, confidence: 0.99, sourceText: title, selectedAmount: amount))
+                row.cardholder = holder
+                return row
+            }
+            _ = try store.saveBankScreenshotImport(BankScreenshotImportResult(source: .amex, accountKey: "amex:4321", importedAt: day,
+                inputs: [BankScreenshotInput(data: Data([9]), fileName: "synthetic.image")], imageFingerprints: ["amex-holder"],
+                movements: [shot("TIENDA EJEMPLO", -100, holder: nil), shot("SUPER EJEMPLO NORTE", -900, holder: "LUCIA EJEMPLO R")],
+                warnings: []))
+
+            // Only your own charge is your spending; hers is tracked apart.
+            XCTAssertEqual(store.consolidatedRealSpend, 100)
+            let profile = try XCTUnwrap(store.cardholderProfiles.first)
+            XCTAssertEqual(profile.name, "Lucia Ejemplo R")
+            XCTAssertEqual(store.cardholderSpendMovements(profile.id).count, 1)
+            XCTAssertEqual(store.cardholderReceivable(profile.id), 900)
+
+            // Her SPEI pays her balance down and is not your income; so does cash.
+            let bank = statement("BBVA", key: "bbva:1111", kind: .bank, period: "01/10/2026 - 31/10/2026")
+            var deposit = Movement(date: day, title: "SPEI RECIBIDO LUCIA EJEMPLO", account: "BBVA", category: "Ingresos", amount: 600, flow: .income, kind: .income)
+            deposit.statementId = bank.id
+            // A transfer from her before her first charge is something else.
+            var earlier = Movement(date: calendarDate(2026, 10, 2), title: "SPEI RECIBIDO LUCIA EJEMPLO", account: "BBVA", category: "Ingresos", amount: 450, flow: .income, kind: .income)
+            earlier.statementId = bank.id
+            store.statements = [bank]
+            store.movements.append(contentsOf: [deposit, earlier])
+            XCTAssertEqual(store.realIncomeMovements.map(\.amount), [450])
+            var updated = profile
+            updated.cashPayments = [CardholderCashPayment(date: day, amount: 100)]
+            store.updateCardholder(updated)
+            XCTAssertEqual(store.cardholderReceivable(profile.id), 200)
+
+            // "It was mine after all" puts it back in your spending.
+            let hers = try XCTUnwrap(store.movements.first { $0.title == "SUPER EJEMPLO NORTE" })
+            store.setSpender(for: hers, to: nil)
+            XCTAssertEqual(store.consolidatedRealSpend, 1000)
+            XCTAssertEqual(store.cardholderReceivable(profile.id), -100)
+        }
+    }
+
+    func testStatementRowKeepsTheCardholderOfTheCaptureItReplaces() throws {
+        try withStore { store in
+            let day = calendarDate(2026, 10, 14)
+            var shot = BankScreenshotMovement(date: day, title: "SUPER EJEMPLO NORTE", displayedAmount: 900, normalizedAmount: -900,
+                pending: true, confidence: 0.99, imageFingerprint: "amex-holder-2",
+                evidence: MovementExtractionEvidence(method: "screenshot-vision", page: 1, confidence: 0.99, sourceText: "SUPER", selectedAmount: -900))
+            shot.cardholder = "LUCIA EJEMPLO R"
+            _ = try store.saveBankScreenshotImport(BankScreenshotImportResult(source: .amex, accountKey: "amex:4321", importedAt: day,
+                inputs: [BankScreenshotInput(data: Data([8]), fileName: "synthetic.image")], imageFingerprints: ["amex-holder-2"],
+                movements: [shot], warnings: []))
+            let card = statement("Amex", key: "amex:9003", kind: .card, period: "del 28 de septiembre al 27 de octubre de 2026")
+            var official = row(-900, date: day, title: "SUPER EJEMPLO NORTE"); official.account = "Amex"; official.statementId = card.id
+            store.statements = [card]
+            store.movements = store.movements.filter { $0.statementId == nil } + [official]
+            store.reconcileBankScreenshotsAgainstOfficialLedger()
+            XCTAssertEqual(store.movements.first { $0.id == official.id }?.spender, "lucia ejemplo r")
+            XCTAssertEqual(store.consolidatedRealSpend, 0)
+        }
+    }
+
     func testCardPaymentSeenInAScreenshotIsNotIncome() throws {
         try withStore { store in
             _ = try store.saveBankScreenshotImport(capture(.amex, key: "amex:4321",

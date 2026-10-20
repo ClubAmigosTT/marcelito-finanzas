@@ -590,6 +590,9 @@ struct MovementDetailView: View {
                         .foregroundStyle(Color.marcelitoAmber)
                 }
             }
+            if currentMovement.amount < 0, currentMovement.flow == .expense || currentMovement.spender != nil {
+                SpenderPickerSection(movement: currentMovement)
+            }
             if let link = store.loanSpendingProjection.payments[currentMovement.id] {
                 Section("Abono de préstamo confirmado") {
                     LabeledContent("Capital", value: planningMoney(abs(currentMovement.amount) - link.receiptInterest))
@@ -3244,6 +3247,7 @@ struct NetWorthView: View {
                     .buttonStyle(.plain)
                     .accessibilityHint("Toca para ver el detalle de la posición neta")
 
+                    CardholderReceivableRows()
                     debtCoverageSection
                     creditSection
                     LoanPositionSection()

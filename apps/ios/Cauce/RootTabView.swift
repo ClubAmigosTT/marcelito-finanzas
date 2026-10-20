@@ -139,6 +139,7 @@ struct HomeView: View {
                 PlanningAccountCoverage(period: .month(.now))
                 HomePendingCard(store: store) { isImporterPresented = true }
                 HomeInsightsCard(store: store, planning: planning)
+                CardholderSummaryCard()
                 NavigationLink { PaymentAgendaView() } label: {
                     HStack { Label("Próximos pagos", systemImage: "calendar"); Spacer(); Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary) }
                 }.font(.subheadline.weight(.semibold))

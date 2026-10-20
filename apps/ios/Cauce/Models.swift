@@ -299,6 +299,10 @@ struct Movement: Identifiable, Codable {
     var merchantConfidence: Double?
     /// Non-blocking merchant issue shown as “comercio por confirmar”.
     var merchantReviewReason: String?
+    /// Additional cardholder (CardholderProfile.id) who made this charge;
+    /// nil when it is the account holder's own. Such charges are counted
+    /// apart from your spending.
+    var spender: String? = nil
 
     /// Recipient or sender printed explicitly in a transfer/SPEI descriptor.
     /// Returns nil when the row only identifies an intermediary such as STP.
@@ -452,6 +456,7 @@ struct Movement: Identifiable, Codable {
         case id, date, title, account, category, amount, flow, statementId, kind, travelRelated, foreignCurrency, classificationTags, extractionEvidence
         case matchedMovementId, reconciliationConfidence, reconciliationReason, manuallyReviewed, manuallyAccountingReviewed, confirmedCounterpartKey
         case rawDescription, normalizedMerchant, displayMerchant, merchantConfidence, merchantReviewReason
+        case spender
     }
 
     init(from decoder: Decoder) throws {
@@ -480,6 +485,7 @@ struct Movement: Identifiable, Codable {
         displayMerchant = try container.decodeIfPresent(String.self, forKey: .displayMerchant)
         merchantConfidence = try container.decodeIfPresent(Double.self, forKey: .merchantConfidence)
         merchantReviewReason = try container.decodeIfPresent(String.self, forKey: .merchantReviewReason)
+        spender = try container.decodeIfPresent(String.self, forKey: .spender)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -508,6 +514,7 @@ struct Movement: Identifiable, Codable {
         try container.encodeIfPresent(displayMerchant, forKey: .displayMerchant)
         try container.encodeIfPresent(merchantConfidence, forKey: .merchantConfidence)
         try container.encodeIfPresent(merchantReviewReason, forKey: .merchantReviewReason)
+        try container.encodeIfPresent(spender, forKey: .spender)
     }
 }
 
@@ -1993,6 +2000,8 @@ final class FinanceStore {
     /// separately from `movements`, so they can never feed balances or KPI
     /// until an issuer statement confirms the corresponding row.
     var screenshotCaptures: [BankScreenshotCapture]
+    /// Additional cardholders whose charges are counted apart from yours.
+    private(set) var cardholderProfiles: [CardholderProfile] = CardholderProfile.load()
     private(set) var ledgerVersion: UUID
     private(set) var lastAuditRun: LedgerAuditRun?
 
@@ -3666,6 +3675,8 @@ final class FinanceStore {
 
     private func isRealIncome(_ movement: Movement) -> Bool {
         guard movement.flow == .income else { return false }
+        // Money an additional cardholder sends back for their charges.
+        guard cardholderPaymentKey(movement) == nil else { return false }
         if isProvisionalScreenshotMovement(movement),
            screenshotCaptures.first(where: { $0.movements.contains(where: { $0.id == movement.id }) })?.source.kind == .card {
             return false
@@ -3683,6 +3694,8 @@ final class FinanceStore {
     }
 
     private func isSpend(_ movement: Movement) -> Bool {
+        // Another cardholder's charges are theirs, not your spending.
+        guard movement.spender == nil else { return false }
         guard movement.flow == .expense, loanSpendingProjection.payments[movement.id] == nil else { return false }
         // An MSI plan is a debt schedule, not a second real purchase. Keep it
         // in card reconciliation/new-cargo controls, but exclude it from
@@ -4674,6 +4687,7 @@ final class FinanceStore {
     var pendingClassifiableExpenseMovements: [Movement] {
         canonicalMovements.filter {
             isClassifiableExpenseForCategory($0)
+                && $0.spender == nil
                 && !$0.manuallyReviewed
                 && hasClassifiableMerchant($0)
                 && Self.pendingCategoryNames.contains($0.category)
@@ -6163,6 +6177,7 @@ final class FinanceStore {
                 movements.append(movement)
             }
         }
+        refreshSpenders()
         reconcileStoredMovements()
         persist(markingChange: true)
     }
@@ -6171,6 +6186,9 @@ final class FinanceStore {
         ledgerResetGeneration += 1
         loanLedger.clear()
         LedgerStorage.remove(forKey: "marcelito.manualReviews.v1")
+        UserDefaults.standard.removeObject(forKey: CardholderProfile.storageKey)
+        UserDefaults.standard.removeObject(forKey: Self.spenderOverridesKey)
+        cardholderProfiles = []
         movements = []
         statements = []
         screenshotCaptures = []
@@ -17201,5 +17219,173 @@ final class FinanceStore {
             return category
         }
         return "Otros / Por revisar"
+    }
+}
+
+
+struct CardholderCashPayment: Codable, Identifiable, Equatable {
+    var id = UUID()
+    var date: Date
+    var amount: Decimal
+    var note: String = ""
+}
+
+/// Someone else spending on one of your cards (an Amex additional card).
+/// Their charges stay in the card's debt but out of your spending, and what
+/// they have not paid back is shown as money owed to you.
+struct CardholderProfile: Codable, Identifiable, Equatable {
+    /// Normalized name; also stored in Movement.spender.
+    var id: String
+    var name: String
+    /// Off: only separate the charges, without tracking what is owed.
+    var reimburses: Bool = true
+    var cashPayments: [CardholderCashPayment] = []
+
+    static let storageKey = "marcelito.cardholders.v1"
+
+    static func key(_ name: String) -> String {
+        name.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+            .replacingOccurrences(of: #"[^a-z ]+"#, with: " ", options: .regularExpression)
+            .split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    }
+
+    static func displayName(_ raw: String) -> String {
+        raw.split(whereSeparator: { $0.isWhitespace }).map { $0.lowercased().capitalized }.joined(separator: " ")
+    }
+
+    /// First name used to recognize their transfers ("SPEI RECIBIDO LUCIA").
+    var firstName: String? {
+        id.split(separator: " ").first.map(String.init).flatMap { $0.count >= 4 ? $0 : nil }
+    }
+
+    var shortName: String { name.split(separator: " ").first.map(String.init) ?? name }
+
+    static func load(_ defaults: UserDefaults = .standard) -> [CardholderProfile] {
+        guard let data = defaults.data(forKey: storageKey),
+              let profiles = try? JSONDecoder().decode([CardholderProfile].self, from: data) else { return [] }
+        return profiles
+    }
+}
+
+extension FinanceStore {
+    static let spenderOverridesKey = "marcelito.spenderOverrides.v1"
+
+    func saveCardholderProfiles(_ profiles: [CardholderProfile]) {
+        cardholderProfiles = profiles
+        if let data = try? JSONEncoder().encode(profiles) {
+            UserDefaults.standard.set(data, forKey: CardholderProfile.storageKey)
+        }
+        invalidateDerivedProjections()
+    }
+
+    func cardholderProfile(_ key: String?) -> CardholderProfile? {
+        guard let key else { return nil }
+        return cardholderProfiles.first { $0.id == key }
+    }
+
+    @discardableResult
+    func addCardholder(named name: String) -> CardholderProfile? {
+        let key = CardholderProfile.key(name)
+        guard key.count >= 3 else { return nil }
+        if let existing = cardholderProfile(key) { return existing }
+        let profile = CardholderProfile(id: key, name: CardholderProfile.displayName(name))
+        saveCardholderProfiles(cardholderProfiles + [profile])
+        return profile
+    }
+
+    func updateCardholder(_ profile: CardholderProfile) {
+        saveCardholderProfiles(cardholderProfiles.map { $0.id == profile.id ? profile : $0 })
+    }
+
+    private func isOwnerName(_ name: String) -> Bool {
+        let key = CardholderProfile.key(name)
+        return transferOwnerAliases.map(CardholderProfile.key).contains { alias in
+            !alias.isEmpty && (alias == key || alias.hasPrefix(key) || key.hasPrefix(alias))
+        }
+    }
+
+    private func spenderOverrideKey(for movement: Movement) -> String {
+        isProvisionalScreenshotMovement(movement) ? "shot:\(movement.id.uuidString)" : manualReviewKey(movement)
+    }
+
+    /// Who made each charge: your explicit choice first, then the name the
+    /// Amex app prints under an additional card's charges. A statement row
+    /// inherits it from the capture it replaced.
+    func refreshSpenders() {
+        let overrides = UserDefaults.standard.dictionary(forKey: Self.spenderOverridesKey) as? [String: String] ?? [:]
+        var detected: [UUID: String] = [:]
+        var inheritedOverrides: [UUID: String] = [:]
+        for capture in screenshotCaptures {
+            for row in capture.movements where row.duplicateOf == nil {
+                let target = row.matchedOfficialMovementID ?? row.id
+                if let choice = overrides["shot:\(row.id.uuidString)"] { inheritedOverrides[target] = choice }
+                if let name = row.cardholder, !isOwnerName(name) { detected[target] = name }
+            }
+        }
+        var profiles = cardholderProfiles
+        for name in Set(detected.values) where !profiles.contains(where: { $0.id == CardholderProfile.key(name) }) {
+            profiles.append(CardholderProfile(id: CardholderProfile.key(name), name: CardholderProfile.displayName(name)))
+        }
+        if profiles != cardholderProfiles { saveCardholderProfiles(profiles) }
+        var next = movements
+        var changed = false
+        for index in next.indices {
+            let choice = overrides.isEmpty ? nil : (overrides[spenderOverrideKey(for: next[index])] ?? inheritedOverrides[next[index].id])
+            let target: String?
+            if let choice { target = choice.isEmpty ? nil : choice }
+            else { target = detected[next[index].id].map(CardholderProfile.key) }
+            if next[index].spender != target {
+                next[index].spender = target
+                changed = true
+            }
+        }
+        if changed { movements = next }
+    }
+
+    /// Your choice for one charge: nil means it was yours.
+    func setSpender(for movement: Movement, to key: String?) {
+        var overrides = UserDefaults.standard.dictionary(forKey: Self.spenderOverridesKey) as? [String: String] ?? [:]
+        overrides[spenderOverrideKey(for: movement)] = key ?? ""
+        UserDefaults.standard.set(overrides, forKey: Self.spenderOverridesKey)
+        refreshSpenders()
+        persist(markingChange: true)
+    }
+
+    func cardholderSpendMovements(_ key: String) -> [Movement] {
+        eligibleMovements.filter { movement in
+            movement.spender == key && movement.flow == .expense
+                && ![.cardPayment, .bankTransfer, .refund, .credit, .msi].contains(movementKind(movement))
+        }.sorted { $0.date > $1.date }
+    }
+
+    func cardholderSpend(_ key: String, period: FinancePeriod) -> Decimal {
+        cardholderSpendMovements(key).filter { period.contains($0.date) }.reduce(0) { $0 + $1.expenseContribution }
+    }
+
+    /// Deposits whose sender is the cardholder, while they pay you back.
+    fileprivate func cardholderPaymentKey(_ movement: Movement) -> String? {
+        guard movement.amount > 0, !cardholderProfiles.isEmpty, !isCardMovement(movement),
+              !isProvisionalScreenshotMovement(movement) else { return nil }
+        let text = " " + CardholderProfile.key([movement.title, movement.rawDescription ?? "", movement.transferRecipient ?? ""].joined(separator: " ")) + " "
+        return cardholderProfiles.first { profile in
+            guard profile.reimburses, let first = profile.firstName, text.contains(" \(first) ") else { return false }
+            // Money they sent before their first charge on your card was
+            // something else (and stays your income).
+            guard let firstCharge = movements.lazy.filter({ $0.spender == profile.id }).map(\.date).min() else { return false }
+            return movement.date >= Calendar.current.startOfDay(for: firstCharge)
+        }?.id
+    }
+
+    func cardholderPaymentMovements(_ key: String) -> [Movement] {
+        eligibleMovements.filter { $0.flow == .income && cardholderPaymentKey($0) == key }.sorted { $0.date > $1.date }
+    }
+
+    /// Charges minus transfers and cash received. Negative: they paid ahead.
+    func cardholderReceivable(_ key: String) -> Decimal {
+        guard let profile = cardholderProfile(key), profile.reimburses else { return 0 }
+        let charged = cardholderSpendMovements(key).reduce(Decimal(0)) { $0 + $1.expenseContribution }
+        let transferred = cardholderPaymentMovements(key).reduce(Decimal(0)) { $0 + $1.amount }
+        let cash = profile.cashPayments.reduce(Decimal(0)) { $0 + $1.amount }
+        return charged - transferred - cash
     }
 }

@@ -89,6 +89,7 @@ struct SettingsView: View {
 
                 Section("Tu información") {
                     NavigationLink("Respaldo y restauración") { FinanceBackupView() }
+                    NavigationLink("Tarjetas adicionales") { CardholdersSettingsView() }
                     CategoryUndoButton()
                 }
                 Section("Privacidad") {
