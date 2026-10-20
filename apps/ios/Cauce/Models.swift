@@ -3772,7 +3772,7 @@ final class FinanceStore {
 
     private func statementRange(from value: String) -> ClosedRange<Date>? { Self.statementRange(from: value) }
 
-    private static func statementRange(from value: String) -> ClosedRange<Date>? {
+    static func statementRange(from value: String) -> ClosedRange<Date>? {
         let normalized = value.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
         let range = NSRange(normalized.startIndex..<normalized.endIndex, in: normalized)
         let spanishCyclePattern = #"(?i)\b(\d{1,2})\s+(?:de\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\s+al\s+(\d{1,2})\s+(?:de\s+)?(enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|setiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|set|oct|nov|dic)\s+(?:de\s+)?(20\d{2})\b"#
@@ -5299,8 +5299,9 @@ final class FinanceStore {
         // One-time projection for captures saved by builds where screenshots
         // were visible only inside Accounts. Existing user edits are retained
         // because synchronization reuses rows with the same screenshot UUID.
-        let activeScreenshotIDs = Set(screenshotCaptures.flatMap(\.movements).filter {
-            $0.duplicateOf == nil && $0.matchedOfficialMovementID == nil
+        let screenshotPeriods = screenshotSupersedingPeriods()
+        let activeScreenshotIDs = Set(screenshotCaptures.flatMap { capture in
+            capture.movements.filter { isActiveProvisionalScreenshotRow($0, in: capture, periods: screenshotPeriods) }
         }.map(\.id))
         let projectedScreenshotIDs = Set(movements.filter(isProvisionalScreenshotMovement).map(\.id))
         if activeScreenshotIDs != projectedScreenshotIDs {
@@ -6090,8 +6091,9 @@ final class FinanceStore {
         )
         movements.removeAll(where: isProvisionalScreenshotMovement)
 
+        let periods = screenshotSupersedingPeriods()
         for capture in screenshotCaptures {
-            for row in capture.movements where row.duplicateOf == nil && row.matchedOfficialMovementID == nil {
+            for row in capture.movements where isActiveProvisionalScreenshotRow(row, in: capture, periods: periods) {
                 if let retained = existing[row.id] {
                     movements.append(retained)
                     continue
@@ -6110,7 +6112,17 @@ final class FinanceStore {
                     classificationTags: Self.categoryTags(for: row.title, category: category),
                     extractionEvidence: row.evidence
                 )
-                movement.kind = movementKind(movement)
+                // "GRACIAS POR SU PAGO" on a card feed is the card being paid,
+                // not money coming in; it waits for its bank-side twin.
+                let receipt = normalizedConcept(row.title)
+                if capture.source.kind == .card, row.normalizedAmount > 0,
+                   receipt.contains("gracias por su pago") || receipt.contains("pago recibido") || receipt.contains("pago por spei") {
+                    movement.flow = .transfer
+                    movement.kind = .cardPayment
+                    movement.category = Self.category(for: row.title, flow: .transfer)
+                } else {
+                    movement.kind = movementKind(movement)
+                }
                 movement.travelRelated = movement.classificationTags.contains("viaje")
                 movements.append(movement)
             }

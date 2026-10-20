@@ -74,6 +74,19 @@ struct BankScreenshotMovement: Identifiable, Codable, Equatable, Sendable {
     }
 }
 
+extension BankScreenshotMovement {
+    func redated(_ newDate: Date) -> BankScreenshotMovement {
+        var copy = BankScreenshotMovement(
+            id: id, date: newDate, title: title, displayedAmount: displayedAmount, normalizedAmount: normalizedAmount,
+            pending: pending, confidence: confidence, imageFingerprint: imageFingerprint, evidence: evidence,
+            duplicateOf: duplicateOf, matchedOfficialMovementID: matchedOfficialMovementID
+        )
+        copy.possibleDuplicateOf = possibleDuplicateOf
+        copy.duplicateReviewed = duplicateReviewed
+        return copy
+    }
+}
+
 struct BankScreenshotCapture: Identifiable, Codable, Equatable, Sendable {
     let id: UUID
     let source: BankScreenshotSource
@@ -189,6 +202,7 @@ enum BankScreenshotReader {
         let hintedSource = sourceHint.flatMap(BankScreenshotSource.identify)
         var detectedSources = Set<BankScreenshotSource>()
         var parsedMovements: [BankScreenshotMovement] = []
+        var perImage: [[BankScreenshotMovement]] = []
         var warnings: [String] = []
         var fingerprints: [String] = []
         var inferredAccountKey = accountKey
@@ -206,10 +220,15 @@ enum BankScreenshotReader {
                 warnings.append("RappiCard: revisa los importes contra las capturas; no importamos cashback informativo ni operaciones rechazadas. Las filas tapadas o incompletas requieren una captura nueva.")
             }
             if rows.isEmpty { warnings.append("\(input.fileName): no se reconocieron filas completas.") }
-            parsedMovements.append(contentsOf: rows)
+            perImage.append(rows)
         }
 
         guard detectedSources.count == 1, let source = detectedSources.first else { throw BankScreenshotImportError.mixedSources }
+        let stitched = source == .amex ? stitchOverlappingImages(perImage) : (movements: perImage.flatMap { $0 }, droppedUndated: 0)
+        parsedMovements = stitched.movements
+        if stitched.droppedUndated > 0 {
+            warnings.append("\(stitched.droppedUndated) fila(s) al inicio de una captura no tenían fecha visible; sube también la captura que muestra su día.")
+        }
         guard !parsedMovements.isEmpty else { throw BankScreenshotImportError.noRows }
         return BankScreenshotImportResult(
             source: source,
@@ -258,6 +277,91 @@ enum BankScreenshotReader {
         return nil
     }
 
+    /// Placeholder for an Amex row whose date header is above the capture.
+    static let undatedRowDate = Date(timeIntervalSince1970: 0)
+
+    /// Screenshots of one feed overlap. A day's rows are only read below its
+    /// header, so every capture of a day holds a prefix of that day's list:
+    /// the same movement seen in two captures is one movement, and the
+    /// capture with the most copies of identical charges has them all.
+    /// Rows above a capture's first header take the day of the identical
+    /// rows another capture shows under a visible header.
+    static func stitchOverlappingImages(
+        _ perImage: [[BankScreenshotMovement]]
+    ) -> (movements: [BankScreenshotMovement], droppedUndated: Int) {
+        func key(_ row: BankScreenshotMovement) -> String {
+            let title = fold(row.title)
+                .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespaces)
+            return "\(row.displayedAmount)|\(title)"
+        }
+        let calendar = Calendar(identifier: .gregorian)
+        var images = perImage
+        var dropped = 0
+        for index in images.indices {
+            let undated = images[index].filter { $0.date == undatedRowDate }
+            guard !undated.isEmpty else { continue }
+            let firstHeaderDay = images[index].first { $0.date != undatedRowDate }?.date
+            var candidateDays = Set<Date>()
+            for row in undated {
+                for (other, rows) in images.enumerated() where other != index {
+                    for dated in rows where dated.date != undatedRowDate && key(dated) == key(row) {
+                        candidateDays.insert(dated.date)
+                    }
+                }
+            }
+            // Rows above the first header are newer than that header's day.
+            if let firstHeaderDay {
+                candidateDays = candidateDays.filter { $0 > firstHeaderDay && !calendar.isDate($0, inSameDayAs: firstHeaderDay) }
+            }
+            if candidateDays.count == 1, let day = candidateDays.first {
+                images[index] = images[index].map { $0.date == undatedRowDate ? $0.redated(day) : $0 }
+            } else {
+                dropped += undated.count
+                images[index].removeAll { $0.date == undatedRowDate }
+            }
+        }
+
+        var groups: [String: [Int: [Int]]] = [:]
+        for (imageIndex, rows) in images.enumerated() {
+            for (rowIndex, row) in rows.enumerated() {
+                let dayKey = calendar.dateComponents([.year, .month, .day], from: row.date)
+                groups["\(dayKey.year ?? 0)-\(dayKey.month ?? 0)-\(dayKey.day ?? 0)|\(key(row))", default: [:]][imageIndex, default: []].append(rowIndex)
+            }
+        }
+        for byImage in groups.values where byImage.count > 1 {
+            let keeper = byImage.max { left, right in
+                left.value.count == right.value.count ? left.key > right.key : left.value.count < right.value.count
+            }!
+            let kept = keeper.value.map { images[keeper.key][$0].id }
+            for (imageIndex, rowIndexes) in byImage where imageIndex != keeper.key {
+                for (position, rowIndex) in rowIndexes.enumerated() {
+                    images[imageIndex][rowIndex].duplicateOf = kept[min(position, kept.count - 1)]
+                    images[imageIndex][rowIndex].duplicateReviewed = true
+                }
+            }
+        }
+        return (images.flatMap { $0 }, dropped)
+    }
+
+    static func parseImagesForTesting(
+        _ images: [[(text: String, y: Double)]],
+        source: BankScreenshotSource,
+        capturedAt: Date
+    ) -> (movements: [BankScreenshotMovement], droppedUndated: Int) {
+        stitchOverlappingImages(images.enumerated().map { imageIndex, textLines in
+            let lines = textLines.map { line in
+                BankScreenshotRecognizedLine(
+                    text: line.text,
+                    bounds: CGRect(x: 0.05, y: CGFloat(line.y), width: 0.9, height: 0.015),
+                    confidence: 0.95,
+                    imageIndex: imageIndex
+                )
+            }
+            return parse(lines: lines, source: source, fingerprint: "fixture-\(imageIndex)", capturedAt: capturedAt)
+        })
+    }
+
     static func parseTextForTesting(
         _ textLines: [String],
         source: BankScreenshotSource,
@@ -274,6 +378,7 @@ enum BankScreenshotReader {
             )
         }
         let rows = parse(lines: lines, source: source, fingerprint: fingerprint, capturedAt: capturedAt)
+            .filter { $0.date != undatedRowDate }
         guard !rows.isEmpty else { throw BankScreenshotImportError.noRows }
         return BankScreenshotImportResult(
             source: source,
@@ -350,29 +455,69 @@ enum BankScreenshotReader {
         var date: Date?
         var titleParts: [String] = []
         var result: [BankScreenshotMovement] = []
+        // Amex: the bounds of the row just read. A line right below it with
+        // no amount (the additional cardholder's name, "Pendiente") is part
+        // of that row, never the start of the next merchant.
+        var rowBlock: CGRect?
+        // Amex: the floating tab bar is translucent. Rows scrolled under it
+        // are half hidden, and the date header above them usually is too, so
+        // they would land on the wrong day.
+        let bottomLimit: CGFloat? = source == .amex
+            ? lines.first(where: { line in
+                let folded = fold(line.text)
+                return folded.contains("membresia") && (folded.contains("promociones") || folded.contains("mi cuenta"))
+            }).map { $0.bounds.maxY + $0.bounds.height * 2.5 }
+            : nil
+
+        // Amex: the card header ("The Platinum Credit Card American Ex…
+        // ••••NNNNN") and the status bar sit above the feed. Text there is
+        // never part of the first visible merchant.
+        let topLimit: CGFloat? = source == .amex
+            ? lines.first(where: { line in
+                let folded = fold(line.text)
+                return folded.contains("platinum credit card") || folded.contains("american ex")
+            }).map(\.bounds.minY)
+            : nil
+
+        func markPreviousPending(_ line: BankScreenshotRecognizedLine) {
+            let previous = result.removeLast()
+            result.append(BankScreenshotMovement(
+                id: previous.id, date: previous.date, title: previous.title,
+                displayedAmount: previous.displayedAmount, normalizedAmount: previous.normalizedAmount,
+                pending: true, confidence: min(previous.confidence, line.confidence),
+                imageFingerprint: previous.imageFingerprint, evidence: previous.evidence,
+                duplicateOf: previous.duplicateOf, matchedOfficialMovementID: previous.matchedOfficialMovementID
+            ))
+        }
 
         for line in lines {
             let compact = compact(line.text)
             guard !compact.isEmpty else { continue }
+            if let bottomLimit, line.bounds.midY < bottomLimit { continue }
+            if let topLimit, line.bounds.midY >= topLimit { continue }
             if let parsedDate = parseDate(compact, capturedAt: capturedAt) {
                 date = parsedDate
                 titleParts.removeAll()
+                rowBlock = nil
                 continue
             }
             let folded = fold(compact)
             if folded == "pendiente", !result.isEmpty {
-                let previous = result.removeLast()
-                result.append(BankScreenshotMovement(
-                    id: previous.id, date: previous.date, title: previous.title,
-                    displayedAmount: previous.displayedAmount, normalizedAmount: previous.normalizedAmount,
-                    pending: true, confidence: min(previous.confidence, line.confidence),
-                    imageFingerprint: previous.imageFingerprint, evidence: previous.evidence,
-                    duplicateOf: previous.duplicateOf, matchedOfficialMovementID: previous.matchedOfficialMovementID
-                ))
+                markPreviousPending(line)
+                continue
+            }
+            if source == .amex, titleParts.isEmpty, !result.isEmpty, let block = rowBlock,
+               lastAmount(in: compact) == nil,
+               block.minY - line.bounds.maxY < line.bounds.height * 1.2 {
+                if folded.contains("pendiente") { markPreviousPending(line) }
+                rowBlock = block.union(line.bounds)
                 continue
             }
             if isNoise(folded, source: source) { continue }
-            guard let currentDate = date else { continue }
+            // Amex rows above the first date header belong to a day whose
+            // header scrolled off. They are kept undated and dated later
+            // from another screenshot of the same day.
+            guard let currentDate = date ?? (source == .amex ? Self.undatedRowDate : nil) else { continue }
 
             if let amount = lastAmount(in: compact) {
                 if folded.contains("por referir") || folded.contains("cashback") { continue }
@@ -384,6 +529,7 @@ enum BankScreenshotReader {
                 titleParts.removeAll()
                 guard combinedTitle.count >= 2, combinedTitle.rangeOfCharacter(from: .letters) != nil else { continue }
                 let isPending = folded.contains("pendiente")
+                rowBlock = line.bounds
                 let normalizedAmount = normalizeAmount(amount.value, title: combinedTitle, source: source)
                 result.append(BankScreenshotMovement(
                     date: currentDate,
@@ -625,7 +771,7 @@ extension FinanceStore {
         }
         var duplicateCount = 0
         var duplicateConflicts: [BankScreenshotDuplicateConflict] = []
-        for index in rows.indices {
+        for index in rows.indices where rows[index].duplicateOf == nil {
             if let duplicate = knownRows.first(where: {
                 $0.row.imageFingerprint != rows[index].imageFingerprint
                     && $0.source == result.source
@@ -787,8 +933,11 @@ extension FinanceStore {
                 let captureKey = next[captureIndex].accountKey
                 let singleAccount = (officialAccountsBySource[next[captureIndex].source]?.count ?? 0) <= 1
                 let sameAccount = captureKey != nil && captureKey == statement.accountKey
+                // Rappi shows the card's last four, and a reissued Amex card
+                // changes its last digits while the statement keeps the
+                // account's, so a single statement account is the match.
                 guard sameAccount
-                        || (singleAccount && (captureKey == nil || next[captureIndex].source == .rappi)) else { return nil }
+                        || (singleAccount && (captureKey == nil || next[captureIndex].source == .rappi || next[captureIndex].source == .amex)) else { return nil }
                 guard abs(movement.amount - row.normalizedAmount) < Decimal(string: "0.005")! else { return nil }
                 let days = abs(Calendar.current.dateComponents([.day], from: row.date, to: movement.date).day ?? 99)
                 guard days <= 3 else { return nil }
@@ -838,6 +987,37 @@ extension FinanceStore {
         screenshotCaptures = next
         synchronizeProvisionalScreenshotLedger()
         persistBankScreenshotCaptures()
+    }
+
+    /// Periods already covered by a reconciled statement, per issuer.
+    func screenshotSupersedingPeriods() -> [(source: BankScreenshotSource, accountKey: String?, range: ClosedRange<Date>)] {
+        statements.compactMap { statement in
+            guard statement.reconciliation?.status == .valid, !statement.requiresReview,
+                  let source = BankScreenshotSource.identify(statement.source),
+                  let range = Self.statementRange(from: statement.period) else { return nil }
+            return (source, statement.accountKey, range)
+        }
+    }
+
+    /// A screenshot row stands in for the statement only until the statement
+    /// arrives. Once a reconciled statement covers its day, a row that did
+    /// not match (a pending charge that posted with a tip, a different
+    /// amount or a new description) is replaced by the statement instead of
+    /// counting beside it.
+    func isActiveProvisionalScreenshotRow(
+        _ row: BankScreenshotMovement,
+        in capture: BankScreenshotCapture,
+        periods: [(source: BankScreenshotSource, accountKey: String?, range: ClosedRange<Date>)]
+    ) -> Bool {
+        guard row.duplicateOf == nil, row.matchedOfficialMovementID == nil else { return false }
+        let issuerPeriods = periods.filter { $0.source == capture.source }
+        let singleAccount = Set(issuerPeriods.map { $0.accountKey ?? "" }).count <= 1
+        let day = Calendar.current.startOfDay(for: row.date)
+        return !issuerPeriods.contains { period in
+            let sameAccount = capture.accountKey != nil && capture.accountKey == period.accountKey
+            let onlyAccount = singleAccount && (capture.accountKey == nil || capture.source == .rappi || capture.source == .amex)
+            return (sameAccount || onlyAccount) && period.range.contains(day)
+        }
     }
 
     private func persistBankScreenshotCaptures() {
