@@ -34,6 +34,8 @@ struct AIClassificationRunResult {
 }
 
 enum ExpenseAIProvider: String, CaseIterable, Identifiable {
+    case appleIntelligence
+    case claude
     case gemini
     case openCodeZen
     case nvidia
@@ -42,14 +44,23 @@ enum ExpenseAIProvider: String, CaseIterable, Identifiable {
 
     var displayName: String {
         switch self {
+        case .appleIntelligence: return "Apple Intelligence"
+        case .claude: return "Claude"
         case .gemini: return "Gemini"
         case .openCodeZen: return "OpenCode Zen"
         case .nvidia: return "NVIDIA"
         }
     }
 
+    /// Runs on the device: no key, nothing sent over the network.
+    var isOnDevice: Bool { self == .appleIntelligence }
+
     var endpoint: URL {
         switch self {
+        case .appleIntelligence:
+            return URL(string: "about:blank")!
+        case .claude:
+            return URL(string: "https://api.anthropic.com/v1/chat/completions")!
         case .gemini:
             return URL(string: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions")!
         case .openCodeZen:
@@ -89,8 +100,19 @@ enum ExpenseAIClassifier {
         ModelOption(id: "gemini-3.8-flash", name: "Gemini 3.8 Flash")
     ]
 
+    static let claudeDefaultModel = "claude-haiku-5-5"
+    static let claudeModels: [ModelOption] = [
+        ModelOption(id: claudeDefaultModel, name: "Claude Haiku 5.5"),
+        ModelOption(id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5")
+    ]
+    static let appleModels: [ModelOption] = [
+        ModelOption(id: OnDeviceExpenseClassifier.modelID, name: "Modelo de Apple en el iPhone")
+    ]
+
     static func models(for provider: ExpenseAIProvider) -> [ModelOption] {
         switch provider {
+        case .appleIntelligence: return appleModels
+        case .claude: return claudeModels
         case .gemini: return geminiModels
         case .openCodeZen: return zenModels
         case .nvidia: return nvidiaModels
@@ -99,6 +121,8 @@ enum ExpenseAIClassifier {
 
     static func defaultModel(for provider: ExpenseAIProvider) -> String {
         switch provider {
+        case .appleIntelligence: return OnDeviceExpenseClassifier.modelID
+        case .claude: return claudeDefaultModel
         case .gemini: return geminiDefaultModel
         case .openCodeZen: return zenDefaultModel
         case .nvidia: return nvidiaDefaultModel
@@ -107,8 +131,9 @@ enum ExpenseAIClassifier {
     static let allowedCategories = [
         "Restaurantes y bares", "Tiendita", "Despensa / supermercado", "Entretenimiento",
         "Viajes", "Transporte", "Deporte", "Compras personales", "Software y suscripciones",
-        "Salud", "Educación", "Entrenamiento", "Binance (salarios)",
-        "Club Amigos / Proyectos", "Comisiones y finanzas", "Otros / Por revisar"
+        "Salud", "Cuidado personal", "Educación", "Entrenamiento", "Binance (salarios)",
+        "Club Amigos / Proyectos", "Comisiones y finanzas", "Retiros de efectivo",
+        "Transferencias a terceros", "Otros / Por revisar"
     ]
     static let allowedTags = ["viaje", "ordinario", "extraordinario", "fijo", "variable", "personal", "proyecto"]
 
@@ -379,7 +404,7 @@ enum ExpenseAIClassifier {
         model: String,
         provider: ExpenseAIProvider
     ) async throws -> AIClassificationRunResult {
-        guard !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        guard provider.isOnDevice || !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw ClassificationError.missingAPIKey(provider)
         }
         guard models(for: provider).contains(where: { $0.id == model }) else {
@@ -401,6 +426,18 @@ enum ExpenseAIClassifier {
         }
         guard Set(movements.map(\.id)).count == movements.count else {
             throw ClassificationError.invalidResponse("Se rechazaron identificadores de movimiento duplicados.")
+        }
+        if provider.isOnDevice {
+            let classifications = try await OnDeviceExpenseClassifier.classify(movements, merchant: classificationMerchant)
+            let autoApplicable = classifications.filter {
+                !$0.requiresReview && $0.confidence >= 0.8 && $0.category != "Otros / Por revisar"
+            }.count
+            return AIClassificationRunResult(
+                classifications: classifications, provider: provider, model: model,
+                requestedCount: movements.count, receivedCount: classifications.count,
+                acceptedCount: classifications.count, unresolvedCount: max(movements.count - autoApplicable, 0),
+                retryCount: 0, finishReasons: [], issues: []
+            )
         }
 
         var classificationsByID: [UUID: AIClassification] = [:]
@@ -556,7 +593,7 @@ enum ExpenseAIClassifier {
         Eres el clasificador de gastos de una app financiera. Clasifica cada movimiento usando solo estas categorías: \(categories). Usa únicamente estas etiquetas secundarias, sin duplicarlas: \(tags). Club Amigos / Proyectos tiene prioridad si el concepto identifica un proyecto. No clasifiques ingresos, reembolsos, pagos de tarjeta, transferencias ni MSI: esos movimientos no deben enviarse a esta función. No recibes ni debes solicitar PDFs, cuentas, números de tarjeta, saldos o metadatos del estado. Identifica si pertenece a un viaje. Conserva exactamente cada id. Devuelve una clasificación por cada id recibido. confidence debe ser un número entre 0 y 1. Si no hay evidencia suficiente usa Otros / Por revisar y requires_review=true. Responde únicamente un objeto JSON sin markdown, con la propiedad \"classifications\" que contenga objetos de la forma {\"id\":\"UUID\",\"category\":\"Categoría\",\"tags\":[\"personal\",\"variable\",\"ordinario\"],\"travelRelated\":true,\"confidence\":0.9,\"reason\":\"evidencia breve\",\"requires_review\":false}.
         """
         let user = "Clasifica estos movimientos pendientes:\n\(inputJSON)"
-        let usesDeterministicOptions = provider == .nvidia || provider == .gemini
+        let usesDeterministicOptions = provider == .nvidia || provider == .gemini || provider == .claude
         var requestBody = Request(
             model: model,
             messages: [
@@ -567,7 +604,8 @@ enum ExpenseAIClassifier {
             // established request remains minimal. NVIDIA receives an
             // explicit deterministic JSON-oriented configuration.
             temperature: usesDeterministicOptions ? 0 : nil,
-            topP: usesDeterministicOptions ? 1 : nil,
+            // Claude rejects temperature and top_p together.
+            topP: usesDeterministicOptions && provider != .claude ? 1 : nil,
             maxTokens: usesDeterministicOptions ? 4096 : nil,
             stream: usesDeterministicOptions ? false : nil,
             chatTemplateKwargs: provider == .nvidia && model == nvidiaDefaultModel ? ChatTemplateKwargs(thinking: false) : nil,
@@ -578,6 +616,10 @@ enum ExpenseAIClassifier {
         request.httpMethod = "POST"
         request.timeoutInterval = 90
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if provider == .claude {
+            request.setValue(apiKey, forHTTPHeaderField: "x-api-key")
+            request.setValue("2023-06-01", forHTTPHeaderField: "anthropic-version")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try encoder.encode(requestBody)
 
@@ -722,6 +764,10 @@ enum ExpenseAIClassifier {
 
     private static func responseFormat(for provider: ExpenseAIProvider) -> ResponseFormat? {
         switch provider {
+        case .appleIntelligence, .claude:
+            // Claude's compatible endpoint takes the JSON contract from the
+            // prompt; the on-device model never reaches this request.
+            return nil
         case .gemini:
             return ResponseFormat(
                 type: "json_schema",
@@ -867,13 +913,19 @@ enum ExpenseAISettingsStore {
     private static let legacyZenAccount = "api-key"
     private static let selectedProviderKey = "marcelito.expense-ai.provider"
 
+    /// The saved choice while it can run; otherwise the on-device model
+    /// when this iPhone has it, so classifying works without any key.
     static var selectedProvider: ExpenseAIProvider {
-        guard let raw = UserDefaults.standard.string(forKey: selectedProviderKey),
-              let provider = ExpenseAIProvider(rawValue: raw) else { return .gemini }
-        return provider
+        if let raw = UserDefaults.standard.string(forKey: selectedProviderKey),
+           let provider = ExpenseAIProvider(rawValue: raw),
+           provider.isOnDevice ? OnDeviceExpenseClassifier.isAvailable : apiKey(for: provider) != nil {
+            return provider
+        }
+        return OnDeviceExpenseClassifier.isAvailable ? .appleIntelligence : .gemini
     }
 
     static func apiKey(for provider: ExpenseAIProvider) -> String? {
+        if provider.isOnDevice { return OnDeviceExpenseClassifier.isAvailable ? "on-device" : nil }
         if let current = read(query: baseQuery(for: provider)) { return current }
         // Existing users keep their Zen configuration after this migration.
         guard provider == .openCodeZen else { return nil }
@@ -888,6 +940,13 @@ enum ExpenseAISettingsStore {
     }
 
     static func save(provider: ExpenseAIProvider, apiKey: String, model: String) throws {
+        if provider.isOnDevice {
+            guard OnDeviceExpenseClassifier.isAvailable else {
+                throw ExpenseAIClassifier.ClassificationError.provider(OnDeviceExpenseClassifier.statusText)
+            }
+            UserDefaults.standard.set(provider.rawValue, forKey: selectedProviderKey)
+            return
+        }
         let cleanKey = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleanKey.isEmpty else { throw ExpenseAIClassifier.ClassificationError.missingAPIKey(provider) }
         guard ExpenseAIClassifier.models(for: provider).contains(where: { $0.id == model }) else {
@@ -957,23 +1016,36 @@ struct AISettingsView: View {
                 Section("Proveedor") {
                     Picker("Servicio de IA", selection: $selectedProvider) {
                         ForEach(ExpenseAIProvider.allCases) { provider in
-                            Text(provider.displayName).tag(provider)
+                            Text(provider.isOnDevice ? "\(provider.displayName) (en el iPhone)" : provider.displayName).tag(provider)
                         }
                     }
-                    .pickerStyle(.segmented)
+                    .pickerStyle(.menu)
+                    .onChange(of: selectedProvider) { _, provider in
+                        apiKey = provider.isOnDevice ? "" : ExpenseAISettingsStore.apiKey(for: provider) ?? ""
+                        selectedModel = ExpenseAISettingsStore.selectedModel(for: provider)
+                    }
                 }
                 Section(selectedProvider.displayName) {
-                    SecureField("Clave API", text: $apiKey)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                    Picker("Modelo", selection: $selectedModel) {
-                        ForEach(ExpenseAIClassifier.models(for: selectedProvider)) { model in
-                            Text(model.name).tag(model.id)
+                    if selectedProvider.isOnDevice {
+                        Label(OnDeviceExpenseClassifier.statusText,
+                              systemImage: OnDeviceExpenseClassifier.isAvailable ? "checkmark.seal.fill" : "exclamationmark.triangle")
+                            .foregroundStyle(OnDeviceExpenseClassifier.isAvailable ? Color.marcelitoSuccess : Color.marcelitoAmber)
+                        Text("No necesita clave ni internet. Es más lento que un servicio externo y a veces menos preciso con comercios poco conocidos; lo que no reconozca con confianza queda para que lo elijas tú.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        SecureField("Clave API", text: $apiKey)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                        Picker("Modelo", selection: $selectedModel) {
+                            ForEach(ExpenseAIClassifier.models(for: selectedProvider)) { model in
+                                Text(model.name).tag(model.id)
+                            }
                         }
+                        Text("La clave de \(selectedProvider.displayName) se guarda únicamente en el llavero de este iPhone. El proveedor solo recibe descripciones, importes y fechas de gastos ya conciliados para sugerir su categoría y etiquetas. Nunca recibe PDFs, cuentas ni saldos.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
                     }
-                    Text("La clave de \(selectedProvider.displayName) se guarda únicamente en el llavero de este iPhone. El proveedor solo recibe descripciones, importes y fechas de gastos ya conciliados para sugerir su categoría y etiquetas. Nunca recibe PDFs, cuentas ni saldos.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
                 Section {
                     Button("Guardar configuración") {
@@ -985,7 +1057,7 @@ struct AISettingsView: View {
                         }
                     }
                     .frame(maxWidth: .infinity)
-                    if ExpenseAISettingsStore.apiKey(for: selectedProvider) != nil {
+                    if !selectedProvider.isOnDevice, ExpenseAISettingsStore.apiKey(for: selectedProvider) != nil {
                         Button("Eliminar clave", role: .destructive) {
                             ExpenseAISettingsStore.delete(provider: selectedProvider)
                             apiKey = ""
@@ -994,7 +1066,7 @@ struct AISettingsView: View {
                     }
                 }
                 Section("Privacidad") {
-                    Text("La clasificación es opcional. Gemini, OpenCode Zen y NVIDIA son servicios externos: evita enviar descripciones que contengan información sensible que no quieras compartir.")
+                    Text("La clasificación es opcional. Apple Intelligence trabaja dentro del iPhone. Claude, Gemini, OpenCode Zen y NVIDIA son servicios externos: evita enviar descripciones que contengan información sensible que no quieras compartir.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text("La IA nunca aprueba cifras por sí sola: cada resultado debe conciliar contra los totales impresos antes de alimentar los KPI.")

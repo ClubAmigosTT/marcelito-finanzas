@@ -1091,7 +1091,7 @@ final class FinanceStore {
     /// survive a PDF re-import, whose row UUID is intentionally new.
     private let manualCategoryOverridesKey = "marcelito.categoryOverrides.v1"
     private let categoryTaxonomyVersionKey = "marcelito.categoryTaxonomyVersion.v1"
-    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.6"
+    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.7"
     private static let pendingCategoryNames: Set<String> = [
         "Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos",
         "Alimentos", "Comidas", "Servicios", "Compras", "Finanzas",
@@ -1155,6 +1155,9 @@ final class FinanceStore {
     }
 
     @ObservationIgnored private var eligibleMovementsCache: DerivedProjectionCache<[Movement]>?
+    @ObservationIgnored private var eligibleStatementIDsCache: DerivedProjectionCache<Set<UUID>>?
+    @ObservationIgnored private var reconciledMovementsCache: DerivedProjectionCache<[Movement]>?
+    @ObservationIgnored private var validMovementIDsCache: DerivedProjectionCache<Set<UUID>>?
     @ObservationIgnored private var periodMetricsCache: DerivedProjectionCache<[StatementMetric]>?
     @ObservationIgnored private var ledgerQualityCache: DerivedProjectionCache<LedgerQuality>?
     @ObservationIgnored private var netExpenseCache: DerivedProjectionCache<[Movement]>?
@@ -2006,12 +2009,33 @@ final class FinanceStore {
     /// ledger small and makes it impossible for a manual preview to mistake
     /// rejected rows for accounting data.
     private var reconciledMovements: [Movement] {
-        movements.filter { movement in
-            guard isValidStoredMovement(movement) else { return false }
+        if let value = cachedProjection(reconciledMovementsCache) { return value }
+        let eligible = eligibleStatementIDs
+        let valid = validMovementIDs
+        let value = movements.filter { movement in
+            guard valid.contains(movement.id) else { return false }
             guard let statementID = movement.statementId else { return true }
-            guard let statement = statements.first(where: { $0.id == statementID }) else { return false }
-            return isEligibleStatement(statement)
+            return eligible.contains(statementID)
         }
+        reconciledMovementsCache = projectionEntry(value)
+        return value
+    }
+
+    /// Statement eligibility runs the source, identity and OCR-quality gates.
+    /// Evaluate it once per statement, not once per movement: with ~1,500
+    /// rows the per-row check took over a second on every ledger change.
+    private var validMovementIDs: Set<UUID> {
+        if let value = cachedProjection(validMovementIDsCache) { return value }
+        let value = Set(movements.filter(isValidStoredMovement).map(\.id))
+        validMovementIDsCache = projectionEntry(value)
+        return value
+    }
+
+    private var eligibleStatementIDs: Set<UUID> {
+        if let value = cachedProjection(eligibleStatementIDsCache) { return value }
+        let value = Set(statements.filter(isEligibleStatement).map(\.id))
+        eligibleStatementIDsCache = projectionEntry(value)
+        return value
     }
 
     var canonicalMovements: [Movement] { reconciledMovements }
@@ -3578,12 +3602,11 @@ final class FinanceStore {
     /// the user can inspect them, but they are quarantined from every total.
     private func isEligibleMovement(_ movement: Movement) -> Bool {
         guard let statementId = movement.statementId else { return true }
-        guard let statement = statements.first(where: { $0.id == statementId }) else { return false }
         // The manual dashboard unlock is intentionally not an accounting
         // override.  It can expose issuer balances for inspection, but rows
         // from an invalid/pending statement stay out of every operational
         // aggregate until the issuer totals reconcile.
-        guard isEligibleStatement(statement), isValidStoredMovement(movement) else { return false }
+        guard eligibleStatementIDs.contains(statementId), validMovementIDs.contains(movement.id) else { return false }
         return true
     }
 
@@ -4618,6 +4641,19 @@ final class FinanceStore {
         movements = nextMovements
         defaults.set(Self.categoryTaxonomyVersion, forKey: categoryTaxonomyVersionKey)
         return changed
+    }
+
+    /// Your own category for this merchant first (a correction you made or a
+    /// rule Marcelito learned from it), then the keyword rules.
+    func inferredExpenseCategory(for title: String) -> String {
+        let defaults = UserDefaults.standard
+        let key = Self.categoryRuleKey(title)
+        let manual = (defaults.dictionary(forKey: manualCategoryOverridesKey) as? [String: String])?[key]
+        let learned = (defaults.dictionary(forKey: categoryRulesKey) as? [String: String])?[key]
+        if let chosen = [manual, learned].compactMap({ $0 }).first(where: { !Self.pendingCategoryNames.contains($0) }) {
+            return chosen
+        }
+        return Self.category(for: Self.categoryText(title), flow: .expense)
     }
 
     var classifiableExpenseCount: Int {
@@ -6099,7 +6135,7 @@ final class FinanceStore {
                     continue
                 }
                 let flow: FlowKind = row.normalizedAmount > 0 ? .income : .expense
-                let category = Self.category(for: row.title, flow: flow)
+                let category = flow == .expense ? inferredExpenseCategory(for: row.title) : Self.category(for: row.title, flow: flow)
                 var movement = Movement(
                     id: row.id,
                     date: row.date,
@@ -8653,6 +8689,7 @@ final class FinanceStore {
 
     private func invalidateDerivedProjections() {
         eligibleMovementsCache = nil
+        eligibleStatementIDsCache = nil; reconciledMovementsCache = nil; validMovementIDsCache = nil
         periodMetricsCache = nil
         ledgerQualityCache = nil
         netExpenseCache = nil; incomeProjectionCache = nil; balanceHistoryCache = nil
@@ -17075,6 +17112,9 @@ final class FinanceStore {
         value
             .folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current)
             .lowercased()
+            // "CANVA050334", "7ELEVEN": a merchant glued to a store number.
+            .replacingOccurrences(of: #"([a-z])(\d{2,})"#, with: "$1 $2", options: .regularExpression)
+            .replacingOccurrences(of: #"(\d)([a-z]{3,})"#, with: "$1 $2", options: .regularExpression)
             .replacingOccurrences(of: #"\b(?:rfc|ref(?:erencia)?|folio|aut(?:orizacion)?|operacion)\s*[:#./_-]+\s*[a-z0-9-]+"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"\b\d{2,}\b"#, with: " ", options: .regularExpression)
             .replacingOccurrences(of: #"[^a-z0-9]+"#, with: " ", options: .regularExpression)
@@ -17082,15 +17122,19 @@ final class FinanceStore {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private static func categoryContains(_ text: String, _ markers: [String]) -> Bool {
+    private static func categoryContains(_ text: String, _ markers: [String], allowPrefix: Bool = false) -> Bool {
         let padded = " \(text) "
         return markers.contains { marker in
             let normalizedMarker = categoryText(marker)
             guard !normalizedMarker.isEmpty else { return false }
             return padded.contains(" \(normalizedMarker) ")
                 || (normalizedMarker.count >= 6 && text.contains(normalizedMarker))
+                // A word that starts with the marker: TACOS, TAQUERIA, OXXOPONTAN.
+                || (allowPrefix && normalizedMarker.count >= 4 && !normalizedMarker.contains(" ") && padded.contains(" \(normalizedMarker)"))
         }
     }
+
+    static func categoryForTesting(_ title: String) -> String { category(for: title, flow: .expense) }
 
     private static func categoryTags(for title: String, category: String) -> [String] {
         let text = categoryText(title)
@@ -17117,26 +17161,36 @@ final class FinanceStore {
 
         let rules: [(String, [String])] = [
             // Project identity is always evaluated first and is handled below.
+            // An outgoing SPEI to someone else is not a purchase the merchant
+            // name can explain; it gets its own bucket instead of "Otros".
+            ("Transferencias a terceros", ["pago cuenta de tercero", "spei enviado", "transf rapida", "pago transferencia spei", "transferencia a", "cargo transf", "transferencia enlace", "pago transf"]),
             ("Educación", ["itam", "instituto tecnologico autonomo de mexico"]),
             ("Entrenamiento", ["entrenamiento", "personal training", "entrenador", "trainer"]),
             ("Binance (salarios)", ["binance salarios", "binance salario", "binance nomina", "binance nominas", "binance payroll"]),
             ("Comisiones y finanzas", ["comision", "interés", "iva com", "cajero", "anualidad", "cargo bancario", "seguro financiero", "financiera", "finanzas"]),
-            ("Software y suscripciones", ["canva", "cursor", "google one", "google cloud", "google storage", "youtube premium", "apple music", "adobe", "microsoft 365", "microsoft office", "suscripcion", "suscripción", "saas", "software", "icloud", "dropbox", "apple.com/bill"]),
+            ("Retiros de efectivo", ["retiro efec", "retiro sin tarjeta", "retiro de efectivo", "retiro en cajero", "keepcash", "atm"]),
+            ("Software y suscripciones", ["facebk", "facebook ads", "meta ads", "cloudflare", "github", "openai", "chatgpt", "anthropic", "claude ai", "notion", "figma", "spotify", "netflix", "disney plus", "disneyplus", "hbo", "prime video", "amazon prime", "vercel", "godaddy", "namecheap", "zoom us", "google", "canva", "cursor", "google one", "google cloud", "google storage", "youtube premium", "apple music", "adobe", "microsoft 365", "microsoft office", "suscripcion", "suscripción", "saas", "software", "icloud", "dropbox", "apple.com/bill"]),
             // A destination alone is only a secondary travel tag. Otherwise
             // UBER MEDELLIN or a restaurant in New York would lose its useful
             // natural category and be flattened into Viajes.
             ("Viajes", ["airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico", "aerobus", "volaris", "vivaaerobus", "avianca", "american airlines", "united airlines", "delta air", "iberia", "vuelo", "flight", "holafly", "esim", "roaming", "airport", "aeropuerto", "renta de auto", "car rental"]),
-            ("Entretenimiento", ["cinemex", "cinemas wtc", "cinepolis", "cinetec", "cineteca", "cine", "teatro", "museo", "museum", "moma", "guggenheim", "summit one", "concierto", "festival", "boleto", "ticket", "show", "smoke jazz", "jazz", "nekoma", "club nocturno", "experiencia", "ocio"]),
-            ("Deporte", ["club deportivo", "club deportivo kanoa", "asdeporte", "decathlon", "pickleball", "padel", "pádel", "cancha", "renta de cancha", "gimnasio", "gym", "deporte", "competencia"]),
-            ("Salud", ["farmacia", "farmacias", "farm san pablo", "farm guad", "hospital", "clinica", "clínica", "doctor", "consultorio", "dentista", "dental", "odont", "laboratorio", "salud", "medic", "tratamiento"]),
-            ("Restaurantes y bares", ["restaurant", "rest ", "taquer", "taco", "sushi", "cafe", "café", "cafesitio", "cafeteria", "cafetería", "coffee", "tierra garat", "starbucks", "burger", "shake shack", "pizza", "pub", "bar ", "comida", "food", "fastfood", "fastfoodrestaurant", "delivery", "rappi", "didi food", "flauta", "tortas", "pancita", "sazonjarocho", "sazon jarocho", "el globo", "panaderia", "panadería", "bakery", "pasteleria", "pastelería", "heladeria", "heladería", "neveria", "nevería", "antojitos", "fondita", "ramen", "italian", "crepes", "cerv", "mariscos", "grill", "cocina", "parrilla", "chipotle", "doordash", "ubereats", "uber eats", "casa de tono", "espeto", "japiramen", "orinoco", "waffles"]),
-            ("Tiendita", ["oxxo", "7 eleven", "seven eleven", "7-eleven", "extra", "circle k", "minisuper", "mini super", "tienda de conveniencia", "convenience store", "snack"]),
-            ("Despensa / supermercado", ["walmart", "superama", "soriana", "costco", "chedraui", "la comer", "city market", "sam's", "sams ", "supermercado", "grocery", "whole foods", "wholefds", "despensa", "mercado grande", "abarrotes"]),
-            ("Transporte", ["uber", "didi", "cabify", "taxi", "metrobus", "metro ", "metrotap", "nyct", "nj transit", "njtransit", "nyc ferry", "subway", "mta ", "train ", "estacionamiento", "parking", "parco ", "gasolina", "pemex", "shell", "bp ", "gulf", "mobil", "caseta", "autopista", "toll", "ecobici", "transporte", "movilidad"]),
-            ("Compras personales", ["apple", "shein", "amazon", "sanborns", "miniso", "old navy", "mercadolibre", "mercado libre", "mercadopago", "office depot", "lumen", "steren", "boutique", "tienda", "shop", "store", "ropa", "zapateria", "departamental", "electronic", "electronico", "accesorio", "compras"])
+            ("Entretenimiento", ["cinemex", "cinemas wtc", "cinepolis", "cinetec", "cineteca", "cine", "teatro", "museo", "museum", "moma", "guggenheim", "summit one", "concierto", "festival", "boleto", "ticket", "show", "smoke jazz", "jazz", "nekoma", "club nocturno", "experiencia", "ocio", "estadio", "stadium", "lucha libre", "cmll", "circo", "amnh", "coca cola", "harp helu", "boletia", "perreo", "antro"]),
+            ("Deporte", ["pingpod", "paddeo", "gpadel", "sport", "club deportivo", "club deportivo kanoa", "asdeporte", "decathlon", "pickleball", "padel", "pádel", "cancha", "renta de cancha", "gimnasio", "gym", "deporte", "competencia"]),
+            ("Salud", ["farmacia", "farmacias", "farm san pablo", "farm guad", "hospital", "clinica", "clínica", "doctor", "consultorio", "dentista", "dental", "odont", "laboratorio", "salud", "medic", "tratamiento", "dr", "f ahorro", "farmacias del ahorro", "similares"]),
+            ("Cuidado personal", ["peluq", "barber", "estetica", "salon de belleza", "beauty", "beuty", "sbeuty", "manicure", "nails", "spa", "tintoreria", "tint", "lavanderia"]),
+            ("Restaurantes y bares", ["restaurant", "rest ", "taquer", "taco", "sushi", "cafe", "café", "cafesitio", "cafeteria", "cafetería", "coffee", "tierra garat", "starbucks", "burger", "shake shack", "pizza", "pub", "bar ", "comida", "food", "fastfood", "fastfoodrestaurant", "delivery", "rappi", "didi food", "flauta", "tortas", "pancita", "sazonjarocho", "sazon jarocho", "el globo", "panaderia", "panadería", "bakery", "pasteleria", "pastelería", "heladeria", "heladería", "neveria", "nevería", "antojitos", "fondita", "ramen", "italian", "crepes", "cerv", "mariscos", "grill", "cocina", "parrilla", "chipotle", "doordash", "ubereats", "uber eats", "casa de tono", "espeto", "japiramen", "orinoco", "waffles", "tizoncito", "pastorcito", "pastor", "cevicher", "ceviche", "mezcal", "rooftop", "lounge", "deli", "bagel", "krispy", "mcdonald", "chili s", "kfc", "domino", "little caesar", "bistro", "trattoria", "cantina", "pulque", "chicken", "wings", "bbq", "steak", "kitchen", "brunch", "gastro", "fonda", "lonche", "torta", "birria", "pozole", "gordita", "quesadill", "elote", "esquite", "churro", "paleter", "concessio", "guac", "horneando", "fogon", "jugos", "frutos prohibidos"]),
+            ("Tiendita", ["oxxo", "7 eleven", "eleven", "seven eleven", "7-eleven", "extra", "circle k", "convenience", "minisuper", "mini super", "tienda de conveniencia", "convenience store", "snack"]),
+            ("Despensa / supermercado", ["walmart", "superama", "soriana", "costco", "chedraui", "la comer", "city market", "sam's", "sams ", "supermercado", "grocery", "whole foods", "wholefds", "despensa", "mercado grande", "abarrotes", "sumesa", "wildfork", "pantry", "mkt", "fresko", "heb", "alsuper", "aurrera"]),
+            ("Transporte", ["uber", "didi", "cabify", "taxi", "metrobus", "metro ", "metrotap", "nyct", "nj transit", "njtransit", "nyc ferry", "subway", "mta ", "train ", "estacionamiento", "parking", "parco ", "gasolina", "pemex", "shell", "bp ", "gulf", "mobil", "caseta", "autopista", "toll", "ecobici", "transporte", "movilidad", "estac", "ado web", "flix", "pase recur", "televia"]),
+            ("Compras personales", ["apple", "shein", "amazon", "sanborns", "miniso", "old navy", "mercadolibre", "mercado libre", "office depot", "fanatics", "merch", "palacio hierro", "liverpool", "zara", "uniqlo", "nike", "adidas", "thrift", "gift", "artesa", "lumen", "steren", "boutique", "tienda", "shop", "store", "ropa", "zapateria", "departamental", "electronic", "electronico", "accesorio", "compras"])
         ]
+        // Payment processors prefix the real merchant ("MERCADOPAGO*CANVA",
+        // "BILLPOCKET*EL TIZONCITO", "TST* LOVEJOYS"). Classify the merchant.
         let normalizedTitle = categoryText(title)
-        let matchesMarker: (String) -> Bool = { marker in categoryContains(normalizedTitle, [marker]) }
+            .replacingOccurrences(of: #"^(?:(?:mercadopago|mercado pago|merpago|billpocket|bpk|bzpay|clip|ztl|zettle|izettle|tst|sq|py|dlocal|d local|unvrs|wuzi|serti|paypal|sumup|conekta|openpay|stripe|payu)\s+)+"#, with: "", options: .regularExpression)
+        // "EST DEPRISA", "EST HD": a parking lot.
+        if normalizedTitle.hasPrefix("est ") { return "Transporte" }
+        let matchesMarker: (String) -> Bool = { marker in categoryContains(normalizedTitle, [marker], allowPrefix: true) }
         if ["club amigos", "clubamigos", "proyecto", "proveedor club", "material club"].contains(where: matchesMarker) {
             return "Club Amigos / Proyectos"
         }
