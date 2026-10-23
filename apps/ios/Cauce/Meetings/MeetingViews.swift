@@ -99,10 +99,12 @@ struct MeetingRecorderView: View {
             }
             .frame(height: 10)
             .padding(.horizontal, 40)
-            Text(recorder.state == .paused ? "En pausa" : started ? "Grabando…" : "Preparando el micrófono…")
+            Text(recorder.state == .paused ? "En pausa" : started ? "Grabando…" : recorder.errorMessage == nil ? "Preparando el micrófono…" : "No se está grabando")
                 .foregroundStyle(.secondary)
             if let error = recorder.errorMessage {
                 Text(error).foregroundStyle(Color.marcelitoDanger).multilineTextAlignment(.center).padding(.horizontal)
+                Button("Reintentar") { Task { await startRecording() } }
+                    .buttonStyle(.marcelitoSecondary)
             }
             Spacer()
             HStack(spacing: 18) {
@@ -136,14 +138,18 @@ struct MeetingRecorderView: View {
             Button("Descartar", role: .destructive) { recorder.discard(); finish(nil) }
             Button("Seguir grabando", role: .cancel) {}
         }
-        .task {
-            let target = meetings.newAudioURL()
-            fileName = target.name
-            started = await recorder.start(to: target.url)
-        }
+        .task { await startRecording() }
         // Keep the screen awake while recording; locking it also works.
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
+    }
+}
+
+extension MeetingRecorderView {
+    fileprivate func startRecording() async {
+        let target = meetings.newAudioURL()
+        fileName = target.name
+        started = await recorder.start(to: target.url)
     }
 }
 
