@@ -110,6 +110,7 @@ struct HomeView: View {
     @State private var importProgress = 0
     @State private var importStatus = "Preparando…"
     @State private var isDiagnosticsPresented = false
+    @State private var isMeetingsPresented = false
     @State private var isSettingsPresented = false
     private struct ExpensePresentation: Identifiable {
         let id = UUID()
@@ -143,6 +144,9 @@ struct HomeView: View {
                 NavigationLink { PaymentAgendaView() } label: {
                     HStack { Label("Próximos pagos", systemImage: "calendar"); Spacer(); Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary) }
                 }.font(.subheadline.weight(.semibold))
+                Button { isMeetingsPresented = true } label: {
+                    HStack { Label("Reuniones", systemImage: "mic"); Spacer(); Image(systemName: "chevron.right").font(.caption.weight(.semibold)).foregroundStyle(.tertiary) }
+                }.font(.subheadline.weight(.semibold)).buttonStyle(.plain)
                 HomePersonalMetrics(showActivity: false)
                 if store.dashboardIsBlocked || store.operationalMetricsBlocked {
                     HistoricalDashboardBlockedCard(store: store)
@@ -178,6 +182,11 @@ struct HomeView: View {
                 } label: {
                     Label("Actualizar estados importados", systemImage: "arrow.clockwise")
                 }
+            }
+            Button {
+                isMeetingsPresented = true
+            } label: {
+                Label("Reuniones", systemImage: "mic")
             }
             Button {
                 isDiagnosticsPresented = true
@@ -239,6 +248,7 @@ struct HomeView: View {
             .sheet(item: $importReport) { report in
                 ImportReportSheet(report: report)
             }
+            .sheet(isPresented: $isMeetingsPresented) { MeetingsView() }
             .sheet(isPresented: $isDiagnosticsPresented) {
                 DiagnosticsView()
             }

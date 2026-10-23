@@ -6,6 +6,17 @@ options:
 settings:
   base:
     SWIFT_VERSION: "5.9"
+    # CI release signing reaches only the app target through these, so Swift
+    # package targets (and their resource bundles) never receive a
+    # provisioning profile they cannot use.
+    MARCELITO_SIGN_STYLE: Automatic
+    MARCELITO_SIGN_IDENTITY: Apple Development
+    MARCELITO_PROVISIONING_PROFILE: ""
+packages:
+  # Speaker separation ("who said what") for recorded meetings, on device.
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio
+    exactVersion: 0.17.7
 targets:
   Marcelito:
     type: application
@@ -14,6 +25,15 @@ targets:
       - Cauce
     resources:
       - Cauce/Resources/rappi-engine.js
+    dependencies:
+      - package: FluidAudio
+    info:
+      path: Cauce/Info.plist
+      properties:
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        # A meeting keeps recording with the screen locked.
+        UIBackgroundModes: [audio]
     settings:
       base:
         PRODUCT_NAME: Marcelito
@@ -25,13 +45,17 @@ targets:
         # Evita declarar iPad hasta contar con launch screen y orientaciones específicas.
         TARGETED_DEVICE_FAMILY: "1"
         INFOPLIST_KEY_NSFaceIDUsageDescription: "Marcelito usa Face ID para proteger el acceso a tus finanzas."
+        INFOPLIST_KEY_NSMicrophoneUsageDescription: "Marcelito graba tus reuniones para transcribirlas y tomar notas dentro de este iPhone."
+        INFOPLIST_KEY_NSSpeechRecognitionUsageDescription: "Marcelito convierte en texto tus reuniones grabadas, dentro de este iPhone."
         INFOPLIST_KEY_ITSAppUsesNonExemptEncryption: NO
         INFOPLIST_KEY_CFBundleDisplayName: Marcelito
         # Declara una pantalla de lanzamiento moderna para evitar que iOS use
         # el lienzo de compatibilidad 320x480 en los iPhone actuales.
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         GENERATE_INFOPLIST_FILE: YES
-        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_STYLE: $(MARCELITO_SIGN_STYLE)
+        CODE_SIGN_IDENTITY: $(MARCELITO_SIGN_IDENTITY)
+        PROVISIONING_PROFILE_SPECIFIER: $(MARCELITO_PROVISIONING_PROFILE)
     scheme:
       testTargets:
         - MarcelitoTests

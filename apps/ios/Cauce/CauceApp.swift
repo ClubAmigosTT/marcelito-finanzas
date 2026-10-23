@@ -7,6 +7,7 @@ struct MarcelitoApp: App {
     @State private var planningStore: FinancialPlanningStore
     @State private var recoveryError: String?
     @State private var authModel: AuthenticationModel
+    @State private var meetingStore = MeetingStore()
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -35,6 +36,7 @@ struct MarcelitoApp: App {
                         .environment(financeStore)
                         .environment(authModel)
                         .environment(planningStore)
+                        .environment(meetingStore)
                 } else {
                     SignInView()
                         .environment(authModel)
