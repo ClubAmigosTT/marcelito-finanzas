@@ -37,6 +37,10 @@ struct Meeting: Codable, Identifiable, Equatable {
     /// Diarizer label → name the user gave ("1" → "Ana").
     var speakerNames: [String: String] = [:]
     var notes: MeetingNotes?
+    /// The recording is deleted once it has been turned into text.
+    var audioDeleted: Bool?
+
+    var hasAudio: Bool { audioDeleted != true }
 
     var speakers: [String] {
         var seen = Set<String>()
@@ -68,10 +72,15 @@ final class MeetingStore {
     /// Transcribe, separate speakers and write notes. Keeps running when the
     /// screen that started it closes.
     func process(_ id: UUID) {
-        guard progress[id] == nil else { return }
+        guard progress[id] == nil, meeting(id)?.hasAudio == true else { return }
         progress[id] = "Preparando…"
         Task { @MainActor in
             await MeetingProcessor.process(id, store: self) { [weak self] step in self?.progress[id] = step }
+            // Text only: once the words and the speakers are in, the audio goes.
+            // It stays when something failed, so the meeting can be retried.
+            if let done = meeting(id), done.status == .ready, done.statusDetail == nil, !done.utterances.isEmpty {
+                deleteAudio(of: id)
+            }
             progress[id] = nil
         }
     }
@@ -88,6 +97,35 @@ final class MeetingStore {
                 if meeting.status == .processing { meeting.status = .recorded; meeting.statusDetail = nil }
                 return meeting
             }
+            // Meetings transcribed by builds that kept the recording.
+            for meeting in meetings where meeting.status == .ready && meeting.statusDetail == nil && meeting.hasAudio && !meeting.utterances.isEmpty {
+                deleteAudio(of: meeting.id)
+            }
+        }
+    }
+
+    /// Removes the recording and keeps only the text.
+    func deleteAudio(of id: UUID) {
+        guard var meeting = meeting(id) else { return }
+        try? FileManager.default.removeItem(at: audioURL(for: meeting))
+        meeting.audioDeleted = true
+        update(meeting)
+    }
+
+    /// Notes again from the transcript (no audio needed), e.g. after naming the speakers.
+    func rewriteNotes(_ id: UUID) {
+        guard progress[id] == nil, let meeting = meeting(id), !meeting.utterances.isEmpty else { return }
+        progress[id] = "Tomando notas…"
+        Task { @MainActor in
+            let snapshot = meeting
+            let notes = try? await MeetingProcessor.withTimeout(120 + max(1, meeting.duration / 60) * 20, step: "Las notas") {
+                await MeetingNotesWriter.notes(for: snapshot)
+            }
+            if var current = self.meeting(id), let notes = notes ?? nil {
+                current.notes = notes
+                update(current)
+            }
+            progress[id] = nil
         }
     }
 
@@ -114,7 +152,7 @@ final class MeetingStore {
     }
 
     func delete(_ meeting: Meeting) {
-        try? FileManager.default.removeItem(at: audioURL(for: meeting))
+        if meeting.hasAudio { try? FileManager.default.removeItem(at: audioURL(for: meeting)) }
         meetings.removeAll { $0.id == meeting.id }
         save()
     }

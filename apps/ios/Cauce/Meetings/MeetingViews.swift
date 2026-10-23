@@ -21,7 +21,7 @@ struct MeetingsView: View {
                         Label("Grabar reunión", systemImage: "mic.circle.fill").font(.headline)
                     }
                 } footer: {
-                    Text("Se graba con el micrófono del iPhone, también con la pantalla bloqueada. La transcripción, quién dijo qué y las notas se hacen dentro de este iPhone; nada se envía a internet. Avisa a los participantes que estás grabando.")
+                    Text("Se graba con el micrófono del iPhone, también con la pantalla bloqueada. La transcripción, quién dijo qué y las notas se hacen dentro de este iPhone; nada se envía a internet. En cuanto termina la transcripción el audio se borra y solo queda el texto. Avisa a los participantes que estás grabando.")
                 }
                 if !meetings.meetings.isEmpty {
                     Section("Reuniones") {
@@ -170,6 +170,7 @@ struct MeetingDetailView: View {
                     .font(.headline)
                     LabeledContent("Fecha", value: planningDayLabel(meeting.date))
                     LabeledContent("Duración", value: meetingDuration(meeting.duration))
+                    LabeledContent("Audio", value: meeting.hasAudio ? "Guardado hasta transcribir" : "Borrado · solo queda el texto")
                     if let step = meetings.progress[meeting.id] {
                         HStack { ProgressView(); Text(step).foregroundStyle(.secondary) }
                     } else if meeting.status == .failed || meeting.status == .recorded {
@@ -177,6 +178,10 @@ struct MeetingDetailView: View {
                         Button(meeting.status == .failed ? "Volver a intentar" : "Transcribir ahora") { meetings.process(meeting.id) }
                     } else if let detail = meeting.statusDetail {
                         Text(detail).font(.caption).foregroundStyle(Color.marcelitoAmber)
+                        if meeting.hasAudio {
+                            Button("Volver a procesar") { meetings.process(meeting.id) }
+                            Button("Quedarme solo con el texto y borrar el audio", role: .destructive) { meetings.deleteAudio(of: meeting.id) }
+                        }
                     }
                 }
                 if let notes = meeting.notes {
@@ -217,7 +222,7 @@ struct MeetingDetailView: View {
                     } header: {
                         Text("¿Quién es quién?")
                     } footer: {
-                        Text("Escribe el nombre de cada voz; la transcripción se actualiza.")
+                        Text("Escribe el nombre de cada voz; la transcripción se actualiza. Después usa «Volver a escribir las notas» para que los pendientes lleven los nombres.")
                     }
                     Section("Transcripción") {
                         ForEach(meeting.utterances) { utterance in
@@ -240,8 +245,8 @@ struct MeetingDetailView: View {
                     Menu {
                         if !meeting.utterances.isEmpty {
                             ShareLink(item: shareText(meeting)) { Label("Compartir notas y transcripción", systemImage: "square.and.arrow.up") }
-                            Button { meetings.process(meeting.id) } label: { Label("Volver a procesar", systemImage: "arrow.clockwise") }
-                                .disabled(meetings.progress[meeting.id] != nil)
+                            Button { meetings.rewriteNotes(meeting.id) } label: { Label("Volver a escribir las notas", systemImage: "text.badge.star") }
+                                .disabled(meetings.progress[meeting.id] != nil || !MeetingNotesWriter.available)
                         }
                         Button(role: .destructive) { confirmDelete = true } label: { Label("Eliminar", systemImage: "trash") }
                     } label: { Image(systemName: "ellipsis.circle") }

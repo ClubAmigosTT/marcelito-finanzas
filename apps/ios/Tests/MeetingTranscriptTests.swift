@@ -56,8 +56,20 @@ final class MeetingTranscriptTests: XCTestCase {
         store.add(meeting)
         // An interrupted run comes back as recorded, ready to retry.
         XCTAssertEqual(MeetingStore(directory: directory).meetings.first?.status, .recorded)
-        store.delete(meeting)
+        store.deleteAudio(of: meeting.id)
         XCTAssertFalse(FileManager.default.fileExists(atPath: target.url.path))
+        XCTAssertEqual(store.meeting(meeting.id)?.hasAudio, false)
+        // A transcribed meeting from an older build loses its audio on load.
+        let kept = store.newAudioURL()
+        try Data([4]).write(to: kept.url)
+        var old = Meeting(title: "Anterior", date: .now, duration: 3, audioFileName: kept.name)
+        old.status = .ready
+        old.utterances = [MeetingUtterance(speaker: "1", start: 0, end: 1, text: "Hola")]
+        store.add(old)
+        XCTAssertEqual(MeetingStore(directory: directory).meeting(old.id)?.hasAudio, false)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: kept.url.path))
+        store.delete(meeting)
+        store.delete(old)
         XCTAssertTrue(MeetingStore(directory: directory).meetings.isEmpty)
     }
 }
