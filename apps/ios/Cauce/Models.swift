@@ -303,6 +303,9 @@ struct Movement: Identifiable, Codable {
     /// nil when it is the account holder's own. Such charges are counted
     /// apart from your spending.
     var spender: String? = nil
+    /// Cardholder printed by the statement itself (an Amex additional card's
+    /// own section), when it is not the account holder.
+    var statementCardholder: String? = nil
 
     /// Recipient or sender printed explicitly in a transfer/SPEI descriptor.
     /// Returns nil when the row only identifies an intermediary such as STP.
@@ -456,7 +459,7 @@ struct Movement: Identifiable, Codable {
         case id, date, title, account, category, amount, flow, statementId, kind, travelRelated, foreignCurrency, classificationTags, extractionEvidence
         case matchedMovementId, reconciliationConfidence, reconciliationReason, manuallyReviewed, manuallyAccountingReviewed, confirmedCounterpartKey
         case rawDescription, normalizedMerchant, displayMerchant, merchantConfidence, merchantReviewReason
-        case spender
+        case spender, statementCardholder
     }
 
     init(from decoder: Decoder) throws {
@@ -486,6 +489,7 @@ struct Movement: Identifiable, Codable {
         merchantConfidence = try container.decodeIfPresent(Double.self, forKey: .merchantConfidence)
         merchantReviewReason = try container.decodeIfPresent(String.self, forKey: .merchantReviewReason)
         spender = try container.decodeIfPresent(String.self, forKey: .spender)
+        statementCardholder = try container.decodeIfPresent(String.self, forKey: .statementCardholder)
     }
 
     func encode(to encoder: Encoder) throws {
@@ -515,6 +519,7 @@ struct Movement: Identifiable, Codable {
         try container.encodeIfPresent(merchantConfidence, forKey: .merchantConfidence)
         try container.encodeIfPresent(merchantReviewReason, forKey: .merchantReviewReason)
         try container.encodeIfPresent(spender, forKey: .spender)
+        try container.encodeIfPresent(statementCardholder, forKey: .statementCardholder)
     }
 }
 
@@ -1086,7 +1091,7 @@ final class FinanceStore {
     /// device. Keep this token separate from `readerVersion`: the public
     /// corpus certificate describes the reader contract, while this token is
     /// an operational cache/replay invalidation for a shipped build.
-    private static let extractionReplayVersion = "ios-extraction-replay-2026.09.28.3"
+    private static let extractionReplayVersion = "ios-extraction-replay-2026.10.28.1"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4439,6 +4444,8 @@ final class FinanceStore {
         // by a later taxonomy migration.
         if !isReconciliationOnly {
             _ = reclassifyPendingCategoriesIfNeeded(force: true)
+            // Additional-card charges printed by a statement go to their person.
+            refreshSpenders()
         }
         invalidateDerivedProjections()
     }
@@ -9648,7 +9655,24 @@ final class FinanceStore {
                 return left.1.midX < right.1.midX
             }
             guard !values.isEmpty else { return nil }
-            let text = values.map { $0.0 }.joined(separator: " ")
+            // A foreign purchase prints "Compra en el extranjero · Tasa de
+            // conversión · USD" chips under the row, which OCR often turns
+            // into noise after the amount. Keep the row's own line (down to
+            // the signed amount) and only note that the purchase was foreign.
+            var rowValues = values
+            if let amountValue = values.first(where: { evidenceCounts($0.0).amounts > 0 && $0.0.range(of: #"[-+−–—]\s*\$"#, options: .regularExpression) != nil }) {
+                let below = values.filter { $0.1.maxY < amountValue.1.minY }
+                if !below.isEmpty {
+                    rowValues = values.filter { $0.1.maxY >= amountValue.1.minY }
+                    if let index = rowValues.firstIndex(where: { $0.0 == amountValue.0 && $0.1 == amountValue.1 }) {
+                        rowValues.insert(("Compra en el extranjero", amountValue.1, amountValue.2), at: index)
+                    }
+                }
+            }
+            // An upscaled crop can glue the operation date, the posting date
+            // and the merchant ("2026-10-032026-10-04TIENDA"); put back the
+            // spaces the printed columns have so both dates are recognized.
+            let text = spacedRappiRowDates(rowValues.map { $0.0 }.joined(separator: " "))
             let financialConfidence = values.compactMap { value -> Double? in
                 let evidence = evidenceCounts(value.0)
                 return evidence.dates > 0 || evidence.amounts > 0 ? value.2 : nil
@@ -9720,6 +9744,19 @@ final class FinanceStore {
         // production pass while preserving its small public contract.
         rappiTableRowRegions(in: image, retryDateAnchorsWhenUnobserved: false)
     }
+
+    /// "2026-10-032026-10-04TIENDA" → "2026-10-03 2026-10-04 TIENDA".
+    static func spacedRappiRowDates(_ value: String) -> String {
+        var text = value
+        for _ in 0..<3 {
+            let spaced = text.replacingOccurrences(of: #"(?<!\d)(\d{4}\s*[-/.]\s*\d{1,2}\s*[-/.]\s*\d{2})(?=[0-9A-Za-zÁÉÍÓÚÑ*])"#, with: "$1 ", options: .regularExpression)
+            if spaced == text { break }
+            text = spaced
+        }
+        return text
+    }
+
+    static func rappiSummaryForTesting(_ text: String) -> StatementSummaryRecord? { rappiSummary(text) }
 
     static func rappiVisualRowTextsForTesting(_ image: CGImage, page: Int = 2) -> [String] {
         rappiVisualRowObservations(
@@ -11259,7 +11296,64 @@ final class FinanceStore {
         if cursor < original.length {
             rebuilt += original.substring(from: cursor)
         }
-        return rebuilt
+        return pairAmexColumnAmounts(rebuilt)
+    }
+
+    /// On some Amex pages PDFKit returns every description first and the
+    /// whole "Importe en MN." column afterwards as a plain list. Give each
+    /// row (and each section total) the amount in the same position, but only
+    /// when the list has exactly one amount per open slot and comes after all
+    /// of them; anything else is left untouched for the controls to reject.
+    private static func pairAmexColumnAmounts(_ text: String) -> String {
+        guard let moneyLine = try? NSRegularExpression(pattern: #"^\s*\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?:\s*CR)?\s*$"#),
+              let money = try? NSRegularExpression(pattern: #"(?<![\w.,])\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?![\d.,])"#),
+              let rowStart = try? NSRegularExpression(pattern: #"(?i)^(?:\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{1,2}\s*(?:de\s*|[/-])(?:enero|febrero|marzo|abril|mayo|junio|julio|agosto|septiembre|octubre|noviembre|diciembre|ene|feb|mar|abr|may|jun|jul|ago|sep|oct|nov|dic)(?:[/-]\d{4})?)(?![a-z])"#) else { return text }
+        func matches(_ regex: NSRegularExpression, _ line: String) -> Bool {
+            regex.firstMatch(in: line, range: NSRange(line.startIndex..., in: line)) != nil
+        }
+        func hasMoney(_ line: String) -> Bool {
+            // Foreign annotations (USD 4.33 TC:18.86374) are not the MXN cell.
+            let cleaned = line.replacingOccurrences(of: #"(?i)(?:peso\s+colombiano|d[oó]lar\s+U\.S\.A\.|euro)\s+[\d,.]+\s+TC\s*:\s*\d+[.,]\d+"#, with: " ", options: .regularExpression)
+            return matches(money, cleaned)
+        }
+        var lines = text.components(separatedBy: "\n")
+        var pageStarts = lines.indices.filter { lines[$0].range(of: #"^__PDF_PAGE_\d+__$"#, options: .regularExpression) != nil }
+        if pageStarts.first != 0 { pageStarts.insert(0, at: 0) }
+        for (position, start) in pageStarts.enumerated() {
+            let end = position + 1 < pageStarts.count ? pageStarts[position + 1] : lines.count
+            let fold: (String) -> String = { $0.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current) }
+            guard let table = (start..<end).first(where: { fold(lines[$0]).contains("fecha y detalle de las operaciones") }) else { continue }
+            var slots: [Int] = []
+            var amounts: [Int] = []
+            var openRow: (index: Int, hasMoney: Bool)?
+            func closeRow() {
+                if let row = openRow, !row.hasMoney { slots.append(row.index) }
+                openRow = nil
+            }
+            for index in (table + 1)..<end {
+                let line = lines[index].trimmingCharacters(in: .whitespaces)
+                let folded = fold(line)
+                if matches(moneyLine, line) {
+                    closeRow(); amounts.append(index)
+                } else if matches(rowStart, line) {
+                    closeRow(); openRow = (index, hasMoney(line))
+                } else if folded.contains("total de las transacciones en") || folded.contains("total de transacciones en moneda extranjera")
+                            || folded.contains("total de meses sin intereses") {
+                    closeRow()
+                    if !hasMoney(line) { slots.append(index) }
+                } else if openRow != nil, hasMoney(line) {
+                    openRow?.hasMoney = true
+                }
+            }
+            closeRow()
+            guard slots.count >= 2, slots.count == amounts.count,
+                  let lastSlot = slots.max(), let firstAmount = amounts.min(), firstAmount > lastSlot else { continue }
+            for (slot, amount) in zip(slots, amounts) {
+                lines[slot] += " " + lines[amount].trimmingCharacters(in: .whitespaces)
+            }
+            for amount in amounts { lines[amount] = "" }
+        }
+        return lines.joined(separator: "\n")
     }
 
     /// PDFKit can flatten RappiCard's multi-page movement table into one
@@ -11854,6 +11948,39 @@ final class FinanceStore {
         var rowPage: Int?
         var pending = ""
         var result: [Movement] = []
+        // Rows since the last section total. Each total names whose rows
+        // they were ("… en $ de NAME") and whether they were domestic or
+        // foreign, so an additional card's purchases are neither taken as
+        // foreign nor as the account holder's.
+        var blockStart = 0
+        var titular: String?
+        func holder(in line: String) -> String? {
+            // The name follows the last " de " and is printed in capitals:
+            // "Total de Transacciones en Moneda Extranjera de NAME 177.08".
+            let stripped = line.replacingOccurrences(of: #"\s*\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}\s*$"#, with: "", options: .regularExpression)
+            guard let marker = stripped.range(of: " de ", options: [.caseInsensitive, .backwards]) else { return nil }
+            let name = stripped[marker.upperBound...].trimmingCharacters(in: .whitespaces)
+            guard name == name.uppercased(), name.rangeOfCharacter(from: .letters) != nil,
+                  name.split(separator: " ").count >= 2 else { return nil }
+            return name
+        }
+        func closeBlock(foreign: Bool, name: String?) {
+            if titular == nil, !foreign { titular = name }
+            let other = name.flatMap { $0 == titular ? nil : $0 }
+            for index in result.indices where index >= blockStart {
+                if foreign {
+                    result[index].foreignCurrency = true
+                } else if result[index].extractionEvidence?.selectedColumn == "MONEDA_EXTRANJERA" {
+                    // A second cardholder's domestic purchases follow the
+                    // first cardholder's total, where foreign rows usually
+                    // are; their own domestic total says otherwise.
+                    result[index].foreignCurrency = Self.hasForeignCurrency(in: (result[index].extractionEvidence?.sourceText ?? "").lowercased())
+                    result[index].extractionEvidence?.selectedColumn = "NACIONALES_PAGOS_CREDITOS"
+                }
+                if let other, result[index].kind != .cardPayment { result[index].statementCardholder = other }
+            }
+            blockStart = result.count
+        }
         func flush() {
             guard !pending.isEmpty else { return }
             let original = pending
@@ -11961,7 +12088,9 @@ final class FinanceStore {
             reason = "amex.description-invalid"
             guard title.count >= 3, title.rangeOfCharacter(from: .letters) != nil else { return }
             let lower = title.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: Locale(identifier: "es_MX"))
-            let payment = lower.hasPrefix("gracias por su pago")
+            // Amex prints card payments as "GRACIAS POR SU PAGO EN LINEA" and,
+            // for some channels, "PAGO RECIBIDO, GRACIAS".
+            let payment = lower.hasPrefix("gracias por su pago") || lower.hasPrefix("pago recibido")
             reason = "amex.payment-without-credit-marker"
             guard !payment || credit else { return }
             let planCancellation = section == 4 && lower.contains("saldo pendiente por cancelacion de plan")
@@ -12001,13 +12130,21 @@ final class FinanceStore {
             if lower.contains("transacciones financieras aplicables a la cuenta") {
                 flush(); section = 4; tableOpen = true; continue
             }
-            if lower.contains("total de las transacciones en") { flush(); section = 2; tableOpen = true; continue }
-            if lower.contains("total de transacciones en moneda extranjera") { flush(); section = 0; tableOpen = false; continue }
+            if lower.contains("total de las transacciones en") && !lower.contains("moneda extranjera") {
+                flush(); closeBlock(foreign: false, name: holder(in: line))
+                section = 2; tableOpen = true; continue
+            }
+            if lower.contains("total de transacciones en moneda extranjera") || lower.contains("total de las transacciones en moneda extranjera") {
+                flush(); closeBlock(foreign: true, name: holder(in: line))
+                section = 0; tableOpen = false; continue
+            }
             if lower.contains("total de las transacciones y comisiones")
                 || lower.contains("total de iva sobre transacciones y comisiones") {
-                flush(); section = 0; tableOpen = false; continue
+                flush(); blockStart = result.count; section = 0; tableOpen = false; continue
             }
-            if lower.contains("transacciones de meses sin intereses") { flush(); section = 3; tableOpen = true; continue }
+            if lower.contains("transacciones de meses sin intereses") {
+                flush(); blockStart = result.count; section = 3; tableOpen = true; continue
+            }
             if lower.contains("total de meses sin intereses") || lower.contains("resumen de meses sin intereses")
                 || lower.contains("consolidado de compras") || lower.contains("total de plan de meses") {
                 flush(); section = 0; continue
@@ -16215,6 +16352,21 @@ final class FinanceStore {
         result.msiMonthlyLoad = money(#"cargos compras a meses \(capital\)"#)
         result.interest = money("monto de intereses")
         result.fees = money("monto de comisiones")
+        // Banorte-issued RappiCard statements can print a "Saldo deudor
+        // total" that is not the balance at the cut (it disagrees with the
+        // page's own "adeudo anterior + cargos − abonos" and with its note
+        // saying it equals "pago para no generar intereses" plus deferred
+        // balances). Without deferred balances, use the printed figure that
+        // the statement's own arithmetic confirms.
+        if let previous = result.previousBalance, let charges = result.newCharges,
+           let credits = result.paymentsAndCredits, let noInterest = result.paymentForNoInterest,
+           let printed = result.statementBalance, (result.msiPending ?? 0) == 0 {
+            let atCut = previous + charges + (result.interest ?? 0) + (result.fees ?? 0) - credits
+            if (atCut - noInterest).magnitude <= Decimal(string: "0.01")!, (atCut - printed).magnitude > Decimal(string: "0.01")! {
+                result.statementBalance = noInterest
+                result.debtBalance = noInterest
+            }
+        }
         // This reader supports the supplied regular-purchase layout only.
         // A future MSI-bearing layout must not be silently accepted.
         guard result.previousBalance != nil, result.statementBalance != nil,
@@ -16539,14 +16691,32 @@ final class FinanceStore {
             ?? flexibleAmountOnLabel(["retiros", "retros", "retiros / cargos", "retros / cargos"])
         assign(\.depositTotal, declaredDeposits)
         assign(\.withdrawalTotal, declaredWithdrawals)
+        // With additional cards Amex prints one subtotal per cardholder; the
+        // section control is their sum. RFC/REF identifiers are never money.
+        func summedAmexSubtotals(_ label: String, excluding: String?) -> Decimal? {
+            guard source.localizedCaseInsensitiveContains("amex"),
+                  let money = try? NSRegularExpression(pattern: #"(?<![\w.,])\$?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?![\d.,])"#) else { return nil }
+            var values: [Decimal] = []
+            for line in normalized.components(separatedBy: .newlines) where line.contains(label) {
+                if let excluding, line.contains(excluding) { continue }
+                let cleaned = line.replacingOccurrences(of: #"\brfc\s*[:#]?\s*[a-z0-9]+\b|/ref[^\s]+"#, with: " ", options: .regularExpression)
+                guard let match = money.matches(in: cleaned, range: NSRange(cleaned.startIndex..., in: cleaned)).last,
+                      let range = Range(match.range, in: cleaned),
+                      let value = parseAmount(String(cleaned[range])) else { continue }
+                values.append(value)
+            }
+            return values.isEmpty ? nil : values.reduce(0, +)
+        }
         assign(
             \.domesticTransactionTotal,
-            lastAmountOnLabel(["total de las transacciones en"])
+            summedAmexSubtotals("total de las transacciones en", excluding: "moneda extranjera")
+                ?? lastAmountOnLabel(["total de las transacciones en"])
                 ?? flexibleAmountOnLabel(["total de las transacciones en"])
         )
         assign(
             \.foreignTransactionTotal,
-            lastAmountOnLabel(["total de transacciones en moneda extranjera"])
+            summedAmexSubtotals("total de transacciones en moneda extranjera", excluding: nil)
+                ?? lastAmountOnLabel(["total de transacciones en moneda extranjera"])
                 ?? flexibleAmountOnLabel(["total de transacciones en moneda extranjera"])
         )
         // BBVA declares movement counts explicitly. Santander does not: on
@@ -17323,8 +17493,27 @@ extension FinanceStore {
             }
         }
         var profiles = cardholderProfiles
-        for name in Set(detected.values) where !profiles.contains(where: { $0.id == CardholderProfile.key(name) }) {
-            profiles.append(CardholderProfile(id: CardholderProfile.key(name), name: CardholderProfile.displayName(name)))
+        // "ANA LOPEZ R" (app) and "ANA LOPEZ RUIZ" (statement)
+        // are one person: same first two words, the rest a prefix.
+        func profileKey(for name: String) -> String {
+            let key = CardholderProfile.key(name)
+            let words = key.split(separator: " ")
+            if let index = profiles.firstIndex(where: { profile in
+                let other = profile.id.split(separator: " ")
+                guard other.count >= 2, words.count >= 2, other[0] == words[0], other[1] == words[1] else { return false }
+                return zip(other.dropFirst(2), words.dropFirst(2)).allSatisfy { $0.hasPrefix($1) || $1.hasPrefix($0) }
+            }) {
+                if key.count > profiles[index].id.count { profiles[index].name = CardholderProfile.displayName(name) }
+                return profiles[index].id
+            }
+            profiles.append(CardholderProfile(id: key, name: CardholderProfile.displayName(name)))
+            return key
+        }
+        var resolvedDetected: [UUID: String] = [:]
+        for (id, name) in detected { resolvedDetected[id] = profileKey(for: name) }
+        var resolvedStatement: [String: String] = [:]
+        for name in Set(movements.compactMap(\.statementCardholder)) where !isOwnerName(name) {
+            resolvedStatement[name] = profileKey(for: name)
         }
         if profiles != cardholderProfiles { saveCardholderProfiles(profiles) }
         var next = movements
@@ -17333,7 +17522,10 @@ extension FinanceStore {
             let choice = overrides.isEmpty ? nil : (overrides[spenderOverrideKey(for: next[index])] ?? inheritedOverrides[next[index].id])
             let target: String?
             if let choice { target = choice.isEmpty ? nil : choice }
-            else { target = detected[next[index].id].map(CardholderProfile.key) }
+            else {
+                target = resolvedDetected[next[index].id]
+                    ?? next[index].statementCardholder.flatMap { resolvedStatement[$0] }
+            }
             if next[index].spender != target {
                 next[index].spender = target
                 changed = true
