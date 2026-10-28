@@ -283,6 +283,9 @@ struct ExpensesView: View {
                     } else {
                         totalsSection
                         comparisonSection
+                        if mode == .month {
+                            MonthStoryCard(rows: rows, period: period, account: account == "Todas" ? nil : account)
+                        }
                         categoriesSection
                         accumulatedChart
                         merchantsSection
