@@ -398,7 +398,7 @@ test("Santander conserva cajas nativas de fecha e importe", async () => {
   const source = await readFile(modelsPath, "utf8");
   assert.match(source, /let dateBoxes: \[OCRTextBox\]/);
   assert.match(source, /let amountBoxes: \[OCRTextBox\]/);
-  assert.match(source, /candidate\.boundingBox\(for: stringRange\)/);
+  assert.match(source, /candidate\.boundingBox\(for: candidateRange\)/);
   assert.match(source, /observation\.dateBoxes\.first/);
   assert.match(source, /if !observation\.amountBoxes\.isEmpty/);
 });
