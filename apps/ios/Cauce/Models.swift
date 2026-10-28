@@ -1091,7 +1091,7 @@ final class FinanceStore {
     /// device. Keep this token separate from `readerVersion`: the public
     /// corpus certificate describes the reader contract, while this token is
     /// an operational cache/replay invalidation for a shipped build.
-    private static let extractionReplayVersion = "ios-extraction-replay-2026.10.28.1"
+    private static let extractionReplayVersion = "ios-extraction-replay-2026.10.28.2"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -1521,6 +1521,22 @@ final class FinanceStore {
         )
         return (result.movements, result.diagnostics)
     }
+
+#if DEBUG
+    /// Local diagnostics for a Santander PDF: the raw OCR observations of the
+    /// selected pages and the reader's row decisions, in reading order.
+    static func santanderPDFDiagnosticsForTesting(_ url: URL, pages: Set<Int>) -> [String] {
+        guard let document = PDFDocument(url: url) else { return ["no-pdf"] }
+        let observations = ocrObservations(from: document, pageIndexes: pages, forceRegionRecovery: true, issuerHint: "Santander")
+        var lines = observations.sorted { $0.page == $1.page ? $0.boundingBox.midY > $1.boundingBox.midY : $0.page < $1.page }.map {
+            String(format: "obs p%d y%.4f-%.4f x%.3f-%.3f ", $0.page, $0.boundingBox.minY, $0.boundingBox.maxY, $0.boundingBox.minX, $0.boundingBox.maxX)
+                + $0.text + " dates=" + $0.dateBoxes.map(\.text).joined(separator: "/")
+        }
+        let result = parseSantanderTable(observations, fileName: url.lastPathComponent, document: document, recoverMissingDateRows: true)
+        lines += result.diagnostics.map { "diag p\($0.page ?? -1) #\($0.rowOrdinal ?? -1) \($0.accepted ? "ok" : "NO") \($0.selectedColumn ?? "-") \($0.selectedAmount.map { "\($0)" } ?? "-") \($0.reason) | \($0.rawText.prefix(90)) | cells \($0.cellTexts ?? [])" }
+        return lines
+    }
+#endif
 
     /// Runs the BBVA-specific visual reader against normalized Vision-like
     /// observations. BBVA keeps CARGOS, ABONOS and SALDO in separate columns;
@@ -9921,6 +9937,20 @@ final class FinanceStore {
         )
     }
 
+    /// Look-alike letters Vision mixes into Latin words. Each maps one UTF-16
+    /// unit to one, so ranges found in the result still address the original.
+    private static let ocrHomoglyphs: [Character: Character] = [
+        "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O", "Р": "P", "С": "C", "Т": "T", "У": "Y", "Х": "X",
+        "а": "a", "е": "e", "о": "o", "р": "p", "с": "c", "у": "y", "х": "x", "і": "i", "І": "I",
+        "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K", "Μ": "M", "Ν": "N", "Ο": "O", "Ρ": "P", "Τ": "T", "Υ": "Y", "Χ": "X",
+        "ο": "o"
+    ]
+
+    static func latinizedOCRText(_ text: String) -> String {
+        guard text.unicodeScalars.contains(where: { (0x0370...0x04FF).contains($0.value) }) else { return text }
+        return String(text.map { ocrHomoglyphs[$0] ?? $0 })
+    }
+
     private static func ocrObservations(
         from document: PDFDocument,
         pageIndexes: Set<Int>? = nil,
@@ -10041,7 +10071,8 @@ final class FinanceStore {
                     let range = NSRange(text.startIndex..<text.endIndex, in: text)
                     return regex.matches(in: text, range: range).compactMap { match in
                         guard let stringRange = Range(match.range, in: text),
-                              let rectangle = try? candidate.boundingBox(for: stringRange) else {
+                              let candidateRange = Range(match.range, in: candidate.string),
+                              let rectangle = try? candidate.boundingBox(for: candidateRange) else {
                             return nil
                         }
                         return OCRTextBox(
@@ -10056,7 +10087,7 @@ final class FinanceStore {
                     guard issuerHint == "Santander", let dates = substringPatterns.date else { return [] }
                     let fullRange = NSRange(text.startIndex..., in: text)
                     let physicalDates = dates.matches(in: text, range: fullRange).compactMap { match -> (range: NSRange, box: CGRect)? in
-                        guard let range = Range(match.range, in: text),
+                        guard let range = Range(match.range, in: candidate.string),
                               let rectangle = try? candidate.boundingBox(for: range) else { return nil }
                         return rectangle.boundingBox.midX <= 0.14 ? (match.range, rectangle.boundingBox) : nil
                     }
@@ -10066,7 +10097,8 @@ final class FinanceStore {
                         let nsRange = NSRange(location: start, length: end - start)
                         guard let range = Range(nsRange, in: text),
                               !text[range].trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                              let rectangle = try? candidate.boundingBox(for: range) else { return nil }
+                              let candidateRange = Range(nsRange, in: candidate.string),
+                              let rectangle = try? candidate.boundingBox(for: candidateRange) else { return nil }
                         let following = physicalDates.first(where: { $0.range.location >= start }) ?? physicalDates.last!
                         return OCRTextBox(text: String(text[range]), boundingBox: rectangle.boundingBox,
                             confidence: Double(candidate.confidence), descriptorDateY: following.box.midY,
@@ -10079,7 +10111,9 @@ final class FinanceStore {
                           !candidate.string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                         return nil
                     }
-                    let text = candidate.string
+                    // Vision sometimes returns a Cyrillic/Greek look-alike
+                    // ("OCТ" with a Cyrillic Т), which hides the row's date.
+                    let text = Self.latinizedOCRText(candidate.string)
                     let dateBoxes = substringBoxes(in: candidate, text: text, regex: substringPatterns.date)
                     let amountBoxes = substringBoxes(in: candidate, text: text, regex: substringPatterns.amount)
                     let financialBoxes = dateBoxes + amountBoxes
@@ -13456,11 +13490,12 @@ final class FinanceStore {
             }
             renderedDateAnchors = (request.results ?? []).compactMap { result -> DateAnchor? in
                 guard let candidate = result.topCandidates(1).first else { return nil }
-                let text = candidate.string
+                let text = latinizedOCRText(candidate.string)
                 let range = NSRange(text.startIndex..<text.endIndex, in: text)
                 let boundedDate = dateRegex.firstMatch(in: text, range: range).flatMap { match -> (text: String, box: CGRect)? in
                     guard let textRange = Range(match.range, in: text),
-                          let box = try? candidate.boundingBox(for: textRange),
+                          let candidateRange = Range(match.range, in: candidate.string),
+                          let box = try? candidate.boundingBox(for: candidateRange),
                           box.boundingBox.midX <= dateMaxX else { return nil }
                     return (String(text[textRange]), box.boundingBox)
                 }

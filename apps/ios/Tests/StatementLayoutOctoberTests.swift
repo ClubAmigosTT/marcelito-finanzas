@@ -49,6 +49,15 @@ final class StatementLayoutOctoberTests: XCTestCase {
                        "2026-10-03 2026-10-04 TIENDA +$1.00")
     }
 
+    func testOCRLookalikeLettersBecomeLatinWithoutShiftingRanges() {
+        // "OCТ" with a Cyrillic Т hid a Santander row's date from the reader.
+        let read = "06-OC\u{0422}-2026 1234567 ABONO TRANSFERENCIA SPEI"
+        let latin = FinanceStore.latinizedOCRText(read)
+        XCTAssertEqual(latin, "06-OCT-2026 1234567 ABONO TRANSFERENCIA SPEI")
+        XCTAssertEqual(latin.utf16.count, read.utf16.count)
+        XCTAssertEqual(FinanceStore.latinizedOCRText("15-SEP-2026 Pago"), "15-SEP-2026 Pago")
+    }
+
     func testRappiCutBalanceFollowsTheStatementsOwnArithmetic() throws {
         let text = """
         Pago para no generar intereses $2,100.00
