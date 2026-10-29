@@ -268,6 +268,7 @@ struct PlanningState: Codable {
     @ObservationIgnored private var expenseRowCache: [FinancePeriod: [Movement]] = [:]
     @ObservationIgnored private var budgetCategoryCache: [PeriodCategoryKey: [String: Decimal]] = [:]
     @ObservationIgnored private var categoryCache: [PeriodCategoryKey: [String: Decimal]] = [:]
+    @ObservationIgnored private var tripIDCache: [Date: Set<UUID>] = [:]
     @ObservationIgnored private var fixedMerchantIdentityCache: [UUID: (fingerprint: String, key: String, linkable: Bool)] = [:]
     @ObservationIgnored private var fixedExpenseIndex: [String: PlanningFixedExpense]?
     @ObservationIgnored private var recurringExpenseCache: (key: SpendingKey, day: Date, items: [RecurringExpenseSuggestion])?
@@ -280,7 +281,7 @@ struct PlanningState: Codable {
     @ObservationIgnored private(set) var spendingProjectionBuildCount = 0
     private(set) var hasUnsavedPlanChanges = false
     private func invalidateSpendingProjections() {
-        spendingProjection = nil; expenseRowCache.removeAll(); periodTotalCache.removeAll(); snapshotCache.removeAll(); budgetCategoryCache.removeAll(); categoryCache.removeAll()
+        spendingProjection = nil; expenseRowCache.removeAll(); periodTotalCache.removeAll(); snapshotCache.removeAll(); budgetCategoryCache.removeAll(); categoryCache.removeAll(); tripIDCache.removeAll()
         labelIdentityIndex = nil; fixedMerchantIdentityCache.removeAll(); fixedExpenseIndex = nil; recurringExpenseCache = nil; proposalCache.removeAll(); fixedCache.removeAll()
         analysisGeneration = UUID()
     }
@@ -288,7 +289,7 @@ struct PlanningState: Codable {
         let key = SpendingKey(store: ObjectIdentifier(store), content: store.analyticsGeneration, ledger: store.ledgerVersion, planning: analysisGeneration, provisional: store.manualDashboardUnlockEnabled, pending: store.hasCanonicalRebuildPending)
         if let projection = spendingProjection, projection.key == key { return projection }
         fixedMerchantIdentityCache.removeAll()
-        expenseRowCache.removeAll(); periodTotalCache.removeAll(); snapshotCache.removeAll(); budgetCategoryCache.removeAll(); categoryCache.removeAll()
+        expenseRowCache.removeAll(); periodTotalCache.removeAll(); snapshotCache.removeAll(); budgetCategoryCache.removeAll(); categoryCache.removeAll(); tripIDCache.removeAll()
         let plans = state.installments
         let directIDs = Set(plans.flatMap(\.linkedMovementIDs))
         let linkedIdentities = Set(plans.flatMap(\.linkedIdentities))
@@ -519,13 +520,33 @@ struct PlanningState: Codable {
     func budgetRows(_ store: FinanceStore, period: FinancePeriod) -> [Movement] {
         projection(store).budgetRows.filter { period.contains($0.date) }
     }
+    /// Variable charges that "¿En qué se fue tu mes?" groups into a trip. The
+    /// budget counts them against Viajes, not restaurants or transport, so a
+    /// weekend away does not look like an overspent day-to-day category.
+    func tripMovementIDs(_ store: FinanceStore, month: Date) -> Set<UUID> {
+        let rows = projection(store).budgetRows
+        let period = FinancePeriod.month(month)
+        if let cached = tripIDCache[period.start] { return cached }
+        let since = Calendar.current.date(byAdding: .month, value: -3, to: period.start) ?? period.start
+        let monthRows = rows.filter { period.contains($0.date) && !isFixed($0) }
+        let history = rows.filter { $0.date >= since && $0.date < period.end }
+        let story = MonthSpendingStory.build(rows: monthRows, history: history, category: { self.budgetCategory($0) })
+        let ids = Set(story.trips.flatMap { ($0.travel + $0.local).map(\.id) })
+        if tripIDCache.count >= 24 { tripIDCache.removeAll() }
+        tripIDCache[period.start] = ids
+        return ids
+    }
     /// Cash commitments exclude the virtual purchase principal and its linked
     /// printed installments, exactly as the uncached calculation did.
     func budgetCategoryTotals(_ store: FinanceStore, period: FinancePeriod, fixed: Bool? = nil) -> [String: Decimal] {
         let value = projection(store)
         let key = PeriodCategoryKey(period: period, fixed: fixed)
         if let cached = budgetCategoryCache[key] { return cached }
-        let result = value.budgetRows.filter { period.contains($0.date) && (fixed == nil || isFixed($0) == fixed) }.reduce(into: [String: Decimal]()) { result, row in result[budgetCategory(row), default: 0] += row.expenseContribution }
+        let trips: Set<UUID> = fixed == true ? [] : period.months().reduce(into: Set<UUID>()) { $0.formUnion(tripMovementIDs(store, month: $1)) }
+        let result = value.budgetRows.filter { period.contains($0.date) && (fixed == nil || isFixed($0) == fixed) }.reduce(into: [String: Decimal]()) { result, row in
+            let name = trips.contains(row.id) && !isFixed(row) ? "Viajes" : budgetCategory(row)
+            result[name, default: 0] += row.expenseContribution
+        }
         if budgetCategoryCache.count >= 96 { budgetCategoryCache.removeAll() }
         budgetCategoryCache[key] = result; return result
     }
@@ -654,9 +675,21 @@ struct PlanningState: Codable {
     }
     func savePendingPlanChanges() { if hasUnsavedPlanChanges { save() } }
     func limits(_ store: FinanceStore, month: Date) -> [String: Decimal] {
-        var result = proposals(store, month: month)
+        var result = carriesPreviousPlan(month) ? carriedLimits(store, month: month) : proposals(store, month: month)
         for (key, value) in plan(for: month).limits { result[key] = value }
         return result
+    }
+    /// A month without its own limits starts from last month's plan, moved
+    /// 70% toward it and 30% toward what was really spent, instead of the
+    /// plain three-month median.
+    func carriesPreviousPlan(_ month: Date) -> Bool {
+        guard plan(for: month).limits.isEmpty,
+              let previous = Calendar.current.date(byAdding: .month, value: -1, to: FinancePeriod.month(month).start) else { return false }
+        return plan(for: previous).limits.values.contains { $0 > 0 }
+    }
+    func carriedLimits(_ store: FinanceStore, month: Date) -> [String: Decimal] {
+        guard let previous = Calendar.current.date(byAdding: .month, value: -1, to: FinancePeriod.month(month).start) else { return [:] }
+        return monthPlanAdvice(store, month: month).suggested(previousLimits: plan(for: previous).limits)
     }
     func fixedLimits(_ store: FinanceStore, month: Date) -> [String: Decimal] {
         var result = fixedProposal(store, month: month)

@@ -295,3 +295,58 @@ struct OneOffReviewSection: View {
         }
     }
 }
+
+/// Once the month is over: what was planned against what really went out
+/// per category, and where each limit starts next month.
+struct PlanVersusActualSection: View {
+    @Environment(FinanceStore.self) private var store
+    @Environment(FinancialPlanningStore.self) private var planning
+    let month: Date
+
+    var body: some View {
+        let start = FinancePeriod.month(month).start
+        let calendar = Calendar.current
+        let explicit = planning.plan(for: month).limits
+        if let next = calendar.date(byAdding: .month, value: 1, to: start), next <= .now, explicit.values.contains(where: { $0 > 0 }) {
+            let limits = planning.limits(store, month: month)
+            let spent = spentByCategory
+            let upcoming = planning.monthPlanAdvice(store, month: next).suggested(previousLimits: explicit)
+            let categories = Set(limits.filter { $0.value > 0 }.keys).union(spent.filter { $0.value > 0 }.keys)
+                .sorted { (spent[$0] ?? 0) > (spent[$1] ?? 0) }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Plan contra real").font(.headline)
+                let plannedTotal = categories.reduce(Decimal(0)) { $0 + (limits[$1] ?? 0) }
+                let spentTotal = categories.reduce(Decimal(0)) { $0 + (spent[$1] ?? 0) }
+                Text(spentTotal <= plannedTotal
+                     ? "Gastaste \(planningMoney(spentTotal)) de \(planningMoney(plannedTotal)) planeados: te sobraron \(planningMoney(plannedTotal - spentTotal))."
+                     : "Gastaste \(planningMoney(spentTotal)) contra \(planningMoney(plannedTotal)) planeados: \(planningMoney(spentTotal - plannedTotal)) de más.")
+                    .font(.subheadline).fixedSize(horizontal: false, vertical: true)
+                ForEach(categories, id: \.self) { category in
+                    let planned = limits[category] ?? 0
+                    let real = spent[category] ?? 0
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack {
+                            Text(category).font(.subheadline.weight(.semibold))
+                            Spacer()
+                            Text(real > planned ? "+\(planningMoney(real - planned))" : "−\(planningMoney(planned - real))")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(real > planned ? Color.marcelitoDanger : Color.marcelitoSuccess)
+                        }
+                        Text("Plan \(planningMoney(planned)) · real \(planningMoney(real))" + (upcoming[category].map { " · \(monthName(next)): \(planningMoney($0))" } ?? ""))
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                Text("El plan de \(monthName(next)) parte de aquí: 70% este límite y 30% lo que gastaste, sin viajes ni gastos de una vez. Puedes cambiarlo con \"Planear\".")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private var spentByCategory: [String: Decimal] {
+        if let closing = planning.plan(for: month).closing, let total = closing.categorySpent {
+            let fixed = closing.fixedSpent ?? [:]
+            return total.reduce(into: [:]) { $0[$1.key] = $1.value - (fixed[$1.key] ?? 0) }
+        }
+        return planning.budgetCategoryTotals(store, period: .month(month), fixed: false)
+    }
+}
