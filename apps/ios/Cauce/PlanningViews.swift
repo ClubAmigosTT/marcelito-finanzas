@@ -721,11 +721,14 @@ struct BudgetView: View {
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     budgetSummary
+                    paceSection
                     Button("Configurar ingresos y depósitos") { section = .income }
                     if !snapshot.hasData { Text("Sin movimientos de este mes. Define tu plan; el gasto se actualizará al subir estados o capturas.").font(.caption).foregroundStyle(.secondary) }
                     SharedMonthlyPlanEditor(month: month)
                     PlanningAccountCoverage(period: .month(month))
-                    if !planning.proposals(store, month: month).isEmpty { Text("Propuesta: mediana de " + planning.proposalMonths(store, before: month).reversed().map { FinancePeriod.month($0).label }.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary) }
+                    if planning.carriesPreviousPlan(month), let previous = Calendar.current.date(byAdding: .month, value: -1, to: month) {
+                        Text("Sin plan propio todavía: cada categoría parte de tu plan de \(monthName(previous)) (70%) y de lo que gastaste (30%), sin viajes ni gastos de una vez.").font(.caption).foregroundStyle(.secondary)
+                    } else if !planning.proposals(store, month: month).isEmpty { Text("Propuesta: mediana de " + planning.proposalMonths(store, before: month).reversed().map { FinancePeriod.month($0).label }.joined(separator: ", ")).font(.caption).foregroundStyle(.secondary) }
                     if planning.proposals(store, month: month).isEmpty {
                         Text("Necesitamos tres meses naturales completos para proponer la mediana variable. Puedes definir tus montos ahora.").font(.caption).foregroundStyle(.secondary)
                     }
@@ -773,6 +776,7 @@ struct BudgetView: View {
                             NavigationLink("Ver préstamos y configurar abono extra") { LoanAccountsView() }
                         }
                     }
+                    PlanVersusActualSection(month: month)
                     OneOffReviewSection(month: month)
                     closingSection
                     Button("¿Me alcanza?") { showDecision = true }.buttonStyle(.marcelitoPrimary)
@@ -831,6 +835,30 @@ struct BudgetView: View {
             if !monthIsCovered(store, period: snapshot.period, through: min(.now, snapshot.period.end.addingTimeInterval(-1))) { Text("Plan provisional · faltan movimientos por actualizar").font(.caption).foregroundStyle(Color.marcelitoAmber) }
             Text("Consumo y presupuesto por fecha del cargo. MSI: compra completa en Gastos; mensualidades como compromisos aquí.").font(.caption).foregroundStyle(.secondary)
         }.marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 14)
+    }
+    /// "Cómo vas": the categories running ahead of their usual pace today.
+    @ViewBuilder private var paceSection: some View {
+        let c = Calendar.current
+        if c.isDate(month, equalTo: .now, toGranularity: .month), !planning.plan(for: month).closed, limits.values.contains(where: { $0 > 0 }) {
+            let day = c.component(.day, from: .now)
+            let daysInMonth = c.range(of: .day, in: .month, for: month)!.count
+            let alerts = planning.monthPlanAdvice(store, month: month)
+                .paceAlerts(limits: limits, spent: planning.budgetCategoryTotals(store, period: .month(month), fixed: false), day: day, daysInMonth: daysInMonth)
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Cómo vas").font(.headline)
+                if alerts.isEmpty {
+                    Text("Día \(day): vas dentro de tu ritmo habitual en todas las categorías.").font(.subheadline)
+                } else {
+                    ForEach(alerts.prefix(4), id: \.category) { alert in
+                        Label(alert.message(day: day), systemImage: "exclamationmark.circle")
+                            .font(.subheadline).foregroundStyle(Color.marcelitoNavy)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Text("Comparado con cómo sueles gastar cada categoría a lo largo del mes, no en partes iguales.")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }.marcelitoCard(fill: Color.marcelitoCreamSoft, radius: 16, padding: 14)
+        }
     }
     private func budgetRow(_ category: String, fixed: Bool) -> some View {
         // Split into typed steps: the one-line form exceeded the CI

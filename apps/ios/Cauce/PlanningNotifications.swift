@@ -113,7 +113,25 @@ enum PlanningNotifications {
         }
         let limits = planning.limits(store, month: .now)
         let actual = planning.budgetCategoryTotals(store, period: .month(.now), fixed: false)
-        guard c.component(.day, from: .now) < 20 else { return }
+        // Pace: once per category and month, when a category runs well ahead
+        // of how it is usually spent by today.
+        let today = c.component(.day, from: .now)
+        let daysInMonth = c.range(of: .day, in: .month, for: .now)?.count ?? 30
+        if today >= 5, planning.plan(for: .now).limits.values.contains(where: { $0 > 0 }) || planning.carriesPreviousPlan(.now) {
+            let alerts = planning.monthPlanAdvice(store, month: .now).paceAlerts(limits: limits, spent: actual, day: today, daysInMonth: daysInMonth)
+            for alert in alerts where alert.spent >= alert.expected * Decimal(string: "1.25")! && alert.spent - alert.expected >= 500 {
+                let digest = SHA256.hash(data: Data(alert.category.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
+                let id = prefix + "pace.\(planning.monthKey(.now)).\(digest)"
+                guard !UserDefaults.standard.bool(forKey: id + ".sent") else { continue }
+                let content = UNMutableNotificationContent(); content.title = "Vas adelantado en \(alert.category.lowercased())"; content.body = alert.message(day: today); content.sound = .default; content.userInfo = ["destination": "budget"]
+                do {
+                    try await center.add(UNNotificationRequest(identifier: id, content: content, trigger: UNTimeIntervalNotificationTrigger(timeInterval: 2, repeats: false)))
+                    UserDefaults.standard.set(true, forKey: id + ".sent")
+                } catch { /* retry on the next refresh */ }
+                break
+            }
+        }
+        guard today < 20 else { return }
         for (category, limit) in limits where limit > 0 && actual[category, default: 0] >= limit * Decimal(string: "0.8")! {
             let digest = SHA256.hash(data: Data(category.utf8)).prefix(6).map { String(format: "%02x", $0) }.joined()
             let id = prefix + "budget.\(planning.monthKey(.now)).\(digest)"

@@ -67,4 +67,15 @@ final class MonthPlanAdviceTests: XCTestCase {
         XCTAssertEqual(advice.expectedFraction(category: "Tiendita", day: 2, daysInMonth: 30), 0.75, accuracy: 0.001)
         XCTAssertEqual(advice.expectedFraction(category: "Sin historial", day: 15, daysInMonth: 30), 0.5, accuracy: 0.001)
     }
+
+    func testPaceAlertsOnlyFlagCategoriesClearlyAhead() {
+        let alerts = advice().paceAlerts(
+            limits: ["Tiendita": 400, "Restaurantes y bares": 2_200],
+            spent: ["Tiendita": 700, "Restaurantes y bares": 200], day: 2, daysInMonth: 30)
+        // Tiendita usually has 75% (300) spent by day 2; 700 is well ahead.
+        XCTAssertEqual(alerts.map(\.category), ["Tiendita"])
+        XCTAssertEqual(alerts.first?.expected, 300)
+        let small = advice().paceAlerts(limits: ["Sin historial": 3_000], spent: ["Sin historial": 1_700], day: 15, daysInMonth: 30)
+        XCTAssertTrue(small.isEmpty, "200 over a linear 1,500 is not worth a warning")
+    }
 }

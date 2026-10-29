@@ -568,3 +568,36 @@ import XCTest
         }
     }
 }
+
+/// Trips count against Viajes, and a month without its own plan starts from
+/// the previous one.
+extension FinancialPlanningTests {
+    private func charge(_ month: Int, _ day: Int, _ title: String, _ amount: Decimal) -> Movement {
+        Movement(date: date(month, day), title: title, account: "Tarjeta", category: "Restaurantes y bares", amount: -amount, flow: .expense, kind: .purchase)
+    }
+
+    func testTripChargesCountAgainstViajesInTheBudget() {
+        withStores { s, p, _ in
+            s.movements = (4...6).flatMap { [charge($0, 5, "CAFE CIUDAD DE MEX", 1_000), charge($0, 18, "TACOS CIUDAD DE MEX", 500)] }
+                + [charge(6, 10, "REST NORTE MONTERREY NL", 600), charge(6, 11, "CAFE SUR MONTERREY NL", 300), charge(6, 12, "BAR CENTRO MONTERREY NL", 200)]
+            let totals = p.budgetCategoryTotals(s, period: .month(date(6, 1)), fixed: false)
+            XCTAssertEqual(totals["Viajes"], 1_100)
+            XCTAssertEqual(totals["Restaurantes y bares"], 1_500)
+            XCTAssertNil(p.budgetCategoryTotals(s, period: .month(date(5, 1)), fixed: false)["Viajes"])
+        }
+    }
+
+    func testMonthWithoutPlanStartsFromThePreviousPlan() {
+        withStores { s, p, _ in
+            s.movements = (4...6).flatMap { [charge($0, 5, "CAFE CIUDAD DE MEX", 1_000), charge($0, 18, "TACOS CIUDAD DE MEX", 500)] }
+            XCTAssertFalse(p.carriesPreviousPlan(date(7, 1)))
+            var plan = MonthBudgetPlan(); plan.limits["Restaurantes y bares"] = 3_000; p.setPlan(plan, for: date(6, 1))
+            XCTAssertTrue(p.carriesPreviousPlan(date(7, 1)))
+            // 70% of 3,000 and 30% of the 1,500 really spent in June.
+            XCTAssertEqual(p.limits(s, month: date(7, 1))["Restaurantes y bares"], 2_550)
+            var own = MonthBudgetPlan(); own.limits["Restaurantes y bares"] = 1_000; p.setPlan(own, for: date(7, 1))
+            XCTAssertFalse(p.carriesPreviousPlan(date(7, 1)))
+            XCTAssertEqual(p.limits(s, month: date(7, 1))["Restaurantes y bares"], 1_000)
+        }
+    }
+}

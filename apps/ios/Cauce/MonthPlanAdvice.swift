@@ -62,6 +62,30 @@ struct MonthPlanAdvice {
         return curve[min(curve.count, max(1, day)) - 1]
     }
 
+    struct PaceAlert: Hashable {
+        let category: String
+        let spent: Decimal
+        let expected: Decimal
+        let limit: Decimal
+
+        func message(day: Int) -> String {
+            "Día \(day): llevas \(planningMoney(spent)) en \(category.lowercased()); normalmente a esta fecha llevas \(planningMoney(expected))."
+        }
+    }
+
+    /// Categories running ahead of how they are usually spent by `day`: at
+    /// least 10% and $300 over the expected share of their limit, largest
+    /// gap first.
+    func paceAlerts(limits: [String: Decimal], spent: [String: Decimal], day: Int, daysInMonth: Int) -> [PaceAlert] {
+        limits.compactMap { category, limit -> PaceAlert? in
+            guard limit > 0 else { return nil }
+            let expected = Self.round(limit * Decimal(expectedFraction(category: category, day: day, daysInMonth: daysInMonth)))
+            let actual = spent[category] ?? 0
+            guard actual > expected * Decimal(string: "1.1")!, actual - expected >= 300 else { return nil }
+            return PaceAlert(category: category, spent: actual, expected: expected, limit: limit)
+        }.sorted { ($0.spent - $0.expected, $1.category) > ($1.spent - $1.expected, $0.category) }
+    }
+
     /// Rounds to the nearest $50 so suggestions read like a plan, not a sum.
     static func round(_ value: Decimal) -> Decimal {
         var units = value / 50
