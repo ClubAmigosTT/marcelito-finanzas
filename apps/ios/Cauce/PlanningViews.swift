@@ -645,6 +645,7 @@ struct BudgetView: View {
     @State private var amountText = ""
     @State private var editingLoanAmount = false
     @State private var loanAmountText = ""
+    @State private var showPlanWizard = false
     private var snapshot: BudgetSnapshot { planning.snapshot(store, month: month) }
     private var limits: [String: Decimal] { planning.limits(store, month: month) }
     private var scheduledLoanReserve: Decimal? { store.loanLedger.reserve(month: month, paid: store.loanPaid(in: .month(month))).reserved }
@@ -676,6 +677,7 @@ struct BudgetView: View {
                 .sheet(isPresented: $showPeriodPicker) { PeriodSelectionSheet(mode: periodMode, date: month) { month = $0 } }
                 .sheet(isPresented: $showIncome) { PlanningIncomeView(month: month) }
                 .sheet(isPresented: $showDecision) { AffordabilityView(month: month) }
+                .sheet(isPresented: $showPlanWizard) { PlanMonthWizard(month: month) }
                 .onDisappear { planning.savePendingPlanChanges() }
                 .onChange(of: section) { _, _ in planning.savePendingPlanChanges() }
                 .onChange(of: month) { _, _ in planning.savePendingPlanChanges() }
@@ -707,6 +709,17 @@ struct BudgetView: View {
                 if periodMode == .year { annualBudgetSummary }
                 else {
                     Text(snapshot.period.label + " · mes natural").font(.caption).foregroundStyle(.secondary)
+                    if !planning.plan(for: month).closed {
+                        Button {
+                            showPlanWizard = true
+                        } label: {
+                            Label("Planear \(snapshot.period.label.lowercased()) con tu historial", systemImage: "wand.and.stars")
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.marcelitoPrimary)
+                        Text("Te propone cada categoría con tu mes típico, te pregunta qué viene este mes y guarda el plan.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     budgetSummary
                     Button("Configurar ingresos y depósitos") { section = .income }
                     if !snapshot.hasData { Text("Sin movimientos de este mes. Define tu plan; el gasto se actualizará al subir estados o capturas.").font(.caption).foregroundStyle(.secondary) }
@@ -760,6 +773,7 @@ struct BudgetView: View {
                             NavigationLink("Ver préstamos y configurar abono extra") { LoanAccountsView() }
                         }
                     }
+                    OneOffReviewSection(month: month)
                     closingSection
                     Button("¿Me alcanza?") { showDecision = true }.buttonStyle(.marcelitoPrimary)
                     Button("Configurar gastos fijos y recurrentes") { section = .fixed }
@@ -840,7 +854,11 @@ struct BudgetView: View {
         let c = Calendar.current
         let daysInMonth: Int = c.range(of: .day, in: .month, for: month)!.count
         let elapsed: Int = c.isDate(month, equalTo: .now, toGranularity: .month) ? c.component(.day, from: .now) : daysInMonth
-        let expected: Double = Double(elapsed) / Double(daysInMonth)
+        // Variable categories follow how they are usually spent through the
+        // month (fixed bills land early, food spreads out); fixed ones and
+        // categories without history stay linear.
+        let advice = planning.monthPlanAdvice(store, month: month)
+        let expected: Double = fixed ? Double(elapsed) / Double(daysInMonth) : advice.expectedFraction(category: category, day: elapsed, daysInMonth: daysInMonth)
         let color: Color
         if ratio > 1 || (ratio > expected * 1.25 && ratio > 0.8) {
             color = .marcelitoDanger
@@ -905,6 +923,11 @@ struct BudgetView: View {
             }
             .font(.caption2).foregroundStyle(.secondary)
             if ratio >= 0.8, elapsed < 20, c.isDate(month, equalTo: .now, toGranularity: .month), limit > 0 { Text("Ya usaste al menos 80% antes del día 20").font(.caption).foregroundStyle(Color.marcelitoAmber) }
+            if !fixed, limit > 0, c.isDate(month, equalTo: .now, toGranularity: .month) {
+                let usual = limit * Decimal(expected)
+                Text(spent > usual * Decimal(string: "1.1")! ? "Vas adelantado: a esta fecha sueles llevar \(planningMoney(usual)) de \(planningMoney(limit))." : "A esta fecha sueles llevar \(planningMoney(usual)) de \(planningMoney(limit)).")
+                    .font(.caption2).foregroundStyle(spent > usual * Decimal(string: "1.1")! ? Color.marcelitoAmber : .secondary)
+            }
         }
     }
     private func setBudget(_ category: String, fixed: Bool, amount: Decimal, persist: Bool) {
