@@ -243,6 +243,7 @@ struct PlanningState: Codable {
     @ObservationIgnored private var coveredCache = Set<Date>()
     @ObservationIgnored private var proposalCache: [String: [String: Decimal]] = [:]
     @ObservationIgnored private var fixedCache: [String: [String: Decimal]] = [:]
+    @ObservationIgnored var adviceCache: [String: MonthPlanAdvice] = [:]
     private struct SpendingKey: Equatable {
         let store: ObjectIdentifier
         let content: UUID
@@ -465,7 +466,7 @@ struct PlanningState: Codable {
         if !state.fixedMerchantRules.isEmpty, let value = state.fixedMerchantRules[merchantKey(movement)] { return value }
         return movement.classificationTags.contains("fijo")
     }
-    private func budgetCategory(_ movement: Movement) -> String {
+    func budgetCategory(_ movement: Movement) -> String {
         if !fixedExpenses.isEmpty, label(for: movement).fixed != false,
            let item = configuredFixedExpense(for: movement), item.includes(movement.date) { return item.category }
         return category(movement)
@@ -513,6 +514,10 @@ struct PlanningState: Codable {
         let result = personalRows(store, period: period).filter { fixed == nil || isFixed($0) == fixed }.reduce(into: [String: Decimal]()) { result, row in result[category(row), default: 0] += personalContribution(row) }
         if categoryCache.count >= 96 { categoryCache.removeAll() }
         categoryCache[key] = result; return result
+    }
+    /// The rows the budget counts (consumption, without loan interest).
+    func budgetRows(_ store: FinanceStore, period: FinancePeriod) -> [Movement] {
+        projection(store).budgetRows.filter { period.contains($0.date) }
     }
     /// Cash commitments exclude the virtual purchase principal and its linked
     /// printed installments, exactly as the uncached calculation did.
