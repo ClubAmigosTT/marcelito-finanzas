@@ -1103,7 +1103,7 @@ final class FinanceStore {
     /// survive a PDF re-import, whose row UUID is intentionally new.
     private let manualCategoryOverridesKey = "marcelito.categoryOverrides.v1"
     private let categoryTaxonomyVersionKey = "marcelito.categoryTaxonomyVersion.v1"
-    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.7"
+    private static let categoryTaxonomyVersion = "expense-taxonomy-v2.8"
     private static let pendingCategoryNames: Set<String> = [
         "Sin categoría", "Por revisar", "Otros / Por revisar", "Otros gastos",
         "Alimentos", "Comidas", "Servicios", "Compras", "Finanzas",
@@ -17358,6 +17358,8 @@ final class FinanceStore {
     }
 
     static func categoryForTesting(_ title: String) -> String { category(for: title, flow: .expense) }
+    /// Keyword category of free text, such as the concept of a transfer.
+    static func keywordCategory(for text: String) -> String { category(for: categoryText(text), flow: .expense) }
 
     private static func categoryTags(for title: String, category: String) -> [String] {
         let text = categoryText(title)
@@ -17396,9 +17398,9 @@ final class FinanceStore {
             // A destination alone is only a secondary travel tag. Otherwise
             // UBER MEDELLIN or a restaurant in New York would lose its useful
             // natural category and be flattened into Viajes.
-            ("Viajes", ["airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico", "aerobus", "volaris", "vivaaerobus", "avianca", "american airlines", "united airlines", "delta air", "iberia", "vuelo", "flight", "holafly", "esim", "roaming", "airport", "aeropuerto", "renta de auto", "car rental"]),
-            ("Entretenimiento", ["cinemex", "cinemas wtc", "cinepolis", "cinetec", "cineteca", "cine", "teatro", "museo", "museum", "moma", "guggenheim", "summit one", "concierto", "festival", "boleto", "ticket", "show", "smoke jazz", "jazz", "nekoma", "club nocturno", "experiencia", "ocio", "estadio", "stadium", "lucha libre", "cmll", "circo", "amnh", "coca cola", "harp helu", "boletia", "perreo", "antro"]),
-            ("Deporte", ["pingpod", "paddeo", "gpadel", "sport", "club deportivo", "club deportivo kanoa", "asdeporte", "decathlon", "pickleball", "padel", "pádel", "cancha", "renta de cancha", "gimnasio", "gym", "deporte", "competencia"]),
+            ("Viajes", ["airbnb", "booking", "expedia", "hotel", "hospedaje", "aeromexico", "aerobus", "volaris", "vivaaerobus", "flecha amarilla", "primera plus", "etn turistar", "autobuses", "omnibus", "avianca", "american airlines", "united airlines", "delta air", "iberia", "vuelo", "flight", "holafly", "esim", "roaming", "airport", "aeropuerto", "renta de auto", "car rental"]),
+            ("Entretenimiento", ["tigres", "rayados", "playstation", "cinemex", "cinemas wtc", "cinepolis", "cinetec", "cineteca", "cine", "teatro", "museo", "museum", "moma", "guggenheim", "summit one", "concierto", "festival", "boleto", "ticket", "show", "smoke jazz", "jazz", "nekoma", "club nocturno", "experiencia", "ocio", "estadio", "stadium", "lucha libre", "cmll", "circo", "amnh", "coca cola", "harp helu", "boletia", "perreo", "antro"]),
+            ("Deporte", ["total pass", "totalpass", "smart fit", "smartfit", "sport city", "sports world", "pingpod", "paddeo", "gpadel", "sport", "club deportivo", "club deportivo kanoa", "asdeporte", "decathlon", "pickleball", "padel", "pádel", "cancha", "renta de cancha", "gimnasio", "gym", "deporte", "competencia"]),
             ("Salud", ["farmacia", "farmacias", "farm san pablo", "farm guad", "hospital", "clinica", "clínica", "doctor", "consultorio", "dentista", "dental", "odont", "laboratorio", "salud", "medic", "tratamiento", "dr", "f ahorro", "farmacias del ahorro", "similares"]),
             ("Cuidado personal", ["peluq", "barber", "estetica", "salon de belleza", "beauty", "beuty", "sbeuty", "manicure", "nails", "spa", "tintoreria", "tint", "lavanderia"]),
             ("Restaurantes y bares", ["restaurant", "rest ", "taquer", "taco", "sushi", "cafe", "café", "cafesitio", "cafeteria", "cafetería", "coffee", "tierra garat", "starbucks", "burger", "shake shack", "pizza", "pub", "bar ", "comida", "food", "fastfood", "fastfoodrestaurant", "delivery", "rappi", "didi food", "flauta", "tortas", "pancita", "sazonjarocho", "sazon jarocho", "el globo", "panaderia", "panadería", "bakery", "pasteleria", "pastelería", "heladeria", "heladería", "neveria", "nevería", "antojitos", "fondita", "ramen", "italian", "crepes", "cerv", "mariscos", "grill", "cocina", "parrilla", "chipotle", "doordash", "ubereats", "uber eats", "casa de tono", "espeto", "japiramen", "orinoco", "waffles", "tizoncito", "pastorcito", "pastor", "cevicher", "ceviche", "mezcal", "rooftop", "lounge", "deli", "bagel", "krispy", "mcdonald", "chili s", "kfc", "domino", "little caesar", "bistro", "trattoria", "cantina", "pulque", "chicken", "wings", "bbq", "steak", "kitchen", "brunch", "gastro", "fonda", "lonche", "torta", "birria", "pozole", "gordita", "quesadill", "elote", "esquite", "churro", "paleter", "concessio", "guac", "horneando", "fogon", "jugos", "frutos prohibidos"]),
