@@ -1091,7 +1091,7 @@ final class FinanceStore {
     /// device. Keep this token separate from `readerVersion`: the public
     /// corpus certificate describes the reader contract, while this token is
     /// an operational cache/replay invalidation for a shipped build.
-    private static let extractionReplayVersion = "ios-extraction-replay-2026.10.28.2"
+    private static let extractionReplayVersion = "ios-extraction-replay-2026.10.28.3"
 
     private let movementKey = "marcelito.movements.v2"
     private let statementKey = "marcelito.statements.v1"
@@ -4059,6 +4059,17 @@ final class FinanceStore {
     /// constrains days inside its own life: from its first covered day, and
     /// after its last one only while it is still current (its newest
     /// statement is within ~two cycles of the newest statement overall).
+    /// Periods printed as "16-sep-2026 al 15-oct-2026" (Santander) or "del
+    /// 28 de septiembre al 27 de octubre de 2026" (Amex) name both days.
+    static func periodNamesBothDays(_ period: String) -> Bool {
+        let month = #"[a-zA-Záéíóú]{3,}"#
+        let patterns = [
+            #"\d{1,2}-"# + month + #"-\d{4}.*\d{1,2}-"# + month + #"-\d{4}"#,
+            #"\d{1,2}\s+(?:de\s+)?"# + month + #"\s+al\s+\d{1,2}\s+(?:de\s+)?"# + month + #"\s+(?:de\s+)?\d{4}"#
+        ]
+        return patterns.contains { period.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil }
+    }
+
     static func commonCoverage(_ accounts: [Set<Date>]) -> Set<Date> {
         let evidenced = accounts.filter { !$0.isEmpty }
         guard let newest = evidenced.compactMap({ $0.max() }).max() else { return [] }
@@ -4092,7 +4103,7 @@ final class FinanceStore {
                 // A month label is not proof of the exact covered days.
                 let explicitDate = #"\d{1,2}[/-]\d{1,2}[/-]\d{4}|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}\s+(?:de\s+)?[a-zA-Záéíóú]+\s+(?:de\s+)?\d{4}"#
                 let matches = (try? NSRegularExpression(pattern: explicitDate))?.numberOfMatches(in: record.period, range: NSRange(record.period.startIndex..., in: record.period)) ?? 0
-                guard matches >= 2, let range = statementRange(from: record.period) else { continue }
+                guard matches >= 2 || Self.periodNamesBothDays(record.period), let range = statementRange(from: record.period) else { continue }
                 var cursor = calendar.startOfDay(for: range.lowerBound)
                 let end = min(calendar.startOfDay(for: range.upperBound), calendar.startOfDay(for: .now))
                 while cursor <= end {
@@ -6532,6 +6543,33 @@ final class FinanceStore {
         return result
     }
 
+    /// Puts back every previously reconciled statement whose fresh reading in
+    /// this (scratch) store did not reconcile, together with its rows. The
+    /// same PDF is recognized by its fingerprint, else by issuer and period.
+    func preserveReconciledStatements(from previous: [StatementRecord], movements previousMovements: [Movement]) -> Int {
+        func reconciled(_ statement: StatementRecord) -> Bool {
+            statement.reconciliation?.status == .valid && !statement.requiresReview
+        }
+        func sameDocument(_ left: StatementRecord, _ right: StatementRecord) -> Bool {
+            if let a = left.sourceFingerprint, let b = right.sourceFingerprint { return a == b }
+            return normalizedConcept(left.source) == normalizedConcept(right.source)
+                && statementKind(left) == statementKind(right)
+                && normalizedConcept(left.period) == normalizedConcept(right.period)
+        }
+        var count = 0
+        for old in previous where reconciled(old) {
+            let fresh = statements.filter { sameDocument($0, old) }
+            guard !fresh.contains(where: reconciled) else { continue }
+            let dropped = Set(fresh.map(\.id))
+            statements.removeAll { dropped.contains($0.id) }
+            movements.removeAll { $0.statementId.map(dropped.contains) ?? false }
+            statements.append(old)
+            movements.append(contentsOf: previousMovements.filter { $0.statementId == old.id })
+            count += 1
+        }
+        return count
+    }
+
     /// Builds a complete candidate ledger in a scratch store and swaps it in
     /// only after every PDF has returned.  The previous snapshot therefore
     /// remains usable while a refresh is running or if one file fails.
@@ -6680,6 +6718,17 @@ final class FinanceStore {
         }
         if Task.isCancelled {
             return abortAfterCancellation()
+        }
+
+        // A replay must not lose a statement that already reconciled: OCR can
+        // read a scanned PDF differently between runs or devices. When the
+        // fresh reading of a PDF is worse, keep its previous reading and rows.
+        let preserved = scratch.preserveReconciledStatements(from: knownStatements, movements: movements)
+        if preserved > 0 {
+            DiagnosticsRecorder.record(
+                stage: "rebuild.preserved",
+                message: "Se conservó la lectura anterior de \(preserved) estado(s) cuya relectura no concilió."
+            )
         }
 
         // Importing into the scratch store is intentionally append-only. The
@@ -9678,7 +9727,14 @@ final class FinanceStore {
             var rowValues = values
             if let amountValue = values.first(where: { evidenceCounts($0.0).amounts > 0 && $0.0.range(of: #"[-+−–—]\s*\$"#, options: .regularExpression) != nil }) {
                 let below = values.filter { $0.1.maxY < amountValue.1.minY }
-                if !below.isEmpty {
+                // Only the foreign chips go. Other rows (payments) continue
+                // their description below the amount and must keep it.
+                let chipMarkers = ["extranjero", "conversion", "tasa de", "usd", "eur", "tc:"]
+                let isChip: ((String, CGRect, Double)) -> Bool = { value in
+                    let folded = value.0.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: .current).lowercased()
+                    return chipMarkers.contains { folded.contains($0) }
+                }
+                if below.contains(where: isChip) {
                     rowValues = values.filter { $0.1.maxY >= amountValue.1.minY }
                     if let index = rowValues.firstIndex(where: { $0.0 == amountValue.0 && $0.1 == amountValue.1 }) {
                         rowValues.insert(("Compra en el extranjero", amountValue.1, amountValue.2), at: index)

@@ -62,6 +62,16 @@ final class MonthSpendingStoryTests: XCTestCase {
         XCTAssertTrue(story.alerts.contains { $0.movementIDs == [rows[1].id] })
         XCTAssertFalse(story.alerts.contains { $0.movementIDs == [rows[0].id] })
         XCTAssertTrue(story.summary.contains { $0.contains("cargo más grande") })
+        // The unexplained $4,000 transfer is not "day to day" spending.
+        XCTAssertTrue(story.summary.contains { $0.contains("lo que más pesa es deporte") })
+    }
+
+    func testCoverageAcceptsPeriodsThatSpellBothDays() {
+        XCTAssertTrue(FinanceStore.periodNamesBothDays("16-sep-2026 al 15-oct-2026"))
+        XCTAssertTrue(FinanceStore.periodNamesBothDays("del 28 de septiembre al 27 de octubre de 2026 dias del periodo: 30 dias"))
+        XCTAssertFalse(FinanceStore.periodNamesBothDays("Octubre 2026"))
+        let range = FinanceStore.statementRange(from: "16-sep-2026 al 15-oct-2026")
+        XCTAssertEqual(range.map { Calendar(identifier: .gregorian).component(.day, from: $0.upperBound) }, 15)
     }
 
     func testBankNoiseIsRemovedFromTitlesAndConcepts() {

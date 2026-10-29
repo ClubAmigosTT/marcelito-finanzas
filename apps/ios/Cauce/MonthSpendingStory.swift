@@ -285,7 +285,12 @@ struct MonthSpendingStory {
             let names = trips.map { "\($0.city) (\(money($0.total)))" }
             sentences.append("\(share)% se fue en \(trips.count == 1 ? "un viaje" : "\(trips.count) viajes"): \(list(names)).")
         }
-        let daily = groups.filter { $0.total > 0 && !["Devoluciones y cashback", "Sin clasificar"].contains($0.name) }
+        // Day to day leaves out one-off transfers of $1,000+ that nothing
+        // explains yet (they are listed under "Para revisar").
+        let daily = groups.filter { !["Devoluciones y cashback", "Sin clasificar"].contains($0.name) }
+            .map { group in group.name == "Transferencias a personas" ? Group(name: group.name, lines: group.lines.filter { $0.amount < 1_000 }) : group }
+            .filter { $0.total > 0 }
+            .sorted { $0.total > $1.total }
         if let first = daily.first {
             let second = daily.dropFirst().first
             sentences.append("En el día a día, lo que más pesa es \(first.name.lowercased()) (\(money(first.total)))" + (second.map { ", seguido de \($0.name.lowercased()) (\(money($0.total)))." } ?? "."))
