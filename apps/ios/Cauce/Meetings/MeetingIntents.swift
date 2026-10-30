@@ -5,7 +5,7 @@ import AppIntents
 /// recorder shows over the Face ID lock and never shows finances or notes.
 struct StartMeetingRecordingIntent: AppIntent {
     static let title: LocalizedStringResource = "Grabar reunión"
-    static let description = IntentDescription("Abre Marcelito y empieza a grabar una reunión.")
+    static let description = IntentDescription("Abre la app y empieza a grabar una reunión.")
     // The microphone can only start with the app on screen.
     static let openAppWhenRun = true
 
@@ -17,10 +17,11 @@ struct StartMeetingRecordingIntent: AppIntent {
 }
 
 /// "Terminar reunión": saves the recording in progress and starts its
-/// transcription, without opening the app.
+/// transcription, without opening the app. Apple rejects intent texts
+/// that name its products, such as "iPhone".
 struct FinishMeetingRecordingIntent: AppIntent {
     static let title: LocalizedStringResource = "Terminar reunión"
-    static let description = IntentDescription("Termina la grabación en curso y la transcribe dentro de este iPhone.")
+    static let description = IntentDescription("Termina la grabación en curso y empieza a transcribirla.")
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
