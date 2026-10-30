@@ -7,7 +7,7 @@ struct MarcelitoApp: App {
     @State private var planningStore: FinancialPlanningStore
     @State private var recoveryError: String?
     @State private var authModel: AuthenticationModel
-    @State private var meetingStore = MeetingStore()
+    @State private var meetingStore = MeetingStore.shared
     @Environment(\.scenePhase) private var scenePhase
 
     init() {
@@ -24,6 +24,10 @@ struct MarcelitoApp: App {
             _recoveryError = State(initialValue: "No se pudo completar la recuperación del respaldo. Tus archivos se conservan. Cierra y vuelve a abrir la app para reintentar.")
         }
         _authModel = State(initialValue: AuthenticationModel())
+        #if DEBUG
+        // Simulator check of the "Grabar reunión" shortcut without Siri.
+        if ProcessInfo.processInfo.arguments.contains("-MarcelitoStartRecording") { MeetingStore.shared.presentRecorder() }
+        #endif
     }
 
     var body: some Scene {
@@ -40,11 +44,25 @@ struct MarcelitoApp: App {
                 } else {
                     SignInView()
                         .environment(authModel)
+                        .environment(meetingStore)
                 }
             }
             .onReceive(NotificationCenter.default.publisher(for: .financeBackupRestored)) { _ in
                 financeStore = FinanceStore(); planningStore = FinancialPlanningStore(); authModel.lock()
             }
+            // The recorder sits above the Face ID gate: the app locks itself
+            // in the background, and a recording started from Siri or the
+            // Action button must not wait for Face ID or stop with the lock.
+            .overlay {
+                if meetingStore.isRecorderPresented && recoveryError == nil {
+                    MeetingRecorderView()
+                        .environment(meetingStore)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .background(MarcelitoAmbientBackground().ignoresSafeArea())
+                        .transition(.move(edge: .bottom))
+                }
+            }
+            .animation(.easeInOut(duration: 0.25), value: meetingStore.isRecorderPresented)
             .overlay {
                 // iOS captures the app-switcher snapshot while the scene is
                 // inactive, before `.background` locks the app. Cover the

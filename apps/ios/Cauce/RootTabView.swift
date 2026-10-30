@@ -111,6 +111,7 @@ struct HomeView: View {
     @State private var importStatus = "Preparando…"
     @State private var isDiagnosticsPresented = false
     @State private var isMeetingsPresented = false
+    @Environment(MeetingStore.self) private var meetings
     @State private var isSettingsPresented = false
     private struct ExpensePresentation: Identifiable {
         let id = UUID()
@@ -249,6 +250,10 @@ struct HomeView: View {
                 ImportReportSheet(report: report)
             }
             .sheet(isPresented: $isMeetingsPresented) { MeetingsView() }
+            // A finished recording opens Reuniones on the new meeting, also
+            // when it ended while the app was locked.
+            .onChange(of: meetings.lastRecordedID) { _, id in if id != nil { isMeetingsPresented = true } }
+            .onAppear { if meetings.lastRecordedID != nil { isMeetingsPresented = true } }
             .sheet(isPresented: $isDiagnosticsPresented) {
                 DiagnosticsView()
             }

@@ -69,6 +69,51 @@ final class MeetingStore {
     private(set) var progress: [UUID: String] = [:]
     let directory: URL
 
+    /// The app's store, also reached by the "Grabar reunión" shortcut.
+    static let shared = MeetingStore()
+
+    /// The recording in progress lives here, not in a screen: the app locks
+    /// itself when it goes to the background and removes every screen, and
+    /// the recording must keep going.
+    let recorder = MeetingRecorder()
+    /// Shows the recorder over everything, the Face ID lock included. It only
+    /// shows the timer and its buttons, never finances or notes.
+    var isRecorderPresented = false
+    /// The meeting the last finished recording produced, for Reuniones to open.
+    var lastRecordedID: UUID?
+    private var recordingFileName = ""
+    private var isStartingRecording = false
+
+    func presentRecorder() { isRecorderPresented = true }
+
+    /// Starts recording unless a recording is already running or starting.
+    func beginRecording() async {
+        guard recorder.state == .idle, !isStartingRecording else { return }
+        isStartingRecording = true
+        defer { isStartingRecording = false }
+        let target = newAudioURL()
+        recordingFileName = target.name
+        _ = await recorder.start(to: target.url)
+    }
+
+    /// Saves the recording as a meeting and starts transcribing it.
+    @discardableResult
+    func finishRecording() -> Meeting? {
+        defer { isRecorderPresented = false }
+        guard recorder.state != .idle else { return nil }
+        let duration = recorder.stop()
+        let meeting = Meeting(title: "Reunión del \(planningDayLabel(.now))", date: .now, duration: duration, audioFileName: recordingFileName)
+        add(meeting)
+        process(meeting.id)
+        lastRecordedID = meeting.id
+        return meeting
+    }
+
+    func discardRecording() {
+        recorder.discard()
+        isRecorderPresented = false
+    }
+
     /// Transcribe, separate speakers and write notes. Keeps running when the
     /// screen that started it closes.
     func process(_ id: UUID) {

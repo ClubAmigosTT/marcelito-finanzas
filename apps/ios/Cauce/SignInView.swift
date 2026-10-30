@@ -5,6 +5,7 @@ import SwiftUI
 /// password of its own.
 struct SignInView: View {
     @Environment(AuthenticationModel.self) private var auth
+    @Environment(MeetingStore.self) private var meetings
 
     var body: some View {
         NavigationStack {
@@ -62,7 +63,10 @@ struct SignInView: View {
             .background(MarcelitoAmbientBackground())
             .foregroundStyle(Color.marcelitoNavy)
             .toolbar(.hidden, for: .navigationBar)
-            .task {
+            // Face ID waits while a recording is on screen and asks as soon
+            // as it is finished.
+            .task(id: meetings.isRecorderPresented) {
+                guard !meetings.isRecorderPresented else { return }
                 await auth.unlockAutomatically()
             }
         }
