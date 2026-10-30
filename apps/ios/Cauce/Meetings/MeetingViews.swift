@@ -10,14 +10,15 @@ func meetingDuration(_ seconds: Double) -> String {
 struct MeetingsView: View {
     @Environment(MeetingStore.self) private var meetings
     @Environment(\.dismiss) private var dismiss
-    @State private var recording = false
     @State private var opened: UUID?
 
     var body: some View {
         NavigationStack {
             List {
                 Section {
-                    Button { recording = true } label: {
+                    // The recorder shows over the whole app, so this sheet
+                    // closes first; Reuniones reopens on the new meeting.
+                    Button { dismiss(); meetings.presentRecorder() } label: {
                         Label("Grabar reunión", systemImage: "mic.circle.fill").font(.headline)
                     }
                 } footer: {
@@ -39,14 +40,8 @@ struct MeetingsView: View {
             .navigationDestination(for: UUID.self) { MeetingDetailView(meetingID: $0) }
             .navigationDestination(item: $opened) { MeetingDetailView(meetingID: $0) }
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Cerrar") { dismiss() } } }
-            .fullScreenCover(isPresented: $recording) {
-                MeetingRecorderView { meeting in
-                    recording = false
-                    if let meeting {
-                        meetings.process(meeting.id)
-                        opened = meeting.id
-                    }
-                }
+            .onAppear {
+                if let id = meetings.lastRecordedID { opened = id; meetings.lastRecordedID = nil }
             }
         }
     }
@@ -77,13 +72,11 @@ private struct MeetingRow: View {
 
 struct MeetingRecorderView: View {
     @Environment(MeetingStore.self) private var meetings
-    @State private var recorder = MeetingRecorder()
-    @State private var fileName = ""
-    @State private var started = false
     @State private var confirmDiscard = false
-    let finish: (Meeting?) -> Void
 
     var body: some View {
+        let recorder = meetings.recorder
+        let started = recorder.state != .idle
         VStack(spacing: 28) {
             Spacer()
             Text(meetingDuration(recorder.elapsed))
@@ -103,7 +96,7 @@ struct MeetingRecorderView: View {
                 .foregroundStyle(.secondary)
             if let error = recorder.errorMessage {
                 Text(error).foregroundStyle(Color.marcelitoDanger).multilineTextAlignment(.center).padding(.horizontal)
-                Button("Reintentar") { Task { await startRecording() } }
+                Button("Reintentar") { Task { await meetings.beginRecording() } }
                     .buttonStyle(.marcelitoSecondary)
             }
             Spacer()
@@ -117,10 +110,7 @@ struct MeetingRecorderView: View {
                 .buttonStyle(.marcelitoSecondary)
                 .disabled(!started)
                 Button {
-                    let duration = recorder.stop()
-                    let meeting = Meeting(title: "Reunión del \(planningDayLabel(.now))", date: .now, duration: duration, audioFileName: fileName)
-                    meetings.add(meeting)
-                    finish(meeting)
+                    meetings.finishRecording()
                 } label: {
                     Label("Terminar", systemImage: "stop.fill").frame(maxWidth: .infinity)
                 }
@@ -135,21 +125,13 @@ struct MeetingRecorderView: View {
         .foregroundStyle(Color.marcelitoNavy)
         .interactiveDismissDisabled()
         .confirmationDialog("¿Descartar la grabación?", isPresented: $confirmDiscard, titleVisibility: .visible) {
-            Button("Descartar", role: .destructive) { recorder.discard(); finish(nil) }
+            Button("Descartar", role: .destructive) { meetings.discardRecording() }
             Button("Seguir grabando", role: .cancel) {}
         }
-        .task { await startRecording() }
+        .task { await meetings.beginRecording() }
         // Keep the screen awake while recording; locking it also works.
         .onAppear { UIApplication.shared.isIdleTimerDisabled = true }
         .onDisappear { UIApplication.shared.isIdleTimerDisabled = false }
-    }
-}
-
-extension MeetingRecorderView {
-    fileprivate func startRecording() async {
-        let target = meetings.newAudioURL()
-        fileName = target.name
-        started = await recorder.start(to: target.url)
     }
 }
 

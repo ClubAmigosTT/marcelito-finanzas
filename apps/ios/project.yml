@@ -1,6 +1,9 @@
 name: Marcelito
 options:
   bundleIdPrefix: mx.marcelito
+  # The app speaks Spanish; Siri matches the "Grabar reunión" phrases in
+  # the development language, so it must be Spanish too.
+  developmentLanguage: es
   deploymentTarget:
     iOS: "17.0"
 settings:
